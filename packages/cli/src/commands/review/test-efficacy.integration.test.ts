@@ -1072,8 +1072,15 @@ process.stdout.write(JSON.stringify({
       'node_modules',
       'probe-dependency',
     );
+    const sourceScopedDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      '@probe',
+      'scoped-dependency',
+    );
     mkdirSync(sourceVitestDir, { recursive: true });
     mkdirSync(sourceDependencyDir);
+    mkdirSync(sourceScopedDependencyDir, { recursive: true });
     writeFileSync(
       join(sourceVitestDir, 'package.json'),
       JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
@@ -1103,11 +1110,26 @@ process.stdout.write(JSON.stringify({
       join(sourceDependencyDir, 'index.mjs'),
       'export default 1;\n',
     );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'index.mjs'),
+      'export default 2;\n',
+    );
+    const brokenLink = join(dependencyRoot, 'node_modules', 'broken-link');
+    if (process.platform !== 'win32') {
+      symlinkSync(
+        join(dependencyRoot, 'node_modules', 'missing-package'),
+        brokenLink,
+      );
+    }
     writeFileSync(join(sourceBinDir, 'probe-tool'), 'available');
     writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
     writeFileSync(
       join(probeTree, 'src/x.test.mjs'),
-      "import fs from 'node:fs'; import value from 'probe-dependency'; if (value !== 1 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
+      "import fs from 'node:fs'; import value from 'probe-dependency'; import scopedValue from '@probe/scoped-dependency'; if (value !== 1 || scopedValue !== 2 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
     );
 
     const result = runOneMutant(
@@ -1126,6 +1148,9 @@ process.stdout.write(JSON.stringify({
     expect(
       existsSync(join(dependencyRoot, 'node_modules', '.vite-probe')),
     ).toBe(false);
+    if (process.platform !== 'win32') {
+      expect(existsSync(join(probeModules, 'broken-link'))).toBe(false);
+    }
 
     expect(result.verdict).toBe('survived');
   });

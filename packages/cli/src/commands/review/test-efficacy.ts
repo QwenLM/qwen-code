@@ -990,7 +990,16 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
     if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
     const sourceEntry = join(source, entry.name);
     const targetEntry = join(target, entry.name);
-    if (!statSync(sourceEntry).isDirectory()) continue;
+    const sourceStats = lstatSync(sourceEntry);
+    if (sourceStats.isSymbolicLink()) {
+      try {
+        if (!statSync(sourceEntry).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+    } else if (!sourceStats.isDirectory()) {
+      continue;
+    }
     if (entry.name.startsWith('@')) {
       mkdirSync(targetEntry);
       for (const pkg of readdirSync(sourceEntry)) {
