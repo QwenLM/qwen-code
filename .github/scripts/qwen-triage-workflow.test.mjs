@@ -93,9 +93,10 @@ const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
 // A probe that only checks .qwen/.git reports "healthy" on workspace-wide
 // poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
 // chown that main did unconditionally — checkout then fails with EACCES.
-// Recovery must stay unconditional; these tests guard against re-adding
-// the probe gating or the inert rename-aside fallback.
-const assertUnconditional = (step, label) => {
+// Recovery must stay unconditional and run before checkout; these tests
+// guard against re-adding the probe gating, the inert rename-aside
+// fallback, or moving the restore below the checkout step.
+const assertUnconditional = (jobSteps, step, label) => {
   assert.ok(step, `${label} must have a "Restore workspace ownership" step`);
   assert.match(
     step.run,
@@ -121,6 +122,12 @@ const assertUnconditional = (step, label) => {
     step.run,
     /\.stale\./,
     `${label} must not rename dirs aside — the rename-aside fallback never unblocks checkout`,
+  );
+  const restoreIdx = jobSteps.indexOf(step);
+  const checkoutIdx = jobSteps.findIndex((s) => /^Checkout/.test(s.name));
+  assert.ok(
+    restoreIdx !== -1 && checkoutIdx !== -1 && restoreIdx < checkoutIdx,
+    `${label} ownership restore must run before checkout`,
   );
 };
 
@@ -461,42 +468,29 @@ describe('qwen-triage: workspace ownership restore', () => {
   });
 
   it('triage: restores ownership before checkout on the ECS pool', () => {
-    assert.ok(
-      triageOwnershipStep,
-      'triage job must have a "Restore workspace ownership" step',
-    );
-    assert.match(
-      triageOwnershipStep.run,
-      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
-      'triage must restore ownership of the whole workspace',
-    );
-    assert.match(
-      triageOwnershipStep.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
-      'triage must restore write permission of the whole workspace',
-    );
-    const restoreIdx = steps.indexOf(triageOwnershipStep);
-    const checkoutIdx = steps.findIndex(
-      (s) => s.name === 'Checkout repo',
-    );
-    assert.ok(
-      restoreIdx < checkoutIdx,
-      'ownership restore must run before checkout',
-    );
+    assertUnconditional(steps, triageOwnershipStep, 'qwen-triage triage');
   });
 });
 
 describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', () => {
   it('test job restores ownership unconditionally', () => {
-    assertUnconditional(ciOwnershipStep, 'ci.yml test');
+    assertUnconditional(ciTestJob.steps, ciOwnershipStep, 'ci.yml test');
   });
 
   it('web_shell_e2e_smoke restores ownership unconditionally', () => {
-    assertUnconditional(ciWebShellOwnershipStep, 'ci.yml web_shell_e2e_smoke');
+    assertUnconditional(
+      ciWebShellJob.steps,
+      ciWebShellOwnershipStep,
+      'ci.yml web_shell_e2e_smoke',
+    );
   });
 
   it('integration_cli restores ownership unconditionally', () => {
-    assertUnconditional(ciIntegrationOwnershipStep, 'ci.yml integration_cli');
+    assertUnconditional(
+      ciIntegrationJob.steps,
+      ciIntegrationOwnershipStep,
+      'ci.yml integration_cli',
+    );
   });
 
   it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
@@ -525,6 +519,7 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
 describe('qwen-code-pr-review.yml: ownership recovery is unconditional', () => {
   it('restores ownership without probe gating or rename-aside', () => {
     assertUnconditional(
+      prReviewJob.steps,
       prReviewOwnershipStep,
       'qwen-code-pr-review.yml review-pr',
     );
