@@ -2341,6 +2341,11 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.allowMention !== false && groupBotOpenId
         ? `\n机器人 OPENID: ${groupBotOpenId}`
         : '';
+    if (senderOpenId && !/^[A-F0-9]{32}$/i.test(senderOpenId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Unexpected senderOpenId format: ${sanitizeLogText(senderOpenId, 64)}\n`,
+      );
+    }
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
       : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${this.qqConfig.allowMention !== false && senderOpenId && /^[A-F0-9]{32}$/i.test(senderOpenId) ? `(${senderOpenId})` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;

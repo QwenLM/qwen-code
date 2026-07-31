@@ -544,6 +544,41 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
+
+  it('senderOpenId 非 32 位 hex 时不显示 openid 并打 stderr 日志', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // 校验不通过的 openid 不进入前缀，仍以 [Bob]: 形式展示
+    expect(env['text']).toBe('[atMention=true] [Bob]: <@OPENID_BOT> 你好');
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some(
+        (c) =>
+          c.includes('Unexpected senderOpenId format') &&
+          c.includes('ZZZ12345'),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------
