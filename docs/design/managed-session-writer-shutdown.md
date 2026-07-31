@@ -65,12 +65,14 @@ single-flight across managed shutdown and concurrent request-failure cleanup.
 The full `shutdown(options)` call is not single-flight because writer and
 telemetry options remain call-specific.
 
-An incompletely initialized Config fast-closes its writer before joining
-initialization. A successfully initialized Config retains the normal
-finalize, flush, and close order. Initialization join has no local timeout:
-timing out the wait would leave the underlying initialization running and
-reintroduce late resource creation. The daemon process deadline remains the
-hard bound, after writer release has already completed or failed explicitly.
+An incompletely initialized Config starts exact-owner release as soon as its
+pending lease is exposed, before joining initialization. Transcript snapshot
+reads observe that release between chunks and stop without publishing a late
+recorder. A successfully initialized Config retains the normal finalize,
+flush, and close order. Initialization join has no local timeout: timing out
+the wait would leave the underlying initialization running and reintroduce
+late resource creation. The daemon process deadline remains the hard bound,
+after pending-writer release has already completed or failed explicitly.
 
 ## Parent process lifecycle
 
