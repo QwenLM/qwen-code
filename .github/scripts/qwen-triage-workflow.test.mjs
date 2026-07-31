@@ -21,6 +21,13 @@ const workflowPath = join(
   'qwen-triage.yml',
 );
 const doc = parse(readFileSync(workflowPath, 'utf8'));
+const cacheProducerPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'npm-cache.yml',
+);
+const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -37,6 +44,7 @@ const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
 const verifyJob = doc.jobs.verify;
+const tmuxJob = doc.jobs['tmux-testing'];
 const verifyCleanupStep = verifyJob.steps.find(
   (s) => s.name === 'Clean up runner workspace',
 );
@@ -329,5 +337,185 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
 
   it('includes Risk field in the Stage 1 comment template', () => {
     assert.ok(prSkill.includes('Risk: <if Stage 1e matched'));
+  });
+});
+
+describe('qwen-triage: npm cache restore-only invariant', () => {
+  for (const [jobName, jobDef] of [
+    ['verify', verifyJob],
+    ['tmux-testing', tmuxJob],
+  ]) {
+    it(`${jobName}: uses actions/cache/restore with no save path`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.match(
+        cacheStep.uses,
+        /^actions\/cache\/restore@/,
+        'must use the restore-only variant (no post-save hook)',
+      );
+      for (const s of jobDef.steps) {
+        if (s.uses) {
+          assert.doesNotMatch(
+            s.uses,
+            /actions\/cache(\/save)?@/,
+            `${jobName} must not have a cache save or full cache action`,
+          );
+        }
+      }
+    });
+
+    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const prepareStep = jobDef.steps.find(
+        (s) => s.name === 'Install and build PR app',
+      );
+      assert.ok(
+        prepareStep,
+        `'Install and build PR app' step must exist in ${jobName}`,
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(dir, 'cache path must resolve to a directory name');
+      assert.ok(
+        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+      );
+    });
+
+    it(`${jobName}: clears stale npm cache before restore`, () => {
+      const clearIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Clear stale npm cache',
+      );
+      const restoreIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(clearIdx !== -1, `'Clear stale npm cache' step must exist in ${jobName}`);
+      assert.ok(restoreIdx !== -1, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        clearIdx < restoreIdx,
+        'clear step must come before restore step',
+      );
+      assert.match(
+        jobDef.steps[clearIdx].run,
+        /rm -rf/,
+        'clear step must rm -rf the cache directory',
+      );
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(
+        jobDef.steps[clearIdx].run.includes(`/${dir}"`),
+        `clear step must remove the restored cache directory (${dir})`,
+      );
+    });
+
+    it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        cacheStep.id,
+        'npm-cache',
+        'restore step needs an id so its cache-hit output is readable',
+      );
+      const reportStep = jobDef.steps.find(
+        (s) => s.name === 'Report npm cache hit',
+      );
+      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.match(
+        reportStep.run,
+        /steps\.npm-cache\.outputs\.cache-hit/,
+        'report step must surface the cache-hit output',
+      );
+    });
+  }
+});
+
+describe('qwen-triage: npm cache producer workflow', () => {
+  const saveJob = cacheProducerDoc.jobs.save;
+
+  it('triggers on push to main only', () => {
+    const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
+    assert.ok(push, 'must have a push trigger');
+    assert.deepEqual(push.branches, ['main']);
+    assert.deepEqual(push.paths, ['package-lock.json']);
+  });
+
+  it('saves with the same key and path the triage lanes restore', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      const restoreStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        saveStep.with.path,
+        restoreStep.with.path,
+        `cache path must match ${jobName} restore path`,
+      );
+      assert.equal(
+        saveStep.with.key,
+        restoreStep.with.key,
+        `cache key must match ${jobName} restore key`,
+      );
+    }
+  });
+
+  it('populates the cache directory it saves', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    const dir = saveStep.with.path.replace(
+      /^\$\{\{\s*runner\.temp\s*\}\}\//,
+      '',
+    );
+    assert.ok(dir, 'save path must resolve to a directory name');
+    const populateStep = saveJob.steps.find(
+      (s) => s.name === 'Populate npm cache',
+    );
+    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(
+      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+    );
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method. A producer on a different runner or outside the
+    // container computes a different version, so every restore misses even
+    // when the key and path strings match — pin runs-on + container to the
+    // consumers' so both match by construction.
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      assert.deepEqual(
+        saveJob['runs-on'],
+        jobDef['runs-on'],
+        `producer runs-on must match ${jobName}`,
+      );
+      assert.deepEqual(
+        saveJob.container,
+        jobDef.container,
+        `producer container must match ${jobName}`,
+      );
+    }
   });
 });

@@ -21,6 +21,10 @@
       "types": "./dist/src/goals/goal-wire.d.ts",
       "import": "./dist/src/goals/goal-wire.js"
     },
+    "./memoryScopes": {
+      "types": "./dist/src/memory/scopes.d.ts",
+      "import": "./dist/src/memory/scopes.js"
+    },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"

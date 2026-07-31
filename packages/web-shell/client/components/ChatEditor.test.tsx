@@ -915,6 +915,30 @@ describe('ChatEditor toolbar popovers', () => {
     expect(button?.textContent).not.toContain(routeId);
   });
 
+  it('exposes the complete model name on dropdown items for hover', () => {
+    const modelLabel =
+      'Qwen Very Long Model Name For Web Shell Reproduction 2026';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'long-model',
+      availableModels: [{ id: 'long-model', label: modelLabel }],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes(modelLabel));
+    expect(option).not.toBeUndefined();
+    expect(option?.title).toBe(modelLabel);
+  });
+
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['approvalMode', 'model'],
