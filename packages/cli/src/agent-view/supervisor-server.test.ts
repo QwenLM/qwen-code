@@ -760,12 +760,35 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 async function readLine(socket: net.Socket): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let buffered = '';
-    socket.on('data', (chunk) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out waiting for supervisor response line.'));
+    }, 200);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off('data', onData);
+      socket.off('error', onError);
+      socket.off('close', onClose);
+    };
+    const onData = (chunk: Buffer | string) => {
       buffered += String(chunk);
       const newline = buffered.indexOf('\n');
-      if (newline !== -1) resolve(buffered.slice(0, newline));
-    });
+      if (newline === -1) return;
+      cleanup();
+      resolve(buffered.slice(0, newline));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Socket closed before a supervisor response line.'));
+    };
+    socket.on('data', onData);
+    socket.once('error', onError);
+    socket.once('close', onClose);
   });
 }

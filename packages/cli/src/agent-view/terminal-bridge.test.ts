@@ -30,6 +30,24 @@ describe('bridgeAgentViewTerminal', () => {
     expect(pty.input()).toBe('hello world');
   });
 
+  it('preserves Uint8Array subarray offsets when writing stdin bytes', async () => {
+    const pty = new FakeTerminalPty();
+    const chunk = new Uint8Array([0, 104, 101, 108, 108, 111, 0]).subarray(
+      1,
+      6,
+    );
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes([chunk]),
+        stdout: new MemoryWritable(),
+        pty,
+      }),
+    ).resolves.toEqual({ reason: 'stdin-ended' });
+
+    expect(pty.input()).toBe('hello');
+  });
+
   it('writes Readable stdin bytes into the PTY', async () => {
     const pty = new FakeTerminalPty();
 
@@ -119,6 +137,23 @@ describe('bridgeAgentViewTerminal', () => {
     await expect(done).resolves.toEqual({ reason: 'detached' });
     expect(stdout.output()).toBe('before');
     expect(pty.listenerCount).toBe(0);
+  });
+
+  it('detaches immediately when the detach signal is already aborted', async () => {
+    const pty = new FakeTerminalPty();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes(['late input']),
+        stdout: new MemoryWritable(),
+        pty,
+        detachSignal: controller.signal,
+      }),
+    ).resolves.toEqual({ reason: 'detached' });
+
+    expect(pty.input()).toBe('');
   });
 
   it('does not destroy Readable stdin when detached', async () => {
