@@ -162,13 +162,19 @@ service the author is affiliated with — used here because it was the one that 
 verified end to end for this example, not an endorsement. Any HTTP service that returns a
 JSON verdict works equally well; only `review()` needs to change._
 
+_Data handling: with `matcher: "*"`, the full `tool_input` of **every** tool call is sent to
+the judgment backend — treat that input as sensitive (it may contain file contents, paths, or
+secrets). Narrow the matcher (e.g. to `run_shell_command`) if you only need to judge shell
+commands._
+
 ```python
 #!/usr/bin/env python3
 # judgment_hook.py -- run: JUDGMENT_API_KEY=... python3 judgment_hook.py
-import json, os, urllib.request
+import json, os, sys, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 JUDGMENT_API_KEY = os.environ["JUDGMENT_API_KEY"]
+JUDGMENT_URL = os.environ.get("JUDGMENT_URL", "https://api.babyblueviper.com/review")
 
 def review(tool_name, tool_input):
     """POST the call to the judgment backend and return its verdict. This is the
@@ -181,10 +187,12 @@ def review(tool_name, tool_input):
         "context": f"qwen-code PreToolUse: {tool_name}",
     }).encode()
     req = urllib.request.Request(
-        "https://api.babyblueviper.com/review", data=body,
+        JUDGMENT_URL, data=body,
         headers={"Authorization": f"Bearer {JUDGMENT_API_KEY}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    # Keep this below the HTTP hook's own timeout (10s in the config above), so a "deny"
+    # verdict is always returned before the hook gives up and fails open on its own.
+    with urllib.request.urlopen(req, timeout=8) as resp:
         return json.loads(resp.read())  # response includes a "verdict" field: "reject" denies, anything else allows
 
 class Handler(BaseHTTPRequestHandler):
@@ -195,8 +203,9 @@ class Handler(BaseHTTPRequestHandler):
             verdict = review(tool_name, tool_input)
             decision = "deny" if verdict.get("verdict") == "reject" else "allow"
             reason = verdict.get("summary", f"judgment verdict: {verdict.get('verdict')}")
-        except Exception:
+        except Exception as e:
             decision, reason = "allow", "judgment backend unavailable, failing open"  # never block on a review-side outage
+            print(f"judgment backend unavailable for {tool_name}, failing open: {e}", file=sys.stderr)
         out = {"continue": True, "decision": decision, "hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason,
         }}
