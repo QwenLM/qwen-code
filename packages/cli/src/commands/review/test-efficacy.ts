@@ -1062,8 +1062,9 @@ function runProbeSuite(
     },
   );
   // `r.error` is set — and `r.status` is null — when the process never ran
-  // (npx missing) or was killed (the timeout above fires SIGTERM). Ignoring
-  // it reports those as "the runner produced no parseable JSON", which
+  // (vitest entry missing or unresolvable) or was killed (the timeout above
+  // fires SIGTERM). Ignoring it reports those as "the runner produced no
+  // parseable JSON", which
   // blames the runner's output for a run that produced none.
   if (r.error) throw r.error;
   if (r.signal) {
