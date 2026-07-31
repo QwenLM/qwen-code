@@ -855,8 +855,10 @@ describe('LoggingContentGenerator', () => {
     const performanceNowSpy = vi
       .spyOn(performance, 'now')
       .mockImplementation(() => monotonicClockMs);
-    const streamFn = vi.fn().mockResolvedValue(
-      (async function* () {
+    const streamFn = vi.fn().mockImplementation(async () => {
+      wallClockMs = 40;
+      monotonicClockMs = 40;
+      return (async function* () {
         wallClockMs = 100;
         monotonicClockMs = 100;
         yield createResponse('r1', 'test-model', [], {
@@ -871,8 +873,8 @@ describe('LoggingContentGenerator', () => {
           candidatesTokenCount: 2,
           totalTokenCount: 12,
         });
-      })(),
-    );
+      })();
+    });
     const wrapped = createWrappedGenerator(vi.fn(), streamFn);
     const generator = new LoggingContentGenerator(wrapped, createConfig(), {
       model: 'test-model',

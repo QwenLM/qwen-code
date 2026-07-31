@@ -86,7 +86,9 @@ continues driving `ApiResponseEvent.ttft_ms`, `sampling_ms`,
 `sampling_ms`.
 
 Existing streaming-Span queries should replace
-`llm_request.stream=true` with `gen_ai.request.stream=true`. Span `ttft_ms`
+`llm_request.stream=true` with `gen_ai.request.stream=true`; non-streaming
+spans are identified by the absence of `gen_ai.request.stream` (the old
+`llm_request.stream=false` filter now matches zero rows). Span `ttft_ms`
 remains available for first-user-visible-output latency;
 `gen_ai.response.time_to_first_chunk` is an independent standard attribute
 measuring first normalized chunk latency in seconds.
