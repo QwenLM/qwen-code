@@ -859,7 +859,11 @@ describe('LoggingContentGenerator', () => {
       wallClockMs = 40;
       monotonicClockMs = 40;
       return (async function* () {
-        wallClockMs = 100;
+        // The wall clock is deliberately driven apart from the monotonic
+        // clock: time_to_first_chunk must come from performance.now()
+        // (100ms -> 0.1s), so a mutant reading Date.now() (900ms -> 0.9s)
+        // fails the toBeCloseTo(0.1) assertion below instead of passing.
+        wallClockMs = 900;
         monotonicClockMs = 100;
         yield createResponse('r1', 'test-model', [], {
           promptTokenCount: 10,
