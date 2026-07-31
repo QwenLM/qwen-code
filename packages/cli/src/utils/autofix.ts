@@ -13,8 +13,8 @@ import type {
 import {
   applySkillAllowedTools,
   buildSkillLlmContent,
+  getGitWorkingTreeStatus,
   parseGhPrList,
-  resolveBranchName,
 } from '@qwen-code/qwen-code-core';
 import { execFile } from 'node:child_process';
 import { dirname } from 'node:path';
@@ -173,10 +173,11 @@ export async function resolveCurrentAutofixPullRequest(
   config: Config,
 ): Promise<CurrentAutofixPullRequestResult> {
   const cwd = config.getProjectRoot();
-  const branch = await resolveBranchName(cwd);
-  if (!branch) {
+  const status = await getGitWorkingTreeStatus(cwd);
+  if (!status || status.detached || !status.branch) {
     return { kind: 'error', message: 'Autofix requires a checked-out branch.' };
   }
+  const branch = status.branch;
 
   try {
     const repo = await resolveRepository(cwd);

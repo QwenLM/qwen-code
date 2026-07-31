@@ -1128,6 +1128,55 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('fails closed when interactive Autofix watcher expansion rejects', async () => {
+    const watcher = {
+      id: 'autofix-job',
+      prompt:
+        'autofix tick repo=QwenLM/qwen-code pr=4362 mode=propose-only rounds=0 infra-reruns=0',
+      cronExpr: '*/10 * * * *',
+      recurring: true,
+      createdAt: 1,
+      expiresAt: 2,
+      jitterMs: 0,
+    };
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn((callback: (job: typeof watcher) => void) => {
+        callback(watcher);
+      }),
+      stop: vi.fn(),
+      list: vi.fn(() => [watcher]),
+      delete: vi.fn().mockRejectedValue(new Error('delete failed')),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+    Object.assign(mockConfig, {
+      getSkillManager: () => ({
+        loadSkillForRuntime: vi.fn().mockRejectedValue(new Error('broken')),
+      }),
+      getPermissionManager: () => null,
+    });
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Cron: Autofix rejected: autofix-job' },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = String(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain(
+      'watcher expansion failed: broken. No maintenance action was authorized.',
+    );
+    expect(sent).not.toContain('<autofix-authority');
+  });
+
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
     let schedulerCallback:
       | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)

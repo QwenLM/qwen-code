@@ -4,16 +4,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
-import type { Config, CronJob, SkillConfig } from '@qwen-code/qwen-code-core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  getGitWorkingTreeStatus,
+  type Config,
+  type CronJob,
+  type SkillConfig,
+} from '@qwen-code/qwen-code-core';
 import {
   AUTOFIX_CRON,
   buildAutofixImmediatePrompt,
   formatAutofixTick,
   matchingAutofixWatchers,
   parseAutofixWatcher,
+  resolveCurrentAutofixPullRequest,
   resolveAutofixCronPrompt,
 } from './autofix.js';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, getGitWorkingTreeStatus: vi.fn() };
+});
+
+const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
+
+beforeEach(() => {
+  getGitWorkingTreeStatusMock.mockResolvedValue({
+    branch: 'main',
+    detached: false,
+    hasUpstream: true,
+    ahead: 0,
+    behind: 0,
+    staged: 0,
+    unstaged: 0,
+    untracked: 0,
+    conflicted: 0,
+    stashCount: 0,
+  });
+});
 
 function job(overrides: Partial<CronJob> = {}): CronJob {
   return {
@@ -94,6 +123,31 @@ describe('Autofix watcher prompt', () => {
         (watcher) => watcher.job.id,
       ),
     ).toEqual(['job-1']);
+  });
+});
+
+describe('Current Autofix pull request', () => {
+  it('rejects detached HEAD before invoking GitHub CLI', async () => {
+    getGitWorkingTreeStatusMock.mockResolvedValue({
+      branch: null,
+      detached: true,
+      hasUpstream: false,
+      ahead: 0,
+      behind: 0,
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      stashCount: 0,
+    });
+    const config = {
+      getProjectRoot: () => '/detached/repo',
+    } as unknown as Config;
+
+    await expect(resolveCurrentAutofixPullRequest(config)).resolves.toEqual({
+      kind: 'error',
+      message: 'Autofix requires a checked-out branch.',
+    });
   });
 });
 
