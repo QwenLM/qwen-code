@@ -458,6 +458,9 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
+  if (attrs['status'] === 'cancelled') {
+    return { code: SpanStatusCode.UNSET };
+  }
   if (
     !!attrs['error'] ||
     !!attrs['error.message'] ||

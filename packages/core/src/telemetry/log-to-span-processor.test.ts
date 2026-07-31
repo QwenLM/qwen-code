@@ -595,6 +595,24 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
   });
 
+  it('keeps cancelled tool calls UNSET even when legacy errors are present', async () => {
+    const logRecord = {
+      body: 'tool call cancelled',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        status: 'cancelled',
+        success: false,
+        error: 'cancelled by user',
+        error_type: 'unhandled_exception',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.UNSET);
+  });
+
   it('does not set ERROR for falsy error attributes', async () => {
     const logRecord = {
       body: 'ok event',

@@ -139,12 +139,19 @@ export interface ToolCallRequestInfo {
   goalContext?: GoalTurnPermit;
 }
 
+export type ToolExecutionStatus =
+  | 'not_started'
+  | 'success'
+  | 'error'
+  | 'cancelled';
+
 export interface ToolCallResponseInfo {
   callId: string;
   responseParts: Part[];
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
+  executionStatus?: ToolExecutionStatus;
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
@@ -232,6 +239,7 @@ export function createDuplicateProviderToolCallResponse(
     resultDisplay: message,
     error: new Error(message),
     errorType: ToolErrorType.EXECUTION_FAILED,
+    executionStatus: 'not_started',
   };
 }
 

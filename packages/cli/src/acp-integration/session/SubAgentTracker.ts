@@ -140,12 +140,19 @@ export class SubAgentTracker {
       });
 
       // Use unified emitter - handles TodoWriteTool skipping internally
-      void this.toolCallEmitter.emitStart({
-        toolName: event.name,
-        callId: event.callId,
-        args: event.args,
-        subagentMeta: this.subagentMeta,
-      });
+      void this.toolCallEmitter
+        .emitStart({
+          toolName: event.name,
+          callId: event.callId,
+          args: event.args,
+          subagentMeta: this.subagentMeta,
+        })
+        .catch((error) => {
+          debugLogger.debug(
+            `Failed to emit subagent tool start for ${event.name}:`,
+            error,
+          );
+        });
     };
   }
 
@@ -162,15 +169,22 @@ export class SubAgentTracker {
       const state = this.toolStates.get(event.callId);
 
       // Use unified emitter - handles TodoWriteTool plan updates internally
-      void this.toolCallEmitter.emitResult({
-        toolName: event.name,
-        callId: event.callId,
-        success: event.success,
-        message: event.responseParts ?? [],
-        resultDisplay: event.resultDisplay,
-        args: state?.args,
-        subagentMeta: this.subagentMeta,
-      });
+      void this.toolCallEmitter
+        .emitResult({
+          toolName: event.name,
+          callId: event.callId,
+          success: event.success,
+          message: event.responseParts ?? [],
+          resultDisplay: event.resultDisplay,
+          args: state?.args,
+          subagentMeta: this.subagentMeta,
+        })
+        .catch((error) => {
+          debugLogger.debug(
+            `Failed to emit subagent tool result for ${event.name}:`,
+            error,
+          );
+        });
 
       // Clean up state
       this.toolStates.delete(event.callId);
@@ -245,7 +259,10 @@ export class SubAgentTracker {
               ? (output.answers as Record<string, string> | undefined)
               : undefined,
         });
-        if (outcome === ToolConfirmationOutcome.Cancel) {
+        if (
+          outcome === ToolConfirmationOutcome.Cancel &&
+          !abortSignal.aborted
+        ) {
           this.onPermissionCancel?.();
         }
       } catch (error) {
@@ -257,7 +274,9 @@ export class SubAgentTracker {
         // Fail closed: if the client cannot answer a nested permission
         // request, stop the parent turn instead of letting later tools run
         // without the required user input.
-        this.onPermissionCancel?.();
+        if (!abortSignal.aborted) {
+          this.onPermissionCancel?.();
+        }
         try {
           await event.respond(ToolConfirmationOutcome.Cancel);
         } catch (respondError) {
@@ -280,12 +299,11 @@ export class SubAgentTracker {
       const event = args[0] as AgentUsageEvent;
       if (abortSignal.aborted) return;
 
-      this.messageEmitter.emitUsageMetadata(
-        event.usage,
-        '',
-        event.durationMs,
-        this.subagentMeta,
-      );
+      void this.messageEmitter
+        .emitUsageMetadata(event.usage, '', event.durationMs, this.subagentMeta)
+        .catch((error) => {
+          debugLogger.debug('Failed to emit subagent usage metadata:', error);
+        });
     };
   }
 
@@ -301,13 +319,17 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       // Emit streamed text as agent message or thought based on the flag
-      void this.messageEmitter.emitMessage(
-        event.text,
-        'assistant',
-        event.thought ?? false,
-        undefined,
-        this.subagentMeta,
-      );
+      void this.messageEmitter
+        .emitMessage(
+          event.text,
+          'assistant',
+          event.thought ?? false,
+          undefined,
+          this.subagentMeta,
+        )
+        .catch((error) => {
+          debugLogger.debug('Failed to emit subagent stream text:', error);
+        });
     };
   }
 }

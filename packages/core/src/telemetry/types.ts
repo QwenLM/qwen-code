@@ -11,6 +11,7 @@ import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { FileDiff } from '../tools/tools.js';
 import type { AuthType } from '../core/contentGenerator.js';
+import type { ToolExecutionStatus } from '../core/turn.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
@@ -175,10 +176,12 @@ export class UserRetryEvent implements BaseTelemetryEvent {
 export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
+  call_id?: string;
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
   status: 'success' | 'error' | 'cancelled';
+  execution_status?: ToolExecutionStatus | 'unknown';
   success: boolean; // Keep for backward compatibility
   decision?: ToolCallDecision;
   error?: string;
@@ -194,6 +197,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   constructor(call: CompletedToolCall) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
+    this.call_id = call.request.callId;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
@@ -212,6 +216,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
         : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
+    this.execution_status = call.response.executionStatus;
     this.success = call.status === 'success'; // Keep for backward compatibility
     this.decision = call.outcome
       ? getDecisionFromOutcome(call.outcome)

@@ -2975,6 +2975,7 @@ export const useGeminiStream = (
                     resultDisplay: response.resultDisplay,
                     error: response.error,
                     errorType: response.errorType,
+                    executionStatus: response.executionStatus,
                   });
               },
             );
@@ -3451,6 +3452,7 @@ export const useGeminiStream = (
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
+            executionStatus: response.executionStatus,
           });
       });
 
