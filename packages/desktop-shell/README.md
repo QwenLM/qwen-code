@@ -23,4 +23,4 @@ npm test --workspaces=false
 npm run dev --workspaces=false
 ```
 
-Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to choose the initial workspace. The default is the process working directory.
+Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to choose the initial workspace. Without it, the app shows a workspace picker on first launch.
