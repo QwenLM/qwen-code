@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  downloadWorkspaceFile,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   normalizePath,
@@ -145,6 +146,19 @@ describe('artifactUtils', () => {
         statFile,
         maxBytes: 4,
       }),
+    ).rejects.toThrow('too large');
+    expect(readFileBytes).not.toHaveBeenCalled();
+  });
+
+  it('rejects downloads larger than the default Blob limit', async () => {
+    const readFileBytes = vi.fn();
+    const stat = vi.fn().mockResolvedValue({
+      sizeBytes: 100 * 1024 * 1024 + 1,
+      modifiedMs: 1,
+    });
+
+    await expect(
+      downloadWorkspaceFile({ readFileBytes, stat }, 'video.mp4'),
     ).rejects.toThrow('too large');
     expect(readFileBytes).not.toHaveBeenCalled();
   });

@@ -34,6 +34,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
@@ -54,6 +55,7 @@ import {
 import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
 import {
   artifactKindLabel,
+  downloadWorkspaceFile,
   formatArtifactSize,
   getArtifactLocation,
   getArtifactImageMimeType,
@@ -64,6 +66,7 @@ import {
 } from './artifactUtils';
 import {
   displayPath,
+  isDownloadableReviewFilePath,
   isRenderedFilePath,
   type TurnOutputFileChange,
   type TurnOutputFileDiff,
@@ -221,7 +224,7 @@ interface ArtifactPanelProps {
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
-  onSideTaskError?: (error: unknown, fallback: string) => void;
+  onError?: (error: unknown, fallback: string) => void;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -252,7 +255,7 @@ export function ArtifactPanel({
   onSideTaskTitleChange,
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
-  onSideTaskError,
+  onError,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -570,6 +573,23 @@ export function ArtifactPanel({
                 activeTab.workspaceCwd ?? workspaceCwd,
               )
             }
+            onDownloadFile={(change) =>
+              downloadWorkspaceFile(
+                activeWorkspaceActions,
+                change.path,
+                getReviewDownloadMimeType(change.path),
+              )
+            }
+            onDownloadError={(downloadError) => {
+              const message = t('common.downloadFailed', {
+                message: extractErrorDetail(downloadError),
+              });
+              if (onError) {
+                onError(new Error(message), message);
+              } else {
+                console.error(message, downloadError);
+              }
+            }}
           />
         ) : activeTab.kind === 'file' ? (
           <WorkspaceFilePreview
@@ -596,6 +616,7 @@ export function ArtifactPanel({
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
           />
         ) : activeTab.kind === 'monitor' ? (
           <MonitorTaskDetail
@@ -626,7 +647,7 @@ export function ArtifactPanel({
             onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
-            onError={onSideTaskError}
+            onError={onError}
           />
         ) : (
           <ScheduledTaskDetail
@@ -1294,11 +1315,15 @@ function ReviewChanges({
   selectedPath,
   workspaceCwd,
   onOpenFilePreview,
+  onDownloadFile,
+  onDownloadError,
 }: {
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
   workspaceCwd?: string;
   onOpenFilePreview: (change: TurnOutputFileChange) => void;
+  onDownloadFile: (change: TurnOutputFileChange) => Promise<void>;
+  onDownloadError: (error: unknown) => void;
 }) {
   const { t } = useI18n();
   const [isTreeOpen, setIsTreeOpen] = useState(false);
@@ -1309,6 +1334,7 @@ function ReviewChanges({
   const reviewContentRef = useRef<HTMLDivElement | null>(null);
   const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
   const showTree = isTreeOpen;
   const fileTree = useMemo(
     () => buildFileTree(changes, workspaceCwd),
@@ -1403,6 +1429,17 @@ function ReviewChanges({
   const toggleDiff = (path: string) => {
     setExpandedPath((current) => (current === path ? null : path));
   };
+  const downloadFile = async (change: TurnOutputFileChange) => {
+    if (downloadingPath) return;
+    setDownloadingPath(change.path);
+    try {
+      await onDownloadFile(change);
+    } catch (error) {
+      onDownloadError(error);
+    } finally {
+      setDownloadingPath(null);
+    }
+  };
 
   return (
     <div className={styles.review}>
@@ -1488,6 +1525,7 @@ function ReviewChanges({
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
               const canOpenPreview = isRenderedFilePath(change.path);
+              const canDownload = isDownloadableReviewFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -1525,6 +1563,21 @@ function ReviewChanges({
                           title={`${t('turnOutputs.preview')} ${change.path}`}
                         >
                           {t('turnOutputs.preview')}
+                        </button>
+                      )}
+                      {canDownload && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => void downloadFile(change)}
+                          title={`${t('common.download')} ${change.path}`}
+                          disabled={downloadingPath !== null}
+                        >
+                          {t(
+                            downloadingPath === change.path
+                              ? 'common.downloading'
+                              : 'common.download',
+                          )}
                         </button>
                       )}
                     </span>
@@ -2025,6 +2078,10 @@ function fileExtensionLabel(value: string) {
     tsx: 'TSX',
   };
   return labels[extension] ?? extension.slice(0, 3).toUpperCase();
+}
+
+function getReviewDownloadMimeType(value: string) {
+  return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
 function ArtifactDetail({

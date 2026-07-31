@@ -130,6 +130,7 @@ function SubagentDetailContent({
   onStop,
   onRightPanelOpen,
   onArtifactsChange,
+  onError,
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
@@ -140,6 +141,7 @@ function SubagentDetailContent({
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -260,6 +262,7 @@ function SubagentDetailContent({
           turnFileChanges={fileChangesByTurn}
           turnArtifacts={artifactsByTurn}
           onTurnOutputOpen={handleRightPanelOpen}
+          onError={onError}
         />
       </div>
     </div>
@@ -273,6 +276,7 @@ export function SubagentDetail({
   workspaceCwd,
   onRightPanelOpen,
   onArtifactsChange,
+  onError,
 }: {
   sessionId: string;
   rootToolCallId: string;
@@ -284,6 +288,7 @@ export function SubagentDetail({
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -376,6 +381,7 @@ export function SubagentDetail({
         resolution={resolution}
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
+        onError={onError}
         onStop={() =>
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
         }
