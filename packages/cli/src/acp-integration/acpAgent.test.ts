@@ -2826,6 +2826,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(argv).toMatchObject({
       sessionId: '550e8400-e29b-41d4-a716-446655440000',
     });
+    // Index 8 is `throwOnSessionIdConflict`: it must be true so a duplicate
+    // caller-supplied id throws (mapped to a RequestError) instead of
+    // process.exit(1)-ing the shared ACP child.
+    expect(vi.mocked(loadCliConfig).mock.calls[0]![8]).toBe(true);
 
     mockConnectionState.resolve();
     await agentPromise;
