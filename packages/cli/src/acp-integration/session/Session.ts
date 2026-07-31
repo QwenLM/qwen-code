@@ -8212,7 +8212,7 @@ export class Session implements SessionContext {
 
             // Skip tool_call_update event for TodoWriteTool
             // Still log and return function response for LLM
-          } else {
+          } else if (!isTodoWriteTool) {
             // Normal tool handling: emit result using ToolCallEmitter
             await this.toolCallEmitter.emitResult({
               callId,

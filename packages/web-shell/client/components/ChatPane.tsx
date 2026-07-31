@@ -22,10 +22,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
-import {
-  SubagentDetailsProvider,
-  useSubagentTreeResolver,
-} from '../subagentDetailsContext';
+import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
@@ -44,7 +41,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
-import { getLatestActiveTodos } from '../utils/todos';
+import { getFloatingTodos } from '../utils/todos';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -189,7 +186,6 @@ export function ChatPane({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const resolveSubagentTree = useSubagentTreeResolver();
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
@@ -293,7 +289,7 @@ export function ChatPane({
     pendingToolApproval?.toolKind === 'switch_mode' &&
     pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
   const planTodos = useMemo(
-    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
+    () => (isExitPlanApproval ? getFloatingTodos(messages).todos : []),
     [isExitPlanApproval, messages],
   );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
@@ -698,10 +694,7 @@ export function ChatPane({
       )}
 
       <div className={styles.body}>
-        <SubagentDetailsProvider
-          onOpen={openSubagentDetails}
-          resolveTree={resolveSubagentTree}
-        >
+        <SubagentDetailsProvider onOpen={openSubagentDetails}>
           <MessageList
             messages={messages}
             pendingApproval={pendingToolApproval}

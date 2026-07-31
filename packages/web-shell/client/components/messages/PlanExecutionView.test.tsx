@@ -212,6 +212,36 @@ describe('PlanExecutionView', () => {
     ]);
   });
 
+  it('keeps the first task registered for a tool call', () => {
+    const firstRoot = task('running', { id: 'agent-first' });
+    const firstChild = task('completed', {
+      id: 'agent-first-child',
+      parentAgentId: firstRoot.id,
+    });
+    const laterRoot = task('failed', { id: 'agent-later' });
+    const laterChild = task('failed', {
+      id: 'agent-later-child',
+      parentAgentId: laterRoot.id,
+    });
+
+    expect(
+      nestedTasksForTool(agentTool('build'), [
+        firstRoot,
+        firstChild,
+        laterRoot,
+        laterChild,
+      ]).map(({ task: nested }) => nested.id),
+    ).toEqual(['agent-first-child']);
+    expect(
+      getPlanNodeState(
+        todos[1],
+        todosById,
+        [agentTool('build')],
+        [firstRoot, firstChild, laterRoot, laterChild],
+      ),
+    ).toEqual({ status: 'running', attention: false });
+  });
+
   it('rebuilds the nested agent tree from transcript tools', () => {
     const grandchild = {
       ...agentTool('verify'),

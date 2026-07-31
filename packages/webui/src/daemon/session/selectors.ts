@@ -40,6 +40,7 @@ export function selectDaemonTodoLists(
     const rawOutput = getRecord(block.rawOutput);
     const plan = getRecord(rawOutput?.['plan']);
     const planId = getString(plan, 'id');
+    const sourceCallId = getString(plan, 'sourceCallId');
     return [
       {
         blockId: block.id,
@@ -47,6 +48,7 @@ export function selectDaemonTodoLists(
         title: block.title,
         status: block.status,
         ...(planId ? { planId } : {}),
+        ...(sourceCallId ? { sourceCallId } : {}),
         items,
         raw: block,
       },

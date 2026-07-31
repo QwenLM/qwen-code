@@ -5,7 +5,6 @@ import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './PlanMessage.module.css';
-import { HistoricalPlanExecution } from './HistoricalPlanExecution';
 
 interface PlanMessageProps {
   id: string;
@@ -56,10 +55,7 @@ export const PlanMessage = memo(function PlanMessage({
         </span>
       </button>
       {expanded ? (
-        <>
-          <TodoFullList todos={todos} numbered />
-          <HistoricalPlanExecution todos={todos} sourceMessageId={id} />
-        </>
+        <TodoFullList todos={todos} numbered />
       ) : (
         <PlanEventSummary id={id} todos={todos} />
       )}

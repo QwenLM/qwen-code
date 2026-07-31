@@ -303,6 +303,7 @@ export interface DaemonTodoList {
   title: string;
   status: string;
   planId?: string;
+  sourceCallId?: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }

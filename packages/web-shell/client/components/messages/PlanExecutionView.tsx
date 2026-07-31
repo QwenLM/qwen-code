@@ -1,4 +1,11 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionTaskStatus,
@@ -87,21 +94,50 @@ export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   return layers;
 }
 
+interface TaskExecutionIndex {
+  rootByToolCallId: ReadonlyMap<string, DaemonSessionAgentTaskStatus>;
+  childrenByParentId: ReadonlyMap<string, DaemonSessionAgentTaskStatus[]>;
+  nestedByRootId: Map<
+    string,
+    Array<{ task: DaemonSessionAgentTaskStatus; depth: number }>
+  >;
+}
+
+function createTaskExecutionIndex(
+  tasks: readonly DaemonSessionTaskStatus[],
+): TaskExecutionIndex {
+  const rootByToolCallId = new Map<string, DaemonSessionAgentTaskStatus>();
+  const childrenByParentId = new Map<string, DaemonSessionAgentTaskStatus[]>();
+  for (const task of tasks) {
+    if (task.kind !== 'agent') continue;
+    if (task.parentAgentId == null) {
+      if (!task.toolUseId || rootByToolCallId.has(task.toolUseId)) continue;
+      rootByToolCallId.set(task.toolUseId, task);
+      continue;
+    }
+    const siblings = childrenByParentId.get(task.parentAgentId) ?? [];
+    siblings.push(task);
+    childrenByParentId.set(task.parentAgentId, siblings);
+  }
+  return {
+    rootByToolCallId,
+    childrenByParentId,
+    nestedByRootId: new Map(),
+  };
+}
+
 function taskForTool(
   tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
-) {
-  return tasks.find(
-    (task): task is DaemonSessionAgentTaskStatus =>
-      task.kind === 'agent' && task.toolUseId === tool.callId,
-  );
+  taskIndex: TaskExecutionIndex,
+): DaemonSessionAgentTaskStatus | undefined {
+  return taskIndex.rootByToolCallId.get(tool.callId);
 }
 
 function executionStatus(
   tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
 ): string {
-  const liveStatus = taskForTool(tool, tasks)?.status;
+  const liveStatus = taskForTool(tool, taskIndex)?.status;
   if (liveStatus) return liveStatus;
   const persistedStatus =
     tool.rawOutput && typeof tool.rawOutput === 'object'
@@ -111,27 +147,21 @@ function executionStatus(
   return isAgentCancelled(tool) ? 'cancelled' : getAgentDisplayStatus(tool);
 }
 
-export function nestedTasksForTool(
+function nestedTasksFromIndex(
   tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
 ): Array<{ task: DaemonSessionAgentTaskStatus; depth: number }> {
-  const root = taskForTool(tool, tasks);
+  const root = taskForTool(tool, taskIndex);
   if (!root) return [];
+  const cached = taskIndex.nestedByRootId.get(root.id);
+  if (cached) return cached;
 
-  const children = new Map<string, DaemonSessionAgentTaskStatus[]>();
-  for (const task of tasks) {
-    if (task.kind !== 'agent' || task.parentAgentId == null) continue;
-    const siblings = children.get(task.parentAgentId) ?? [];
-    siblings.push(task);
-    children.set(task.parentAgentId, siblings);
-  }
-
-  const result: Array<{
+  const nested: Array<{
     task: DaemonSessionAgentTaskStatus;
     depth: number;
   }> = [];
   const visited = new Set([root.id]);
-  const stack = (children.get(root.id) ?? [])
+  const stack = (taskIndex.childrenByParentId.get(root.id) ?? [])
     .slice()
     .reverse()
     .map((task) => ({ task, depth: 1 }));
@@ -139,13 +169,21 @@ export function nestedTasksForTool(
     const entry = stack.pop()!;
     if (visited.has(entry.task.id)) continue;
     visited.add(entry.task.id);
-    result.push(entry);
-    const descendants = children.get(entry.task.id) ?? [];
+    nested.push(entry);
+    const descendants = taskIndex.childrenByParentId.get(entry.task.id) ?? [];
     for (let index = descendants.length - 1; index >= 0; index--) {
       stack.push({ task: descendants[index], depth: entry.depth + 1 });
     }
   }
-  return result;
+  taskIndex.nestedByRootId.set(root.id, nested);
+  return nested;
+}
+
+export function nestedTasksForTool(
+  tool: ACPToolCall,
+  tasks: readonly DaemonSessionTaskStatus[],
+): Array<{ task: DaemonSessionAgentTaskStatus; depth: number }> {
+  return nestedTasksFromIndex(tool, createTaskExecutionIndex(tasks));
 }
 
 export function nestedAgentToolsForTool(
@@ -163,17 +201,19 @@ export function nestedAgentToolsForTool(
   return result;
 }
 
-export function getPlanNodeState(
+function getPlanNodeStateFromIndex(
   todo: TodoItem,
   todosById: ReadonlyMap<string, TodoItem>,
   tools: readonly ACPToolCall[],
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
 ): { status: PlanNodeStatus; attention: boolean } {
-  const executionStatuses = tools.map((tool) => executionStatus(tool, tasks));
+  const executionStatuses = tools.map((tool) =>
+    executionStatus(tool, taskIndex),
+  );
   const descendantStatuses = tools.flatMap((tool) => [
-    ...nestedTasksForTool(tool, tasks).map(({ task }) => task.status),
+    ...nestedTasksFromIndex(tool, taskIndex).map(({ task }) => task.status),
     ...nestedAgentToolsForTool(tool).map(({ tool: nestedTool }) =>
-      executionStatus(nestedTool, tasks),
+      executionStatus(nestedTool, taskIndex),
     ),
   ]);
   const attention = [...executionStatuses, ...descendantStatuses].some(
@@ -194,6 +234,20 @@ export function getPlanNodeState(
   if (todo.status === 'in_progress')
     return { status: 'in_progress', attention };
   return { status: 'ready', attention };
+}
+
+export function getPlanNodeState(
+  todo: TodoItem,
+  todosById: ReadonlyMap<string, TodoItem>,
+  tools: readonly ACPToolCall[],
+  tasks: readonly DaemonSessionTaskStatus[],
+): { status: PlanNodeStatus; attention: boolean } {
+  return getPlanNodeStateFromIndex(
+    todo,
+    todosById,
+    tools,
+    createTaskExecutionIndex(tasks),
+  );
 }
 
 function todoIdOf(tool: ACPToolCall): string | undefined {
@@ -255,6 +309,7 @@ export function PlanExecutionView({
   onOpenSubagent?: (tool: ACPToolCall) => void;
 }) {
   const { t } = useI18n();
+  const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
 
   const knownIds = new Set(todos.map((todo) => todo.id));
   const todosById = new Map(todos.map((todo) => [todo.id, todo]));
@@ -282,9 +337,6 @@ export function PlanExecutionView({
     0,
   );
   const hasDependencies = dependencyCount > 0;
-  const hasTruncatedSubagentTree = tools.some(
-    (tool) => tool.subToolsTruncated === true,
-  );
   const drawsDependencyEdges =
     hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
   const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
@@ -404,14 +456,19 @@ export function PlanExecutionView({
     ? (toolsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const selectedState = selectedTodo
-    ? getPlanNodeState(selectedTodo, todosById, selectedExecutions, tasks)
+    ? getPlanNodeStateFromIndex(
+        selectedTodo,
+        todosById,
+        selectedExecutions,
+        taskIndex,
+      )
     : undefined;
   const detailsId = `plan-step-details-${graphId}`;
 
   const renderExecution = (tool: ACPToolCall) => {
-    const status = executionStatus(tool, tasks);
+    const status = executionStatus(tool, taskIndex);
     const label = tool.title || String(tool.args?.description ?? tool.toolName);
-    const nestedTasks = nestedTasksForTool(tool, tasks);
+    const nestedTasks = nestedTasksFromIndex(tool, taskIndex);
     const transcriptNestedTools = nestedAgentToolsForTool(tool);
     const nestedToolByCallId = new Map(
       transcriptNestedTools.map(({ tool: nestedTool }) => [
@@ -495,7 +552,7 @@ export function PlanExecutionView({
                 String(nestedTool.args?.description ?? nestedTool.toolName)}
             </span>
             <span className={styles.executionStatus}>
-              {t(executionStatusKey(executionStatus(nestedTool, tasks)))}
+              {t(executionStatusKey(executionStatus(nestedTool, taskIndex)))}
             </span>
           </button>
         ))}
@@ -509,11 +566,6 @@ export function PlanExecutionView({
         {t('planExecution.title')}{' '}
         <span className={styles.count}>({todos.length})</span>
       </div>
-      {hasTruncatedSubagentTree && (
-        <div className={styles.lineageNotice} role="status">
-          {t('planExecution.lineageTruncated')}
-        </div>
-      )}
       <div
         className={hasDependencies ? styles.dagViewport : styles.flatList}
         {...(hasDependencies ? { 'data-plan-workflow': true } : {})}
@@ -562,11 +614,11 @@ export function PlanExecutionView({
             <div className={styles.layer} key={index}>
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
-                const state = getPlanNodeState(
+                const state = getPlanNodeStateFromIndex(
                   todo,
                   todosById,
                   executions,
-                  tasks,
+                  taskIndex,
                 );
                 return (
                   <article

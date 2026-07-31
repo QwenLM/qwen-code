@@ -2116,7 +2116,6 @@ export function registerSessionRoutes(
         runtime,
         sessionId,
         toolCallId,
-        { includeTree: req.query['includeTree'] === '1' },
       );
       if (!resolved) {
         res.status(404).json({

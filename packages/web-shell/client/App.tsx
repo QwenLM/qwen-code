@@ -47,10 +47,7 @@ import {
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import {
-  SubagentDetailsProvider,
-  useSubagentTreeResolver,
-} from './subagentDetailsContext';
+import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
@@ -1394,7 +1391,6 @@ export function App({
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
-  const resolveSubagentTree = useSubagentTreeResolver();
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -8544,7 +8540,6 @@ export function App({
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
-                                resolveTree={resolveSubagentTree}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>

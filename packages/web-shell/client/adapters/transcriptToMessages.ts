@@ -195,11 +195,7 @@ function parseDaemonTodoItemsFromEntries(
     const item = getRecord(entry);
     const content = getString(item, 'content');
     if (!content) return [];
-    const meta = getRecord(item?.['_meta']);
-    const qwenTodo = getRecord(meta?.['qwenTodo']);
-    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
-    const id =
-      getString(qwenTodo, 'id') ?? getString(item, 'id') ?? `plan-${index}`;
+    const id = getString(item, 'id') ?? `plan-${index}`;
     return [
       {
         id,
@@ -209,7 +205,6 @@ function parseDaemonTodoItemsFromEntries(
           const priority = getTodoPriority(getString(item, 'priority'));
           return priority ? { priority } : {};
         })(),
-        ...(blockedBy ? { blockedBy } : {}),
       },
     ];
   });
@@ -878,16 +873,6 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function getStringArray(
-  record: Record<string, unknown> | undefined,
-  key: string,
-): string[] | undefined {
-  const value = record?.[key];
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-    ? value
-    : undefined;
 }
 
 function getTodoStatus(
