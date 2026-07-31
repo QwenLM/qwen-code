@@ -1131,13 +1131,17 @@ export function createDaemonSessionActions({
     },
 
     async getTasks(opts) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
-        const session = sessionRef.current;
-        if (!session) {
-          throw new Error('Daemon session is not connected');
-        }
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'Daemon session is not connected'
+        ) {
+          throw error;
+        }
         if (opts?.silent && isTransientActionError(error)) {
           throw error;
         }

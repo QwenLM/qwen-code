@@ -478,9 +478,18 @@ export function registerWorkspaceManagementRoutes(
     },
   );
 
+  const protectExistingWorkspaceRegistration = mutate({ strict: true });
   app.post(
     '/workspaces',
-    mutate({ strict: true }),
+    mutate(),
+    (req, res, next) => {
+      const body = safeBody(req);
+      if (body['kind'] === 'scratch') {
+        next();
+        return;
+      }
+      protectExistingWorkspaceRegistration(req, res, next);
+    },
     async (req: Request, res: Response) => {
       const body = safeBody(req);
       if ('kind' in body) {

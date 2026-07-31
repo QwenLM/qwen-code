@@ -31,10 +31,16 @@ describe('buildSplitUrl', () => {
     expect(url).toContain('split=s1%2Cs2');
   });
 
-  it('resets the path so no single-session deep-link competes', () => {
+  it('strips the session deep-link so no single session competes', () => {
     expect(
       new URL(buildSplitUrl(['a'], 'https://host/session/x')).pathname,
     ).toBe('/');
+  });
+
+  it('preserves the deployment base path while stripping the session', () => {
+    expect(
+      new URL(buildSplitUrl(['a'], 'https://host/app/session/x')).pathname,
+    ).toBe('/app');
   });
 
   it('carries the daemon token in the fragment when provided', () => {

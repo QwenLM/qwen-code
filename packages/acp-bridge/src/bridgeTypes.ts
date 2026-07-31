@@ -147,6 +147,8 @@ export interface BridgeRestoreSessionRequest {
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
+  /** Keep inherited fork records as model context without replaying them. */
+  hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -165,12 +167,15 @@ export interface BridgeRestoreSessionRequest {
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
 export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
+export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
+  'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -284,11 +289,23 @@ export interface BridgeSessionTranscriptPage {
 
 export interface BridgeBranchSessionRequest {
   name?: string;
+  sourceType?: string;
+  sourceId?: string;
+  replayInheritedHistory?: boolean;
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeSideTaskSessionRequest {
+  name?: string;
+}
+
+export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  displayName: string;
+  parentSessionId: string;
 }
 
 export interface BridgeForkAgentResult {
@@ -874,6 +891,13 @@ export interface AcpSessionBridge {
     req: BridgeBranchSessionRequest,
     context?: BridgeClientRequestContext,
   ): Promise<BridgeBranchedSession>;
+
+  /** Create a persisted side task with a snapshot of the parent's context. */
+  createSideTaskSession(
+    sessionId: string,
+    req: BridgeSideTaskSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSideTaskSession>;
 
   /**
    * Change the working directory of a live session. The session must be

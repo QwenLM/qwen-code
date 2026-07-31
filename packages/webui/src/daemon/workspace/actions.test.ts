@@ -318,6 +318,11 @@ describe('workspace actions', () => {
         createdAt: 1,
       },
     };
+    const pairingApprovals = { senderIds: ['sender-1', 'sender-2'] };
+    const pairingRevocation = {
+      revoked: 'sender-1',
+      senderIds: ['sender-2'],
+    };
     const workspace = {
       workspaceChannelTypes: vi.fn().mockResolvedValue(catalog),
       workspaceChannels: vi.fn().mockResolvedValue(snapshot),
@@ -329,6 +334,12 @@ describe('workspace actions', () => {
       restartWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
       workspaceChannelPairingRequests: vi.fn().mockResolvedValue(pairing),
       approveWorkspaceChannelPairing: vi.fn().mockResolvedValue(approval),
+      workspaceChannelPairingApprovals: vi
+        .fn()
+        .mockResolvedValue(pairingApprovals),
+      revokeWorkspaceChannelPairingApproval: vi
+        .fn()
+        .mockResolvedValue(pairingRevocation),
     };
     const workspaceByCwd = vi.fn(() => workspace);
     const actions = createDaemonWorkspaceActions({
@@ -358,6 +369,12 @@ describe('workspace actions', () => {
     await expect(
       actions.channelPairing.approve('bot', 'abcdefgh'),
     ).resolves.toBe(approval);
+    await expect(actions.channelPairing.approvals('bot')).resolves.toBe(
+      pairingApprovals,
+    );
+    await expect(
+      actions.channelPairing.revoke('bot', 'sender-1'),
+    ).resolves.toBe(pairingRevocation);
 
     expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
     expect(workspaceByCwd).toHaveBeenLastCalledWith('/workspace-b');
@@ -379,6 +396,12 @@ describe('workspace actions', () => {
       'bot',
       { code: 'abcdefgh' },
     );
+    expect(workspace.workspaceChannelPairingApprovals).toHaveBeenCalledWith(
+      'bot',
+    );
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { senderId: 'sender-1' });
   });
 
   it('rejects Channel management without a selected workspace', async () => {

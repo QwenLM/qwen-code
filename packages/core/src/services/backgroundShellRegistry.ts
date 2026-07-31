@@ -23,6 +23,7 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
@@ -244,6 +245,7 @@ export interface ShellNotificationMeta {
   shellId: string;
   status: BackgroundShellStatus;
   exitCode?: number;
+  todoWorkChainId?: string;
 }
 
 export type BackgroundShellNotificationCallback = (
@@ -309,6 +311,7 @@ export class BackgroundShellRegistry {
     entry.outputFile = registration.outputPath;
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
     this.fireRegister(entry);
@@ -550,6 +553,7 @@ export class BackgroundShellRegistry {
       shellId: entry.shellId,
       status: entry.status,
       exitCode: entry.exitCode,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     try {

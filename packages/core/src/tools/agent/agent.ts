@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import { extractParentToolNames } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,7 +34,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -215,6 +215,11 @@ export interface AgentParams {
    * everything; a positive integer string inherits that many recent user turns.
    */
   fork_turns?: ForkTurns;
+  /**
+   * Tool names a fork may execute. The fork's current model-visible
+   * declarations remain unchanged so the prompt-cache prefix is preserved.
+   */
+  fork_tools?: string[];
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
@@ -248,6 +253,28 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+function isValidForkToolWildcard(toolName: string): boolean {
+  if (!toolName.includes('*')) {
+    return true;
+  }
+  if (toolName === 'mcp__*') {
+    return true;
+  }
+  if (
+    !toolName.startsWith('mcp__') ||
+    !toolName.endsWith('*') ||
+    toolName.slice(0, -1).includes('*')
+  ) {
+    return false;
+  }
+
+  // After removing `mcp__` and the trailing wildcard, a server-scoped tool
+  // pattern must still contain a non-empty raw server name followed by `__`.
+  // The tool-name prefix may be empty, as in `mcp__github__*`.
+  const patternBody = toolName.slice('mcp__'.length, -1);
+  return patternBody.lastIndexOf('__') > 0;
+}
 
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
@@ -795,6 +822,15 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Only valid with subagent_type "fork". Omit it or use "all" to inherit the full parent conversation; use a positive integer string such as "3" to inherit the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
         },
+        fork_tools: {
+          type: 'array',
+          items: {
+            type: 'string',
+            minLength: 1,
+          },
+          description:
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Omit for unrestricted execution; use an empty array to reject every tool call.',
+        },
         run_in_background: {
           type: 'boolean',
           default: true,
@@ -894,7 +930,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -914,7 +950,7 @@ Usage notes:
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\` and \`fork_tools\`; omit \`fork_turns\` for the full conversation and omit \`fork_tools\` for unrestricted execution.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
@@ -1111,6 +1147,34 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (params.fork_tools !== undefined) {
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_tools" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_tools" cannot be used when spawning a named teammate.';
+      }
+      if (
+        !Array.isArray(params.fork_tools) ||
+        params.fork_tools.some(
+          (toolName) =>
+            typeof toolName !== 'string' ||
+            toolName.trim().length === 0 ||
+            toolName.trim() !== toolName,
+        )
+      ) {
+        return 'Parameter "fork_tools" must be an array of non-empty tool names without surrounding whitespace.';
+      }
+      if (params.fork_tools.includes('*')) {
+        return 'Parameter "fork_tools" does not accept "*"; omit it for unrestricted execution.';
+      }
+      if (
+        params.fork_tools.some((toolName) => !isValidForkToolWildcard(toolName))
+      ) {
+        return 'Parameter "fork_tools" wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*".';
+      }
+    }
+
     if (params.isolation !== undefined) {
       if (params.isolation !== 'worktree') {
         return 'Parameter "isolation" must be "worktree" when set.';
@@ -1208,6 +1272,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     return {
       subagent_type: params.subagent_type,
       fork_turns: params.fork_turns,
+      fork_tools: params.fork_tools,
       // Include working_dir: it rebinds the child's cwd to another registered
       // worktree, which the AUTO-mode classifier must be able to see — a
       // launch that looks benign from subagent_type + prompt alone could be
@@ -1578,7 +1643,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
-    promptConfig: PromptConfig;
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
@@ -1636,6 +1700,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
+          this.params.fork_tools,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1665,7 +1730,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     // Default: directive with fork boilerplate as task_prompt
     if (!taskPrompt) {
-      taskPrompt = buildChildMessage(this.params.prompt);
+      taskPrompt = buildChildMessage(
+        this.params.prompt,
+        this.params.fork_tools,
+      );
     }
 
     // Read the parent's live generationConfig (systemInstruction + tool
@@ -1678,25 +1746,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )
-          ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+      // Keep the parent's current allowlist, but pass names rather than inline
+      // schemas so AgentCore resolves every declaration through the fork's
+      // current ToolRegistry. This preserves the parent's tool surface and
+      // cache prefix when schemas are unchanged without letting a persisted or
+      // stale declaration bypass the live registry.
+      const parentToolNames = extractParentToolNames(generationConfig);
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1705,15 +1760,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         initialMessages,
       };
       toolConfig = {
-        tools:
-          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+        tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
+        ...(this.params.fork_tools !== undefined
+          ? { executionAllowedTools: [...this.params.fork_tools] }
+          : {}),
       };
     } else {
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
       };
-      toolConfig = { tools: ['*'] };
+      toolConfig = {
+        tools: ['*'],
+        ...(this.params.fork_tools !== undefined
+          ? { executionAllowedTools: [...this.params.fork_tools] }
+          : {}),
+      };
     }
 
     const subagent = await AgentHeadless.create(
@@ -1726,7 +1788,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
+    return { subagent, initialMessages, taskPrompt, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds
@@ -2878,7 +2940,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
-      let promptConfig: PromptConfig | undefined;
       let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
@@ -2897,7 +2958,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
         initialMessages = fork.initialMessages;
-        promptConfig = fork.promptConfig;
         toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
@@ -2998,7 +3058,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgSubagent = subagent;
         const bgInitialMessages = initialMessages;
         const bgTaskPrompt = taskPrompt;
-        const bgPromptConfig = promptConfig;
         const bgToolConfig = toolConfig;
         const bgSubagentDispose = subagentDispose;
 
@@ -3121,11 +3180,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapSystemInstruction: isFork
-              ? (bgPromptConfig?.renderedSystemPrompt ??
-                bgPromptConfig?.systemPrompt)
-              : undefined,
-            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
@@ -3145,6 +3199,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork && bgToolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...bgToolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
@@ -3935,6 +3994,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork && toolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...toolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
