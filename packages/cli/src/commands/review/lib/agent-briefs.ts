@@ -240,7 +240,9 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - Sensitive data exposure in logs, error messages, or responses
 - Insecure deserialization; weak crypto
 - Hardcoded secrets, credentials, or API keys in the diff
-- CSRF and clickjacking, for web changes`,
+- CSRF and clickjacking, for web changes
+- **A borrowed protection idiom, missing what made it work at home.** When the diff lifts a defensive construct from elsewhere in the codebase — an escaping call, an encoding, a filter — go READ the source context, and check which of its surroundings did the actual protecting. A live case: an \`@\` → \`&#64;\` rewrite was lifted from a workflow whose output landed inside \`<code>\` — the code ancestor is what made mentions inert; the entity was belt-and-braces. In prose, GitHub decodes the entity before the mention filter runs, so the copied half protects nothing and the review that traced only the copied line would call it sound. Name what the original context provided and whether the new site has it.
+- **A second parser for a format someone else authoritatively parses.** When the diff implements its own model of another system's syntax — a sanitizer's fence scanner over markdown GitHub will parse, an escaper's tokenizer, a validator's URL splitter — the finding to hunt is an INPUT THE TWO PARSE DIFFERENTLY: every divergence is a bypass, because the sanitizer transforms what it saw while the authoritative parser renders what IS. Probe the corners the model simplifies (nesting, container prefixes, things that change meaning mid-stream: a fence opener inside a raw-HTML block, a quote inside an attribute). State the divergent input concretely — "these disagree somewhere" is not a finding.`,
   },
 
   '3': {
@@ -302,7 +304,9 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 
 - both sides of the assertion are computed the same way, so they move together — e.g. \`expect(extract(a)).toBe(extract(b))\` where a loose or unanchored \`extract\` returns \`undefined\` on both, i.e. \`expect(undefined).toBe(undefined)\`; **pin the literal** instead;
 - the assertion reads only the *first* of several sites the changed behaviour spans, so drift in a later site passes green;
-- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw.
+- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw;
+- **the test pins the MECHANISM instead of the EFFECT.** A test asserting \`&#64;\` appears in the output pins an encoding choice; the property that matters is that no mention-shaped \`@\` survives — and when the mechanism itself is broken (that entity still pings), the mechanism test is green precisely while the guarantee fails. Wherever the diff's test asserts *how* a protection is implemented rather than *what it must prevent*, say what the effect-shaped assertion would be;
+- **the test's oracle mirrors the implementation's own model.** A fold-balance test whose helper re-implements the sanitizer's code-region scanner can never catch that scanner diverging from GitHub's parse — the test and the code share the blind spot **by construction**. An oracle must come from the authority the code is modelling (recorded real output, a spec fixture), or the test proves self-consistency, not correctness.
 
 A vacuous test is a **Suggestion** — an ineffective guard is a gap, not a defect in the code, and grading it Critical merely for being the sole guard is the severity inflation the shared ladder is built to avoid (Agent 7's efficacy probe reports the very same inert test as a Suggestion, and Step 4 keeps the higher of the two). Escalate only the way this dimension always does: if the vacuous test lets a **specific incorrect behaviour** ship, report **that behaviour** as the Critical with the test as your evidence — naming the bug is the work, naming the gap is not; and a test that asserts the **opposite** of the intended behaviour, or was **weakened/disabled in this diff**, is already Critical under the existing rule.
 
@@ -501,6 +505,11 @@ It builds the merge base in a sibling worktree and reports \`available\` and \`p
 - **A/B is expensive — spend it on a claim that turns on it.** An install and a build, once per review at most (the command reuses an already-built base tree, so concurrent verifiers pay once). A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
 
 A finding an A/B settled carries \`Source: [probe]\` like any other run-produced evidence, with both sides' output quoted. **Do not remove the base tree** — \`cleanup\` sweeps it at the end of the review, and a later finding may need it.
+
+**When the claim is about GITHUB's behaviour, neither tree can settle it — only GitHub can.** A claim like "this encoding renders identically and can never ping", "GitHub strips this tag", "this markdown shape closes the fold" is about the comment pipeline's parser, sanitizer allowlist and notification path, none of which exist in this environment — a local markdown library is a model of GitHub, and judging a sanitizer claim against a model of the authority is exactly the parser-divergence failure under review. Measured live: an \`@\` → \`&#64;\` defusal read as sound in every local trace, and GitHub's real renderer registered the mention and fired the notification. So:
+
+- **If the environment variable \`QWEN_REVIEW_SCRATCH_REPO\` is set** (an \`owner/repo\` the user designated for disposable test posts), you may adjudicate on the real renderer: post the payload as an issue comment there — \`gh api repos/$QWEN_REVIEW_SCRATCH_REPO/issues/<n>/comments -f body=@<file>\` against an issue you created there for this purpose — read it back with \`-H "Accept: application/vnd.github.html+json"\`, and rule on the returned HTML (and, for mention claims, the timeline events). The observation is the verdict; quote it. This is the ONLY write destination other than \`submit\`'s that any part of this review may touch, it is user-designated, and nothing about the PR under review, its code, or its authors may appear in what you post there — post the minimal payload shape, not the report.
+- **If it is not set, a rendering claim you could not settle by any local means is \`confirmed (low confidence)\` or \`cannot tell\` — never "confirmed" off a local markdown approximation.** Say what a scratch-repo check would have measured, so the user knows what the setting buys.
 
 Return, for each finding, one verdict:
 
