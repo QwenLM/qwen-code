@@ -58,10 +58,15 @@ export type CurrentAutofixPullRequestResult =
 
 const AUTOFIX_PROMPT_PATTERN =
   /^autofix tick repo=([^\s]+) pr=([1-9]\d*) mode=(propose-only|auto-commit|auto-push) rounds=(\d+) infra-reruns=(\d+)$/;
+const AUTOFIX_PROMPT_NAMESPACE_PATTERN = /^autofix tick(?:\s|$)/;
 const OWNER_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 export function isAutofixCronJob(job: AutofixCronCandidate): boolean {
-  return parseAutofixWatcher(job) !== null;
+  return (
+    Boolean(job.recurring) &&
+    job.cronExpr === AUTOFIX_CRON &&
+    AUTOFIX_PROMPT_NAMESPACE_PATTERN.test(job.prompt)
+  );
 }
 
 export function parseAutofixWatcher(
@@ -252,7 +257,14 @@ export async function resolveAutofixCronPrompt(
   job: AutofixWatcherInput,
 ): Promise<ResolvedAutofixCronPrompt | null> {
   const watcher = parseAutofixWatcher(job);
-  if (!watcher) return null;
+  if (!watcher) {
+    if (!AUTOFIX_PROMPT_NAMESPACE_PATTERN.test(job.prompt)) return null;
+    return rejectedAutofixCronPrompt(
+      config,
+      job,
+      'malformed Autofix watcher prompt',
+    );
+  }
   try {
     const live = config
       .getCronScheduler()

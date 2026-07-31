@@ -5,6 +5,25 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const ghMocks = vi.hoisted(() => {
+  const execFileAsync = vi.fn();
+  const execFile = vi.fn();
+  Object.defineProperty(execFile, Symbol.for('nodejs.util.promisify.custom'), {
+    value: execFileAsync,
+  });
+  return { execFile, execFileAsync };
+});
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: { ...actual.default, execFile: ghMocks.execFile },
+    execFile: ghMocks.execFile,
+  };
+});
+
 import {
   getGitWorkingTreeStatus,
   type Config,
@@ -15,6 +34,7 @@ import {
   AUTOFIX_CRON,
   buildAutofixImmediatePrompt,
   formatAutofixTick,
+  isAutofixCronJob,
   matchingAutofixWatchers,
   parseAutofixWatcher,
   resolveCurrentAutofixPullRequest,
@@ -30,6 +50,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
 
 beforeEach(() => {
+  ghMocks.execFileAsync.mockReset();
   getGitWorkingTreeStatusMock.mockResolvedValue({
     branch: 'main',
     detached: false,
@@ -69,6 +90,24 @@ function skill(): SkillConfig {
   };
 }
 
+function currentPr(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    number: 4362,
+    title: 'Autofix controls',
+    url: 'https://github.com/QwenLM/qwen-code/pull/4362',
+    author: { login: 'yiliang114' },
+    headRefName: 'main',
+    headRepositoryOwner: { login: 'QwenLM' },
+    isDraft: false,
+    isCrossRepository: false,
+    reviewDecision: 'REVIEW_REQUIRED',
+    statusCheckRollup: [],
+    updatedAt: '2026-07-31T00:00:00Z',
+    state: 'OPEN',
+    ...overrides,
+  });
+}
+
 describe('Autofix watcher prompt', () => {
   it('round-trips canonical watcher state', () => {
     const prompt = formatAutofixTick(
@@ -104,6 +143,9 @@ describe('Autofix watcher prompt', () => {
     expect(() =>
       formatAutofixTick('not-a-repository', 1, 'propose-only', 0, 0),
     ).toThrow('Invalid Autofix repository identity');
+    expect(
+      isAutofixCronJob(job({ prompt: 'autofix tick mode=auto-push' })),
+    ).toBe(true);
   });
 
   it('matches repository names case-insensitively and keeps PRs separate', () => {
@@ -152,6 +194,54 @@ describe('Current Autofix pull request', () => {
       message: 'Autofix requires a checked-out branch.',
     });
   });
+
+  it('reports missing GitHub CLI before trusting PR metadata', async () => {
+    const error = Object.assign(new Error('missing gh'), { code: 'ENOENT' });
+    ghMocks.execFileAsync.mockRejectedValue(error);
+    const config = {
+      getProjectRoot: () => '/repo',
+    } as unknown as Config;
+
+    await expect(resolveCurrentAutofixPullRequest(config)).resolves.toEqual({
+      kind: 'error',
+      message: 'Autofix requires the GitHub CLI (`gh`).',
+    });
+  });
+
+  it('rejects pull requests outside the current canonical branch', async () => {
+    const config = {
+      getProjectRoot: () => '/repo',
+    } as unknown as Config;
+
+    for (const [metadata, message] of [
+      [
+        { state: 'CLOSED' },
+        'No open pull request is associated with branch main.',
+      ],
+      [
+        { headRefName: 'other-branch' },
+        'No open pull request is associated with branch main.',
+      ],
+      [
+        { isCrossRepository: true },
+        'Autofix requires the current branch to belong to the canonical repository.',
+      ],
+      [
+        { headRepositoryOwner: { login: 'other' } },
+        'The current pull request does not belong to the canonical repository.',
+      ],
+    ] as const) {
+      ghMocks.execFileAsync.mockReset();
+      ghMocks.execFileAsync
+        .mockResolvedValueOnce({ stdout: 'QwenLM/qwen-code\n' })
+        .mockResolvedValueOnce({ stdout: currentPr(metadata) });
+
+      await expect(resolveCurrentAutofixPullRequest(config)).resolves.toEqual({
+        kind: 'error',
+        message: `Unable to resolve the current pull request: ${message}`,
+      });
+    }
+  });
 });
 
 describe('Autofix prompt authority', () => {
@@ -199,14 +289,26 @@ describe('Autofix prompt authority', () => {
     expect(addSessionAllowRule).toHaveBeenCalledWith('cron_list');
   });
 
-  it('ignores noncanonical Autofix-prefixed cron prompts', async () => {
-    const watcherJob = job({ prompt: 'autofix tick mode=auto-push' });
+  it('ignores cron prompts outside the Autofix namespace', async () => {
+    const watcherJob = job({ prompt: 'ordinary cron text' });
     const { config, deleteJob } = promptConfig(watcherJob);
 
     await expect(
       resolveAutofixCronPrompt(config, watcherJob),
     ).resolves.toBeNull();
     expect(deleteJob).not.toHaveBeenCalled();
+  });
+
+  it('rejects and disables noncanonical Autofix-prefixed cron prompts', async () => {
+    const watcherJob = job({ prompt: 'autofix tick mode=auto-push' });
+    const { config, deleteJob } = promptConfig(watcherJob);
+
+    const result = await resolveAutofixCronPrompt(config, watcherJob);
+
+    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.modelText).toContain('malformed Autofix watcher prompt');
+    expect(result?.modelText).toContain('No maintenance action was authorized');
+    expect(deleteJob).toHaveBeenCalledWith('job-1');
   });
 
   it('rejects and disables a stale canonical Autofix tick', async () => {
