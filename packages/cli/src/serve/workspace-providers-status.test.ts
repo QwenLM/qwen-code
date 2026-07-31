@@ -1025,6 +1025,50 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('123%abc');
   });
 
+  it('strips a spaced password whose first word is digits closing a sentence', async () => {
+    // `123.` is digits followed by a `PORT_END` character, which is exactly how a
+    // port ending a sentence looks (`:8443. See ...`), so the colon was rejected
+    // as a port, no credential prefix was found, and `findUrlEnd` cut at the
+    // first space — inside the password. What separates the two is whether a
+    // userinfo `@` follows: a port that ends a sentence is not followed by one.
+    // The fallback pattern cannot cover this case, because its host is a single
+    // character by construction and the host here is `host.example`.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:123. secret@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+    expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
+  it('still reads a port that closes a sentence as a port', async () => {
+    // The other side of the rule above, and the reason it tests for a following
+    // `@` rather than dropping `PORT_END` from the lookahead: with no credential
+    // in the message, treating `8443` as a password start would take the `@` from
+    // the contact line and rewrite the host to `example.com`.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443. Contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443. Contact admin@example.com',
+    );
+  });
+
   it('strips a spaced password before a bare one-character host', async () => {
     // `HOST_AFTER_USERINFO` requires two characters of a bare label, so `@h`
     // matched no shape, `CREDENTIAL_PREFIX_PATTERN` declined, and the fallback
