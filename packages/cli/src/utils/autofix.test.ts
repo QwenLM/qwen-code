@@ -193,6 +193,7 @@ describe('Current Autofix pull request', () => {
       kind: 'error',
       message: 'Autofix requires a checked-out branch.',
     });
+    expect(ghMocks.execFileAsync).not.toHaveBeenCalled();
   });
 
   it('reports missing GitHub CLI before trusting PR metadata', async () => {
