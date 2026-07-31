@@ -878,14 +878,19 @@ export function buildRoleBrief(
           'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
           'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
           'test in the diff fails when it is removed, which the whole-file ' +
-          "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
+          "revert cannot see when the file's other, tested behaviours mask it. " +
+          '`kind: "hunk-survived"` is one HUNK reverted on its own with every affected ' +
+          'test still green — that specific change ships with nothing gating it. Report each ' +
+          'of the four as a ' +
           '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
-          'test in this diff that would catch its removal. **`inconclusive` is not a ' +
-          'finding** — for probes and mutants alike, ' +
+          'test in this diff that would catch its removal. If `harnessValidated` is `false`, ' +
+          'the positive control failed and every would-be survivor was re-classed — say the ' +
+          'harness could not be validated instead of implying clean coverage. ' +
+          '**`inconclusive` is not a finding** — for probes, mutants and hunks alike, ' +
           "reverting or mutating the source often breaks the test's own compile, and that is " +
-          'not the test catching anything. Mutants counted in `mutants.skippedForBudget`, ' +
-          '`mutants.skippedForCap`, or `mutants.skippedForBaseline` never ran — not findings ' +
-          'either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
+          'not the test catching anything. Entries counted in `mutants.skipped*` or ' +
+          '`hunks.skippedForBudget` / `skippedForCap` / `skippedForBaseline` never ran — not ' +
+          'findings either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }

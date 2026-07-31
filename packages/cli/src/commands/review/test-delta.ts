@@ -45,6 +45,7 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildRunEnv,
+  trimOutput,
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
@@ -114,6 +115,13 @@ export interface TestDeltaArgs {
   exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
 }
 
+// Mirrors build-test's run() on the three properties its comments call out as
+// deliberate — reviewed live when this reimplementation diverged on all three:
+// stdin ignored (a rerun that asks a question hangs to the deadline), timeout
+// read from error.code with the SIGTERM/null-status fallback (the substring
+// form misses a maxBuffer kill, which would flow into the base-green Critical
+// path), and trimmed output (a failing monorepo suite is hundreds of KB that
+// would otherwise land verbatim in the report Agent 7 reads).
 function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   const started = Date.now();
   const r = spawnSync(command, {
@@ -123,16 +131,27 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     timeout: timeoutMs,
     env: buildRunEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const timedOut = r.error?.message?.includes('ETIMEDOUT') ?? false;
+  const err = r.error as (Error & { code?: string }) | undefined;
+  const timedOut =
+    err?.code === 'ETIMEDOUT' || (r.signal === 'SIGTERM' && r.status === null);
   return {
     command,
     exitCode: timedOut ? null : (r.status ?? null),
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: `${r.stdout ?? ''}${r.stderr ?? ''}`,
+    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
   };
 }
+
+/**
+ * Whole-command budget, mirroring test-efficacy's: the tool ceiling is 600s,
+ * and three failed commands at the 300s per-command default would blow past it
+ * with NO report written — discarding the base install+build just paid for.
+ * Commands the budget cannot fit are disclosed, never silently dropped.
+ */
+const TOTAL_BUDGET_MS = 540_000;
 
 export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const exec = args.exec ?? run;
@@ -168,9 +187,21 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     );
   }
 
-  const entries: DeltaEntry[] = failed.map((t) => {
+  const startedAt = Date.now();
+  const skippedForBudget: string[] = [];
+  const entries: DeltaEntry[] = [];
+  for (const t of failed) {
+    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining < 5_000) {
+      skippedForBudget.push(t.command);
+      continue;
+    }
     const prFailingFiles = failingFilesOf(t.output ?? '');
-    const base = exec(t.command, baseline, args.timeout * 1000);
+    const base = exec(
+      t.command,
+      baseline,
+      Math.min(args.timeout * 1000, remaining),
+    );
     const baseFailingFiles = base.timedOut ? [] : failingFilesOf(base.output);
     const unparsed =
       prFailingFiles.length === 0 && baseFailingFiles.length === 0;
@@ -185,7 +216,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // net-new off a base that never ran its tests (reviewed live on this PR).
     const baseUnusable =
       base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
-    return {
+    entries.push({
       command: t.command,
       prFailingFiles,
       baseFailingFiles,
@@ -197,8 +228,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         : prFailingFiles.filter((f) => baseFailingFiles.includes(f)),
       base,
       unparsed,
-    };
-  });
+    });
+  }
 
   const netNew = [...new Set(entries.flatMap((e) => e.netNew))].sort();
   const shared = [...new Set(entries.flatMap((e) => e.shared))].sort();
@@ -224,6 +255,11 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (timedOut) {
     parts.push(
       `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
+    );
+  }
+  if (skippedForBudget.length) {
+    parts.push(
+      `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
   return {

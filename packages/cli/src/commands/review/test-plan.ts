@@ -45,6 +45,7 @@
 // `script-lint` gives a deferred checker, for the same reason.
 
 import type { CommandModule } from 'yargs';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -211,6 +212,12 @@ const COUNT_RES = [
 function codeSpans(section: string): string[] {
   const spans: string[] = [];
   const add = (line: string) => {
+    // A pasted unified diff is EVIDENCE, and the PR template invites pasting
+    // it inside the Test Plan ("paste logs or test output"). Its syntax lines
+    // would otherwise shed false path claims (`+++ b/<path>` → `b/<path>`,
+    // `diff --git a/x b/x` → both). Drop them whole; a diff's body lines
+    // carry no runner and match no claim shape on their own.
+    if (/^(?:diff --git |\+\+\+ |--- |@@ |index )/.test(line.trim())) return;
     // Strip a prompt marker, then anything after a `#` comment: a repro line is
     // written `npm test   # 471 pass`, and the comment is not part of the command.
     const t = line
@@ -380,6 +387,24 @@ function rulePath(
       verdict: 'unchecked',
       note: 'not a repo-relative path',
     };
+  }
+  // A gitignored path (a build output the Environment section names — the
+  // template's own example is a dist/ entry point) is absent at the reviewed
+  // commit BY CONSTRUCTION, the same reasoning that excludes `.qwen/` paths.
+  // check-ignore failing (not a repo, old git) falls through to the normal
+  // ruling — the guard only ever downgrades a would-be contradiction.
+  try {
+    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', path], {
+      stdio: 'ignore',
+    });
+    return {
+      kind: 'path',
+      text,
+      verdict: 'unchecked',
+      note: 'gitignored — a build output, absent at the reviewed commit by construction',
+    };
+  } catch {
+    // Not ignored (exit 1) or no git here: proceed.
   }
   if (existsSync(join(worktree, path))) {
     return {

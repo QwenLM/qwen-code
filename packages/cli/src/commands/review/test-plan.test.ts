@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs, { type Argv } from 'yargs';
@@ -441,6 +442,26 @@ describe('runTestPlan', () => {
     it('does not rule on a path that escapes the repo root', () => {
       const r = run('## Test Plan\n\nWrote `../other/x.ts`');
       expect(verdictOf(r.claims, '../other/x.ts')).toBe('unchecked');
+    });
+
+    it('sheds no claims from a pasted unified diff in an Evidence block', () => {
+      // The PR template invites pasting logs/diffs INSIDE the Test Plan;
+      // `+++ b/<path>` once became a contradicted claim on a correct body.
+      const r = run(
+        '## Test Plan\n\n```diff\ndiff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```',
+      );
+      expect(r.claims).toEqual([]);
+    });
+
+    it('rules a gitignored path unchecked — absent by construction', () => {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      writeFileSync(join(dir, '.gitignore'), 'dist/\n');
+      const r = run(
+        '## Test Plan\n\nRun `node dist/index.js` against `dist/index.js`',
+      );
+      const claim = r.claims.find((c) => c.text === 'dist/index.js');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('gitignored');
     });
 
     it('never extracts an absolute path as a repo claim', () => {

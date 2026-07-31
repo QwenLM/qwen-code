@@ -188,6 +188,34 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('nothing to attribute');
   });
 
+  it('stops at the whole-command budget and discloses what it skipped', () => {
+    // Three failed commands x 300s default would blow the 600s tool ceiling
+    // with no report at all. The exec seam eats the budget in one call.
+    const real = Date.now;
+    let t = 0;
+    Date.now = () => (t += 300_000);
+    try {
+      const r = runWith(
+        [
+          cmd({
+            command: 'npm test --workspace="a"',
+            output: 'FAIL a/x.test.ts',
+          }),
+          cmd({
+            command: 'npm test --workspace="b"',
+            output: 'FAIL b/y.test.ts',
+          }),
+        ],
+        ' FAIL a/x.test.ts',
+      );
+      expect(r.entries).toHaveLength(1);
+      expect(r.note).toContain('budget was exhausted');
+      expect(r.note).toContain('npm test --workspace="b"');
+    } finally {
+      Date.now = real;
+    }
+  });
+
   it('refuses an unreadable report and a missing base tree without throwing', () => {
     expect(
       runTestDelta({ report: join(dir, 'nope.json'), baseline, timeout: 60 })

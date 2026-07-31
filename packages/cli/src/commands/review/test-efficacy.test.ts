@@ -1372,6 +1372,17 @@ describe('selectMutants — replacement operators', () => {
     expect(skippedForCap).toBe(1);
   });
 
+  it('caps replacements at their sub-cap and counts what it drops', () => {
+    // 24x pool inflation measured on real commits: uncapped replacements would
+    // drain the time window hunk probes draw from last.
+    const many = Array.from({ length: 6 }, (_, i) =>
+      fileOf(`if (a${i} !== b${i}) go();\n`, [1]),
+    ).map((f, i) => ({ ...f, file: `src/g${i}.ts` }));
+    const { selected, skippedForCap } = selectMutants(many);
+    expect(selected).toHaveLength(3); // REPLACEMENT_SUB_CAP
+    expect(skippedForCap).toBe(3);
+  });
+
   it('emits one candidate per line — a safety-verb line is not also mutated by replacement', () => {
     // `map.delete(k) ?? fallback` matches both; the deletion experiment wins.
     const { selected } = selectMutants([fileOf('cache.delete(key);\n', [1])]);
