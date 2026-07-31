@@ -225,6 +225,41 @@ differs only by the change under test; the verdict is the pair of counts.
   remote and ran the same command. Then prove the fix behaviour-preserving
   by **enumerating the real inputs** and showing identical output on each,
   not by arguing the two patterns are equivalent.
+- **The bug report is a coverage specification — test its enumeration.**
+  A report usually names more than one case ("the same pattern was
+  observed with `write_file` and `run_shell_command`"), and those names are
+  falsifiable coverage claims the PR inherits. Build one fixture per named
+  case, parameterised by the dimensions the report itself supplies, and say
+  which ones the fix actually reaches. Measured example: a recovery guard
+  keyed on a prose-to-total length ratio was probed by holding the preamble
+  at the 1,898 characters the issue reported and varying only the tool —
+  `read_file` (98 c), `run_shell_command` (106 c) and a small `edit`
+  (196 c) were all declined, while the issue's own `edit` shape (491 c) and
+  `write_file` (1,135 c) recovered, with the threshold bisected at ~473
+  characters. The issue named `run_shell_command` explicitly, so the fix
+  covered half of what it was filed against — a scope finding that testing
+  the PR's own claim could never surface.
+- **Walk the PR's own Reviewer Test Plan step by step and report per
+  step.** It is a list of falsifiable claims the author already wrote down,
+  and the interesting outcome is the step that cannot be performed at all.
+  Measured example: step 3 asked the reviewer to insert real user input
+  into an active turn; no code path does that, and the "not reproducible"
+  cell became the round's sharpest finding — the feature's own completion
+  criterion was structurally unreachable, so an objective of the form
+  "stop once the user sends X" could never complete. A step you cannot run
+  is either a missing code path or a wrong plan; say which, and say the
+  plan needs fixing either way.
+- **Prove a negative by census, not by reading.** When the finding is that
+  something can never happen — a branch nothing reaches, an evidence kind
+  never produced, a request never sent — the static chain through the code
+  is the argument and a count over real runs is the proof. Measured
+  example: a verifier demanded evidence of kind `user_input`, whose only
+  producer sat behind a queue filter admitting slash commands only; the
+  chain said unreachable, and 30 verifier payloads captured from one
+  session carried exactly one kind, `delivered_output`, with zero
+  `user_input` records even though the user typed three messages during
+  that run. Report both, and state the window the census covers — an
+  absence claim is only as strong as the observations behind it.
 - If the changed branch is unreachable in the default setup (a fallback, a
   `dist` path, an error handler), **construct the configuration that
   reaches it** — drop the tsconfig mapping, break the primary path, force
@@ -273,6 +308,15 @@ differs only by the change under test; the verdict is the pair of counts.
   `chown -R` does not follow symlinks. What survived was content and quota
   abuse. A finding that names what it is _not_ is far harder to wave away
   than one that implies everything.
+- **Rank a defect's variants by observability, not by blast radius.** Where
+  one root cause yields both a loud failure and a quiet one, the quiet one
+  is the finding. Measured example: an unescaped non-greedy parser fed a
+  payload containing its own close tag either dropped a required argument —
+  rejected by schema validation, loud, recoverable — or silently truncated
+  the value and wrote a truncated file. Same bug; the second is the one to
+  fix first. This is the same ordering as the concurrency rule below, where
+  a race that fabricates a result outranks one that crashes: a wrong answer
+  nobody is told about outranks a failure that announces itself.
 - **An accepted-tradeoff list is a completeness claim — test its
   boundary.** When the description names the costs it accepts ("links and
   images will render"), enumerate the unnamed siblings of the same
@@ -378,6 +422,16 @@ deletion leaves every test green is one of those two things, and the
 difference matters to the author. Where a survivor mirrors a pre-existing gap
 rather than something the PR introduced, say so — and label the whole set as
 completeness reporting, not merge conditions, unless one of them is load-bearing.
+
+**A surviving mutation needs a positive control before it becomes a
+finding.** An unmutated green run proves the suite passes; it does not prove
+your harness can make it fail. Land one mutation you expect to be caught and
+quote it beside the survivors. Measured example: inverting a fail-closed
+guard survived 429/429 and disabling it outright survived 326/326 — numbers
+worth believing only because a third mutation, deleting a clause a known
+test pins, turned exactly one test red. Without that row, "your suite does
+not cover this" and "my harness never ran your suite" are the same
+observation.
 
 The mutation runs in reverse too: when the round produces a **candidate
 further fix** (a sibling shape closed, a guard tightened), apply it in a
@@ -753,6 +807,12 @@ central claim from being tested — say why.
    base and head both blank, so this is my sandbox, not a regression" is a
    claim a reader can check; "seems environmental" is not, and the two look
    identical in a report.
+   Distinguish reproducing the **shape** from reproducing the **cause**: a
+   harness that replays a bug's exact wire bytes proves the handling, not
+   the trigger. Say which one you have — "this reproduces the wire shape
+   the issue reported, not the model-side degradation that produces it" —
+   because a reader otherwise credits the report with an end-to-end
+   reproduction it never had.
 7. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live.
 

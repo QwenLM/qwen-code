@@ -2311,6 +2311,42 @@ describe('qwen-triage verify hardening round 2', () => {
     // repo-nested tree needs no per-tree install. One of the two accounts
     // is wrong and the reviewer pays whichever it is.
     expect(flat).toContain("audit it against the repo's own accounting");
+
+    // #8037 F1: the recovery guard keyed on a length ratio, so whether it
+    // fired depended on payload size. Holding the issue's own 1898-char
+    // preamble fixed and varying only the tool showed run_shell_command —
+    // named in the issue — declined at these sizes. The report enumerates
+    // the cases; the fix inherits them.
+    expect(flat).toContain('The bug report is a coverage specification');
+
+    // #8037 F2: the same unescaped parser either dropped a required arg
+    // (schema-rejected, loud) or silently truncated a file. Same defect,
+    // and the silent half is the one to fix first — the same ordering as
+    // the fabricating-race rule.
+    expect(flat).toContain("Rank a defect's variants by observability");
+
+    // #8037 "Not verified": the harness replayed the exact wire bytes of
+    // the reported failure but not the model-side degradation producing
+    // them. A reader otherwise credits an end-to-end reproduction.
+    expect(flat).toContain('Distinguish reproducing the **shape**');
+
+    // #8005 test plan: step 3 asked the reviewer to insert real user input
+    // into an active turn. No code path does that — and the unrunnable
+    // step was the round's sharpest finding, because it meant the
+    // feature's own completion criterion was unreachable.
+    expect(flat).toContain("Walk the PR's own Reviewer Test Plan step by step");
+
+    // #8005 F1b: the static chain said the user_input branch was
+    // unreachable; 30 captured verifier payloads carried only
+    // delivered_output, which is what turned a reading into a proof.
+    expect(flat).toContain('Prove a negative by census, not by reading');
+
+    // #8005 F3: two mutations survived 429/429 and 326/326 — believable
+    // only because a third, expected-caught mutation turned one test red.
+    // Without it, "no coverage" and "harness never ran" look identical.
+    expect(flat).toContain(
+      'A surviving mutation needs a positive control before it becomes a',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
