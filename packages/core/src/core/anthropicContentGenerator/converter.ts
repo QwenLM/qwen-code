@@ -35,7 +35,20 @@ type AnthropicMessageParam = Anthropic.MessageParam;
 // model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
 // shape here for the fields where we actually attach it (tool params and
 // the system text block).
-type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
+//
+// `ttl` is the Anthropic spec's extended-cache-tier field
+// (`ttl?: '5m' | '1h'`). Anthropic's current docs describe the 1h tier as
+// GA with no beta requirement; `extended-cache-ttl-2025-04-11` is sent
+// defensively for older Anthropic-compatible backends that may still gate
+// the field on it (see `hasExtendedCacheTtlOnWire` in
+// anthropicContentGenerator.ts). Omitting `ttl` means the spec default
+// (5m). It composes freely with `scope`: the two are independent and
+// Anthropic accepts both on the same cache_control entry.
+type AnthropicCacheControl = {
+  type: 'ephemeral';
+  scope?: 'global';
+  ttl?: '5m' | '1h';
+};
 type AnthropicToolParam = Anthropic.Tool & {
   cache_control?: AnthropicCacheControl;
 };
@@ -45,6 +58,41 @@ type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 const debugLogger = createDebugLogger('AnthropicConverter');
+
+/**
+ * Internal token for "how long should a cache anchor live?", resolved from
+ * `ContentGeneratorConfig.cacheRetention` (settings.json:
+ * `model.generationConfig.cacheRetention`), threaded into the converter
+ * per-call alongside `enableCacheControl`/`useGlobalCacheScope`.
+ *
+ * `'ephemeral'` (default) omits `ttl` on the wire — spec default is 5m.
+ * `'1h'` requests the extended cache tier (`ttl: '1h'`) unconditionally --
+ * live verification against the Anthropic Messages API found every
+ * currently-active model (Haiku 4.5 through Opus 4.8 and Sonnet 5) accepts
+ * it, so there is no known model-specific allowlist to gate on. If a future
+ * model rejects it, the 400 from Anthropic surfaces directly to the caller
+ * rather than being silently masked by an incomplete allowlist.
+ */
+export type CacheRetention = 'ephemeral' | '1h';
+
+/**
+ * Per-anchor override of {@link CacheRetention}. Keys are the three cache
+ * anchors this converter places `cache_control` on — the system text
+ * block, the last tool definition, and the trailing user message (a
+ * single anchor; this converter marks only one trailing user message with
+ * cache_control, not a sliding multi-turn window). Missing keys inherit
+ * the top-level retention.
+ *
+ * These render on the wire in a fixed order — `tool` -> `system` ->
+ * `user.last` — and Anthropic requires cache entries with a longer TTL to
+ * appear before shorter ones. Resolution (see `resolveCacheRetention`)
+ * normalizes for this automatically: setting one anchor to `'1h'`
+ * promotes every anchor before it on the wire to `'1h'` as well, so any
+ * combination of overrides here produces a legal request body.
+ */
+export type CacheRetentionByBlock = Partial<
+  Record<'system' | 'tool' | 'user.last', CacheRetention>
+>;
 
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
@@ -122,6 +170,19 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * than before. Only meaningful when `enableCacheControl` is on.
    */
   staticSystemPrefix?: string;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier. See {@link CacheRetention}.
+   */
+  cacheRetention?: CacheRetention;
+  /**
+   * Per-anchor override of {@link cacheRetention}. See
+   * {@link CacheRetentionByBlock}.
+   */
+  cacheRetentionByBlock?: CacheRetentionByBlock;
 }
 
 export class AnthropicContentConverter {
@@ -196,15 +257,29 @@ export class AnthropicContentConverter {
     const enableCacheControl =
       options.enableCacheControl ?? this.enableCacheControl;
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    const cacheRetention = options.cacheRetention ?? 'ephemeral';
+    const cacheRetentionByBlock = options.cacheRetentionByBlock ?? {};
     const system = enableCacheControl
       ? this.buildSystemWithCacheControl(
           systemText,
           useGlobalCacheScope,
           options.staticSystemPrefix,
+          this.resolveCacheRetention(
+            'system',
+            cacheRetention,
+            cacheRetentionByBlock,
+          ),
         )
       : systemText;
     if (enableCacheControl) {
-      this.addCacheControlToMessages(messages);
+      this.addCacheControlToMessages(
+        messages,
+        this.resolveCacheRetention(
+          'user.last',
+          cacheRetention,
+          cacheRetentionByBlock,
+        ),
+      );
     }
 
     return {
@@ -218,6 +293,8 @@ export class AnthropicContentConverter {
     options: {
       enableCacheControl?: boolean;
       useGlobalCacheScope?: boolean;
+      cacheRetention?: CacheRetention;
+      cacheRetentionByBlock?: CacheRetentionByBlock;
     } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
@@ -285,11 +362,18 @@ export class AnthropicContentConverter {
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
+      const resolvedRetention = this.resolveCacheRetention(
+        'tool',
+        options.cacheRetention ?? 'ephemeral',
+        options.cacheRetentionByBlock ?? {},
+      );
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: {
+          type: 'ephemeral',
+          ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+          ...(resolvedRetention === '1h' ? { ttl: '1h' as const } : {}),
+        },
       };
     }
 
@@ -696,6 +780,49 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Resolve the effective {@link CacheRetention} for one cache anchor,
+   * normalized so retention is monotonically non-increasing in wire order.
+   *
+   * Render order is `tools` -> `system` -> `messages`, so this converter's
+   * three anchors sit on the wire in exactly that order: `tool` -> `system`
+   * -> `user.last`. Anthropic requires "cache entries with longer TTL must
+   * appear before shorter TTLs" — an anchor at the spec's 5-minute default
+   * (no `ttl`) is a short-TTL entry for this rule's purposes, so a raw
+   * per-anchor override like `cacheRetentionByBlock: { system: '1h' }`
+   * would otherwise leave the (still 5m-default) `tool` anchor ahead of a
+   * 1h `system` anchor on the wire — an ordering violation Anthropic 400s
+   * on.
+   *
+   * Resolving with a scan instead of a straight per-anchor lookup avoids
+   * that: `anchor` resolves to `'1h'` if `anchor` itself OR any anchor
+   * later on the wire resolves to `'1h'`. That makes every
+   * `cacheRetentionByBlock` configuration legal — anchors before a `'1h'`
+   * anchor are promoted to `'1h'` too — without adding a new error surface
+   * or rejecting any input. `{ tool: '1h' }` alone is unaffected (nothing
+   * follows it that needs promoting); `{ system: '1h' }` alone now also
+   * promotes `tool` to `'1h'`, which is exactly the "cache my big system
+   * prompt for an hour" usage the per-anchor override exists for.
+   */
+  private resolveCacheRetention(
+    anchor: 'system' | 'tool' | 'user.last',
+    cacheRetention: CacheRetention,
+    cacheRetentionByBlock: CacheRetentionByBlock,
+  ): CacheRetention {
+    const wireOrder: ReadonlyArray<'tool' | 'system' | 'user.last'> = [
+      'tool',
+      'system',
+      'user.last',
+    ];
+    const anchorIndex = wireOrder.indexOf(anchor);
+    for (let i = wireOrder.length - 1; i >= anchorIndex; i--) {
+      if ((cacheRetentionByBlock[wireOrder[i]] ?? cacheRetention) === '1h') {
+        return '1h';
+      }
+    }
+    return 'ephemeral';
+  }
+
+  /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
    * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
@@ -724,14 +851,17 @@ export class AnthropicContentConverter {
     systemText: string,
     useGlobalCacheScope: boolean,
     staticSystemPrefix?: string,
+    cacheRetention: CacheRetention = 'ephemeral',
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
     }
 
-    const scopedCacheControl: AnthropicCacheControl = useGlobalCacheScope
-      ? { type: 'ephemeral', scope: 'global' }
-      : { type: 'ephemeral' };
+    const scopedCacheControl: AnthropicCacheControl = {
+      type: 'ephemeral',
+      ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+      ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+    };
 
     if (
       staticSystemPrefix &&
@@ -747,7 +877,16 @@ export class AnthropicContentConverter {
         {
           type: 'text',
           text: systemText.slice(staticSystemPrefix.length),
-          cache_control: { type: 'ephemeral' },
+          // Deliberately never carries `scope: 'global'` (see class doc
+          // above — the suffix varies per session, cross-session reuse
+          // has ~zero hit rate). `cacheRetention` still applies: the
+          // suffix is cached within a session, and a caller that asked
+          // for the 1h tier benefits from it surviving longer gaps
+          // between turns even on this volatile block.
+          cache_control: {
+            type: 'ephemeral',
+            ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+          },
         },
       ];
     }
@@ -967,7 +1106,10 @@ export class AnthropicContentConverter {
    * system prefix and tool prefixes (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
-  private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
+  private addCacheControlToMessages(
+    messages: Anthropic.MessageParam[],
+    cacheRetention: CacheRetention = 'ephemeral',
+  ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
     // explicitly list both `text` and `tool_result` blocks as cacheable in
@@ -994,6 +1136,7 @@ export class AnthropicContentConverter {
             if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
               lastContent.cache_control = {
                 type: 'ephemeral',
+                ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
               };
             }
           }
