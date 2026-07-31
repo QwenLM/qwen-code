@@ -1662,7 +1662,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // ask_user_question restriction (buildForkExecutionAllowlist) with the
     // display_image restriction (resolveForkExecutionAllowedTools): the fork
     // keeps the parent's display_image declaration for cache parity but must
-    // not execute it.
+    // not execute it. When fork_tools is omitted the fork otherwise has
+    // unrestricted tools, so no notice is announced here even though
+    // display_image is still execution-blocked via toolConfig
+    // .executionAllowedTools below; announcing "every tool minus one" would be
+    // prompt noise rather than a meaningful restriction.
     const requestedExecutionAllowedTools =
       this.params.fork_tools === undefined
         ? undefined

@@ -6,6 +6,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   MAX_TERMINAL_IMAGE_BYTES,
@@ -66,7 +67,6 @@ export function supportsKittyImageProtocol(
 }
 
 export function getTerminalImageRenderSupport(
-  filePath: string,
   env: NodeJS.ProcessEnv = process.env,
   stdoutIsTTY = process.stdout.isTTY,
 ): TerminalImageRenderSupport {
@@ -74,10 +74,17 @@ export function getTerminalImageRenderSupport(
     return { available: true };
   }
 
-  const result = renderWithChafa(filePath, { widthCells: 4, rows: 4 }, env);
-  return result.kind === 'ansi'
+  // Detect chafa with a PATH lookup instead of rendering the user's image:
+  // this runs during display_image execution and must never spawn a
+  // synchronous subprocess. A render failure still surfaces later, as a
+  // fallback notice, when renderTerminalImage actually runs chafa.
+  return findChafa(env)
     ? { available: true }
-    : { available: false, reason: result.reason };
+    : {
+        available: false,
+        reason:
+          'No compatible native image protocol was detected, and chafa is not installed.',
+      };
 }
 
 export function renderTerminalImage({
@@ -241,4 +248,22 @@ function renderWithChafa(
             'chafa could not render the image.',
     };
   }
+}
+
+function findChafa(env: NodeJS.ProcessEnv): boolean {
+  const extensions =
+    process.platform === 'win32'
+      ? (env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+      : [''];
+  for (const dir of (env['PATH'] ?? '').split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      try {
+        fs.accessSync(path.join(dir, `chafa${extension}`), fs.constants.X_OK);
+        return true;
+      } catch {
+        // Not executable at this PATH entry; keep searching.
+      }
+    }
+  }
+  return false;
 }

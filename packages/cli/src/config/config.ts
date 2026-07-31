@@ -2095,11 +2095,11 @@ export async function loadCliConfig(
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     terminalImageRenderSupportProvider: interactive
-      ? async (filePath: string) => {
+      ? async () => {
           const { getTerminalImageRenderSupport } = await import(
             '../ui/utils/terminal-image-renderer.js'
           );
-          return getTerminalImageRenderSupport(filePath);
+          return getTerminalImageRenderSupport();
         }
       : undefined,
     customSkillDirs:

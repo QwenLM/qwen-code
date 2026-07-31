@@ -101,11 +101,14 @@ class DisplayImageInvocation extends BaseToolInvocation<
     let fileHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
     try {
       fileHandle = await fs.open(filePath, 'r');
-      const header = Buffer.alloc(8);
+      // Read the full 24-byte PNG header (signature + IHDR width/height) so a
+      // truncated file is rejected here, before the renderer support check
+      // reports success. A valid PNG is always at least 24 bytes.
+      const header = Buffer.alloc(24);
       const { bytesRead } = await fileHandle.read(header, 0, header.length, 0);
       if (
         bytesRead !== header.length ||
-        header.toString('hex') !== PNG_SIGNATURE
+        header.subarray(0, 8).toString('hex') !== PNG_SIGNATURE
       ) {
         return errorResult(
           `Only PNG images are supported by display_image: ${filePath}`,
@@ -123,8 +126,7 @@ class DisplayImageInvocation extends BaseToolInvocation<
       await fileHandle?.close();
     }
 
-    const renderSupport =
-      await this.config.getTerminalImageRenderSupport(filePath);
+    const renderSupport = await this.config.getTerminalImageRenderSupport();
     if (!renderSupport.available) {
       return errorResult(
         `The image was not displayed: ${renderSupport.reason}`,

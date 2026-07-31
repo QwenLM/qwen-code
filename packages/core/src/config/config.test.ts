@@ -3880,18 +3880,14 @@ describe('Server Config (config.ts)', () => {
         terminalImageRenderSupportProvider: provider,
       });
 
-      await expect(
-        config.getTerminalImageRenderSupport('/workspace/image.png'),
-      ).resolves.toEqual({
+      await expect(config.getTerminalImageRenderSupport()).resolves.toEqual({
         available: false,
         reason: 'renderer unavailable',
       });
-      expect(provider).toHaveBeenCalledWith('/workspace/image.png');
+      expect(provider).toHaveBeenCalledWith();
 
       await expect(
-        new Config(baseParams).getTerminalImageRenderSupport(
-          '/workspace/image.png',
-        ),
+        new Config(baseParams).getTerminalImageRenderSupport(),
       ).resolves.toEqual({
         available: false,
         reason: 'No terminal image renderer is configured.',

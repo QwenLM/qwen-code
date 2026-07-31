@@ -153,7 +153,6 @@ describe('terminalImageRenderer', () => {
     ).toBe(false);
     expect(
       getTerminalImageRenderSupport(
-        imagePath,
         {
           PATH: tempDir,
           TERM: 'xterm-256color',
@@ -203,7 +202,6 @@ describe('terminalImageRenderer', () => {
       });
       expect(
         getTerminalImageRenderSupport(
-          imagePath,
           {
             PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
             TERM: 'xterm-256color',
@@ -231,9 +229,7 @@ describe('terminalImageRenderer', () => {
     expect(result.kind === 'unavailable' && result.reason).toContain(
       'chafa is not installed',
     );
-    expect(
-      getTerminalImageRenderSupport(imagePath, { PATH: tempDir }, true),
-    ).toEqual({
+    expect(getTerminalImageRenderSupport({ PATH: tempDir }, true)).toEqual({
       available: false,
       reason:
         'No compatible native image protocol was detected, and chafa is not installed.',

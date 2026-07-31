@@ -962,9 +962,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
-  terminalImageRenderSupportProvider?: (
-    filePath: string,
-  ) => Promise<TerminalImageRenderSupport>;
+  terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Additional directories to scan for skills (SKILL.md files).
    * Sourced from `settings.skills.directories`. Paths are raw
@@ -1793,7 +1791,7 @@ export class Config {
     | (() => ReadonlySet<string>)
     | null;
   private readonly terminalImageRenderSupportProvider:
-    | ((filePath: string) => Promise<TerminalImageRenderSupport>)
+    | (() => Promise<TerminalImageRenderSupport>)
     | null;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
@@ -7045,11 +7043,9 @@ export class Config {
     return this.interactive;
   }
 
-  async getTerminalImageRenderSupport(
-    filePath: string,
-  ): Promise<TerminalImageRenderSupport> {
+  async getTerminalImageRenderSupport(): Promise<TerminalImageRenderSupport> {
     return this.terminalImageRenderSupportProvider
-      ? this.terminalImageRenderSupportProvider(filePath)
+      ? this.terminalImageRenderSupportProvider()
       : {
           available: false,
           reason: 'No terminal image renderer is configured.',
