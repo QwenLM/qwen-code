@@ -19,6 +19,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const cacheProducerWorkflow = readFileSync(
+  '.github/workflows/npm-cache.yml',
+  'utf8',
+);
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -3164,13 +3168,17 @@ describe('qwen-triage verify round-3 hardening', () => {
       'QWEN_VERIFY_CHROMIUM',
     );
 
-    // And the skill must stop calling captures optional, must name the
-    // gate, and must forbid the install the agent cannot complete.
+    // And the skill must stop calling captures optional.
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain('Produce these whenever you ran a harness');
-    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
-    expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
   });
 
   // The browser step's require.resolve + cli.js join is otherwise guarded
@@ -3395,11 +3403,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     );
     // A numbered budget item alongside the A/B, harnesses and gates.
     expect(scope).toMatch(/^4\. \*\*Capture/m);
-    expect(scope).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
     // Time reserved, and the failure that motivated it named — a rule
     // stated without its failure reads as advice and gets skipped.
-    expect(scope).toContain('~5 minutes');
-    expect(scope).toContain('produced **zero**');
+    expect(scope).toContain('four live runs produced zero images');
     // Bounded: the cap exists so "budget it" does not become eight images.
     expect(scope).toMatch(/normally two, at most a handful/);
 
@@ -4350,6 +4360,121 @@ describe('qwen-triage tmux lane parity', () => {
     expect(transcriptCap).toBeGreaterThan(0);
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
+  });
+
+  // The cache step must be restore-only: `actions/cache/restore` has no
+  // post-save hook, so PR lifecycle scripts cannot write to the shared
+  // cache. Swapping to `actions/cache` would re-enable the save path and
+  // let a PR poison subsequent runs.
+  it('pins the npm cache step to restore-only in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain('actions/cache/restore@');
+      expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+      // A separate save step would reopen the same hole the
+      // restore-only variant closes.
+      expect(job(jobName)).not.toContain('actions/cache/save@');
+      expect(job(jobName)).not.toMatch(/uses:\s*'actions\/cache@/);
+    }
+  });
+
+  it('points npm ci at the restored cache directory in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+      );
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cachePath = cacheStep.match(
+        /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
+      )?.[1];
+      expect(cachePath).toBeTruthy();
+      const npmCaches = [
+        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      ].map((m) => m[1]);
+      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
+      for (const c of npmCaches) expect(c).toBe(cachePath);
+    }
+  });
+  it('clears stale npm cache before restore in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      expect(clearStep, `${jobName} must have a clear step`).toContain(
+        'rm -rf',
+      );
+      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
+      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      expect(clearIdx).toBeGreaterThan(-1);
+      expect(restoreIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeLessThan(restoreIdx);
+    }
+  });
+
+  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain("id: 'npm-cache'");
+      const reportStep = stepIn(jobName, 'Report npm cache hit');
+      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
+    }
+  });
+});
+
+describe('qwen-triage npm cache producer', () => {
+  it('saves with the same key and path the triage lanes restore', () => {
+    expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    // Prettier may choose single or double quotes depending on inner
+    // quote characters, so compare the parsed scalar, not the raw YAML.
+    const yamlScalar = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+      return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    };
+    const savePath = yamlScalar(
+      cacheProducerWorkflow.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+    );
+    const saveKey = yamlScalar(
+      cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+    );
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const path = yamlScalar(
+        restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+      );
+      const key = yamlScalar(
+        restoreStep.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+      );
+      expect(path).toBeTruthy();
+      expect(key).toBeTruthy();
+      expect(savePath).toBe(path);
+      expect(saveKey).toBe(key);
+    }
+  });
+
+  it('triggers on push to main', () => {
+    expect(cacheProducerWorkflow).toMatch(/push:/);
+    expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method, so a producer on a different runner or outside
+    // the container computes a different version and every restore misses
+    // even when the key and path strings match.
+    expect(cacheProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    for (const jobName of ['verify', 'tmux-testing']) {
+      expect(job(jobName)).toContain(
+        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+      );
+      expect(job(jobName)).toContain("image: 'node:22-bookworm'");
+    }
   });
 });
 

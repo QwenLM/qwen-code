@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   channelLoopPath,
   daemonChannelLoopPath,
+  daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
@@ -65,6 +66,18 @@ it('isolates daemon loop stores by workspace hash', () => {
   );
   expect(daemonChannelLoopPath('/workspace')).not.toBe(channelLoopPath());
   expect(daemonChannelLoopPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates daemon channel state by workspace and safe instance key', () => {
+  const stateDir = daemonChannelStateDir('/workspace', 'team/../bot');
+
+  expect(stateDir).toMatch(
+    /^\/tmp\/qwen\/channels\/daemon\/workspace-hash\/instances\/team_\.\._bot-[0-9a-f]{16}$/,
+  );
+  expect(stateDir).not.toContain('/../');
+  expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
+  expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
+  expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);
 });
 
 describe('parseConfiguredChannels', () => {

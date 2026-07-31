@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -96,8 +96,10 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import {
+  getSessionWriterLockPath,
   SessionTranscriptChangedError,
   SessionWriterLease,
+  SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
@@ -1874,6 +1876,28 @@ describe('Server Config (config.ts)', () => {
       expect(Object.keys(result!)).not.toContain('playwright');
     });
 
+    it('getMcpServers does not stamp cwd — cwd binding happens in populateMcpServerCommand', () => {
+      const explicitCwd = path.resolve('/explicit/mcp');
+      const config = new Config({
+        ...baseParams,
+        targetDir: path.resolve('/session/worktree'),
+        mcpServers: {
+          implicit: { command: 'node', args: ['server.js'] },
+          explicit: { command: 'node', cwd: explicitCwd },
+          remote: { httpUrl: 'https://example.test/mcp' },
+          sdk: { type: 'sdk', command: 'placeholder' },
+          tcpWithCommand: { tcp: 'tcp://example.test:9000', command: 'node' },
+        },
+      });
+
+      const servers = config.getMcpServers()!;
+      expect(servers['implicit']?.cwd).toBeUndefined();
+      expect(servers['explicit']?.cwd).toBe(explicitCwd);
+      expect(servers['remote']?.cwd).toBeUndefined();
+      expect(servers['sdk']?.cwd).toBeUndefined();
+      expect(servers['tcpWithCommand']?.cwd).toBeUndefined();
+    });
+
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
       const config = new Config({
         ...baseParams,
@@ -2837,6 +2861,92 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('releases a pending lease while a real baseline read is gated', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
+      const runtimeBaseDir = path.join(root, 'runtime');
+      const projectDir = path.join(root, 'project');
+      await mkdir(projectDir, { recursive: true });
+      Storage.setRuntimeBaseDir(runtimeBaseDir);
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'pending-baseline',
+        cwd: projectDir,
+        targetDir: projectDir,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const transcriptPath = config.getTranscriptPath();
+      await mkdir(path.dirname(transcriptPath), { recursive: true });
+      const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+      transcript[transcript.byteLength - 1] = 0x0a;
+      await writeFile(transcriptPath, transcript);
+      const lockPath = getSessionWriterLockPath(
+        runtimeBaseDir,
+        'pending-baseline',
+      );
+      const probe = await open(transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        read: typeof probe.read;
+      };
+      await probe.close();
+      const originalRead = fileHandlePrototype.read;
+      let releaseRead!: () => void;
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      let notifyReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        notifyReadStarted = resolve;
+      });
+      let gated = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (
+          this: fs.promises.FileHandle,
+          ...args
+        ) {
+          const result = await originalRead.apply(this, args);
+          const values = args as readonly unknown[];
+          if (!gated && values[2] === 1024 * 1024) {
+            gated = true;
+            notifyReadStarted();
+            await readGate;
+          }
+          return result;
+        });
+
+      try {
+        const initialize = config.initialize();
+        await readStarted;
+        await expect(stat(lockPath)).resolves.toBeDefined();
+        const close = config.closeSessionWriter();
+
+        await vi.waitFor(
+          () =>
+            expect(stat(lockPath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            }),
+          { timeout: 1_000 },
+        );
+        expect(gated).toBe(true);
+        releaseRead();
+        await expect(close).resolves.toBeUndefined();
+        await expect(initialize).rejects.toMatchObject({
+          name: 'SessionWriterUnavailableError',
+        });
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        expect(config.getChatRecordingService()?.hasWriteOwnership()).toBe(
+          false,
+        );
+      } finally {
+        releaseRead();
+        read.mockRestore();
+        Storage.setRuntimeBaseDir(null);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('treats managed shutdown during writer acquisition as a clean terminal', async () => {
       const config = new Config({
         ...baseParams,
@@ -2899,11 +3009,7 @@ describe('Server Config (config.ts)', () => {
         'getSessionLocation',
       ).mockRejectedValue(activationError);
 
-      const result = await (
-        config as unknown as { activateChatRecording(): Promise<void> }
-      )
-        .activateChatRecording()
-        .catch((error: unknown) => error);
+      const result = await config.initialize().catch((error: unknown) => error);
 
       expect(result).toMatchObject({
         name: 'SessionWriterUnavailableError',
@@ -2916,6 +3022,67 @@ describe('Server Config (config.ts)', () => {
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([activationError, releaseError]);
       expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not report the same acquisition release failure twice', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const acquisitionFailure = new SessionWriterUnavailableError({
+        cause: new AggregateError([activationError, releaseError]),
+      });
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const lease = {
+        release,
+        isReleased: false,
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async (options) => {
+          options.onOwnershipAcquired?.(lease);
+          throw acquisitionFailure;
+        });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toBe(acquisitionFailure);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not duplicate a concurrent activation and close failure', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      let rejectAcquire!: (error: Error) => void;
+      const acquireGate = new Promise<SessionWriterLease>(
+        (_resolve, reject) => {
+          rejectAcquire = reject;
+        },
+      );
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config
+        .closeSessionWriter()
+        .catch((error: unknown) => error);
+      rejectAcquire(activationError);
+
+      expect(await close).toBe(activationError);
+      expect(await initialize).toBe(activationError);
       acquire.mockRestore();
     });
 
@@ -5214,6 +5381,64 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should reconcile MCP servers with the new session cwd', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node', args: ['server.js'] } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockClear();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledOnce();
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(config);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report MCP reconcile failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should continue after recording flush fails', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
@@ -5540,6 +5765,40 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getTargetDir()).toBe(newDir);
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report both memory and MCP refresh failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

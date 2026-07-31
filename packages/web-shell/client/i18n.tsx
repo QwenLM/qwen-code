@@ -168,7 +168,7 @@ const EN: Messages = {
   'agent.colorLabel': 'Color: ',
   'agent.colorUpdated': (v) => `Updated color for ${v?.name ?? ''}`,
   'agent.create': 'Create a new subagent',
-  'agent.create.button': 'Create Agent',
+  'agent.create.button': 'Create',
   'agent.create.confirm': 'Confirm and Save',
   'agent.create.desc': 'Create a new subagent',
   'agent.create.descPlaceholder': 'What does this agent do?',
@@ -361,6 +361,11 @@ const EN: Messages = {
   'subagent.paused': 'paused',
   'subagent.detailsLoading': 'Loading agent details…',
   'subagent.detailsLoadFailed': 'Failed to load agent details.',
+  'agentType.general-purpose': 'General-purpose',
+  'agentType.explore': 'Explore',
+  'agentType.statusline-setup': 'Status Line Setup',
+  'agentType.test-engineer': 'Test Engineer',
+  'agentType.fork': 'Fork',
   'timeline.parallelAgents': 'Parallel agents',
   'timeline.thinking': 'Thinking',
   'timeline.assistantUpdate': 'Assistant update',
@@ -1066,6 +1071,9 @@ const EN: Messages = {
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.details': 'Details',
+  'sidebar.copySessionId': 'Copy session ID',
+  'sidebar.copySessionIdFailed': 'Failed to copy session ID',
+  'sidebar.sessionIdCopied': 'Session ID copied',
   'sidebar.workspaceUntrusted': 'untrusted',
   'sidebar.workspaceReadOnly': 'read-only',
   'sidebar.workspaceTrustToOpen': 'Trust this workspace to open the session.',
@@ -1497,7 +1505,7 @@ const EN: Messages = {
     }: ${v?.error ?? 'Unknown error'}`,
   'extensions.manage.agents': 'Agents:',
   'extensions.manage.actions': 'Extension actions',
-  'extensions.manage.add': 'Add Extension',
+  'extensions.manage.add': 'Add',
   'extensions.manage.checkingUpdates': 'Checking for updates...',
   'extensions.manage.checkUpdates': 'Check for updates',
   'extensions.manage.commands': 'Commands:',
@@ -1542,6 +1550,7 @@ const EN: Messages = {
     'Enter a GitHub, Git, or npm extension source.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
+  'extensions.manage.installTitle': 'Add Extension',
   'extensions.manage.installType': 'Install type:',
   'extensions.manage.mcpServers': 'MCP servers:',
   'extensions.manage.marketplaceRoot': 'Marketplace root',
@@ -1670,7 +1679,7 @@ const EN: Messages = {
   'mcp.name': 'Name',
   'mcp.noDescription': 'No description',
   'mcp.noMatches': 'No matching MCP servers.',
-  'mcp.add.button': 'Add MCP Server',
+  'mcp.add.button': 'Add',
   'mcp.add.adding': 'Adding MCP Server…',
   'mcp.add.title': 'Add MCP Server',
   'mcp.add.description':
@@ -1965,7 +1974,7 @@ const EN: Messages = {
   'skills.disabled': 'Skill disabled.',
   'skills.enable': 'Enable',
   'skills.enabled': 'Skill enabled.',
-  'skills.install.action': 'Upload skill',
+  'skills.install.action': 'Upload',
   'skills.install.description':
     'Install a skill from GitHub, a local folder, or a ZIP archive.',
   'skills.install.error.authentication':
@@ -2450,6 +2459,30 @@ const EN: Messages = {
   'channels.editor.pairing.saveFirst.title': 'Save pairing mode first',
   'channels.editor.pairing.saveFirst.description':
     'Pending requests will appear here after this Channel is saved in pairing mode.',
+  'channels.editor.pairing.approvals.title': 'Pairing approvals',
+  'channels.editor.pairing.approvals.description':
+    'Sender IDs approved through pairing for this Channel.',
+  'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
+  'channels.editor.pairing.approvals.revoke': 'Revoke',
+  'channels.editor.pairing.approvals.revokeFor': (v) =>
+    `Revoke ${v?.senderId ?? 'pairing approval'}`,
+  'channels.editor.pairing.approvals.revoked': (v) =>
+    `Pairing approval for ${v?.senderId ?? 'this sender'} was revoked.`,
+  'channels.editor.pairing.approvals.error':
+    'Pairing approvals were not updated',
+  'channels.editor.pairing.approvals.unavailable':
+    'Pairing approvals are temporarily unavailable. Try again.',
+  'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
+  'channels.editor.pairing.approvals.empty.description':
+    'Approved sender IDs will appear here.',
+  'channels.editor.pairing.approvals.confirm.title': (v) =>
+    `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
+  'channels.editor.pairing.approvals.confirm.description':
+    'Only the approval created through pairing will be removed. Access configured in the Channel allowlist is not changed.',
+  'channels.editor.pairing.approvals.confirm.action': 'Revoke approval',
+  'channels.editor.pairing.allowlist.title': 'Configured allowlist',
+  'channels.editor.pairing.allowlist.description':
+    'Configured allowlist users remain allowed after a pairing approval is revoked.',
   'channels.editor.policy.open.title': 'Open',
   'channels.editor.policy.open.description':
     'Anyone who can reach the bot can start a conversation.',
@@ -2732,7 +2765,7 @@ const ZH: Messages = {
   'agent.colorLabel': '颜色：',
   'agent.colorUpdated': (v) => `已更新 ${v?.name ?? ''} 的颜色`,
   'agent.create': '创建新的智能体',
-  'agent.create.button': '创建智能体',
+  'agent.create.button': '创建',
   'agent.create.confirm': '确认并保存',
   'agent.create.desc': '创建新的智能体',
   'agent.create.descPlaceholder': '这个智能体做什么？',
@@ -2913,6 +2946,11 @@ const ZH: Messages = {
   'subagent.paused': '已暂停',
   'subagent.detailsLoading': '正在加载子智能体详情…',
   'subagent.detailsLoadFailed': '子智能体详情加载失败。',
+  'agentType.general-purpose': '通用',
+  'agentType.explore': '探索',
+  'agentType.statusline-setup': '状态栏设置',
+  'agentType.test-engineer': '测试工程师',
+  'agentType.fork': '分支',
   'timeline.parallelAgents': '并行智能体',
   'timeline.thinking': '思考',
   'timeline.assistantUpdate': '助手更新',
@@ -3578,6 +3616,9 @@ const ZH: Messages = {
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.details': '详情',
+  'sidebar.copySessionId': '复制会话 ID',
+  'sidebar.copySessionIdFailed': '复制会话 ID 失败',
+  'sidebar.sessionIdCopied': '会话 ID 已复制',
   'sidebar.workspaceUntrusted': '未信任',
   'sidebar.workspaceReadOnly': '只读',
   'sidebar.workspaceTrustToOpen': '信任此工作区后才能打开会话。',
@@ -3976,7 +4017,7 @@ const ZH: Messages = {
     }`,
   'extensions.manage.agents': '智能体：',
   'extensions.manage.actions': '扩展操作',
-  'extensions.manage.add': '添加扩展',
+  'extensions.manage.add': '添加',
   'extensions.manage.checkingUpdates': '正在检查更新...',
   'extensions.manage.checkUpdates': '检查更新',
   'extensions.manage.commands': '命令：',
@@ -4015,6 +4056,7 @@ const ZH: Messages = {
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
+  'extensions.manage.installTitle': '添加扩展',
   'extensions.manage.installType': '安装类型：',
   'extensions.manage.mcpServers': 'MCP servers：',
   'extensions.manage.marketplaceRoot': '此市场根目录',
@@ -4130,7 +4172,7 @@ const ZH: Messages = {
   'mcp.name': '名称',
   'mcp.noDescription': '没有描述',
   'mcp.noMatches': '没有匹配的 MCP 服务器。',
-  'mcp.add.button': '添加 MCP 服务器',
+  'mcp.add.button': '添加',
   'mcp.add.adding': '正在添加 MCP 服务器…',
   'mcp.add.title': '添加 MCP 服务器',
   'mcp.add.description': '输入服务器名称和配置，并保存到当前工作区。',
@@ -4406,7 +4448,7 @@ const ZH: Messages = {
   'skills.disabled': 'Skill 已禁用。',
   'skills.enable': '启用',
   'skills.enabled': 'Skill 已启用。',
-  'skills.install.action': '上传技能',
+  'skills.install.action': '上传',
   'skills.install.description': '从 GitHub、本地文件夹或 ZIP 压缩包安装技能。',
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
@@ -4858,6 +4900,29 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
+  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.description':
+    '通过配对获得此频道访问权限的用户 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+  'channels.editor.pairing.approvals.revoke': '撤销',
+  'channels.editor.pairing.approvals.revokeFor': (v) =>
+    `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
+  'channels.editor.pairing.approvals.revoked': (v) =>
+    `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
+  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.unavailable':
+    '暂时无法获取已配对用户，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+  'channels.editor.pairing.approvals.empty.description':
+    '批准配对请求后，用户 ID 会显示在这里。',
+  'channels.editor.pairing.approvals.confirm.title': (v) =>
+    `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
+  'channels.editor.pairing.approvals.confirm.description':
+    '只会移除通过配对获得的授权，不会更改频道配置中的白名单访问权限。',
+  'channels.editor.pairing.approvals.confirm.action': '撤销授权',
+  'channels.editor.pairing.allowlist.title': '配置白名单',
+  'channels.editor.pairing.allowlist.description':
+    '撤销配对授权后，配置白名单中的用户仍然可以访问此频道。',
   'channels.editor.policy.open.title': '开放模式',
   'channels.editor.policy.open.description':
     '所有能够访问机器人的用户均可直接开始对话。',
