@@ -60,6 +60,7 @@ import {
   getArtifactLocation,
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
+  getReviewDownloadMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -1342,12 +1343,14 @@ function ReviewChanges({
     () => new Set(),
   );
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
   const showTree = isTreeOpen;
   const fileTree = useMemo(
     () => buildFileTree(changes, workspaceCwd),
@@ -2095,10 +2098,6 @@ function fileExtensionLabel(value: string) {
     tsx: 'TSX',
   };
   return labels[extension] ?? extension.slice(0, 3).toUpperCase();
-}
-
-function getReviewDownloadMimeType(value: string) {
-  return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
 function ArtifactDetail({

@@ -66,6 +66,10 @@ export function getImageMimeTypeFromPath(path: string): string | undefined {
   return extension ? IMAGE_MIME_TYPES[extension] : undefined;
 }
 
+export function getReviewDownloadMimeType(value: string): string {
+  return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
+}
+
 export async function readWorkspaceFileAsBlob(
   readFileBytes: (
     filePath: string,

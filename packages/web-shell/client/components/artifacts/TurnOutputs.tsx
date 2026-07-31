@@ -362,12 +362,14 @@ function ArtifactCard({
   const { t } = useI18n();
   const [downloading, setDownloading] = useState(false);
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
   const downloadName =
