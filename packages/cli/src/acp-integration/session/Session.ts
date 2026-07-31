@@ -5004,6 +5004,10 @@ export class Session implements SessionContext {
         });
         void this.#drainCronQueue();
       };
+      if (!/^autofix tick(?:\s|$)/.test(job.prompt)) {
+        enqueue(null);
+        return;
+      }
       void resolveAutofixCronPrompt(this.config, {
         id: job.id ?? '',
         prompt: job.prompt,
