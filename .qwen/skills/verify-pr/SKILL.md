@@ -30,6 +30,19 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
 - **You may execute PR code freely.** This job is the designated sandbox
   (container, no credentials) — the opposite of the `/triage` rules. Builds,
   node processes, loopback servers, and scratch `git worktree`s are all fine.
+- **This container is a live sample of the lane's own runtime.** When the
+  diff changes `qwen-triage.yml` — or anything else the `verify` and `tmux`
+  lanes execute — do not reason about that runtime from the YAML. Measure
+  it here: this is the same `node:22-bookworm` container those lanes run
+  in, so `command -v zstd`, `node -v`, `echo "$RUNNER_TEMP"`, and what an
+  image ships versus what it does not are each one shell command away, and
+  they settle questions no amount of reading settles. Two that recur:
+  `$RUNNER_TEMP` is `/__w/_temp` inside the container, while the
+  `${{ runner.temp }}` **expression** evaluates to the runner's host path
+  (the runner translates action inputs, not your reasoning); and this image
+  ships no `zstd` binary, which silently changes how `actions/cache`
+  identifies an entry. Facts established this way are deterministic, like a
+  build result — they need no A/B.
 - **Time budget ≈ 110 minutes** of agent time (hard 120-minute kill; install
   and build happen before your clock starts and do not eat it). Pick scope
   first (below); when time runs out, ship the report with what ran.
@@ -515,6 +528,26 @@ since the merge-base, say so and re-measure there.
   repo (tags, release commits, merge cadence in `git log`), label it as the
   bounded local estimate it is, and name the exact query a maintainer should
   run to confirm.
+- **Performance, caching, and reuse PRs**: the question is not "is it
+  correct" but "**can the mechanism fire at all**", and A/B has no purchase
+  on it — both sides of a cache restore run identical code. The proof is an
+  identity comparison instead. First, find where the matching key is really
+  defined, **in the implementation, not the documentation**: for
+  `actions/cache`, `npm pack @actions/cache@<version>` and read
+  `getCacheVersion` in `lib/internal/cacheUtils.js` — it hashes the literal
+  `path` strings and the compression method, not the key alone, so two jobs
+  that share a `key:` still miss forever when one runs on `ubuntu-latest`
+  and the other in a container (`/home/runner/work/_temp/…` versus
+  `/__w/_temp/…`, zstd versus gzip). Then compare the **environment
+  tuples** of the write side and the read side — `runs-on`, `container`,
+  what each path expression actually expands to, which tools each image
+  ships — never the YAML strings, which are identical in exactly the case
+  that fails. Close on observability: a restore step with no `id:` and
+  nothing written to `$GITHUB_STEP_SUMMARY` cannot report a miss, so the
+  failure is silent and permanent, and _that_ is the finding rather than a
+  nit. Worked example: a lane's npm cache shipped with matching keys,
+  matching `path:` lines, and 152 green YAML-shape assertions, and could
+  never have hit once.
 - **Config knobs**: trace every new input, flag, or option to an observable
   effect — a control that is recorded but never wired to behavior is a
   finding. Probe the **default** path of manual dispatch/config combinations
