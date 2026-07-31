@@ -295,6 +295,9 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).toHaveBeenCalledWith('修改我');
     expect(editor.focus).toHaveBeenCalled();
+    expect(actions.removeMidTurnMessage).toHaveBeenCalledWith('mid-edit', {
+      sessionId: 'session-1',
+    });
   });
 
   it('keeps the row when removal loses the race with drain or idle', async () => {
@@ -452,8 +455,79 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('responding');
     act(() => latest.enqueuePrompt('图片', [{ data: 'x', media_type: 'x' }]));
     act(() => latest.enqueuePrompt('/help'));
+    act(() =>
+      latest.enqueuePrompt('@file.ts fix', undefined, undefined, [
+        {
+          type: 'reference',
+          start: 0,
+          end: 7,
+          text: '@file.ts',
+          reference: { id: 'ref-1' },
+        },
+      ]),
+    );
 
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(3);
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(4);
     expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  });
+
+  it('retains mid-turn rows and clears ordinary rows on clearQueuedPrompts', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-1',
+    });
+    const { render } = mount('idle', actions);
+
+    act(() => latest.enqueuePrompt('普通排队'));
+    render('responding');
+    act(() => latest.enqueuePrompt('中途消息'));
+    await act(async () => {});
+
+    expect(latest.queuedPrompts).toHaveLength(2);
+
+    act(() => latest.clearQueuedPrompts());
+
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '中途消息', midTurnState: 'queued', midTurnMessageId: 'mid-1' },
+    ]);
+    expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+  });
+
+  it('edits the last mid-turn row via editLastQueuedPrompt', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-1',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockResolvedValue({
+      removed: true,
+    });
+    const { editor } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('编辑最后'));
+    await act(async () => {});
+
+    act(() => latest.editLastQueuedPrompt());
+    await act(async () => {});
+
+    expect(actions.removeMidTurnMessage).toHaveBeenCalledWith('mid-1', {
+      sessionId: 'session-1',
+    });
+    expect(editor.setText).toHaveBeenCalledWith('编辑最后');
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('consumes the keypress without editing while mid-turn is submitting', () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('正在提交'));
+
+    const consumed = latest.editLastQueuedPrompt();
+    expect(consumed).toBe(true);
+    expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
   });
 });

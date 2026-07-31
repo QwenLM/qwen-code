@@ -120,11 +120,9 @@ describe('QueuedPromptDisplay', () => {
       prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],
     });
 
-    expect(
-      [...container.querySelectorAll('button')].every(
-        (button) => button.disabled,
-      ),
-    ).toBe(true);
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
   });
 
   it('hides mid-turn mutation actions without the capability', () => {

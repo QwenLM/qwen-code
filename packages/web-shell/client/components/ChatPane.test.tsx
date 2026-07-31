@@ -1119,6 +1119,11 @@ describe('ChatPane', () => {
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('true');
   });
 
+  it('disables mid-turn queue mutations when not advertised', () => {
+    render();
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
+  });
+
   it('passes follow-up suggestions to the pane editor', () => {
     render();
     expect(testid('pane-followup')?.textContent).toBe('next idea');

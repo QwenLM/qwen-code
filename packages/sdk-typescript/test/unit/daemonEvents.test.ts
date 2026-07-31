@@ -934,18 +934,19 @@ describe('daemon event schema', () => {
       }),
     ).toBeDefined();
 
-    expect(
-      asKnownDaemonEvent({
-        id: 2,
-        v: 1,
-        type: 'mid_turn_message_injected',
-        data: {
-          sessionId: 's-1',
-          messages: ['a', 'b'],
-          messageIds: ['mid-a', 'mid-b'],
-        },
-      }),
-    ).toBeDefined();
+    const aligned = asKnownDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a', 'mid-b'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(aligned).toBeDefined();
+    expect(aligned?.data.messages).toEqual(['a', 'b']);
+    expect(aligned?.data.messageIds).toEqual(['mid-a', 'mid-b']);
 
     // Empty array is structurally valid (the guard only requires a string[]).
     expect(

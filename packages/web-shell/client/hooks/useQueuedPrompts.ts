@@ -588,6 +588,7 @@ export function useQueuedPrompts({
       const shouldInsertMidTurn =
         latestStreamingStateRef.current !== 'idle' &&
         (images?.length ?? 0) === 0 &&
+        (inputAnnotations?.length ?? 0) === 0 &&
         !isCommandPrompt(trimmed);
       const prompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
@@ -666,9 +667,10 @@ export function useQueuedPrompts({
   useEffect(() => {
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
+    if (ctrl) {
+      ctrl.abort();
+      midTurnEnqueueAbortRef.current = null;
+    }
     for (const prompt of queuedPromptsRef.current) {
       if (prompt.midTurnFailedAction) {
         const next = queuedPromptsRef.current.filter(
