@@ -22,6 +22,10 @@ import {
 
 const CHAFA_TIMEOUT_MS = 8000;
 const CHAFA_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_PREVIEW_WIDTH_CELLS = 72;
+const MAX_PREVIEW_ROWS = 24;
+const ESTIMATED_CELL_WIDTH_PX = 8;
+const ESTIMATED_CELL_HEIGHT_PX = 16;
 
 export type TerminalImageRenderResult =
   | {
@@ -152,15 +156,31 @@ function fitImageToTerminal(
   contentWidth: number,
   availableTerminalHeight?: number,
 ): { widthCells: number; rows: number } {
-  const widthCells = Math.max(4, Math.min(Math.floor(contentWidth), 120));
-  const naturalRows = Math.ceil((size.height / size.width) * widthCells * 0.5);
-  const maxRows = Math.max(
-    4,
-    Math.min(Math.floor(availableTerminalHeight ?? 32), 60),
+  const maxWidthCells = Math.max(
+    1,
+    Math.min(Math.floor(contentWidth), MAX_PREVIEW_WIDTH_CELLS),
   );
+  const maxRows = Math.max(
+    1,
+    Math.min(
+      Math.floor(availableTerminalHeight ?? MAX_PREVIEW_ROWS),
+      MAX_PREVIEW_ROWS,
+    ),
+  );
+  const naturalWidthCells = Math.max(1, size.width / ESTIMATED_CELL_WIDTH_PX);
+  const naturalRows = Math.max(1, size.height / ESTIMATED_CELL_HEIGHT_PX);
+  const scale = Math.min(
+    1,
+    maxWidthCells / naturalWidthCells,
+    maxRows / naturalRows,
+  );
+
   return {
-    widthCells,
-    rows: Math.max(4, Math.min(naturalRows, maxRows)),
+    widthCells: Math.max(
+      1,
+      Math.min(maxWidthCells, Math.floor(naturalWidthCells * scale)),
+    ),
+    rows: Math.max(1, Math.min(maxRows, Math.floor(naturalRows * scale))),
   };
 }
 

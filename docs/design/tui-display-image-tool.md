@@ -41,6 +41,11 @@ allowlisted environment used by the Mermaid renderer, so API credentials are
 not forwarded. If neither path is available, the TUI shows a bounded text
 fallback naming the image.
 
+Previews are capped at 72 columns and 24 rows, then reduced further to fit the
+available terminal space. An 8-by-16-pixel terminal cell estimate provides a
+conservative natural size so small images are not deliberately enlarged. Both
+native and `chafa` rendering use the same aspect-preserving dimensions.
+
 The tool is registered only when all of these are true:
 
 - the main config is interactive;
