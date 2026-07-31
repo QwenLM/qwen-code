@@ -8,17 +8,32 @@ import { useEffect, useId, useRef, useState } from 'react';
 import {
   AlertCircleIcon,
   CheckIcon,
+  InfoIcon,
   RefreshCwIcon,
+  ShieldCheckIcon,
+  Trash2Icon,
   UsersRoundIcon,
 } from 'lucide-react';
 import type {
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequest,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../ui/alert-dialog';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -31,6 +46,14 @@ export interface ChannelPairingRequestsProps {
     name: string,
     code: string,
   ) => Promise<DaemonChannelPairingApprovalResult>;
+  listApprovals: (
+    name: string,
+  ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revokeApproval: (
+    name: string,
+    senderId: string,
+  ) => Promise<DaemonChannelPairingRevocationResult>;
+  staticAllowedUsers?: readonly string[];
 }
 
 function senderLabel(request: DaemonChannelPairingRequest): string {
@@ -61,9 +84,13 @@ export function ChannelPairingRequests({
   channelName,
   listRequests,
   approveRequest,
+  listApprovals,
+  revokeApproval,
+  staticAllowedUsers = [],
 }: ChannelPairingRequestsProps) {
   const { t } = useI18n();
   const headingId = useId();
+  const approvalsHeadingId = useId();
   const mounted = useRef(false);
   const currentChannelName = useRef(channelName);
   currentChannelName.current = channelName;
@@ -73,6 +100,13 @@ export function ChannelPairingRequests({
   const [approvingCode, setApprovingCode] = useState<string>();
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
+  const [approvedSenderIds, setApprovedSenderIds] = useState<string[]>([]);
+  const [approvalsLoading, setApprovalsLoading] = useState(true);
+  const [approvalsReloadToken, setApprovalsReloadToken] = useState(0);
+  const [approvalsError, setApprovalsError] = useState<string>();
+  const [revokeSuccess, setRevokeSuccess] = useState<string>();
+  const [revokeTarget, setRevokeTarget] = useState<string>();
+  const [revokingSenderId, setRevokingSenderId] = useState<string>();
 
   useEffect(() => {
     mounted.current = true;
@@ -110,12 +144,43 @@ export function ChannelPairingRequests({
     };
   }, [channelName, listRequests, reloadToken, t]);
 
+  useEffect(() => {
+    let active = true;
+    setApprovalsLoading(true);
+    setApprovedSenderIds([]);
+    setApprovalsError(undefined);
+    setRevokeSuccess(undefined);
+    setRevokeTarget(undefined);
+    setRevokingSenderId(undefined);
+    void listApprovals(channelName).then(
+      (snapshot) => {
+        if (!active) return;
+        setApprovedSenderIds(snapshot.senderIds);
+        setApprovalsLoading(false);
+      },
+      (loadError: unknown) => {
+        if (!active) return;
+        setApprovalsError(
+          pairingErrorDetail(
+            loadError,
+            t('channels.editor.pairing.approvals.unavailable'),
+          ),
+        );
+        setApprovalsLoading(false);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [approvalsReloadToken, channelName, listApprovals, t]);
+
   const approve = async (request: DaemonChannelPairingRequest) => {
     if (approvingCode) return;
     const approvalChannel = channelName;
     setApprovingCode(request.code);
     setError(undefined);
     setSuccess(undefined);
+    setRevokeSuccess(undefined);
     try {
       const result = await approveRequest(channelName, request.code);
       if (!mounted.current || currentChannelName.current !== approvalChannel) {
@@ -127,6 +192,7 @@ export function ChannelPairingRequests({
           sender: senderLabel(result.approved),
         }),
       );
+      setApprovalsReloadToken((current) => current + 1);
     } catch (approvalError) {
       if (!mounted.current || currentChannelName.current !== approvalChannel) {
         return;
@@ -167,6 +233,62 @@ export function ChannelPairingRequests({
     } finally {
       if (mounted.current && currentChannelName.current === approvalChannel) {
         setApprovingCode(undefined);
+      }
+    }
+  };
+
+  const revoke = async (senderId: string) => {
+    if (revokingSenderId) return;
+    const revokeChannel = channelName;
+    setRevokeTarget(undefined);
+    setRevokingSenderId(senderId);
+    setApprovalsError(undefined);
+    setRevokeSuccess(undefined);
+    setSuccess(undefined);
+    try {
+      const result = await revokeApproval(channelName, senderId);
+      if (!mounted.current || currentChannelName.current !== revokeChannel) {
+        return;
+      }
+      setApprovedSenderIds(result.senderIds);
+      setRevokeSuccess(
+        t('channels.editor.pairing.approvals.revoked', { senderId }),
+      );
+    } catch (revokeError) {
+      if (!mounted.current || currentChannelName.current !== revokeChannel) {
+        return;
+      }
+      if (errorCode(revokeError) === 'channel_pairing_approval_not_found') {
+        try {
+          const snapshot = await listApprovals(revokeChannel);
+          if (mounted.current && currentChannelName.current === revokeChannel) {
+            setApprovedSenderIds(snapshot.senderIds);
+          }
+          return;
+        } catch (refreshError) {
+          if (mounted.current && currentChannelName.current === revokeChannel) {
+            setApprovalsError(
+              pairingErrorDetail(
+                refreshError,
+                t('channels.editor.pairing.approvals.unavailable'),
+              ),
+            );
+          }
+          return;
+        }
+      }
+      if (!mounted.current || currentChannelName.current !== revokeChannel) {
+        return;
+      }
+      setApprovalsError(
+        pairingErrorDetail(
+          revokeError,
+          t('channels.editor.pairing.approvals.unavailable'),
+        ),
+      );
+    } finally {
+      if (mounted.current && currentChannelName.current === revokeChannel) {
+        setRevokingSenderId(undefined);
       }
     }
   };
@@ -261,7 +383,7 @@ export function ChannelPairingRequests({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={Boolean(approvingCode)}
+                  disabled={Boolean(approvingCode) || Boolean(revokingSenderId)}
                   aria-label={t('channels.editor.pairing.approveFor', {
                     sender: label,
                     code: request.code,
@@ -276,6 +398,155 @@ export function ChannelPairingRequests({
           })}
         </ul>
       ) : null}
+
+      <section aria-labelledby={approvalsHeadingId}>
+        <div className={styles.divider} />
+
+        <div className={styles.header}>
+          <div>
+            <h4 id={approvalsHeadingId} className={styles.title}>
+              {t('channels.editor.pairing.approvals.title')}
+            </h4>
+            <p className={styles.description}>
+              {t('channels.editor.pairing.approvals.description')}
+            </p>
+          </div>
+          <div className={styles.headerActions}>
+            <Badge variant="outline">{approvedSenderIds.length}</Badge>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              disabled={approvalsLoading || Boolean(revokingSenderId)}
+              aria-label={t('channels.editor.pairing.approvals.refresh')}
+              onClick={() => {
+                setRevokeSuccess(undefined);
+                setApprovalsReloadToken((current) => current + 1);
+              }}
+            >
+              {approvalsLoading ? <Spinner /> : <RefreshCwIcon />}
+            </Button>
+          </div>
+        </div>
+
+        {approvalsError ? (
+          <Alert variant="destructive">
+            <AlertCircleIcon />
+            <AlertTitle>
+              {t('channels.editor.pairing.approvals.error')}
+            </AlertTitle>
+            <AlertDescription>{approvalsError}</AlertDescription>
+            <Button
+              className="mt-2 w-fit"
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={approvalsLoading}
+              onClick={() => setApprovalsReloadToken((current) => current + 1)}
+            >
+              {t('channels.editor.pairing.retry')}
+            </Button>
+          </Alert>
+        ) : null}
+
+        {revokeSuccess ? (
+          <div role="status" className={styles.success}>
+            <CheckIcon />
+            {revokeSuccess}
+          </div>
+        ) : null}
+
+        {!approvalsLoading &&
+        !approvalsError &&
+        approvedSenderIds.length === 0 ? (
+          <div className={styles.empty}>
+            <ShieldCheckIcon aria-hidden="true" />
+            <div>
+              <p className={styles.emptyTitle}>
+                {t('channels.editor.pairing.approvals.empty.title')}
+              </p>
+              <p className={styles.emptyDescription}>
+                {t('channels.editor.pairing.approvals.empty.description')}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {approvedSenderIds.length > 0 ? (
+          <ul className={styles.list}>
+            {approvedSenderIds.map((senderId) => (
+              <li key={senderId} className={styles.approval}>
+                <div className={styles.approvalIdentity}>
+                  <ShieldCheckIcon aria-hidden="true" />
+                  <code className={styles.approvalSenderId}>{senderId}</code>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  disabled={Boolean(revokingSenderId) || Boolean(approvingCode)}
+                  aria-label={t('channels.editor.pairing.approvals.revokeFor', {
+                    senderId,
+                  })}
+                  onClick={() => setRevokeTarget(senderId)}
+                >
+                  {revokingSenderId === senderId ? <Spinner /> : <Trash2Icon />}
+                  {t('channels.editor.pairing.approvals.revoke')}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {staticAllowedUsers.length > 0 ? (
+          <Alert>
+            <InfoIcon />
+            <AlertTitle>
+              {t('channels.editor.pairing.allowlist.title')}
+            </AlertTitle>
+            <AlertDescription>
+              <p>{t('channels.editor.pairing.allowlist.description')}</p>
+              <code className={styles.allowlist}>
+                {staticAllowedUsers.join(', ')}
+              </code>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+      </section>
+
+      <AlertDialog
+        open={Boolean(revokeTarget)}
+        onOpenChange={(open) => {
+          if (!open) setRevokeTarget(undefined);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('channels.editor.pairing.approvals.confirm.title', {
+                senderId: revokeTarget ?? '',
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('channels.editor.pairing.approvals.confirm.description')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel type="button">
+              {t('channels.editor.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                if (revokeTarget) void revoke(revokeTarget);
+              }}
+            >
+              {t('channels.editor.pairing.approvals.confirm.action')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

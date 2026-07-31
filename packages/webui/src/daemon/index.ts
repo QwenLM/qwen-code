@@ -197,6 +197,9 @@ export type {
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
 } from '@qwen-code/sdk/daemon';

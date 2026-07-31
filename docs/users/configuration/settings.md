@@ -855,7 +855,7 @@ To help us improve Qwen Code, we collect anonymized usage statistics. This data 
 
 **What we collect:**
 
-- **Tool Calls:** We log the names of the tools that are called, whether they succeed or fail, and how long they take to execute. We do not collect the arguments passed to the tools or any data returned by them.
+- **Tool Calls:** We log the names and categories (native or MCP) of the tools that are called, their terminal status (success, error, or cancelled), and how long they take to execute. We do not collect the arguments passed to the tools or any data returned by them.
 - **API Requests:** We log the model used for each request, the duration of the request, and whether it was successful. We do not collect the content of the prompts or responses.
 - **Session Information:** We collect information about the configuration of the CLI, such as the enabled tools and the approval mode.
 

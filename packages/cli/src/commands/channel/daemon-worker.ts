@@ -69,6 +69,7 @@ import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
   daemonChannelLoopPath,
+  daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
@@ -533,6 +534,7 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
               readChannelMemory,
               getChannelMemoryRevision,

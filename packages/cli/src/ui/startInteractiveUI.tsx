@@ -9,6 +9,7 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  isDebugLogFileEnabled,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
@@ -37,11 +38,15 @@ import {
   isInteractiveTerminal,
   shouldUseVirtualViewport,
 } from './utils/terminal-buffer.js';
-import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
+import {
+  ErrorBoundary,
+  consumeLastRenderError,
+} from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
@@ -208,6 +213,7 @@ export async function startInteractiveUI(
   }
   const appTree = (
     <ErrorBoundary
+      recordForExitEcho
       onError={(error, info) => {
         debugLogger.error(
           `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
@@ -306,6 +312,18 @@ export async function startInteractiveUI(
     }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
+    // If the ErrorBoundary caught a rendering error, echo it to stderr
+    // now that we are back on the main screen buffer. In VP mode the
+    // fallback UI was drawn on the alternate screen and is gone.
+    const renderError = consumeLastRenderError();
+    if (renderError) {
+      const loggedHint = isDebugLogFileEnabled()
+        ? ' (logged to debug file)'
+        : '';
+      writeStderrLine(
+        `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
+      );
+    }
   });
 }
 
