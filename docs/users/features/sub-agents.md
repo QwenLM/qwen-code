@@ -62,11 +62,11 @@ agent(description="Research", prompt="Inspect the retry path", subagent_type="fo
 ```
 
 - `fork_profile` is valid only for a fork and cannot be combined with `fork_tools` or a named teammate.
-- Profiles are currently project-only. The requested name, filename, and frontmatter `name` must match exactly.
+- Profiles are currently project-only. The requested name, filename, and frontmatter `name` must match exactly. The profile must resolve to a regular file inside `.qwen/fork-profiles/` and cannot exceed 64 KiB.
 - `tools` is required and follows the `fork_tools` rules, including empty-array deny-all behavior.
-- `promptHint` is optional. It is appended to the fork task directive; it does not change the inherited system instruction or model-visible tool declarations.
+- `promptHint` is optional and limited to 200 characters. It is escaped and framed as project-supplied guidance after the fork directive and before the authoritative tool restriction; it does not change the inherited system instruction or model-visible tool declarations. Profile files are frontmatter-only, so non-blank Markdown after the closing `---` is rejected instead of silently ignored.
 - The profile is resolved once at launch. A retained fork continues with the resolved tool snapshot even if the project file later changes.
-- Project fork profiles are unavailable in safe mode, which disables local customizations.
+- Project fork profiles are unavailable in safe mode and bare mode, which disable local customizations.
 
 Like `fork_tools`, a fork profile is a caller-selected restriction rather than an administrator sandbox. Its optional prompt guidance is project-controlled content.
 

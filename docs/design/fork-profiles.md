@@ -34,18 +34,22 @@ promptHint: |
 ---
 ```
 
-`name` and `tools` are required. `promptHint` is optional. The requested name,
-the filename, and the frontmatter name must match. Names are 2–50 characters
-and contain only letters, numbers, hyphens, or underscores, without a leading
-or trailing separator.
+`name` and `tools` are required. `promptHint` is optional and limited to 200
+characters. The requested name, the filename, and the frontmatter name must
+match. Names are 2–50 characters and contain only letters, numbers, hyphens,
+or underscores, without a leading or trailing separator. Profile files are
+frontmatter-only; a non-blank Markdown body is rejected so guidance cannot be
+silently discarded. A profile must resolve to a regular file inside the
+project profile directory and cannot exceed 64 KiB.
 
 The `tools` field uses the exact `fork_tools` contract. An empty list remains
 deny-all, bare `*` is invalid, and MCP wildcard syntax is unchanged.
 
 Project scope is the only lookup scope in this phase. User-level profiles,
 scope precedence, built-in profiles, profile listing, and management UI are
-deferred. Safe mode rejects project profiles because they are local
-customizations.
+deferred. Safe mode and bare mode reject project profiles because they are
+local customizations. AUTO mode treats writes under `.qwen/fork-profiles/` as
+self-modification, so they cannot use the normal in-workspace edit fast path.
 
 ## Launch Resolution
 
@@ -60,7 +64,9 @@ the profile before constructing the fork runtime:
    tools and prompt hint to AUTO-mode classification.
 5. Pass a cloned tool list as `ToolConfig.executionAllowedTools`.
 6. Append `promptHint`, when present, to the fork task directive after the
-   parent-derived cacheable prefix.
+   parent-derived cacheable prefix. The project-controlled text is escaped and
+   framed as guidance after the directive, while the authoritative execution
+   restriction remains last.
 
 Missing or invalid profiles fail the launch before the agent runtime, hooks,
 background registry entry, or transcript sidecar is created.

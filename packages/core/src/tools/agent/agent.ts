@@ -44,10 +44,10 @@ import {
   buildChildMessage,
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
-  isValidForkToolWildcard,
   normalizeForkTurns,
   runInForkContext,
   selectForkHistory,
+  validateForkToolList,
   type ForkTurns,
 } from './fork-subagent.js';
 import {
@@ -264,6 +264,14 @@ const debugLogger = createDebugLogger('AGENT');
 const resolvedForkProfiles = new WeakMap<AgentParams, ForkProfile>();
 const FORK_PROFILE_SAFE_MODE_ERROR =
   'Parameter "fork_profile" is unavailable in safe mode because project profiles are local customizations.';
+const FORK_PROFILE_BARE_MODE_ERROR =
+  'Parameter "fork_profile" is unavailable in bare mode because project profiles are local customizations.';
+
+function getForkProfileModeError(config: Config): string | undefined {
+  if (config.getBareMode()) return FORK_PROFILE_BARE_MODE_ERROR;
+  if (config.isSafeMode()) return FORK_PROFILE_SAFE_MODE_ERROR;
+  return undefined;
+}
 
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
@@ -1150,24 +1158,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.name !== undefined) {
         return 'Parameter "fork_tools" cannot be used when spawning a named teammate.';
       }
-      if (
-        !Array.isArray(params.fork_tools) ||
-        params.fork_tools.some(
-          (toolName) =>
-            typeof toolName !== 'string' ||
-            toolName.trim().length === 0 ||
-            toolName.trim() !== toolName,
-        )
-      ) {
-        return 'Parameter "fork_tools" must be an array of non-empty tool names without surrounding whitespace.';
-      }
-      if (params.fork_tools.includes('*')) {
-        return 'Parameter "fork_tools" does not accept "*"; omit it for unrestricted execution.';
-      }
-      if (
-        params.fork_tools.some((toolName) => !isValidForkToolWildcard(toolName))
-      ) {
-        return 'Parameter "fork_tools" wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*".';
+      const toolsError = validateForkToolList(params.fork_tools);
+      if (toolsError) {
+        return `Parameter "fork_tools" ${toolsError}.`;
       }
     }
 
@@ -1185,9 +1178,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (profileNameError) {
         return `Parameter "fork_profile" ${profileNameError}.`;
       }
-      if (this.config.isSafeMode()) {
-        return FORK_PROFILE_SAFE_MODE_ERROR;
-      }
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) return modeError;
     }
 
     if (params.isolation !== undefined) {
@@ -1276,11 +1268,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // snapshot rather than rereading a mutable project file at two phases.
     // This read is synchronous because the Tool.build() contract is
     // synchronous.
-    if (
-      invocationParams.fork_profile !== undefined &&
-      this.config.isSafeMode()
-    ) {
-      throw new Error(FORK_PROFILE_SAFE_MODE_ERROR);
+    if (invocationParams.fork_profile !== undefined) {
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) throw new Error(modeError);
     }
     const forkProfile =
       invocationParams.fork_profile !== undefined

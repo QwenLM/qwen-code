@@ -79,6 +79,20 @@ describe('fork profiles', () => {
     });
   });
 
+  it('loads flow-style YAML with the strict parser', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(
+      projectRoot,
+      'ro-research',
+      '---\nname: ro-research\ntools: [read_file, grep_search]\n---\n',
+    );
+
+    expect(loadForkProfile(projectRoot, 'ro-research')).toEqual({
+      name: 'ro-research',
+      tools: ['read_file', 'grep_search'],
+    });
+  });
+
   it.each(['ro-research', 'review_2', '研究-2'])(
     'accepts safe profile name %s',
     (name) => {
@@ -115,6 +129,63 @@ describe('fork profiles', () => {
     );
   });
 
+  it('rejects a profile symlink that escapes the profile directory', async () => {
+    const projectRoot = await createProject();
+    const profileDir = path.join(projectRoot, '.qwen', 'fork-profiles');
+    const outsideProfile = path.join(projectRoot, 'outside.md');
+    await fs.mkdir(profileDir, { recursive: true });
+    await fs.writeFile(
+      outsideProfile,
+      '---\nname: ro-research\ntools: []\n---\n',
+      'utf8',
+    );
+    await fs.symlink(
+      outsideProfile,
+      path.join(profileDir, 'ro-research.md'),
+      process.platform === 'win32' ? 'file' : undefined,
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /resolves outside .*fork-profiles/i,
+    );
+  });
+
+  it('rejects a non-regular profile before reading it', async () => {
+    const projectRoot = await createProject();
+    await fs.mkdir(
+      path.join(projectRoot, '.qwen', 'fork-profiles', 'ro-research.md'),
+      { recursive: true },
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /is not a regular file/i,
+    );
+  });
+
+  it('rejects a profile larger than the byte cap', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(projectRoot, 'ro-research', 'x'.repeat(64 * 1024 + 1));
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /file is larger than 65536 bytes/i,
+    );
+  });
+
+  it('accepts a valid profile exactly at the byte cap', async () => {
+    const projectRoot = await createProject();
+    const prefix = '---\nname: ro-research\ntools: []\n';
+    const suffix = '---\n';
+    const commentLength = 64 * 1024 - prefix.length - suffix.length - 2;
+    const content = `${prefix}#${'x'.repeat(commentLength)}\n${suffix}`;
+    expect(Buffer.byteLength(content)).toBe(64 * 1024);
+    await writeProfile(projectRoot, 'ro-research', content);
+
+    expect(loadForkProfile(projectRoot, 'ro-research')).toEqual({
+      name: 'ro-research',
+      tools: [],
+    });
+  });
+
   it('requires frontmatter name to match the requested filename', async () => {
     const projectRoot = await createProject();
     await writeProfile(
@@ -125,6 +196,67 @@ describe('fork profiles', () => {
 
     expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
       /frontmatter name must exactly match the filename/i,
+    );
+  });
+
+  it('rejects unresolved YAML aliases instead of falling back', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(
+      projectRoot,
+      'ro-research',
+      '---\n' +
+        'name: ro-research\n' +
+        'tools:\n' +
+        '  - read_file\n' +
+        'note: *missing\n' +
+        '---\n',
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /malformed YAML frontmatter/i,
+    );
+  });
+
+  it('rejects YAML warnings instead of accepting unresolved tags', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(
+      projectRoot,
+      'ro-research',
+      '---\nname: ro-research\ntools: !unknown [read_file]\n---\n',
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /malformed YAML frontmatter/i,
+    );
+  });
+
+  it('rejects non-empty Markdown bodies with promptHint guidance', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(
+      projectRoot,
+      'ro-research',
+      '---\nname: ro-research\ntools: []\n---\nWork read-only.\n',
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /Markdown body content.*promptHint/i,
+    );
+  });
+
+  it('rejects prompt hints longer than 200 characters', async () => {
+    const projectRoot = await createProject();
+    await writeProfile(
+      projectRoot,
+      'ro-research',
+      '---\n' +
+        'name: ro-research\n' +
+        'tools: []\n' +
+        `promptHint: ${'x'.repeat(201)}\n` +
+        '---\n',
+    );
+
+    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+      /promptHint must not exceed 200 characters/i,
     );
   });
 
@@ -153,7 +285,7 @@ describe('fork profiles', () => {
     {
       label: 'empty tool name',
       content: '---\nname: ro-research\ntools:\n  - " "\n---\n',
-      error: /non-empty names without surrounding whitespace/i,
+      error: /array of non-empty tool names without surrounding whitespace/i,
     },
     {
       label: 'bare wildcard',
