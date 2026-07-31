@@ -175,7 +175,7 @@ export class CdpBrowserEmulator {
               id,
               error: {
                 code: SERVER_ERROR,
-                message: `Unknown CDP target: ${String(targetId)}`,
+                message: `Cannot attach to target: ${String(targetId)}`,
               },
             });
           }

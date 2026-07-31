@@ -161,6 +161,24 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
+  it('rejects attachToTarget for a target that is not the page', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 15,
+      method: 'Target.attachToTarget',
+      params: { targetId: 'qwen-cdp-tab', flatten: true },
+    });
+    // The tab target is advertised but only attachable via setAutoAttach, so an
+    // explicit attach must fail without minting a session.
+    expect(
+      replies.find((reply) => reply.method === 'Target.attachedToTarget'),
+    ).toBeUndefined();
+    expect(replies.at(-1)).toMatchObject({
+      id: 15,
+      error: { code: -32000, message: 'Cannot attach to target: qwen-cdp-tab' },
+    });
+  });
+
   it('reports that the selected page has no DevTools target', async () => {
     const { emu, replies } = setup();
     await emu.handleFromClient({

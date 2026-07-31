@@ -133,7 +133,12 @@ try {
     );
     const getOutput = collect(child);
     getDaemonOutput = getOutput;
-    await waitForJson(`${baseUrl}/health`, (value) => value.status === 'ok');
+    await waitForJson(
+      `${baseUrl}/health`,
+      (value) => value.status === 'ok',
+    ).catch((error) => {
+      throw new Error(`${error.message}\n${getOutput()}`);
+    });
     if (waitForBridge) {
       await waitFor(() =>
         getOutput().includes('registered as CDP bridge'),
@@ -192,7 +197,10 @@ try {
 
   await stopChild(daemon);
   daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
-  await runScript(reconnectSmoke, smokeEnv);
+  await runScript(reconnectSmoke, smokeEnv).catch((error) => {
+    process.stderr.write(getDaemonOutput());
+    throw error;
+  });
   console.log('REAL-CHROME-E2E: PASS');
 } finally {
   await stopChild(daemon);

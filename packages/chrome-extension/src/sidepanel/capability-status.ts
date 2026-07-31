@@ -104,8 +104,17 @@ export function deriveCapabilityStatus(
       try {
         const argUrl = new URL(arg);
         const daemonUrl = new URL(baseUrl);
+        // The panel treats every loopback spelling as one host (isLoopback in
+        // sidepanel.js), so a daemon bound to `localhost`/`::1` is the same
+        // tunnel as the default 127.0.0.1 bind, not a shadowing config.
+        const loopback = (host: string) => {
+          const bare = host.replace(/^\[|\]$/g, '');
+          return bare === 'localhost' || bare === '127.0.0.1' || bare === '::1'
+            ? 'loopback'
+            : bare;
+        };
         return (
-          argUrl.hostname === daemonUrl.hostname &&
+          loopback(argUrl.hostname) === loopback(daemonUrl.hostname) &&
           argUrl.port === daemonUrl.port
         );
       } catch {

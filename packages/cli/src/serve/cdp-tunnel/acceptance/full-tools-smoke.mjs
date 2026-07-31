@@ -69,15 +69,20 @@ const call = async (name, args = {}) => {
 const waitUntil = async (read, predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
   let value;
+  let lastError;
   while (Date.now() < deadline) {
     try {
       value = await read();
       if (predicate(value)) return value;
-    } catch {
+    } catch (error) {
       // Transient CDP errors (page navigating, target destroyed) are expected
       // while polling; retry until the deadline instead of failing the run.
+      lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (value === undefined) {
+    throw new Error(`waitUntil: read never succeeded: ${lastError?.message}`);
   }
   return value;
 };
@@ -243,6 +248,7 @@ const passed =
   checks.linkNavigation &&
   checks.restoredOriginalUrl &&
   !checks.error &&
+  !checks.restoreCommandFailed &&
   !checks.restoreVerificationFailed;
 
 console.log(JSON.stringify(checks, null, 2));
