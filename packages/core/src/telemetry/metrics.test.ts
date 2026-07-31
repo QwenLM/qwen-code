@@ -67,6 +67,7 @@ vi.mock('@opentelemetry/api');
 
 describe('Telemetry Metrics', () => {
   let initializeMetricsModule: typeof import('./metrics.js').initializeMetrics;
+  let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
@@ -93,6 +94,7 @@ describe('Telemetry Metrics', () => {
 
     const metricsJsModule = await import('./metrics.js');
     initializeMetricsModule = metricsJsModule.initializeMetrics;
+    recordToolCallMetricsModule = metricsJsModule.recordToolCallMetrics;
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
@@ -125,6 +127,48 @@ describe('Telemetry Metrics', () => {
     (otelApiModule.metrics.getMeter as Mock).mockReturnValue(mockMeterInstance);
     mockCreateCounterFn.mockReturnValue(mockCounterInstance);
     mockCreateHistogramFn.mockReturnValue(mockHistogramInstance);
+  });
+
+  describe('recordToolCallMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records an explicit terminal status only on the counter', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 25, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(25, {
+        function_name: 'read_file',
+      });
+    });
+
+    it('derives status from success for legacy callers', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 10, {
+        function_name: 'legacy_tool',
+        success: false,
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'legacy_tool',
+        success: false,
+        status: 'error',
+      });
+    });
   });
 
   describe('recordChatCompressionMetrics', () => {
