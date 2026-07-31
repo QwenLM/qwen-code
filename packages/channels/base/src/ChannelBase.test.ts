@@ -14963,6 +14963,44 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('rechecks bridge recovery before a queued followup prompt starts', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+      const ch = createChannel(
+        { dispatchMode: 'followup' },
+        { bridgeRecovery: () => recoveryState.current },
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'task one' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      const second = ch.handleInbound(envelope({ text: 'task two' }));
+      await Promise.resolve();
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      resolveFirst('response-1');
+      await first;
+      await Promise.resolve();
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      releaseRecovery!();
+      await second;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+    });
+
     it('steer is the default mode when dispatchMode not set', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
@@ -16013,6 +16051,28 @@ describe('ChannelBase', () => {
         const collectedPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
           .calls[1][1] as string;
         expect(collectedPrompt).toContain('follow-up while webhook runs');
+      });
+
+      it('waits for bridge recovery before resolving a webhook session', async () => {
+        let releaseBridge: (() => void) | undefined;
+        const bridgeReady = new Promise<void>((resolve) => {
+          releaseBridge = resolve;
+        });
+        const ch = createChannel(
+          { approvalMode: 'yolo', webhooks },
+          { bridgeRecovery: () => bridgeReady },
+        );
+        ch.proactiveSupported = true;
+
+        const run = ch.runWebhookTask(webhookTask);
+        await Promise.resolve();
+        expect(bridge.newSession).not.toHaveBeenCalled();
+        expect(bridge.prompt).not.toHaveBeenCalled();
+
+        releaseBridge!();
+        await expect(run).resolves.toBe('agent response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
       });
 
       it('rechecks bridge recovery before a webhook prompt starts', async () => {
