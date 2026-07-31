@@ -449,12 +449,16 @@ export function registerWorkspaceExtensionRoutes(
             await Promise.allSettled(
               runtimes.map(async (runtime) => {
                 runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                const result =
-                  await runtime.bridge.refreshExtensionsForAllSessions();
-                if (result.failed > 0) {
-                  throw new Error(
-                    `${result.failed} extension session refresh(es) failed`,
-                  );
+                try {
+                  const result =
+                    await runtime.bridge.refreshExtensionsForAllSessions();
+                  if (result.failed > 0) {
+                    throw new Error(
+                      `${result.failed} extension session refresh(es) failed`,
+                    );
+                  }
+                } finally {
+                  runtime.workspaceService.invalidateWorkspaceSkillsStatus();
                 }
               }),
             ),
