@@ -153,6 +153,23 @@ describe('summaryCommand custom export path', () => {
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
+  it('allows a symlink that resolves inside the project root', async () => {
+    // Symlink creation typically requires elevated privileges on Windows.
+    if (process.platform === 'win32') {
+      return;
+    }
+    await fs.mkdir(path.join(projectRoot, 'real-dir'));
+    await fs.symlink(
+      path.join(projectRoot, 'real-dir'),
+      path.join(projectRoot, 'internal-link'),
+    );
+    const result = await run('internal-link/summary.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(
+      await fileExists(path.join(projectRoot, 'real-dir', 'summary.md')),
+    ).toBe(true);
+  });
+
   it('rejects a path that escapes the project root via a symlink', async () => {
     // Symlink creation typically requires elevated privileges on Windows.
     if (process.platform === 'win32') {
@@ -188,6 +205,32 @@ describe('summaryCommand custom export path', () => {
     expect(result.content).toContain('within the project root');
     expect(await fileExists(outsideTarget)).toBe(false);
     expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('rejects a directory whose appended default filename is a symlink escaping the project root', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const outside = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'summary-outside-'),
+    );
+    try {
+      const docsDir = path.join(projectRoot, 'docs');
+      await fs.mkdir(docsDir);
+      await fs.symlink(
+        path.join(outside, 'evil-target.md'),
+        path.join(docsDir, 'PROJECT_SUMMARY.md'),
+      );
+      const result = await run('docs');
+      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(result.content).toContain('within the project root');
+      expect(await fileExists(path.join(outside, 'evil-target.md'))).toBe(
+        false,
+      );
+      expect(runSideQuery).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('does not create the target directory when generation fails', async () => {
