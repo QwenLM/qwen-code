@@ -208,6 +208,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Adapter-owned persistent state directory. */
+  stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   channelMemoryRecallObserver?: (
@@ -290,6 +292,7 @@ type ActivePrompt = {
   messageId?: string;
   senderId?: string;
   senderName?: string;
+  metadata?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -358,6 +361,8 @@ export abstract class ChannelBase {
   protected readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  /** Adapter-owned persistent state directory, when supplied by the runtime. */
+  protected readonly stateDir?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -788,6 +793,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
@@ -2345,6 +2351,33 @@ export abstract class ChannelBase {
     const target = this.router.getTarget(sessionId);
     const threadId = active?.threadId ?? target?.threadId;
     await this.sendThreadMessage(chatId, threadId, text);
+  }
+
+  /**
+   * Adapter hook for delivery-only metadata. The response delivery path can read
+   * the active prompt while it exists; adapters must not retain its raw content.
+   */
+  protected getResponseMessageId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  protected getResponseSenderId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseMetadata(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.metadata;
+  }
+
+  /**
+   * Returns the active prompt's response thread while it remains available for
+   * adapter delivery. Falls back to the session target after prompt cleanup.
+   */
+  protected getResponseThreadId(sessionId: string): string | undefined {
+    return (
+      this.activePrompts.get(sessionId)?.threadId ??
+      this.router.getTarget(sessionId)?.threadId
+    );
   }
 
   /**
@@ -5377,6 +5410,7 @@ export abstract class ChannelBase {
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
+        metadata: envelope.metadata,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only

@@ -3093,6 +3093,69 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('writes source metadata and drops the inherited title for sourced forks', async () => {
+      const oldId = '10101010-1010-1010-1010-101010101010';
+      const newId = '20202020-2020-2020-2020-202020202020';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'title-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'custom_title',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              customTitle: 'Parent title',
+              titleSource: 'manual',
+            },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        source: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written[0]).toMatchObject({
+        parentUuid: null,
+        sessionId: newId,
+        type: 'system',
+        subtype: 'session_source',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      expect(written.some((record) => record.subtype === 'custom_title')).toBe(
+        false,
+      );
+      expect(written[1]).toMatchObject({
+        parentUuid: written[0].uuid,
+        forkedFrom: {
+          sessionId: oldId,
+          messageUuid: 'u1',
+        },
+      });
+    });
+
     it('copies artifact side records from the active branch', async () => {
       const oldId = '71717171-7171-7171-7171-717171717171';
       const newId = '81818181-8181-8181-8181-818181818181';

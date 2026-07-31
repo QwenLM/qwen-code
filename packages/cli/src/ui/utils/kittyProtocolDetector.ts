@@ -96,11 +96,14 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
           protocolSupported = true;
           enableProtocol();
 
-          // Set up cleanup on exit (exit covers process.exit() calls,
-          // SIGTERM/SIGINT cover signal-based terminations).
+          // Last-resort fallback: if the process exits without running
+          // the async cleanup chain (e.g. direct process.exit() call),
+          // the 'exit' event still fires synchronously and restores the
+          // terminal. Signal-based teardown is handled by the main
+          // installInteractiveSignalHandlers() → runExitCleanup() →
+          // disableKittyProtocol() path, which runs *after* Ink leaves
+          // the alternate screen so the pop lands on the correct buffer.
           process.on('exit', disableProtocol);
-          process.on('SIGTERM', disableProtocol);
-          process.on('SIGINT', disableProtocol);
         }
 
         detectionComplete = true;
