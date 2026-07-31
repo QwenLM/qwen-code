@@ -54,33 +54,33 @@ export async function bridgeAgentViewTerminal(
   const onStdoutError = () => bridgeAbort.abort();
   let outputWrites = Promise.resolve();
 
-  if (options.detachSignal?.aborted) {
-    bridgeAbort.abort();
-  } else {
-    options.detachSignal?.addEventListener('abort', onDetach, { once: true });
-  }
-  options.stdout.on('error', onStdoutError);
-  const dataDisposable = options.pty.onData((data) => {
-    if (bridgeAbort.signal.aborted) return;
-    outputWrites = outputWrites
-      .then(() => writeToWritable(options.stdout, toBuffer(data)))
-      .catch(() => {
-        bridgeAbort.abort();
-      });
-  });
-  if (dataDisposable) {
-    disposables.push(dataDisposable);
-  }
-
-  const resizeDisposable = options.onResize?.((size) => {
-    if (bridgeAbort.signal.aborted) return;
-    void Promise.resolve(options.pty.resize?.(size)).catch(() => {});
-  });
-  if (resizeDisposable) {
-    disposables.push(resizeDisposable);
-  }
-
   try {
+    if (options.detachSignal?.aborted) {
+      bridgeAbort.abort();
+    } else {
+      options.detachSignal?.addEventListener('abort', onDetach, { once: true });
+    }
+    options.stdout.on('error', onStdoutError);
+    const dataDisposable = options.pty.onData((data) => {
+      if (bridgeAbort.signal.aborted) return;
+      outputWrites = outputWrites
+        .then(() => writeToWritable(options.stdout, toBuffer(data)))
+        .catch(() => {
+          bridgeAbort.abort();
+        });
+    });
+    if (dataDisposable) {
+      disposables.push(dataDisposable);
+    }
+
+    const resizeDisposable = options.onResize?.((size) => {
+      if (bridgeAbort.signal.aborted) return;
+      void Promise.resolve(options.pty.resize?.(size)).catch(() => {});
+    });
+    if (resizeDisposable) {
+      disposables.push(resizeDisposable);
+    }
+
     const reason = await pumpInputToPty(
       options.stdin,
       options.pty,

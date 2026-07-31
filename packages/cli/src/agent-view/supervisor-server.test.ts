@@ -162,6 +162,75 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('returns internal_error when a request handler throws', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const server = createAgentViewSupervisorServer(
+      {
+        status: () => {
+          throw new Error('status failed');
+        },
+        list: () => [],
+        shutdown: () => ({}),
+      },
+      { socketPath },
+    );
+
+    await server.listen();
+    try {
+      await expect(
+        requestAgentViewSupervisor(socketPath, {
+          id: 'status-request',
+          op: 'status',
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'internal_error' },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns internal_error when a streaming handler throws', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const server = createAgentViewSupervisorServer(
+      {
+        status: () => ({}),
+        list: () => [],
+        shutdown: () => ({}),
+        attachStream: () => {
+          throw new Error('attach failed');
+        },
+      },
+      { socketPath },
+    );
+
+    await server.listen();
+    try {
+      const socket = net.createConnection(socketPath);
+      socket.setEncoding('utf8');
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.write(
+        `${JSON.stringify({
+          id: 'attach-request',
+          op: 'attachStream',
+          params: { sessionId: 'session-1' },
+        })}\n`,
+      );
+
+      const line = await readLine(socket);
+      expect(JSON.parse(line)).toMatchObject({
+        ok: false,
+        error: { code: 'internal_error' },
+      });
+      socket.destroy();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('rejects incompatible protocol versions', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);
@@ -688,4 +757,15 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for supervisor test condition.');
+}
+
+async function readLine(socket: net.Socket): Promise<string> {
+  return new Promise((resolve) => {
+    let buffered = '';
+    socket.on('data', (chunk) => {
+      buffered += String(chunk);
+      const newline = buffered.indexOf('\n');
+      if (newline !== -1) resolve(buffered.slice(0, newline));
+    });
+  });
 }

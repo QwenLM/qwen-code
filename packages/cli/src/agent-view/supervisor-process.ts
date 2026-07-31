@@ -23,7 +23,6 @@ const UNIX_SOCKET_PATH_LIMIT = 100;
 const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
 
 export interface AgentViewSupervisorHibernationPolicy {
-  enabled?: boolean;
   autoExit?: boolean;
   autoExitGraceMs?: number;
 }
@@ -147,10 +146,6 @@ class AgentViewSupervisorProcessHandler
     if (this.shouldAutoExit(states)) {
       void Promise.resolve(this.options.onShutdown?.()).catch(() => {});
       return { hibernated: [], shutdownRequested: true };
-    }
-
-    if (this.options.hibernationPolicy?.enabled === false) {
-      return { hibernated: [], shutdownRequested: false };
     }
 
     return { hibernated: [], shutdownRequested: false };

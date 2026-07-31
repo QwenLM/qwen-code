@@ -315,6 +315,7 @@ async function waitForSpawnedSupervisorReady(
   socketPath: string,
   options: EnsureAgentViewSupervisorOptions,
 ): Promise<void> {
+  const waitAbort = new AbortController();
   let cleanup = () => {};
   const startupFailure = new Promise<never>((_, reject) => {
     const fail = (error: Error) => {
@@ -334,10 +335,11 @@ async function waitForSpawnedSupervisorReady(
 
   try {
     await Promise.race([
-      waitForSupervisor(socketPath, options),
+      waitForSupervisor(socketPath, options, waitAbort.signal),
       startupFailure,
     ]);
   } finally {
+    waitAbort.abort();
     cleanup();
   }
 }
@@ -424,11 +426,18 @@ async function canReachSupervisor(
 async function waitForSupervisor(
   socketPath: string,
   options: EnsureAgentViewSupervisorOptions,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadlineMs =
     Date.now() + SUPERVISOR_READY_RETRIES * SUPERVISOR_READY_DELAY_MS;
   while (Date.now() < deadlineMs) {
+    if (signal?.aborted) {
+      throw new Error('Agent View supervisor startup was cancelled.');
+    }
     if (await canReachSupervisor(socketPath, options)) return;
+    if (signal?.aborted) {
+      throw new Error('Agent View supervisor startup was cancelled.');
+    }
     await delay(SUPERVISOR_READY_DELAY_MS);
   }
   throw new Error('Agent View supervisor did not become ready.');

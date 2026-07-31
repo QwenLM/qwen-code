@@ -261,4 +261,38 @@ describe('createAgentViewSupervisorHandler', () => {
     });
     expect(onShutdown).toHaveBeenCalledTimes(1);
   });
+
+  it('restarts the auto-exit grace period when a session becomes active again', async () => {
+    const globalDir = await makeGlobalDir();
+    await writeSession(globalDir);
+    let nowMs = 1_000_000;
+    const onShutdown = vi.fn();
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      hibernationPolicy: { autoExitGraceMs: 5_000 },
+      now: () => new Date(nowMs),
+      onShutdown,
+    });
+
+    await expect(handler.tickIdleHibernation()).resolves.toMatchObject({
+      shutdownRequested: false,
+    });
+
+    nowMs += 5_000;
+    await writeSession(globalDir, { processState: 'alive' });
+    await expect(handler.tickIdleHibernation()).resolves.toMatchObject({
+      shutdownRequested: false,
+    });
+
+    await writeSession(globalDir, { processState: 'hibernated' });
+    await expect(handler.tickIdleHibernation()).resolves.toMatchObject({
+      shutdownRequested: false,
+    });
+
+    nowMs += 5_000;
+    await expect(handler.tickIdleHibernation()).resolves.toMatchObject({
+      shutdownRequested: true,
+    });
+    expect(onShutdown).toHaveBeenCalledTimes(1);
+  });
 });

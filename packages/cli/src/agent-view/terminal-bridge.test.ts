@@ -170,6 +170,33 @@ describe('bridgeAgentViewTerminal', () => {
     expect(disposed).toEqual(['data', 'resize']);
   });
 
+  it('cleans up setup listeners when resize registration throws', async () => {
+    const disposed: string[] = [];
+    const stdout = new MemoryWritable();
+    const pty: AgentViewTerminalPty = {
+      write: () => {},
+      onData: () => ({
+        dispose: () => {
+          disposed.push('data');
+        },
+      }),
+    };
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes([]),
+        stdout,
+        pty,
+        onResize: () => {
+          throw new Error('resize registration failed');
+        },
+      }),
+    ).rejects.toThrow('resize registration failed');
+
+    expect(disposed).toEqual(['data']);
+    expect(stdout.listenerCount('error')).toBe(0);
+  });
+
   it('ignores iterator return rejections on detach', async () => {
     const pty = new FakeTerminalPty();
     const controller = new AbortController();
