@@ -158,8 +158,8 @@ function showShell(baseUrl, token, status) {
  */
 let ticking = false;
 async function tick() {
-  // Reentrancy guard: probeState runs two sequential fetches (up to ~4s) but
-  // setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
+  // Reentrancy guard: probeState can run three sequential fetches (up to ~6s),
+  // but setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
   // burning the FRAMED_MISS_LIMIT tolerance at ~2× and flashing the welcome
   // screen (clearing the user's in-flight chat) while the daemon is just slow.
   if (ticking) return;
