@@ -18,6 +18,7 @@ import {
   probeCreateFailureDetail,
   probeCleanupFailureDetail,
   findVitestBin,
+  exposeDependencies,
   MAX_MUTANTS,
 } from './test-efficacy.js';
 import {
@@ -27,6 +28,8 @@ import {
   symlinkSync,
   existsSync,
   readFileSync,
+  readdirSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -181,6 +184,61 @@ describe('findVitestBin', () => {
     writeFileSync(join(vitestDir, 'package.json'), '{}');
 
     expect(() => findVitestBin(worktree)).toThrow(/declares no "vitest" bin/);
+  });
+
+  it('keeps the real error when vitest is present but hides its package.json', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'vitest-hidden-'));
+    const vitestDir = join(worktree, 'node_modules', 'vitest');
+    mkdirSync(vitestDir, { recursive: true });
+    // An `exports` map with no `./package.json` (and no `./*` wildcard) makes
+    // `require.resolve('vitest/package.json')` throw ERR_PACKAGE_PATH_NOT_EXPORTED.
+    // vitest IS installed here, so the blanket "vitest not found" would be a lie
+    // that sends the reader hunting a missing install; the real error survives.
+    writeFileSync(
+      join(vitestDir, 'package.json'),
+      JSON.stringify({ name: 'vitest', exports: { '.': './index.js' } }),
+    );
+    writeFileSync(join(vitestDir, 'index.js'), '');
+
+    expect(() => findVitestBin(worktree)).toThrow(/not defined by "exports"/);
+  });
+});
+
+describe('exposeDependencies', () => {
+  it('links top-level and scoped packages, counting what it linked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+    const nm = join(root, 'node_modules');
+    mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
+    mkdirSync(join(nm, '@scope', 'inner-pkg'), { recursive: true });
+    // A non-directory entry is skipped — neither linked nor counted as a failure.
+    writeFileSync(join(nm, 'stray-file'), 'x');
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toEqual({ linked: 2, failed: 0 });
+    expect(readdirSync(join(probe, 'node_modules')).sort()).toEqual([
+      '@scope',
+      'plain-pkg',
+    ]);
+    expect(
+      lstatSync(join(probe, 'node_modules', 'plain-pkg')).isSymbolicLink(),
+    ).toBe(true);
+    expect(
+      lstatSync(
+        join(probe, 'node_modules', '@scope', 'inner-pkg'),
+      ).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  it('leaves an already-built probe farm untouched', () => {
+    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+
+    expect(exposeDependencies(probe, root)).toEqual({ linked: 0, failed: 0 });
+    expect(readdirSync(join(probe, 'node_modules'))).toEqual([]);
   });
 });
 
@@ -351,6 +409,59 @@ describe('classifyProbeRun', () => {
         ['packages/lib/src/inert.test.ts'],
       );
       expect(only(got).verdict).toBe('inert');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('matches Windows result paths case-insensitively', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      // Windows paths are case-insensitive; a drive letter or 8.3 name reported
+      // in different case must still match the git-relative probe, or the file
+      // silently reads `inconclusive`.
+      const got = classifyProbeRun(
+        0,
+        json({
+          testResults: [
+            {
+              name: 'C:\\W\\Packages\\Lib\\src\\Inert.test.ts',
+              assertionResults: [{ status: 'passed' }],
+            },
+          ],
+        }),
+        ['packages/lib/src/inert.test.ts'],
+      );
+      expect(only(got).verdict).toBe('inert');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('keeps POSIX matching case-sensitive', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
+      // Case folding is win32-only: on POSIX case is significant, so a
+      // different-case name is a different file and must NOT satisfy the probe.
+      const got = only(
+        classifyProbeRun(
+          1,
+          json({
+            testResults: [
+              {
+                name: '/w/SRC/A.test.ts',
+                assertionResults: [{ status: 'failed' }],
+              },
+            ],
+          }),
+          ['src/a.test.ts'],
+        ),
+      );
+      expect(got.verdict).toBe('inconclusive');
     } finally {
       platformSpy.mockRestore();
     }

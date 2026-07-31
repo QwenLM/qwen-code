@@ -101,4 +101,6 @@ jobs:
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           # Root test:scripts exercises bash-only workflow scripts; Linux CI covers it.
+          # npm has no --parallel (a pnpm/lerna flag) and ignores it, so the
+          # workspaces run serially; kept for parity with the root test:ci script.
           npm run test:ci --workspaces --if-present --parallel

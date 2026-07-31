@@ -122,12 +122,14 @@ describe('writeSkillArgs', () => {
     expect(writeSkillArgs('review', 'attacker')).toBeNull();
   });
 
-  it('writes the file mode 0600 — arguments can carry a secret', () => {
-    if (process.platform === 'win32') return;
-    writeSkillArgs('review', 'TOKEN=sk-secret');
-    const mode = statSync(skillArgsPath('review')).mode & 0o777;
-    expect(mode).toBe(0o600);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'writes the file mode 0600 — arguments can carry a secret',
+    () => {
+      writeSkillArgs('review', 'TOKEN=sk-secret');
+      const mode = statSync(skillArgsPath('review')).mode & 0o777;
+      expect(mode).toBe(0o600);
+    },
+  );
 
   it('writes a large argument string completely (no short write)', () => {
     // `writeSync` may write fewer bytes than asked and return the count; a

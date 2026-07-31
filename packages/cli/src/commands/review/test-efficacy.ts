@@ -59,6 +59,7 @@ import {
   existsSync,
   statSync,
   symlinkSync,
+  type Stats,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
@@ -722,12 +723,21 @@ export function classifyProbeRun(
     // there backslash IS a separator, but on POSIX it is a legal filename
     // character, so normalising it unconditionally would let
     // `/w/vendor/other\src/a.test.ts` satisfy `src/a.test.ts` — the very false
-    // match the boundary exists to prevent.
+    // match the boundary exists to prevent. Fold case on Windows as well: its
+    // paths are case-insensitive, so a drive letter or 8.3 name reported in a
+    // different case would otherwise miss and read `inconclusive` — the same
+    // wrong-verdict silence, in the other direction. Never fold on POSIX, where
+    // case is significant.
     const probe =
-      process.platform === 'win32' ? file.replace(/\\/g, '/') : file;
+      process.platform === 'win32'
+        ? file.replace(/\\/g, '/').toLowerCase()
+        : file;
     const result = byFile.find((r) => {
       const raw = r.name ?? '';
-      const name = process.platform === 'win32' ? raw.replace(/\\/g, '/') : raw;
+      const name =
+        process.platform === 'win32'
+          ? raw.replace(/\\/g, '/').toLowerCase()
+          : raw;
       return name.endsWith(`/${probe}`) || name === probe;
     });
     const assertions = result?.assertionResults ?? [];
@@ -816,8 +826,15 @@ export function findVitestBin(worktree: string): string {
   let pkgPath: string;
   try {
     pkgPath = req.resolve('vitest/package.json');
-  } catch {
-    throw new Error(`vitest not found searching up from ${worktree}`);
+  } catch (error) {
+    // Only a genuine MODULE_NOT_FOUND is "vitest not found". A present vitest
+    // whose `exports` no longer exposes `./package.json` throws
+    // ERR_PACKAGE_PATH_NOT_EXPORTED — a different problem with a different fix;
+    // folding it into "not found" sends the reader hunting a missing install.
+    if ((error as { code?: string }).code === 'MODULE_NOT_FOUND') {
+      throw new Error(`vitest not found searching up from ${worktree}`);
+    }
+    throw error;
   }
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
     bin?: { vitest?: string };
@@ -981,18 +998,32 @@ export function probeCleanupFailureDetail(
   return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
 }
 
-function exposeDependencies(probeTree: string, dependencyRoot: string): void {
-  if (probeTree === dependencyRoot) return;
+export function exposeDependencies(
+  probeTree: string,
+  dependencyRoot: string,
+): { linked: number; failed: number } {
+  const done = { linked: 0, failed: 0 };
+  if (probeTree === dependencyRoot) return done;
   const source = join(dependencyRoot, 'node_modules');
   const target = join(probeTree, 'node_modules');
-  if (!existsSync(source) || existsSync(target)) return;
+  if (!existsSync(source) || existsSync(target)) return done;
   mkdirSync(target);
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
     const sourceEntry = join(source, entry.name);
     const targetEntry = join(target, entry.name);
-    const sourceStats = lstatSync(sourceEntry);
+    // Every per-entry step is guarded: this is best-effort, so one locked or
+    // concurrently-unlinked entry must not throw out of the probe run (which
+    // would mark every probe `inconclusive`). What cannot be linked is counted
+    // and disclosed by the caller — never silently dropped.
+    let sourceStats: Stats;
+    try {
+      sourceStats = lstatSync(sourceEntry);
+    } catch {
+      done.failed++;
+      continue;
+    }
     if (sourceStats.isSymbolicLink()) {
       try {
         if (!statSync(sourceEntry).isDirectory()) continue;
@@ -1003,22 +1034,32 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
       continue;
     }
     if (entry.name.startsWith('@')) {
-      mkdirSync(targetEntry);
-      for (const pkg of readdirSync(sourceEntry)) {
+      let pkgs: string[];
+      try {
+        mkdirSync(targetEntry);
+        pkgs = readdirSync(sourceEntry);
+      } catch {
+        done.failed++;
+        continue;
+      }
+      for (const pkg of pkgs) {
         try {
           symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+          done.linked++;
         } catch {
-          continue;
+          done.failed++;
         }
       }
     } else {
       try {
         symlinkSync(sourceEntry, targetEntry, linkType);
+        done.linked++;
       } catch {
-        continue;
+        done.failed++;
       }
     }
   }
+  return done;
 }
 
 /**
@@ -1041,13 +1082,14 @@ function runProbeSuite(
 ): {
   perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
   ms: number;
+  exposed: { linked: number; failed: number };
 } {
   const started = now();
   const timeout =
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
       : PROBE_RUN_TIMEOUT_MS;
-  exposeDependencies(probeTree, dependencyRoot);
+  const exposed = exposeDependencies(probeTree, dependencyRoot);
   const r = spawnSync(
     process.execPath,
     [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
@@ -1080,6 +1122,7 @@ function runProbeSuite(
       `${r.stderr ?? ''}`,
     ),
     ms: now() - started,
+    exposed,
   };
 }
 
@@ -1191,6 +1234,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // disclosure with another.
   const noteMutants = (note: string) => {
     mutantsNote = mutantsNote ? `${mutantsNote}; ${note}` : note;
+  };
+  // A partial dependency farm lets vitest spawn but fails every probe's
+  // imports, reading red for a reason that is not the tests. Disclose it rather
+  // than let the report blame the suite for links that never arrived.
+  const noteDependencyFarm = (exposed: {
+    linked: number;
+    failed: number;
+  }): void => {
+    if (exposed.failed > 0) {
+      noteMutants(
+        `dependency farm incomplete: exposed ${exposed.linked}/${
+          exposed.linked + exposed.failed
+        } dependencies into the probe tree (${
+          exposed.failed
+        } failed to link) — probe results may not be evidence`,
+      );
+    }
   };
 
   if (probes.length > 0 && revert.length > 0) {
@@ -1315,6 +1375,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           now,
           worktree,
         );
+        noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
         // it: against a file already red the mutant is "killed" by failures it
         // did not cause, and a file that collected nothing proves nothing. Gate
@@ -1384,15 +1445,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
-        results.push(
-          ...runProbeSuite(
-            probeTree,
-            probes,
-            startedAt + TOTAL_BUDGET_MS,
-            now,
-            worktree,
-          ).perFile,
+        const revertRun = runProbeSuite(
+          probeTree,
+          probes,
+          startedAt + TOTAL_BUDGET_MS,
+          now,
+          worktree,
         );
+        noteDependencyFarm(revertRun.exposed);
+        results.push(...revertRun.perFile);
       } catch (e) {
         // The probe could not be set up or run. That is not evidence about any
         // test — record it and keep going, so the report (and the unreachable
