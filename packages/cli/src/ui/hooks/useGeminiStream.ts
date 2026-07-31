@@ -3782,19 +3782,19 @@ export const useGeminiStream = (
       }
       if (!toolGoalPermit && toolGoalContexts.length > 0) {
         const active = activeGoalTurnRef.current;
-        let missingActiveGoalContext = false;
+        let activeGoalPermitValid = false;
         if (active) {
           try {
             const runtime = config.getGoalRuntime();
             const currentPermit = runtime.permitForTurn(active.turnKey);
-            missingActiveGoalContext =
+            activeGoalPermitValid =
               currentPermit !== undefined &&
               sameGoalPermit(currentPermit, active.permit);
           } catch {
             // A missing runtime means this is an ordinary non-Goal batch.
           }
         }
-        if (active && missingActiveGoalContext) {
+        if (active && activeGoalPermitValid) {
           markToolsAsSubmitted(
             geminiTools.map((toolCall) => toolCall.request.callId),
           );
