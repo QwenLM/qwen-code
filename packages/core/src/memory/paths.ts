@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { QWEN_DIR, resolvePath, sanitizeCwd } from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
+import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
@@ -29,6 +30,11 @@ export const USER_AUTO_MEMORY_DIRNAME = 'memories';
  * lives INSIDE the repository and is tracked by git, which is the sync transport.
  */
 export const TEAM_AUTO_MEMORY_DIRNAME = 'team-memory';
+
+// Canonical definitions live in scopes.ts (a zero-import leaf module that can
+// be subpath-imported without pulling the core barrel). Re-exported here so
+// the barrel surface is unchanged.
+export { MEMORY_PROJECT_SCOPES, type MemoryProjectScope } from './scopes.js';
 
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
@@ -60,18 +66,51 @@ export function getMemoryBaseDir(): string {
   return Storage.getRuntimeBaseDir();
 }
 
-// Memoize by projectRoot plus the runtime-specific base dir. In daemon mode,
-// different sessions can share a project root while writing to different output dirs.
+// Memoize by projectRoot, project scope, and the runtime-specific base dir.
+// The base dir is part of the key because in daemon mode different sessions can
+// share one projectRoot yet write to different output dirs.
 const _autoMemoryRootCache = new Map<string, string>();
 
 // Memoized on projectRoot alone: the team root resolves via findGitRoot, which
 // does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
+let warnedUnknownMemoryProjectScope = false;
+
+/**
+ * Resolve QWEN_CODE_MEMORY_PROJECT_SCOPE. Only "workspace" (after trimming and
+ * lowercasing) opts into per-workspace partitioning; anything else keeps the
+ * git-root scope. An unrecognized non-empty value warns once so a typo surfaces
+ * instead of silently falling back to the shared scope this flag exists to
+ * prevent.
+ */
+function resolveWorkspaceProjectScope(): boolean {
+  const raw = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'workspace') return true;
+  if (
+    normalized !== '' &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(normalized) &&
+    !warnedUnknownMemoryProjectScope
+  ) {
+    warnedUnknownMemoryProjectScope = true;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring unrecognized QWEN_CODE_MEMORY_PROJECT_SCOPE="${raw}"; ` +
+        'falling back to "git-root". Expected "git-root" or "workspace".',
+    );
+  }
+  return false;
+}
+
 export function getAutoMemoryRoot(projectRoot: string): string {
   const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
+  const useWorkspaceRoot = resolveWorkspaceProjectScope();
   const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
-  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${projectRoot}`;
+  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${
+    useWorkspaceRoot ? 'workspace' : 'git-root'
+  }\0${projectRoot}`;
   const cached = _autoMemoryRootCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
@@ -79,15 +118,19 @@ export function getAutoMemoryRoot(projectRoot: string): string {
   if (useLocalMemory) {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
-    // Anchor at the nearest git root WITHOUT resolving linked worktrees back
-    // to their canonical repository root: each worktree gets its own memory,
-    // consistent with the per-worktree isolation of chats/, workflows/, and
-    // team memory (getTeamAutoMemoryRoot). See #6449.
-    const gitRoot = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    // In git-root scope, anchor at the nearest git root WITHOUT resolving
+    // linked worktrees back to their canonical repository root: each worktree
+    // gets its own memory, consistent with the per-worktree isolation of
+    // chats/, workflows/, and team memory (getTeamAutoMemoryRoot). See #6449.
+    // In workspace scope, key by the exact resolved workspace dir instead so
+    // nested workspaces in one checkout do not share memory.
+    const projectKey = useWorkspaceRoot
+      ? path.resolve(projectRoot)
+      : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
     result = path.join(
       memoryBaseDir,
       'projects',
-      sanitizeCwd(gitRoot),
+      sanitizeCwd(projectKey),
       AUTO_MEMORY_DIRNAME,
     );
   }
@@ -99,6 +142,7 @@ export function getAutoMemoryRoot(projectRoot: string): string {
 export function clearAutoMemoryRootCache(): void {
   _autoMemoryRootCache.clear();
   _teamAutoMemoryRootCache.clear();
+  warnedUnknownMemoryProjectScope = false;
 }
 
 /**
