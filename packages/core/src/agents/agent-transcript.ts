@@ -130,7 +130,8 @@ export interface AgentMeta {
   resolvedApprovalMode?: string;
   /**
    * Immutable launch-time execution policy for a restricted fork.
-   * Absence preserves unrestricted execution; an empty list means deny-all.
+   * Legacy absence allows every tool except the mandatory interaction-tool
+   * exclusion; an empty list means deny-all.
    */
   executionAllowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */

@@ -1175,6 +1175,7 @@ describe('createProductionDispatch', () => {
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
+      'ask_user_question',
       'send_message',
       'monitor',
       'enter_plan_mode',
@@ -1955,10 +1956,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
-    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode,
-    // Agent] must be unioned in.
+    // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
+    // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining([
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',
@@ -2042,6 +2044,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(disallowed).toEqual(
       expect.arrayContaining([
         'Foo',
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',
@@ -2443,6 +2446,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(disallowed).toEqual(
       expect.arrayContaining([
         'Foo',
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',
