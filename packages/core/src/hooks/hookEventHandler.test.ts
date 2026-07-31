@@ -49,6 +49,8 @@ describe('HookEventHandler', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getSessionSourceType: vi.fn().mockReturnValue(undefined),
+      getSessionSourceId: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
     } as unknown as Config;
@@ -568,6 +570,8 @@ describe('HookEventHandler', () => {
       // Config without registry/scheduler methods
       const bareConfig = {
         getSessionId: vi.fn().mockReturnValue('test-session-id'),
+        getSessionSourceType: vi.fn().mockReturnValue(undefined),
+        getSessionSourceId: vi.fn().mockReturnValue(undefined),
         getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
         getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       } as unknown as Config;
@@ -725,6 +729,62 @@ describe('HookEventHandler', () => {
       expect(input.source).toBe(SessionStartSource.Resume);
       expect(input.model).toBe('test-model');
       expect(input.agent_type).toBe(AgentType.Bash);
+    });
+
+    it('should include session source fields in the hook input', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('channel');
+      vi.mocked(mockConfig.getSessionSourceId).mockReturnValue('feishu-main');
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'test-model',
+      );
+
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2];
+      expect(input).toMatchObject({
+        source_type: 'channel',
+        source_id: 'feishu-main',
+      });
+    });
+
+    it('should omit session source fields when unavailable', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'test-model',
+      );
+
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2];
+      expect(input).not.toHaveProperty('source_type');
+      expect(input).not.toHaveProperty('source_id');
     });
 
     it('should use default permission mode when not provided', async () => {

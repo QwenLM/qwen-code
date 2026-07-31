@@ -3,13 +3,22 @@ import {
   DaemonSessionProvider,
   useConnection,
   useWorkspace,
+  useWorkspaceActions,
+  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import { useMessages } from '../../hooks/useMessages';
+import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
+import type { TurnOutputOpenRequest } from './TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+} from './turnOutputSelectors';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -119,14 +128,38 @@ function SubagentDetailContent({
   rootTool,
   resolution,
   onStop,
+  onRightPanelOpen,
+  onArtifactsChange,
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
   onStop: () => Promise<{ cancelled: boolean }>;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
+  const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
+  const { artifacts } = useSessionArtifacts();
+  const artifactsByTurn = useMemo(
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [artifacts, connection.workspaceCwd, messages],
+  );
+  const fileChangesByTurn = useMemo(
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [artifactsByTurn, connection.workspaceCwd, messages],
+  );
   const description = getAgentDescription(rootTool);
   const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
@@ -137,6 +170,30 @@ function SubagentDetailContent({
     metrics.status === 'running' || metrics.status === 'in_progress';
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState('');
+
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    return () => {
+      onArtifactsChange?.(sessionId, [], workspaceActions);
+    };
+  }, [artifacts, connection.sessionId, onArtifactsChange, workspaceActions]);
+
+  const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
+    if (request.kind === 'subagent') {
+      onRightPanelOpen?.({
+        ...request,
+        sourceSessionId: connection.sessionId,
+      });
+      return;
+    }
+    onRightPanelOpen?.({
+      ...request,
+      workspaceActions,
+      sourceSessionId: connection.sessionId,
+    });
+  };
 
   useEffect(() => {
     if (isRunning) return;
@@ -200,6 +257,9 @@ function SubagentDetailContent({
           hideFirstUserMessage
           firstTurnMetrics={metrics}
           includeSubagentToolUsageInMetrics={false}
+          turnFileChanges={fileChangesByTurn}
+          turnArtifacts={artifactsByTurn}
+          onTurnOutputOpen={handleRightPanelOpen}
         />
       </div>
     </div>
@@ -211,11 +271,19 @@ export function SubagentDetail({
   rootToolCallId,
   initialRootTool,
   workspaceCwd,
+  onRightPanelOpen,
+  onArtifactsChange,
 }: {
   sessionId: string;
   rootToolCallId: string;
   initialRootTool: ACPToolCall;
   workspaceCwd?: string;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -306,6 +374,8 @@ export function SubagentDetail({
       <SubagentDetailContent
         rootTool={rootTool}
         resolution={resolution}
+        onRightPanelOpen={onRightPanelOpen}
+        onArtifactsChange={onArtifactsChange}
         onStop={() =>
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
         }

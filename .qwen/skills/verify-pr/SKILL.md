@@ -30,6 +30,19 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
 - **You may execute PR code freely.** This job is the designated sandbox
   (container, no credentials) — the opposite of the `/triage` rules. Builds,
   node processes, loopback servers, and scratch `git worktree`s are all fine.
+- **This container is a live sample of the lane's own runtime.** When the
+  diff changes `qwen-triage.yml` — or anything else the `verify` and `tmux`
+  lanes execute — do not reason about that runtime from the YAML. Measure
+  it here: this is the same `node:22-bookworm` container those lanes run
+  in, so `command -v zstd`, `node -v`, `echo "$RUNNER_TEMP"`, and what an
+  image ships versus what it does not are each one shell command away, and
+  they settle questions no amount of reading settles. Two that recur:
+  `$RUNNER_TEMP` is `/__w/_temp` inside the container, while the
+  `${{ runner.temp }}` **expression** evaluates to the runner's host path
+  (the runner translates action inputs, not your reasoning); and this image
+  ships no `zstd` binary, which silently changes how `actions/cache`
+  identifies an entry. Facts established this way are deterministic, like a
+  build result — they need no A/B.
 - **Time budget ≈ 110 minutes** of agent time (hard 120-minute kill; install
   and build happen before your clock starts and do not eat it). Pick scope
   first (below); when time runs out, ship the report with what ran.
@@ -104,13 +117,15 @@ secondary claims. Budget by value:
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
-4. **Capture the A/B and the matrix as they print** (~5 minutes, whenever
-   `QWEN_VERIFY_CHROMIUM=1`). This is a budget line, not an afterthought:
-   two live runs with the browser installed and working produced **zero**
-   images, because the instruction lived in the artifact contract while the
-   plan the agent follows is this list. Decide here how many captures the
-   round needs — normally two, at most a handful — and reserve the time.
-   See the artifact contract for the mechanics and the naming rule.
+4. **Capture the A/B and the matrix as they print** — one command each,
+   `node scripts/verify-capture.mjs --out …/01-ab.png -- <cmd>`, so budget
+   ~2 minutes, not the ~5 an ad-hoc pipeline would need. This is a budget
+   line, not an afterthought: **four live runs produced zero images**, first
+   because the instruction was worded as optional, then because it lived in
+   the artifact contract while the plan the agent follows is this list, and
+   underneath both because the pipeline it named did not exist. Decide here
+   how many captures the round needs — normally two, at most a handful — and
+   reserve the time. Mechanics and the naming rule: artifact contract.
 
 Everything else is explicitly out of scope — and is **listed as not covered**
 in the report. Never let breadth eat the A/B: one proven load-bearing claim
@@ -515,6 +530,26 @@ since the merge-base, say so and re-measure there.
   repo (tags, release commits, merge cadence in `git log`), label it as the
   bounded local estimate it is, and name the exact query a maintainer should
   run to confirm.
+- **Performance, caching, and reuse PRs**: the question is not "is it
+  correct" but "**can the mechanism fire at all**", and A/B has no purchase
+  on it — both sides of a cache restore run identical code. The proof is an
+  identity comparison instead. First, find where the matching key is really
+  defined, **in the implementation, not the documentation**: for
+  `actions/cache`, `npm pack @actions/cache@<version>` and read
+  `getCacheVersion` in `lib/internal/cacheUtils.js` — it hashes the literal
+  `path` strings and the compression method, not the key alone, so two jobs
+  that share a `key:` still miss forever when one runs on `ubuntu-latest`
+  and the other in a container (`/home/runner/work/_temp/…` versus
+  `/__w/_temp/…`, zstd versus gzip). Then compare the **environment
+  tuples** of the write side and the read side — `runs-on`, `container`,
+  what each path expression actually expands to, which tools each image
+  ships — never the YAML strings, which are identical in exactly the case
+  that fails. Close on observability: a restore step with no `id:` and
+  nothing written to `$GITHUB_STEP_SUMMARY` cannot report a miss, so the
+  failure is silent and permanent, and _that_ is the finding rather than a
+  nit. Worked example: a lane's npm cache shipped with matching keys,
+  matching `path:` lines, and 152 green YAML-shape assertions, and could
+  never have hit once.
 - **Config knobs**: trace every new input, flag, or option to an observable
   effect — a control that is recorded but never wired to behavior is a
   finding. Probe the **default** path of manual dispatch/config combinations
@@ -541,15 +576,34 @@ workflow globs). It must contain:
   headline number. One capture of the terminal showing `2999 → 0` is worth
   more than the sentence asserting it.
 
-  **Chromium is pre-installed for you** when `QWEN_VERIFY_CHROMIUM=1` is set;
-  `PLAYWRIGHT_BROWSERS_PATH` already points at it. Do **not** run
-  `playwright install` — you run as `node` with a fresh `HOME` and no apt
-  rights, so it downloads ~170 MB and then fails on system deps. If
-  `QWEN_VERIFY_CHROMIUM` is unset the capability is unavailable in this run:
-  ship the text-only report and note it under _Not covered_ in one line, do
-  not spend budget working around it.
+  **One command, already wired — do not build a capture pipeline.**
 
-  Route: `terminal-capture` skill (node-pty → xterm.js → Playwright PNG).
+  ```bash
+  node scripts/verify-capture.mjs --out tmp/pr<n>-verify-<ts>/evidence/01-ab.png \
+    --title 'A/B: the gate flips on noisy data' -- node my-harness.mjs
+  # or pipe:  my-harness | node scripts/verify-capture.mjs --out …/02-matrix.png
+  ```
+
+  It runs the command, parses its ANSI through `@xterm/headless`, and
+  rasterises the cell grid with `sharp` — the 16 base ANSI colours and bold
+  preserved (256-colour and truecolor fall back to the default grey), **no
+  browser and no pseudo-terminal**. A non-zero exit from the captured command
+  is fine and often the point: capturing a failing base arm is normal. Options
+  that matter: `--cols` (default 100) to stop wrapping, `--title` for the
+  caption, `--rows` to cap height (output taller than `--rows` keeps the tail
+  and warns on stderr that the top was dropped).
+
+  This helper covers flat command output only: it gives the captured command
+  no TTY, so it cannot render an ink TUI or a browser page; for a TUI or
+  web-UI capture, see the `terminal-capture` skill. Earlier versions of this
+  section sent you to build that browser pipeline yourself. Its dependencies
+  do resolve from this repo, but it needs a browser, is slower, and is wired
+  fragilely (integration-tests/terminal-capture is not a root workspace, so
+  its package.json is never installed as a unit), and four live runs produced
+  zero images. Prefer this one command. If `verify-capture.mjs` is missing or
+  fails, say so under _Not covered_ in one line and ship the text-only report;
+  do not reconstruct the pipeline by hand.
+
   The publish job hosts what you produce on a per-PR branch
   (`pr-assets/<N>-verify`) and appends it below the report, capped at
   **8 images, 2 MB each**; anything
