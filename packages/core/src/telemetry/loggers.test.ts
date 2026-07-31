@@ -992,7 +992,163 @@ describe('loggers', () => {
       vi.spyOn(metrics, 'recordToolCallMetrics').mockImplementation(
         mockMetrics.recordToolCallMetrics,
       );
+      vi.spyOn(QwenLogger.prototype, 'logToolCallEvent').mockImplementation(
+        () => undefined,
+      );
       mockLogger.emit.mockReset();
+    });
+
+    it('normalizes an unclassified error before every consumer', () => {
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2024-12-31T23:59:59.000Z',
+        function_name: '   ',
+        function_args: { value: 1 },
+        duration_ms: 25,
+        status: 'error',
+        success: true,
+        error: 'failed',
+        error_type: ' ',
+        prompt_id: 'prompt-normalize',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      logToolCall(configWithRecording, event);
+
+      const normalized = expect.objectContaining({
+        function_name: 'unknown_tool',
+        status: 'error',
+        success: false,
+        error: 'failed',
+        error_type: ToolErrorType.UNKNOWN,
+      });
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        normalized,
+      );
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        normalized,
+        'test-session-id',
+      );
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(normalized);
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            function_name: 'unknown_tool',
+            status: 'error',
+            success: false,
+            error: 'failed',
+            error_type: ToolErrorType.UNKNOWN,
+            'error.message': 'failed',
+            'error.type': ToolErrorType.UNKNOWN,
+          }),
+        }),
+      );
+      expect(mockMetrics.recordToolCallMetrics).toHaveBeenCalledWith(
+        configWithRecording,
+        25,
+        {
+          function_name: 'unknown_tool',
+          status: 'error',
+          success: false,
+          decision: undefined,
+          tool_type: 'native',
+        },
+      );
+      expect(event).toMatchObject({
+        function_name: '   ',
+        success: true,
+        error_type: ' ',
+      });
+    });
+
+    it.each([
+      { status: 'success' as const, expectedSuccess: true },
+      { status: 'cancelled' as const, expectedSuccess: false },
+    ])(
+      'clears stale error fields for $status events',
+      ({ status, expectedSuccess }) => {
+        const event = {
+          'event.name': 'tool_call',
+          'event.timestamp': '2024-12-31T23:59:59.000Z',
+          function_name: 'test-function',
+          function_args: {},
+          duration_ms: 10,
+          status,
+          success: !expectedSuccess,
+          error: 'stale error',
+          error_type: ToolErrorType.EXECUTION_FAILED,
+          prompt_id: 'prompt-terminal',
+          tool_type: 'native',
+        } as ToolCallEvent;
+
+        logToolCall(mockConfig, event);
+
+        expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            status,
+            success: expectedSuccess,
+            error: undefined,
+            error_type: undefined,
+          }),
+        );
+        const attributes = mockLogger.emit.mock.calls[0][0].attributes;
+        expect(attributes).toMatchObject({
+          status,
+          success: expectedSuccess,
+          error: undefined,
+          error_type: undefined,
+        });
+        expect(attributes).not.toHaveProperty('error.message');
+        expect(attributes).not.toHaveProperty('error.type');
+        expect(mockMetrics.recordToolCallMetrics).toHaveBeenCalledWith(
+          mockConfig,
+          10,
+          expect.objectContaining({
+            status,
+            success: expectedSuccess,
+          }),
+        );
+      },
+    );
+
+    it('normalizes UI and QwenLogger events when the OTel SDK is disabled', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2024-12-31T23:59:59.000Z',
+        function_name: '',
+        function_args: {},
+        duration_ms: 10,
+        status: 'error',
+        success: true,
+        prompt_id: 'prompt-no-otel',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      logToolCall(mockConfig, event);
+
+      const normalized = expect.objectContaining({
+        function_name: 'unknown_tool',
+        status: 'error',
+        success: false,
+        error_type: ToolErrorType.UNKNOWN,
+      });
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        normalized,
+      );
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        normalized,
+        'test-session-id',
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+      expect(mockMetrics.recordToolCallMetrics).not.toHaveBeenCalled();
     });
 
     it('should log a tool call with all fields', () => {
@@ -1084,6 +1240,7 @@ describe('loggers', () => {
         100,
         {
           function_name: 'test-function',
+          status: 'success',
           success: true,
           decision: ToolCallDecision.ACCEPT,
           tool_type: 'native',
@@ -1149,7 +1306,10 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-2',
           tool_type: 'native',
           error: undefined,
-          error_type: undefined,
+          error_type: ToolErrorType.UNKNOWN,
+          'error.type': ToolErrorType.UNKNOWN,
+          mcp_server_name: undefined,
+          response_id: undefined,
           metadata: undefined,
           content_length: undefined,
         },
@@ -1160,6 +1320,7 @@ describe('loggers', () => {
         100,
         {
           function_name: 'test-function',
+          status: 'error',
           success: false,
           decision: ToolCallDecision.REJECT,
           tool_type: 'native',
@@ -1169,6 +1330,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...event,
+          error_type: ToolErrorType.UNKNOWN,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -1239,6 +1401,7 @@ describe('loggers', () => {
         100,
         {
           function_name: 'test-function',
+          status: 'success',
           success: true,
           decision: ToolCallDecision.MODIFY,
           tool_type: 'native',
@@ -1317,6 +1480,7 @@ describe('loggers', () => {
         100,
         {
           function_name: 'test-function',
+          status: 'success',
           success: true,
           decision: undefined,
           tool_type: 'native',
@@ -1396,6 +1560,7 @@ describe('loggers', () => {
         100,
         {
           function_name: 'test-function',
+          status: 'error',
           success: false,
           decision: undefined,
           tool_type: 'native',
