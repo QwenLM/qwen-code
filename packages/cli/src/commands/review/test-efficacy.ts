@@ -1043,13 +1043,28 @@ export function splitDiffIntoHunks(
   // file's header, or a multi-file diff hands git a patch naming the wrong
   // file. (Latent while hunkProbeInputs diffs one path at a time — but this is
   // exported and reads as general-purpose, so it behaves as one.)
-  let fileHeader = lines.slice(0, first);
+  // Start from the LAST `diff --git` before the first `@@`: a binary entry
+  // before it has no hunks, and including its header in the initial slice
+  // would hand the first real hunk a patch naming two files.
+  let headerStart = 0;
+  for (let k = first - 1; k >= 0; k--) {
+    if (lines[k].startsWith('diff --git ')) {
+      headerStart = k;
+      break;
+    }
+  }
+  let fileHeader = lines.slice(headerStart, first);
   const out: Array<{ header: string; patch: string; startLine: number }> = [];
   let i = first;
   while (i < lines.length) {
     if (lines[i].startsWith('diff --git ')) {
       const start = i;
-      while (i < lines.length && !lines[i].startsWith('@@')) i++;
+      while (
+        i < lines.length &&
+        !lines[i].startsWith('@@') &&
+        !(i > start && lines[i].startsWith('diff --git '))
+      )
+        i++;
       fileHeader = lines.slice(start, i);
       continue;
     }
@@ -1121,6 +1136,10 @@ export function selectHunkProbes(
   const preferred: HunkCandidate[] = [];
   const rest: HunkCandidate[] = [];
   for (const f of files) {
+    // A deleted file's hunks are all removals; `runOneHunkProbe` reads the
+    // file first and returns `inconclusive` every time. Spending cap slots on
+    // guaranteed inconclusives wastes the budget on a delete-heavy diff.
+    if (f.diff.includes('\n+++ /dev/null')) continue;
     const hunks = splitDiffIntoHunks(f.diff);
     hunks.forEach((h, index) => {
       const end = h.startLine + newSideLength(h.header);
@@ -1684,7 +1703,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         return {
           file: h.file,
           kind: 'hunk-survived' as const,
-          message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. Nothing in this diff's tests fails when this particular change is undone, so it ships unprotected — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
+          message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. No test in this diff fails when this particular change is undone — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
             restatesInert
               ? ' A file-level revert probe also came back inert, so this restates that gap at hunk granularity — read the two as one finding, not two.'
               : ''

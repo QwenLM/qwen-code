@@ -74,6 +74,14 @@ describe('extractTestPlanSection', () => {
     expect(s?.content).not.toContain('low');
   });
 
+  it('tracks fence markers: a ``` line inside a ~~~ fence does not close it', () => {
+    const s = extractTestPlanSection(
+      '## Test Plan\n\n~~~\n```\n# still fenced\nnpm test\n```\n~~~\n\nafter\n\n## Risk\n\nlow',
+    );
+    expect(s?.content).toContain('after');
+    expect(s?.content).not.toContain('low');
+  });
+
   it('finds a heading whose name is PREFIXED, not anchored', () => {
     // This repo's own PR template writes `## Reviewer Test Plan`. An anchored
     // pattern found neither it nor `## Reviewer 测试计划`, so the command
@@ -184,6 +192,32 @@ describe('extractClaims', () => {
     ).toEqual([]);
   });
 
+  it('does not read prose inside a quoted argument as a path', () => {
+    // `-t 'covers write/edit tools'` is a test-name filter, not a path claim.
+    const claims = extractClaims(
+      "`npx vitest run src/a.test.ts -t 'covers write/edit tools'`",
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/a.test.ts' });
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('write/edit')),
+    ).toBe(false);
+  });
+
+  it('bails on path-rebasing flags like --root, as it does on cd', () => {
+    // `--root ./integration-tests` rebases relative paths like `cd` does;
+    // resolving them against the repo root files false `contradicted` notes.
+    const claims = extractClaims(
+      '`npx vitest run --root ./integration-tests sdk-typescript/perm.test.ts`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('sdk-typescript')),
+    ).toBe(false);
+  });
+
   it('does not read a bare parenthesised number as a count', () => {
     expect(
       extractClaims('Follows up on (#8176).').filter((c) => c.kind === 'count'),
@@ -237,6 +271,14 @@ describe('observedTestCounts', () => {
   it('reads a summary that also reports failures', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),
+    ).toEqual([40]);
+  });
+
+  it('reads a three-segment summary (failed | skipped | passed)', () => {
+    expect(
+      observedTestCounts(
+        report(['Tests  2 failed | 3 skipped | 40 passed (45)']),
+      ),
     ).toEqual([40]);
   });
 

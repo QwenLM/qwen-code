@@ -145,14 +145,16 @@ export function extractTestPlanSection(
   // this ends the section at the first `#!/usr/bin/env bash` and reports a Test
   // Plan that stops one line into its own repro.
   const fenced = new Array<boolean>(lines.length).fill(false);
-  let inFence = false;
+  let fenceMarker: string | null = null;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(```|~~~)/.test(lines[i])) {
+    const m = /^\s*(```|~~~)/.exec(lines[i]);
+    if (m) {
       fenced[i] = true;
-      inFence = !inFence;
+      if (!fenceMarker) fenceMarker = m[1];
+      else if (m[1] === fenceMarker) fenceMarker = null;
       continue;
     }
-    fenced[i] = inFence;
+    fenced[i] = fenceMarker !== null;
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -287,7 +289,18 @@ export function extractClaims(section: string): Array<{
     if (!cd && /(^|\s)cd\s/.test(span)) continue;
     const base = cd?.[1] ?? '';
     if (base && PATH_RE.test(base)) push('path', base);
-    const tokens = (cd?.[2] ?? span).split(/\s+/);
+    // Flags that rebase relative paths (`--root ./integration-tests`) are
+    // `cd`'s twin: a path token after one is relative to the flag's value,
+    // not the repo root. Bail like the exotic-`cd` case — the `cd` directory
+    // above was already pushed.
+    const rest = cd?.[2] ?? span;
+    if (/(?:^|\s)(?:--root|--prefix|--cwd|--project|-C)\s/.test(rest)) continue;
+    // Strip quoted arguments before tokenizing: `-t 'covers write/edit tools'`
+    // is prose inside a flag value, not a path claim about the tree.
+    const tokens = rest
+      .replace(/'[^']*'/g, '')
+      .replace(/"[^"]*"/g, '')
+      .split(/\s+/);
     for (let i = 0; i < tokens.length; i++) {
       // A token following a flag is that flag's VALUE (`--repo owner/repo`,
       // `-f infra/compose.yml`) — a claim about the tool's argument space,
@@ -327,10 +340,10 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
     let total = 0;
     let saw = false;
-    // `Tests  472 passed (472)`, `Tests: 12 passed, 12 total`, and the mixed
-    // form `Tests  1 failed | 40 passed (41)` — vitest separates with ` | `,
-    // jest with `, `, so the separator carries its own surrounding whitespace.
-    const re = /^\s*Tests:?\s+(?:\d+\s+failed\s*[,|]\s*)?(\d+)\s+passed/gim;
+    // `Tests  472 passed (472)`, `Tests: 12 passed, 12 total`, and multi-
+    // segment forms like `Tests  2 failed | 3 skipped | 40 passed (45)` —
+    // vitest separates with ` | `, jest with `, `.
+    const re = /^\s*Tests:?\s+(?:\d+\s+\w+\s*[,|]\s*)*(\d+)\s+passed/gim;
     // Strip ANSI SGR sequences first. A real runner writes its summary through
     // a color-enabled pipe, so the kept text reads
     // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
@@ -671,12 +684,20 @@ export const testPlanCommand: CommandModule = {
   handler: (argv) => {
     const args = argv as unknown as TestPlanArgs;
     setGhHost(args.host);
-    const report = runTestPlan(args);
-    if (args.out) {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+    try {
+      const report = runTestPlan(args);
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+      writeStderrLine(`test-plan: ${report.note}`);
+    } catch (err) {
+      // A missing/invalid plan makes `runTestPlan` throw. Emit the one-line
+      // message and a non-zero exit (matching build-test and script-lint), not
+      // yargs' stack trace — the orchestrator reads a clean error.
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
     }
-    writeStdoutLine(JSON.stringify(report, null, 2));
-    writeStderrLine(`test-plan: ${report.note}`);
   },
 };

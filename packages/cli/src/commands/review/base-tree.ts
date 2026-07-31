@@ -72,7 +72,7 @@ export interface BaseTreeReport {
   path?: string;
   /** The commit it holds — the merge base of the PR and its target branch. */
   baseSha?: string;
-  /** The build that ran there; null when the tree could not be created. */
+  /** The build that ran there; null when the tree could not be created or a fast-path reuse found it already built. */
   build: BuildTestReport | null;
   /** What happened, in one line. Rendered to the reviewer verbatim. */
   note: string;

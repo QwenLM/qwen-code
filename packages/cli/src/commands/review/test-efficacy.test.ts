@@ -1271,6 +1271,26 @@ describe('splitDiffIntoHunks', () => {
     ).toEqual([]);
     expect(splitDiffIntoHunks('')).toEqual([]);
   });
+
+  it("does not swallow a binary file into the next file's header", () => {
+    // A binary entry has no `@@` hunks; the boundary scan must stop at the
+    // next `diff --git` rather than running past it into the next file.
+    const d = [
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/src/x.ts b/src/x.ts',
+      '--- a/src/x.ts',
+      '+++ b/src/x.ts',
+      '@@ -1,1 +1,1 @@',
+      '-const a = 1;',
+      '+const a = 2;',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].patch).toContain('diff --git a/src/x.ts b/src/x.ts');
+    expect(hunks[0].patch).not.toContain('img.png');
+  });
 });
 
 describe('selectHunkProbes', () => {
@@ -1326,6 +1346,30 @@ describe('selectHunkProbes', () => {
     const { selected, skippedForCap } = selectHunkProbes(many);
     expect(selected).toHaveLength(MAX_HUNK_PROBES);
     expect(skippedForCap).toBe(3);
+  });
+
+  it('skips deleted files rather than spending cap slots on them', () => {
+    // A deleted file's hunks are all removals; runOneHunkProbe reads the file
+    // first and returns `inconclusive` every time.
+    const deleted = {
+      file: 'src/gone.ts',
+      diff: [
+        'diff --git a/src/gone.ts b/src/gone.ts',
+        'deleted file mode 100644',
+        '--- a/src/gone.ts',
+        '+++ /dev/null',
+        '@@ -1,3 +0,0 @@',
+        '-const a = 1;',
+        '-const b = 2;',
+        '-const c = 3;',
+        '',
+      ].join('\n'),
+      hasNewTests: false,
+      mutantLines: [] as number[],
+    };
+    const { selected } = selectHunkProbes([deleted, file()]);
+    expect(selected.every((c) => c.file !== 'src/gone.ts')).toBe(true);
+    expect(selected.length).toBeGreaterThan(0);
   });
 
   it('has nothing to probe when every hunk is mutant-covered', () => {

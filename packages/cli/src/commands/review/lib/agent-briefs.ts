@@ -496,7 +496,7 @@ It builds the merge base in a sibling worktree and reports \`available\` and \`p
 
 - **Same input, same procedure, both sides.** A difference produced by running two different things is not a difference between the two programs. If you had to build or install differently on one side, say so and treat the result as inconclusive.
 - **Quote both outputs.** \`BASE: <what it printed>\` / \`PR: <what it printed>\`. The observation is the verdict; a summary of it is a reading again.
-- **A/B is expensive — spend it on a claim that turns on it.** An install and a build, once per review at most (the command reuses an already-built base tree, so concurrent verifiers pay once). A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
+- **A/B is expensive — spend it on a claim that turns on it.** An install and a build (the command reuses an already-built base tree; shards that race the first build may both pay). A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
 
 A finding an A/B settled carries \`Source: [probe]\` like any other run-produced evidence, with both sides' output quoted. **Do not remove the base tree** — \`cleanup\` sweeps it at the end of the review, and a later finding may need it.
 
