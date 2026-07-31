@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
+import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
 } from '../../utils/environmentContext.js';
+import { ToolNames } from '../tool-names.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -58,6 +60,42 @@ export function runInForkContext<T>(fn: () => Promise<T>): Promise<T> {
 
 export function isInForkExecution(): boolean {
   return forkExecutionStorage.getStore() !== undefined;
+}
+
+/**
+ * Keeps the fork's model-visible declarations cache-identical while removing
+ * the main-session-only image renderer from its execution capability.
+ */
+export function resolveForkExecutionAllowedTools(
+  advertisedToolNames: readonly string[],
+  requestedToolNames: readonly string[] | undefined,
+  availableToolNames: readonly string[] = advertisedToolNames,
+): string[] | undefined {
+  if (!advertisedToolNames.includes(ToolNames.DISPLAY_IMAGE)) {
+    return requestedToolNames ? [...requestedToolNames] : undefined;
+  }
+
+  return (requestedToolNames ?? availableToolNames).filter(
+    (name) => name !== ToolNames.DISPLAY_IMAGE,
+  );
+}
+
+/**
+ * Restores the parent's display schema in a fork registry for prompt-cache
+ * parity. Callers must pair this with resolveForkExecutionAllowedTools().
+ */
+export function registerForkDisplayImageForCache(
+  config: Config,
+  advertisedToolNames: readonly string[],
+): void {
+  if (!advertisedToolNames.includes(ToolNames.DISPLAY_IMAGE)) return;
+
+  config
+    .getToolRegistry()
+    .registerFactory(ToolNames.DISPLAY_IMAGE, async () => {
+      const { DisplayImageTool } = await import('../display-image.js');
+      return new DisplayImageTool(config);
+    });
 }
 
 export const FORK_PLACEHOLDER_RESULT =

@@ -191,6 +191,7 @@ describe('AgentTool', () => {
     // exercises foreground execution fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -3415,6 +3416,62 @@ describe('AgentTool', () => {
         ToolNames.EDIT,
       ]);
       expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),
+      );
+    });
+
+    it('preserves display_image in the fork declarations but denies its execution', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.DISPLAY_IMAGE,
+          description: 'Display an image',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.EDIT,
+          description: 'Edit a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect images',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: [ToolNames.READ_FILE, ToolNames.DISPLAY_IMAGE],
+      });
+      await invocation.execute();
+
+      const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
+      const forkConfig = createArgs?.[1];
+      const toolConfig = createArgs?.[5];
+      expect(toolConfig?.tools).toStrictEqual([
+        ToolNames.READ_FILE,
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.EDIT,
+      ]);
+      expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(
+        forkConfig?.getToolRegistry().registerFactory,
+      ).toHaveBeenCalledWith(ToolNames.DISPLAY_IMAGE, expect.any(Function));
       expect(mockContextState.set).toHaveBeenCalledWith(
         'task_prompt',
         expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),

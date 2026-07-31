@@ -157,7 +157,7 @@ export class DisplayImageTool extends BaseDeclarativeTool<
     super(
       DisplayImageTool.Name,
       ToolDisplayNames.DISPLAY_IMAGE,
-      'Displays an existing workspace PNG in the user’s interactive terminal. This is only a user-visible preview: it does not return image contents to you. Use read_file when you need to inspect or understand the image. The file_path must be absolute.',
+      'Displays an existing workspace PNG in the user’s interactive terminal. Only the main agent can execute this tool. This is only a user-visible preview: it does not return image contents to you. Use read_file when you need to inspect or understand the image. The file_path must be absolute.',
       Kind.Read,
       {
         type: 'object',

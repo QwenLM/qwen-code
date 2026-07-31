@@ -50,6 +50,8 @@ import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
 import {
@@ -904,6 +906,12 @@ export class BackgroundAgentResumeService {
       const activeRestoreParentPM = approvalOverride.cleanup;
       agentConfig = activeAgentConfig;
       restoreParentPM = activeRestoreParentPM;
+      if (target.isFork) {
+        registerForkDisplayImageForCache(
+          activeAgentConfig,
+          currentForkRuntime!.toolNames,
+        );
+      }
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces
       // confirmations to the parent UI instead of auto-denying, in
@@ -1662,14 +1670,19 @@ export class BackgroundAgentResumeService {
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
+    const allowedTools = resolveForkExecutionAllowedTools(
+      runtime.toolNames,
+      executionAllowedTools,
+      agentConfig.getToolRegistry().getAllToolNames(),
+    );
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
       initialMessages,
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
-      ...(executionAllowedTools !== undefined
-        ? { executionAllowedTools: structuredClone(executionAllowedTools) }
+      ...(allowedTools !== undefined
+        ? { executionAllowedTools: allowedTools }
         : {}),
     };
 

@@ -6,7 +6,44 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { normalizeForkTurns, selectForkHistory } from './fork-subagent.js';
+import { ToolNames } from '../tool-names.js';
+import {
+  normalizeForkTurns,
+  resolveForkExecutionAllowedTools,
+  selectForkHistory,
+} from './fork-subagent.js';
+
+describe('resolveForkExecutionAllowedTools', () => {
+  const parentTools = [
+    ToolNames.READ_FILE,
+    ToolNames.DISPLAY_IMAGE,
+    ToolNames.EDIT,
+  ];
+
+  it('preserves unrestricted execution when display_image is not advertised', () => {
+    expect(
+      resolveForkExecutionAllowedTools([ToolNames.READ_FILE], undefined),
+    ).toBeUndefined();
+  });
+
+  it('keeps inherited declarations but denies display_image by default', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, undefined, [
+        ...parentTools,
+        ToolNames.GLOB,
+      ]),
+    ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.GLOB]);
+  });
+
+  it('cannot re-enable display_image through fork_tools', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, [
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.READ_FILE,
+      ]),
+    ).toEqual([ToolNames.READ_FILE]);
+  });
+});
 
 describe('selectForkHistory', () => {
   const startup: Content = {

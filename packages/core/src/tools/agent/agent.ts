@@ -45,6 +45,8 @@ import {
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
   normalizeForkTurns,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
   selectForkHistory,
   type ForkTurns,
@@ -1646,6 +1648,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const parentToolNames = generationConfig?.systemInstruction
+      ? extractParentToolNames(generationConfig)
+      : [];
+    registerForkDisplayImageForCache(agentConfig, parentToolNames);
+    const executionAllowedTools = resolveForkExecutionAllowedTools(
+      parentToolNames,
+      this.params.fork_tools,
+      agentConfig.getToolRegistry().getAllToolNames(),
+    );
+    const promptExecutionAllowedTools =
+      this.params.fork_tools === undefined ? undefined : executionAllowedTools;
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     let rawHistory: Content[] = [];
     if (geminiClient) {
@@ -1700,7 +1714,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
-          this.params.fork_tools,
+          promptExecutionAllowedTools,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1732,7 +1746,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (!taskPrompt) {
       taskPrompt = buildChildMessage(
         this.params.prompt,
-        this.params.fork_tools,
+        promptExecutionAllowedTools,
       );
     }
 
@@ -1744,15 +1758,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let promptConfig: PromptConfig;
     let toolConfig: ToolConfig;
 
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
       // Keep the parent's current allowlist, but pass names rather than inline
       // schemas so AgentCore resolves every declaration through the fork's
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const parentToolNames = extractParentToolNames(generationConfig);
-
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
           | string
@@ -1761,8 +1772,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       toolConfig = {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
-        ...(this.params.fork_tools !== undefined
-          ? { executionAllowedTools: [...this.params.fork_tools] }
+        ...(executionAllowedTools !== undefined
+          ? { executionAllowedTools }
           : {}),
       };
     } else {
@@ -1772,8 +1783,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       toolConfig = {
         tools: ['*'],
-        ...(this.params.fork_tools !== undefined
-          ? { executionAllowedTools: [...this.params.fork_tools] }
+        ...(executionAllowedTools !== undefined
+          ? { executionAllowedTools }
           : {}),
       };
     }
@@ -3199,7 +3210,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork && bgToolConfig?.executionAllowedTools !== undefined
+          ...(isFork &&
+          this.params.fork_tools !== undefined &&
+          bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
@@ -3994,7 +4007,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork && toolConfig?.executionAllowedTools !== undefined
+          ...(isFork &&
+          this.params.fork_tools !== undefined &&
+          toolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
