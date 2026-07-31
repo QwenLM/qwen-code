@@ -1397,6 +1397,33 @@ function mergeConsecutiveAssistantMessages(
 }
 
 /**
+ * Builds a first-wins predicate for deduplicating tool_result blocks by
+ * tool_use_id. Anthropic rejects a message with more than one tool_result
+ * for the same tool_use_id ("each `tool_use` block must have a single
+ * result" -- HTTP 400); a duplicate can happen when a tool call's result is
+ * recorded twice in history (a retried conversion pass, or a history source
+ * that double-appends a function response). In the cases observed so far
+ * the duplicate blocks are byte-identical, so first-wins vs. last-wins is
+ * indistinguishable in practice -- first-wins is chosen only because it
+ * requires no lookahead. id-less blocks always pass through unfiltered,
+ * preserving prior behavior for blocks Anthropic doesn't validate this way.
+ *
+ * Two independent call sites need this: `cleanOrphanedToolCalls` (the
+ * common case, a duplicate within one message) and
+ * `mergeConsecutiveUserMessages` (a duplicate that only becomes
+ * co-located after two originally-separate messages are combined).
+ */
+function makeToolResultDeduper(): (id: string | undefined) => boolean {
+  const seen = new Set<string>();
+  return (id) => {
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  };
+}
+
+/**
  * Remove tool_use blocks that have no matching tool_result in the
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
@@ -1498,15 +1525,7 @@ function cleanOrphanedToolCalls(
       continue;
     }
 
-    // Anthropic rejects a user message that carries more than one
-    // tool_result block for the same tool_use_id ("each `tool_use` block
-    // must have a single result" -- HTTP 400). A duplicate can happen when
-    // a tool call's result is recorded twice in history (e.g. a retried
-    // conversion pass, or a source of Content objects that double-appends
-    // a function response). Keep only the first tool_result seen for a
-    // given id in this message; drop later duplicates outright rather than
-    // sending a shape Anthropic will reject wholesale.
-    const seenToolResultIds = new Set<string>();
+    const keepToolResult = makeToolResultDeduper();
 
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
@@ -1518,9 +1537,7 @@ function cleanOrphanedToolCalls(
         const id = (b as { tool_use_id?: string }).tool_use_id;
         if (!id) return true;
         if (!validToolResultBlocks.has(b as object)) return false;
-        if (seenToolResultIds.has(id)) return false;
-        seenToolResultIds.add(id);
-        return true;
+        return keepToolResult(id);
       }
       return true;
     });
@@ -1560,14 +1577,11 @@ function mergeConsecutiveUserMessages(
       // several into one). Re-apply the same first-wins dedup here so a
       // cross-message duplicate can't survive the merge and reach the
       // wire as two tool_result blocks for one tool_use_id.
-      const seenToolResultIds = new Set<string>();
+      const keepToolResult = makeToolResultDeduper();
       const toolResults = combined.filter((b) => {
         if ((b as { type?: string }).type !== 'tool_result') return false;
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        if (!id) return true;
-        if (seenToolResultIds.has(id)) return false;
-        seenToolResultIds.add(id);
-        return true;
+        return keepToolResult(id);
       });
       lastMessage.content = [
         ...toolResults,

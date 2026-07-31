@@ -1224,8 +1224,9 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
+      expect(messages).toHaveLength(3);
       const toolResults = (
-        messages[2]?.content as Array<{ type: string; tool_use_id?: string }>
+        messages[2]!.content as Array<{ type: string; tool_use_id?: string }>
       ).filter((b) => b.type === 'tool_result');
       expect(toolResults).toHaveLength(1);
       expect(toolResults[0]).toMatchObject({
@@ -1538,18 +1539,93 @@ describe('AnthropicContentConverter', () => {
                   response: { output: 'second' },
                 },
               },
+              { text: 'a follow-up note' },
             ],
           },
         ],
       });
 
-      const toolResults = (
-        messages[2]?.content as Array<{ type: string; tool_use_id?: string }>
-      ).filter((b) => b.type === 'tool_result');
-      expect(toolResults).toHaveLength(1);
-      expect(toolResults[0]).toMatchObject({
-        tool_use_id: 'dup',
-        content: 'first',
+      // Full merged content, not just the filtered tool_result blocks --
+      // confirms the non-tool_result sibling from the second message
+      // survives the merge and still sorts after the (deduped) results.
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'dup', content: 'first' },
+          {
+            type: 'text',
+            text: 'a follow-up note',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops duplicate tool_result blocks across three consecutive user messages', () => {
+      // Pins that the merge-site dedup accumulates across the whole
+      // `combined` array on every iteration, not just pairwise between
+      // the two most recently merged messages -- with three originally
+      // separate user turns each carrying a tool_result for the same
+      // tool_use_id, only the first should survive.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup3', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'third' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'dup3',
+            content: 'first',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
       });
     });
 
