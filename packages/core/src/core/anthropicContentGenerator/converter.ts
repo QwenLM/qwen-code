@@ -1176,6 +1176,16 @@ function cleanOrphanedToolCalls(
       continue;
     }
 
+    // Anthropic rejects a user message that carries more than one
+    // tool_result block for the same tool_use_id ("each `tool_use` block
+    // must have a single result" -- HTTP 400). A duplicate can happen when
+    // a tool call's result is recorded twice in history (e.g. a retried
+    // conversion pass, or a source of Content objects that double-appends
+    // a function response). Keep only the first tool_result seen for a
+    // given id in this message; drop later duplicates outright rather than
+    // sending a shape Anthropic will reject wholesale.
+    const seenToolResultIds = new Set<string>();
+
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
@@ -1184,7 +1194,11 @@ function cleanOrphanedToolCalls(
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        return !id || validToolResultBlocks.has(b as object);
+        if (!id) return true;
+        if (!validToolResultBlocks.has(b as object)) return false;
+        if (seenToolResultIds.has(id)) return false;
+        seenToolResultIds.add(id);
+        return true;
       }
       return true;
     });
@@ -1218,10 +1232,23 @@ function mergeConsecutiveUserMessages(
         ...(lastMessage.content as AnthropicContentBlockParam[]),
         ...(message.content as AnthropicContentBlockParam[]),
       ];
+      // Two originally-separate user messages can each carry a valid
+      // tool_result for the same tool_use_id (cleanOrphanedToolCalls only
+      // dedupes within a single message, before this merge combines
+      // several into one). Re-apply the same first-wins dedup here so a
+      // cross-message duplicate can't survive the merge and reach the
+      // wire as two tool_result blocks for one tool_use_id.
+      const seenToolResultIds = new Set<string>();
+      const toolResults = combined.filter((b) => {
+        if ((b as { type?: string }).type !== 'tool_result') return false;
+        const id = (b as { tool_use_id?: string }).tool_use_id;
+        if (!id) return true;
+        if (seenToolResultIds.has(id)) return false;
+        seenToolResultIds.add(id);
+        return true;
+      });
       lastMessage.content = [
-        ...combined.filter(
-          (b) => (b as { type?: string }).type === 'tool_result',
-        ),
+        ...toolResults,
         ...combined.filter(
           (b) => (b as { type?: string }).type !== 'tool_result',
         ),

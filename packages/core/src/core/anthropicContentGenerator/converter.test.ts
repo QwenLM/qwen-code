@@ -1189,6 +1189,106 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('drops a duplicate tool_result sharing a tool_use_id within one message', () => {
+      // Anthropic rejects a message with two tool_result blocks for the
+      // same tool_use_id ("each `tool_use` block must have a single
+      // result" -- HTTP 400). This can happen when a tool call's result
+      // is recorded twice in history.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const toolResults = (
+        messages[2]?.content as Array<{ type: string; tool_use_id?: string }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0]).toMatchObject({
+        tool_use_id: 'dup',
+        content: 'first',
+      });
+    });
+
+    it('drops a duplicate tool_result for one id while keeping a different id in the same message', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'dup', name: 'tool', args: {} } },
+              { functionCall: { id: 'other', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'other',
+                  name: 'tool',
+                  response: { output: 'other-result' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const toolResults = (
+        messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+          content?: string;
+        }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults.map((b) => [b.tool_use_id, b.content])).toEqual([
+        ['dup', 'first'],
+        ['other', 'other-result'],
+      ]);
+    });
+
     it('keeps tool results split across consecutive user messages', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -1248,6 +1348,59 @@ describe('AnthropicContentConverter', () => {
             cache_control: { type: 'ephemeral' },
           },
         ],
+      });
+    });
+
+    it('drops a duplicate tool_result for the same id across two consecutive user messages', () => {
+      // cleanOrphanedToolCalls only dedupes tool_result blocks within a
+      // single message; mergeConsecutiveUserMessages runs afterward and
+      // can combine two originally-separate user messages that each
+      // independently carried a (individually valid) tool_result for the
+      // same tool_use_id. Without a second dedup pass at the merge site,
+      // the merged message would resurface the exact "two tool_result
+      // blocks for one tool_use_id" shape Anthropic rejects.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const toolResults = (
+        messages[2]?.content as Array<{ type: string; tool_use_id?: string }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0]).toMatchObject({
+        tool_use_id: 'dup',
+        content: 'first',
       });
     });
 
