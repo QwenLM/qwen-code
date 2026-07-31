@@ -1603,6 +1603,7 @@ describe('qwen-triage verify hardening', () => {
       for (const line of s.split('\n')) {
         if (!inFence) {
           if (inHtml && /^\s*$/.test(line)) inHtml = false;
+          const wasHtml = inHtml;
           const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
           if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
             inFence = true;
@@ -1610,8 +1611,8 @@ describe('qwen-triage verify hardening', () => {
             fl = m[1].length;
             continue;
           }
-          if (/^ {0,3}<\/?(details|summary)\b/.test(line)) inHtml = true;
-          kept.push(line.replace(/`[^`]*`/g, ''));
+          if (/^\s*<\/?(details|summary)\b/.test(line)) inHtml = true;
+          kept.push(wasHtml ? line : line.replace(/`[^`]*`/g, ''));
         } else {
           const cm = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
           if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
@@ -1749,6 +1750,50 @@ describe('qwen-triage verify hardening', () => {
       expect(htmlOut.split('<details>').length - 1).toBe(
         htmlOut.split('</details>').length - 1,
       );
+
+      // Code-span divergence: a backtick code span inside a <details>
+      // HTML block is literal text per CommonMark/GitHub, not code.
+      // The sanitizer must prose-escape the whole line (neutralizing
+      // <img>) rather than splitting it through proseLine and passing
+      // the span through escCode as inert code.
+      const codespan = join(dir, 'codespan.md');
+      writeFileSync(
+        codespan,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          'text `<img src=x onerror=alert(1)>` more',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const csOut = emit(codespan, 45000);
+      expect(csOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(csOut).not.toContain('<img');
+      expect(csOut.split('<details>').length - 1).toBe(
+        csOut.split('</details>').length - 1,
+      );
+      const csProse = stripCode(csOut);
+      expect(csProse).not.toContain('<img');
+
+      // Indented fold: a <details> nested in a list (indent >= 4) must
+      // enter the inHtml state too — GitHub opens HTML blocks relative
+      // to the list-item content column, not just at column 0-3.
+      const indented = join(dir, 'indented.md');
+      writeFileSync(
+        indented,
+        [
+          '- list item',
+          '    <details>',
+          '    <summary>fold</summary>',
+          '    text `<img src=x>` more',
+          '    </details>',
+          '',
+        ].join('\n'),
+      );
+      const indOut = emit(indented, 45000);
+      expect(indOut).toContain('&lt;img src=x>');
+      expect(indOut).not.toContain('<img');
 
       // Mirror case: a surplus </details> with no open is dropped so it
       // cannot close the wrapping fold early — the wrapper stays 1 open /

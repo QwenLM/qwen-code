@@ -3345,18 +3345,20 @@ jobs:
           #      back to live tags — no other tag can form in ordinary
           #      prose, so <img>/<script>/onerror never render there. A
           #      line-level inHtml flag tracks raw-HTML blocks opened by
-          #      details/summary: inside one, backtick lines are NOT fences
-          #      (CommonMark/GitHub reads them as literal text), so the
-          #      sanitizer prose-escapes their content instead of passing it
-          #      through escCode — closing the divergence where GitHub saw
-          #      live HTML the sanitizer treated as inert code. & and > are
-          #      left alone
-          #      in prose (a decoded entity yields text, never markup, and an
-          #      unescaped > cannot open a tag once < is escaped), which keeps
-          #      &&, ->, and blockquotes readable. Inside code spans/fences
-          #      < & @ are left alone too: <img> and @mentions are inert under
-          #      a code/pre ancestor, and escaping them there only mangles the
-          #      rendered text;
+          #      details/summary (at any indent, so list-nested folds
+          #      enter the state too): inside one, neither fence lines
+          #      NOR code spans are code — CommonMark/GitHub reads both
+          #      as literal text in a raw-HTML block — so the sanitizer
+          #      prose-escapes the whole line instead of splitting it
+          #      through proseLine, closing the divergence where GitHub
+          #      saw live HTML the sanitizer treated as inert code.
+          #      & and > are left alone in prose (a decoded entity
+          #      yields text, never markup, and an unescaped > cannot
+          #      open a tag once < is escaped), which keeps &&, ->, and
+          #      blockquotes readable. Outside HTML blocks, inside code
+          #      spans/fences < & @ are left alone: <img> and @mentions
+          #      are inert under a code/pre ancestor, and escaping them
+          #      there only mangles the rendered text;
           #   2. the comment-open token is broken EVERYWHERE, prose and code
           #      alike (<!-- becomes an escaped no-op, the autofix-proven
           #      neutralizer). The break must stay global: the upsert greps
@@ -3457,8 +3459,8 @@ jobs:
                     out.push(escCode(line));
                     continue;
                   }
-                  const rendered = proseLine(line);
-                  if (/^ {0,3}<\/?(details|summary)\b/.test(rendered)) inHtml = true;
+                  const rendered = inHtml ? balance(escProse(line)) : proseLine(line);
+                  if (/^\s*<\/?(details|summary)\b/.test(rendered)) inHtml = true;
                   out.push(rendered);
                 } else {
                   const cm = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
