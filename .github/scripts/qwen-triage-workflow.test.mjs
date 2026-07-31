@@ -87,6 +87,40 @@ const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
 
+// A probe that only checks .qwen/.git reports "healthy" on workspace-wide
+// poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
+// chown that main did unconditionally — checkout then fails with EACCES.
+// Recovery must stay unconditional; these tests guard against re-adding
+// the probe gating or the inert rename-aside fallback.
+const assertUnconditional = (step, label) => {
+  assert.ok(step, `${label} must have a "Restore workspace ownership" step`);
+  assert.match(
+    step.run,
+    /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must restore ownership of the whole workspace`,
+  );
+  assert.match(
+    step.run,
+    /sudo -n chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must keep the sudo fallback that recovers root-owned files on a non-root runner`,
+  );
+  assert.match(
+    step.run,
+    /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+    `${label} must restore write permission of the whole workspace`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /recovery_needed|\.probe\./,
+    `${label} must not gate recovery behind a .qwen/.git probe — poisoning is workspace-wide`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /\.stale\./,
+    `${label} must not rename dirs aside — the rename-aside fallback never unblocks checkout`,
+  );
+};
+
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assert.ok(triageStep, 'triage step (id: triage) must exist');
@@ -352,6 +386,11 @@ describe('qwen-triage: workspace ownership restore', () => {
       chmodIndex < chownIndex,
       'the root-owned read-only tree must be made writable before ownership is returned',
     );
+    assert.match(
+      verifyOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'verify runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
   });
 
   it('tmux-testing: returns ownership to the runner unconditionally', () => {
@@ -369,6 +408,11 @@ describe('qwen-triage: workspace ownership restore', () => {
       /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
       'tmux-testing must return workspace ownership to the runner',
     );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'tmux-testing runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
   });
 
   it('verify: a chmod failure is visible, not silent', () => {
@@ -381,35 +425,6 @@ describe('qwen-triage: workspace ownership restore', () => {
 });
 
 describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', () => {
-  // A probe that only checks .qwen/.git reports "healthy" on workspace-wide
-  // poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
-  // chown that main did unconditionally — checkout then fails with EACCES.
-  // Recovery must stay unconditional; these tests guard against re-adding
-  // the probe gating or the inert rename-aside fallback.
-  const assertUnconditional = (step, label) => {
-    assert.ok(step, `${label} must have a "Restore workspace ownership" step`);
-    assert.match(
-      step.run,
-      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
-      `${label} must restore ownership of the whole workspace`,
-    );
-    assert.match(
-      step.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
-      `${label} must restore write permission of the whole workspace`,
-    );
-    assert.doesNotMatch(
-      step.run,
-      /recovery_needed|\.probe\./,
-      `${label} must not gate recovery behind a .qwen/.git probe — poisoning is workspace-wide`,
-    );
-    assert.doesNotMatch(
-      step.run,
-      /\.stale\./,
-      `${label} must not rename dirs aside — the rename-aside fallback never unblocks checkout`,
-    );
-  };
-
   it('test job restores ownership unconditionally', () => {
     assertUnconditional(ciOwnershipStep, 'ci.yml test');
   });
@@ -447,29 +462,9 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
 
 describe('qwen-code-pr-review.yml: ownership recovery is unconditional', () => {
   it('restores ownership without probe gating or rename-aside', () => {
-    assert.ok(
+    assertUnconditional(
       prReviewOwnershipStep,
-      'review-pr job must have a "Restore workspace ownership" step',
-    );
-    assert.match(
-      prReviewOwnershipStep.run,
-      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
-      'must restore ownership of the whole workspace',
-    );
-    assert.match(
-      prReviewOwnershipStep.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
-      'must restore write permission of the whole workspace',
-    );
-    assert.doesNotMatch(
-      prReviewOwnershipStep.run,
-      /recovery_needed|\.probe\./,
-      'must not gate recovery behind a .qwen/.git probe — poisoning is workspace-wide',
-    );
-    assert.doesNotMatch(
-      prReviewOwnershipStep.run,
-      /\.stale\./,
-      'must not rename dirs aside — the rename-aside fallback never unblocks checkout',
+      'qwen-code-pr-review.yml review-pr',
     );
   });
 });
