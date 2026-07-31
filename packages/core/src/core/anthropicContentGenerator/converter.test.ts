@@ -1218,6 +1218,155 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    describe('tool_use id sanitization', () => {
+      // Anthropic validates tool_use.id / tool_result.tool_use_id against
+      // ^[a-zA-Z0-9_-]+$ server-side (HTTP 400 otherwise), but the Gemini
+      // lingua-franca's functionCall.id / functionResponse.id has no such
+      // constraint. Verified live: sending an id containing characters
+      // outside that set, or an empty tool_use_id, both 400 with
+      // "String should match pattern '^[a-zA-Z0-9_-]+$'".
+      it('sanitizes a tool_use id containing characters outside [a-zA-Z0-9_-]', () => {
+        const rawId = 'call:abc.def/ghi?jkl';
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: { id: rawId, name: 'tool', args: { a: 1 } },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const userBlocks = messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        const toolResult = userBlocks.find((b) => b.type === 'tool_result');
+
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+        expect(toolUse?.id).not.toBe(rawId);
+        // The sanitized id links the pair back up.
+        expect(toolResult?.tool_use_id).toBe(toolUse?.id);
+      });
+
+      it('generates a non-empty fallback id when functionCall.id is missing (not an empty string)', () => {
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { name: 'tool', args: {} } }],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        expect(toolUse?.id).toBeTruthy();
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+      });
+
+      // Note: there is no analogous standalone test for "functionResponse.id
+      // missing" here -- a tool_result with no id can't be linked to any
+      // tool_use by definition (which call is it responding to?), so it is
+      // always a genuine orphan and gets cleaned up by cleanOrphanedToolCalls
+      // regardless of this fix. tool_result.tool_use_id goes through the
+      // exact same resolveToolUseId/nextGeneratedToolId path exercised by
+      // the tool_use-side tests above, so the never-empty-string guarantee
+      // is already covered.
+
+      it('does not collide fallback ids generated for two different missing-id tool calls in the same request', () => {
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { functionCall: { name: 'tool_a', args: {} } },
+                { functionCall: { name: 'tool_b', args: {} } },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const ids = assistantBlocks
+          .filter((b) => b.type === 'tool_use')
+          .map((b) => b.id);
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(2);
+      });
+
+      it('resolves the same source id to the same sanitized id across tool_use and tool_result in different messages', () => {
+        const rawId = 'weird/id:1';
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { id: rawId, name: 'tool', args: {} } }],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const toolUseId = (
+          messages[1]?.content as Array<{ type: string; id?: string }>
+        ).find((b) => b.type === 'tool_use')?.id;
+        const toolResultId = (
+          messages[2]?.content as Array<{
+            type: string;
+            tool_use_id?: string;
+          }>
+        ).find((b) => b.type === 'tool_result')?.tool_use_id;
+
+        expect(toolUseId).toBeDefined();
+        expect(toolUseId).toBe(toolResultId);
+      });
+    });
+
     it('keeps tool results split across consecutive user messages', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -1350,7 +1499,15 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('drops tool results that do not lead user content', () => {
+    it('reorders a tool_result ahead of other content in the same message rather than dropping it', () => {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use. A text part preceding the
+      // functionResponse part within the same Gemini Content used to be
+      // treated by cleanOrphanedToolCalls's own "seenNonToolResult" gate as
+      // if the tool_result never showed up at all -- silently discarding
+      // both the tool_result AND its paired tool_use, rather than fixing
+      // the order. Now the blocks are reordered before that gate runs, so
+      // the pairing is recognized and everything survives.
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1376,16 +1533,68 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+        },
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'Hi' },
+            { type: 'tool_result', tool_use_id: 't1', content: 'late' },
             {
               type: 'text',
               text: 'preface',
               cache_control: { type: 'ephemeral' },
             },
           ],
+        },
+      ]);
+    });
+
+    it('preserves relative order among multiple tool_result blocks when reordering ahead of text', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+              { functionCall: { id: 't2', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { text: 'preface' },
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 't2',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.content).toEqual([
+        { type: 'tool_result', tool_use_id: 't1', content: 'first' },
+        { type: 'tool_result', tool_use_id: 't2', content: 'second' },
+        {
+          type: 'text',
+          text: 'preface',
+          cache_control: { type: 'ephemeral' },
         },
       ]);
     });
@@ -2303,6 +2512,134 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  describe('assistant-turn prefill stripping', () => {
+    it('drops a trailing empty assistant message when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            // Whitespace-only, not empty: processContent only emits a text
+            // block when part.text is truthy, so an actually-empty string
+            // never reaches this pass at all (the fixture would be
+            // vacuous). isEmptyAssistantMessage's `.trim()` check is what
+            // this test needs to exercise.
+            { role: 'model', parts: [{ text: '   ' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      ]);
+    });
+
+    it('appends a synthetic user turn when a trailing assistant message has real content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+
+    it('leaves a trailing user message untouched when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Hello!' }] },
+            { role: 'user', parts: [{ text: 'How are you?' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Hello!' }] },
+        { role: 'user', content: [{ type: 'text', text: 'How are you?' }] },
+      ]);
+    });
+
+    it('does not strip a trailing assistant message when the option is unset', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+      ]);
+    });
+
+    it('keeps a trailing thinking-only assistant message and appends a synthetic user turn', () => {
+      // A thinking block is real content (not text/whitespace-only), so it
+      // must be preserved rather than dropped as an "empty prefill" —
+      // unlike an unanswered tool_use, thinking blocks are never treated
+      // as orphans by the earlier merge/clean passes.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'pondering the answer',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'pondering the answer',
+              signature: 'sig',
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+  });
+
   describe('convertGeminiToolsToAnthropic', () => {
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [
@@ -2839,6 +3176,244 @@ describe('AnthropicContentConverter', () => {
           { enableCacheControl: true },
         );
         expect(result[0].cache_control).toEqual({ type: 'ephemeral' });
+      });
+    });
+
+    describe('cacheRetention', () => {
+      it('omits ttl on the system block when cacheRetention is unset (ephemeral default)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: 'hi',
+          config: { systemInstruction: 'sys' },
+        });
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+      });
+
+      it("sets ttl:'1h' on system, last tool, and trailing user message when cacheRetention is '1h'", async () => {
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          { cacheRetention: '1h' },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it('composes ttl with scope:"global" on the same cache_control entry', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h', useGlobalCacheScope: true },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: {
+              type: 'ephemeral',
+              scope: 'global',
+              ttl: '1h',
+            },
+          },
+        ]);
+      });
+
+      it('honors a per-anchor cacheRetentionByBlock override, promoting the earlier tool anchor to keep wire order legal', async () => {
+        // Anthropic requires cache entries with a longer TTL to appear
+        // before shorter ones on the wire (tools -> system -> messages).
+        // { system: '1h' } alone would otherwise leave a 5m-default tool
+        // anchor ahead of a 1h system anchor -- an ordering violation.
+        // resolveCacheRetention promotes every anchor before a '1h' one,
+        // so the tool anchor here also resolves to '1h'.
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("does not promote anchors after the overridden one -- { tool: '1h' } alone leaves system/user.last at the default", async () => {
+        // tool -> system -> user.last is already longest-to-shortest here,
+        // so nothing needs promoting; this is the one override shape that
+        // was always legal even before the ordering fix.
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("promotes both tool and system when only 'user.last' is overridden to '1h'", async () => {
+        // { 'user.last': '1h' } alone would otherwise leave both the tool
+        // and system anchors at the 5m default ahead of a 1h trailing
+        // user message -- also an ordering violation, and one the
+        // reviewer's case analysis called out explicitly (case E).
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it('carries ttl on both halves of a split system prompt (staticSystemPrefix)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'stable prefixvolatile suffix' },
+          },
+          { cacheRetention: '1h', staticSystemPrefix: 'stable prefix' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'stable prefix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+          {
+            type: 'text',
+            text: 'volatile suffix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
       });
     });
   });

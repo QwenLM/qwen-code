@@ -16,6 +16,7 @@ import {
   formatTokenCount,
   getAgentCancellationReason,
   getAgentDisplayStatus,
+  localizeAgentTypeName,
   toolContainsCallId,
 } from '../toolFormatting';
 import { SubAgentPanel } from './SubAgentPanel';
@@ -261,7 +262,10 @@ export function ParallelAgentsGroup({
                   >
                     <StatusIcon status={status} />
                     <span className={styles.rowDesc}>
-                      {truncateText(desc || agentType, 50)}
+                      {truncateText(
+                        desc || localizeAgentTypeName(agentType, t),
+                        50,
+                      )}
                       {toolHint && (
                         <span
                           className={styles.rowTool}
