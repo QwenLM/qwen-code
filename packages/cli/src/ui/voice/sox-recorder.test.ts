@@ -15,10 +15,17 @@ const mocks = vi.hoisted(() => ({
   rm: vi.fn(),
 }));
 
-vi.mock('node:child_process', () => ({
-  default: { spawn: mocks.spawn },
-  spawn: mocks.spawn,
-}));
+vi.mock('node:child_process', async () => {
+  const actual =
+    await vi.importActual<typeof import('node:child_process')>(
+      'node:child_process',
+    );
+  return {
+    ...actual,
+    default: { ...actual, spawn: mocks.spawn },
+    spawn: mocks.spawn,
+  };
+});
 
 vi.mock('node:fs/promises', () => ({
   default: {
