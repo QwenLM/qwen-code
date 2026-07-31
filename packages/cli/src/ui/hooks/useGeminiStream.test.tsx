@@ -1163,7 +1163,10 @@ describe('useGeminiStream', () => {
 
     await waitFor(() => {
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: 'notification', text: 'Cron: Autofix rejected: autofix-job' },
+        {
+          type: 'notification',
+          text: 'Cron: Autofix rejected: autofix-job. Run /autofix off.',
+        },
         expect.any(Number),
       );
     });

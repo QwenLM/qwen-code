@@ -5048,7 +5048,8 @@ describe('runNonInteractive', () => {
       'p-autofix-rejected/automatic/2',
       expect.objectContaining({
         type: SendMessageType.Cron,
-        notificationDisplayText: 'Cron: Autofix rejected: autofix-job',
+        notificationDisplayText:
+          'Cron: Autofix rejected: autofix-job. Run /autofix off.',
       }),
     );
   });

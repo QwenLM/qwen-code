@@ -32,8 +32,14 @@ export const AUTOFIX_USAGE =
 
 export type AutofixMode = 'propose-only' | 'auto-commit' | 'auto-push';
 
+type AutofixWatcherInput = Pick<CronJob, 'id' | 'prompt'> &
+  Partial<Pick<CronJob, 'recurring' | 'cronExpr'>>;
+
+type AutofixCronCandidate = Pick<CronJob, 'prompt'> &
+  Partial<Pick<CronJob, 'id' | 'recurring' | 'cronExpr'>>;
+
 export interface AutofixWatcher {
-  job: CronJob;
+  job: AutofixWatcherInput;
   repo: string;
   pr: number;
   mode: AutofixMode;
@@ -53,18 +59,19 @@ export type CurrentAutofixPullRequestResult =
 const AUTOFIX_PROMPT_PATTERN =
   /^autofix tick repo=([^\s]+) pr=([1-9]\d*) mode=(propose-only|auto-commit|auto-push) rounds=(\d+) infra-reruns=(\d+)$/;
 const OWNER_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const AUTOFIX_NAMESPACE_PATTERN = /^autofix tick(?:\s|$)/;
 
-export function isAutofixCronJob(job: Pick<CronJob, 'prompt'>): boolean {
-  return AUTOFIX_NAMESPACE_PATTERN.test(job.prompt);
+export function isAutofixCronJob(job: AutofixCronCandidate): boolean {
+  return parseAutofixWatcher(job) !== null;
 }
 
-export function parseAutofixWatcher(job: CronJob): AutofixWatcher | null {
+export function parseAutofixWatcher(
+  job: AutofixCronCandidate,
+): AutofixWatcher | null {
   if (!job.recurring || job.cronExpr !== AUTOFIX_CRON) return null;
   const match = AUTOFIX_PROMPT_PATTERN.exec(job.prompt);
-  if (!match || !OWNER_REPO_PATTERN.test(match[1])) return null;
+  if (!match || !job.id || !OWNER_REPO_PATTERN.test(match[1])) return null;
   return {
-    job,
+    job: { ...job, id: job.id },
     repo: match[1],
     pr: Number(match[2]),
     mode: match[3] as AutofixMode,
@@ -231,22 +238,22 @@ async function rejectedAutofixCronPrompt(
       stopped = false;
     }
   }
+  const displayText = stopped
+    ? `Autofix rejected: ${id}`
+    : `Autofix rejected: ${id}. Run /autofix off.`;
   return {
-    displayText: `Autofix rejected: ${id}`,
+    displayText,
     modelText: `Autofix watcher ${id} was rejected by the CLI: ${reason}. No maintenance action was authorized.${stopped ? ' The watcher was disabled.' : ' The watcher could not be confirmed disabled; use /autofix off.'}`,
   };
 }
 
 export async function resolveAutofixCronPrompt(
   config: Config,
-  job: Pick<CronJob, 'id' | 'prompt' | 'recurring' | 'cronExpr'>,
+  job: AutofixWatcherInput,
 ): Promise<ResolvedAutofixCronPrompt | null> {
-  if (!isAutofixCronJob(job)) return null;
+  const watcher = parseAutofixWatcher(job);
+  if (!watcher) return null;
   try {
-    const watcher = parseAutofixWatcher(job as CronJob);
-    if (!watcher || !job.id) {
-      return rejectedAutofixCronPrompt(config, job, 'invalid watcher metadata');
-    }
     const live = config
       .getCronScheduler()
       .list()

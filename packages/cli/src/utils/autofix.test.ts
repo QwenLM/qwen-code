@@ -88,7 +88,7 @@ describe('Autofix watcher prompt', () => {
     });
   });
 
-  it('rejects prompts without repository identity or exact cadence', () => {
+  it('rejects prompts without repository identity, exact cadence, or canonical metadata', () => {
     expect(
       parseAutofixWatcher(
         job({
@@ -98,6 +98,9 @@ describe('Autofix watcher prompt', () => {
       ),
     ).toBeNull();
     expect(parseAutofixWatcher(job({ cronExpr: '*/5 * * * *' }))).toBeNull();
+    expect(
+      parseAutofixWatcher(job({ prompt: 'autofix tick report' })),
+    ).toBeNull();
     expect(() =>
       formatAutofixTick('not-a-repository', 1, 'propose-only', 0, 0),
     ).toThrow('Invalid Autofix repository identity');
@@ -196,13 +199,19 @@ describe('Autofix prompt authority', () => {
     expect(addSessionAllowRule).toHaveBeenCalledWith('cron_list');
   });
 
-  it.each([
-    ['malformed', job({ prompt: 'autofix tick mode=auto-push' })],
-    ['stale', job()],
-  ])('rejects and disables a %s Autofix tick', async (_label, watcherJob) => {
-    const { config, deleteJob } = promptConfig(watcherJob, {
-      jobs: _label === 'stale' ? [] : [watcherJob],
-    });
+  it('ignores noncanonical Autofix-prefixed cron prompts', async () => {
+    const watcherJob = job({ prompt: 'autofix tick mode=auto-push' });
+    const { config, deleteJob } = promptConfig(watcherJob);
+
+    await expect(
+      resolveAutofixCronPrompt(config, watcherJob),
+    ).resolves.toBeNull();
+    expect(deleteJob).not.toHaveBeenCalled();
+  });
+
+  it('rejects and disables a stale canonical Autofix tick', async () => {
+    const watcherJob = job();
+    const { config, deleteJob } = promptConfig(watcherJob, { jobs: [] });
 
     const result = await resolveAutofixCronPrompt(config, watcherJob);
 
@@ -246,14 +255,17 @@ describe('Autofix prompt authority', () => {
   });
 
   it('reports when a rejected watcher could not be confirmed disabled', async () => {
-    const watcherJob = job({ prompt: 'autofix tick mode=auto-push' });
+    const watcherJob = job();
     const { config } = promptConfig(watcherJob, {
+      disabled: new Set(['autofix']),
       deleteJob: vi.fn().mockResolvedValue(false),
     });
 
     const result = await resolveAutofixCronPrompt(config, watcherJob);
 
-    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.displayText).toBe(
+      'Autofix rejected: job-1. Run /autofix off.',
+    );
     expect(result?.modelText).toContain(
       'The watcher could not be confirmed disabled; use /autofix off.',
     );
