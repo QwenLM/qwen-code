@@ -243,6 +243,29 @@ describe('goal reducer', () => {
     },
   );
 
+  it('resets the continuation turn budget when resuming an exhausted goal', () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'usage_limited', revision: 4, turnCount: 50 }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({
+      status: 'active',
+      revision: 4,
+      turnCount: 0,
+      evidenceCursor: { recordId: 'r-100' },
+    });
+  });
+
   it('rejects an unsupported control action instead of resuming', () => {
     expect(() =>
       reduceGoalControl(goalRecord({ status: 'paused' }), {

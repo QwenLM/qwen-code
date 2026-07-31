@@ -948,6 +948,42 @@ describe('goal runtime', () => {
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
   });
 
+  it('resumes a budget-exhausted goal into a fresh turn instead of re-limiting', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    await vi.waitFor(() =>
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
+    );
+    const goal = runtime.getSnapshot().goal!;
+    const startedBeforeResume = host.started.length;
+
+    const response = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: goal.goalId,
+      expectedRevision: goal.revision,
+    });
+
+    // The reported outcome must match the settled outcome: resume grants a
+    // fresh budget and starts a continuation turn rather than reporting
+    // `active` and immediately re-transitioning to `usage_limited`.
+    expect(response.snapshot.goal?.status).toBe('active');
+    expect(response.snapshot.goal?.turnCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(host.started.length).toBe(startedBeforeResume + 1),
+    );
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+
   it('returns a bounded catalog without exposing full evidence content', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];

@@ -575,6 +575,41 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('renders a mid-turn causeless /goal clear with no active goal', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'No Goal set.' },
+        expect.any(Number),
+      );
+    });
+
     it('should correctly find and execute a nested subcommand', async () => {
       const childAction = vi.fn();
       const parentCommand: SlashCommand = {
