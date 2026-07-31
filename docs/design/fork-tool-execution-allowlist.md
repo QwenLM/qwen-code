@@ -12,7 +12,8 @@ hint tells the fork which visible tools the allowlist permits.
 
 ## Goals
 
-- Preserve existing fork behavior when `fork_tools` is omitted.
+- Preserve the inherited fork execution surface when `fork_tools` is omitted,
+  except for interaction tools that forks must never execute.
 - Treat an empty list as deny-all rather than as the existing `tools: []`
   wildcard behavior.
 - Keep the fork's current model-visible declarations unchanged so adding an
@@ -35,7 +36,8 @@ declarations. MCP entries support exact canonical names plus server and
 trailing-wildcard patterns. Patterns are matched against the registered tool's
 raw MCP server/tool identity rather than only its provider-sanitized name, so
 distinct server names that sanitize to the same prefix cannot cross-match.
-Bare `*` is rejected; omission already represents unrestricted execution.
+Bare `*` is rejected; omission already allows every otherwise-executable
+inherited tool.
 Wildcard entries are limited to `mcp__*` or a trailing MCP tool-prefix pattern
 such as `mcp__github__read_*`. `mcp__*` deliberately matches all MCP tools
 without matching built-in tools.
@@ -63,6 +65,13 @@ The allowlist only narrows the existing surface. It cannot re-enable tools
 removed by subagent exclusions, bypass normal permissions for an allowed
 tool, or add declarations.
 
+Every fork receives an in-memory execution allowlist, even when `fork_tools`
+is omitted. The runtime-owned floor removes `ask_user_question` after applying
+the caller-supplied list, so a caller cannot re-enable it. The tool remains in
+the parent-derived declaration list for prompt-cache sharing, but a call is
+rejected before scheduling or approval. A blocked fork reports the missing
+input to its parent instead of trying to interact with the user directly.
+
 The fork receives a restriction notice in the task prompt after the inherited
 cacheable prefix. This avoids trial-and-error calls without changing the
 parent-derived system instruction, history prefix, or tool declarations.
@@ -75,14 +84,17 @@ tool declarations are capabilities, so cold revival rebinds them from the
 current parent runtime and resolves current tool names through the live
 registry.
 
-`executionAllowedTools` is launch-time policy instead. Restricted forks store
-it in the `AgentMeta` sidecar, including an empty deny-all list, and cold
-revival reapplies it to the live `ToolConfig`. The resulting executable surface
-is the current parent-derived tool surface narrowed by the persisted policy.
+Caller-supplied `executionAllowedTools` is launch-time policy instead.
+Restricted forks store it in the `AgentMeta` sidecar, including an empty
+deny-all list, and cold revival reapplies it to the live `ToolConfig`. Forks
+launched without `fork_tools` do not persist the derived list, allowing revival
+to recompute it from the current parent tool surface. The resulting executable
+surface is the current parent-derived tool surface narrowed by the persisted
+policy and the mandatory interaction-tool exclusion.
 
 The field remains optional for compatibility. Older transcripts and forks
-launched without `fork_tools` restore with no additional execution
-restriction.
+launched without `fork_tools` restore with the current parent-derived tool
+surface minus the mandatory interaction-tool exclusion.
 
 ## Boundary
 
