@@ -191,22 +191,26 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
-  it('rejects a TUI-only key (ui.mouseTracking) that has no effect in the web shell', async () => {
-    // ui.mouseTracking is read only inside the ink TUI (and requires a TTY),
-    // so exposing it here would be a dead toggle in serve mode. It is filtered
-    // out via TUI_ONLY_SETTINGS even though it declares showInDialog: true.
-    const { app, persistSetting } = makeApp();
+  it.each(['ui.mouseTracking', 'ui.showScrollbar'])(
+    'rejects a TUI-only key (%s) that has no effect in the web shell',
+    async (key) => {
+      // These keys are read only inside the ink TUI (mouseTracking also
+      // requires a TTY), so exposing them here would be dead toggles in serve
+      // mode. They are filtered out via TUI_ONLY_SETTINGS even though they
+      // declare showInDialog: true.
+      const { app, persistSetting } = makeApp();
 
-    const res = await request(app).post('/workspace/settings').send({
-      scope: 'user',
-      key: 'ui.mouseTracking',
-      value: false,
-    });
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key,
+        value: false,
+      });
 
-    expect(res.status).toBe(400);
-    expect(res.body).toMatchObject({ code: 'disallowed_key' });
-    expect(persistSetting).not.toHaveBeenCalled();
-  });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['workspace', 'user'] as const)(
     'accepts %s mcpServers for the MCP manager',

@@ -1066,7 +1066,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction.',
+          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
         showInDialog: true,
       },
       shellOutputMaxLines: {

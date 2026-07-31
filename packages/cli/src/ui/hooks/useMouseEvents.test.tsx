@@ -296,7 +296,11 @@ describe('useMouseEvents', () => {
     it('releases and re-acquires the mode when toggled at runtime (requiresRestart: false)', () => {
       // The settings object is mutable so a rerender can flip the value
       // without remounting, mirroring SettingsDialog's requiresRestart:false
-      // immediate-save path.
+      // immediate-save path. That path keeps the merged-settings identity
+      // stable, so subscribers outside the dialog only re-render (and the
+      // refcounted mode only converges) when the dialog closes and the tree
+      // re-renders; the manual rerender() below stands in for that close-time
+      // re-render rather than proving the flip lands instantly.
       const live = { mouseTracking: true };
       const liveWrapper = ({ children }: { children: React.ReactNode }) => (
         <SettingsContext.Provider

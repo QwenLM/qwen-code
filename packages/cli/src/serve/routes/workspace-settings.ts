@@ -41,6 +41,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
+  'ui.showScrollbar',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
