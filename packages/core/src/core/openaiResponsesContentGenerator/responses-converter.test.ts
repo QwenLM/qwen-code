@@ -189,6 +189,43 @@ describe('convertResponsesEventToGemini', () => {
     ]);
   });
 
+  it("falls back to the done item's arguments when output_item.added created the buffer but no delta events ever arrived", () => {
+    // initFunctionCall seeds buf.args to ''. A `??` fallback here would
+    // never trigger for an empty string, so a proxy that sends
+    // output_item.added followed directly by output_item.done (no
+    // function_call_arguments.delta in between) must still fall through to
+    // the done item's own complete `arguments` rather than losing every
+    // argument to `JSON.parse('')` throwing.
+    const state = new ResponsesStreamState();
+    state.initFunctionCall(0, 'fc_1', 'call_1', 'read_file');
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.ts"}',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_1',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+        },
+      },
+    ]);
+  });
+
   describe('reasoning item completion (thoughtSignature round-trip)', () => {
     it('emits a signature-only thought chunk when encrypted_content is present', () => {
       const state = new ResponsesStreamState();
@@ -555,6 +592,167 @@ describe('convertGeminiContentsToResponsesInput', () => {
           { type: 'input_image', image_url: 'data:image/png;base64,YWJj' },
         ],
       } satisfies ResponsesApiMessageItem,
+    ]);
+  });
+
+  it('merges a text part and an image part in the same turn into one message with a multi-part content array', () => {
+    // Regression guard: pushing one 'message' item per part would make the
+    // Responses API treat the question and the image as two separate turns.
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            { text: 'What is in this image?' },
+            { inlineData: { mimeType: 'image/png', data: 'YWJj' } },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'What is in this image?' },
+          { type: 'input_image', image_url: 'data:image/png;base64,YWJj' },
+        ],
+      } satisfies ResponsesApiMessageItem,
+    ]);
+  });
+
+  it('flushes accumulated text as its own message before a function_call so relative order is preserved', () => {
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'model',
+          parts: [
+            { text: "I'll check that file." },
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'read_file',
+                args: { path: 'a.ts' },
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'message',
+        role: 'assistant',
+        content: "I'll check that file.",
+      } satisfies ResponsesApiMessageItem,
+      {
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'read_file',
+        arguments: JSON.stringify({ path: 'a.ts' }),
+      } satisfies ResponsesApiFunctionCallItem,
+    ]);
+  });
+
+  it('replaces non-image inlineData with a text placeholder instead of silently dropping it', () => {
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            { text: 'Summarize my PDF' },
+            { inlineData: { mimeType: 'application/pdf', data: 'JVBERi0' } },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Summarize my PDF' },
+          {
+            type: 'input_text',
+            text: '[Unsupported inline media type: application/pdf]',
+          },
+        ],
+      } satisfies ResponsesApiMessageItem,
+    ]);
+  });
+
+  it('replaces a fileData reference with a text placeholder instead of silently dropping it', () => {
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            {
+              fileData: {
+                mimeType: 'application/pdf',
+                fileUri: 'gs://bucket/doc.pdf',
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: '[Unsupported file reference: application/pdf]',
+      } satisfies ResponsesApiMessageItem,
+    ]);
+  });
+
+  it('unwraps a { output } tool response envelope to the bare string instead of double-encoding it', () => {
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                response: { output: '{"key":"value"}' },
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"key":"value"}',
+      } satisfies ResponsesApiFunctionCallOutputItem,
+    ]);
+  });
+
+  it('unwraps a { error } tool response envelope to the bare string', () => {
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                response: { error: 'file not found' },
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: 'file not found',
+      } satisfies ResponsesApiFunctionCallOutputItem,
     ]);
   });
 

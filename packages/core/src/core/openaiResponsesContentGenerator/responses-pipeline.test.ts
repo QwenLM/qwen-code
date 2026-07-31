@@ -21,6 +21,22 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 
+// The pipeline calls the `fetch` buildRuntimeFetchOptions returns (pinned
+// alongside its dispatcher) rather than the global `fetch`, so the mock must
+// intercept it there -- stubbing global `fetch` alone is bypassed and the
+// real undici fetch attempts a live network call (see #8169 review).
+const { buildRuntimeFetchOptionsMock } = vi.hoisted(() => ({
+  buildRuntimeFetchOptionsMock: vi.fn(),
+}));
+vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/runtimeFetchOptions.js')>();
+  return {
+    ...actual,
+    buildRuntimeFetchOptions: buildRuntimeFetchOptionsMock,
+  };
+});
+
 function sseStream(lines: string[]): ReadableStream<Uint8Array> {
   const body = lines.join('\n') + '\n';
   const encoder = new TextEncoder();
@@ -86,17 +102,18 @@ describe('ResponsesPipeline', () => {
 
   beforeEach(() => {
     fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+    buildRuntimeFetchOptionsMock.mockReturnValue({ fetch: fetchMock });
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.clearAllMocks();
   });
 
   function mockResponse(lines: string[], status = 200) {
     fetchMock.mockResolvedValue({
       ok: status < 400,
       status,
+      headers: { get: () => 'text/event-stream' },
       body: sseStream(lines),
       text: async () => '',
     });
@@ -141,6 +158,49 @@ describe('ResponsesPipeline', () => {
       [{ text: 'hi' }],
       [],
     ]);
+  });
+
+  it('passes userPromptId through as prompt_cache_key when within the length limit', async () => {
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    for await (const _ of pipeline.executeStream(
+      textRequest('hi'),
+      'short-id',
+    )) {
+      // drain
+    }
+    const body = JSON.parse(
+      fetchMock.mock.calls[0]![1].body,
+    ) as ResponsesApiRequest;
+    expect(body.prompt_cache_key).toBe('short-id');
+  });
+
+  it('hashes userPromptId into a fixed-length prompt_cache_key when it exceeds 64 characters', async () => {
+    // A mutation removing the truncation branch would silently disable
+    // prompt caching (the Responses API rejects/ignores an over-length
+    // prompt_cache_key) with no visible error -- pin the hashed shape.
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const longId = 'x'.repeat(100);
+    for await (const _ of pipeline.executeStream(textRequest('hi'), longId)) {
+      // drain
+    }
+    const body = JSON.parse(
+      fetchMock.mock.calls[0]![1].body,
+    ) as ResponsesApiRequest;
+    expect(body.prompt_cache_key).not.toBe(longId);
+    expect(body.prompt_cache_key).toHaveLength(64);
+    expect(body.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('strips a trailing /v1 from baseUrl before appending /v1/responses', async () => {
@@ -440,6 +500,70 @@ describe('ResponsesPipeline', () => {
     expect(result.usageMetadata?.totalTokenCount).toBe(5);
   });
 
+  it('parses data-only SSE frames (no event: line) -- the shape the Responses API actually emits', async () => {
+    // Every other test builds frames with sseEvent(), which always prepends
+    // an `event: ` line, so it never exercises the data-only branch that
+    // parses `data['type']` directly and handles `[DONE]`. A regression
+    // there would leave the whole suite green while breaking every real
+    // OpenAI call.
+    const dataOnlyLines = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' })}`,
+      `data: ${JSON.stringify({
+        type: 'response.completed',
+        response: { id: 'r1', status: 'completed' },
+      })}`,
+      'data: [DONE]',
+    ];
+    mockResponse(dataOnlyLines);
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const chunks = [];
+    for await (const chunk of pipeline.executeStream(
+      textRequest('hello'),
+      'prompt-1',
+    )) {
+      chunks.push(chunk);
+    }
+    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
+      [{ text: 'hi' }],
+      [],
+    ]);
+  });
+
+  it('parses data-only SSE frames split across multiple reader.read() chunks', async () => {
+    const dataOnlyLines = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' })}`,
+      `data: ${JSON.stringify({
+        type: 'response.completed',
+        response: { id: 'r1', status: 'completed' },
+      })}`,
+    ];
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'text/event-stream' },
+      body: sseStreamChunked(dataOnlyLines, 5),
+      text: async () => '',
+    });
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const chunks = [];
+    for await (const chunk of pipeline.executeStream(
+      textRequest('hello'),
+      'prompt-1',
+    )) {
+      chunks.push(chunk);
+    }
+    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([
+      [{ text: 'hi' }],
+      [],
+    ]);
+  });
+
   it('parses correctly when frames are split across multiple reader.read() chunks', async () => {
     const lines = [
       ...sseEvent('response.output_text.delta', { delta: 'foo' }),
@@ -466,6 +590,7 @@ describe('ResponsesPipeline', () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
+      headers: { get: () => 'text/event-stream' },
       body: sseStreamChunked(lines, 5),
       text: async () => '',
     });
