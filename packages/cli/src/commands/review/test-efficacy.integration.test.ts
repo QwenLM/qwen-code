@@ -26,6 +26,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { runOneMutant, testEfficacyCommand } from './test-efficacy.js';
 
 type Handler = (args: {
@@ -1085,7 +1086,7 @@ process.stdout.write(JSON.stringify({
     );
     writeFileSync(
       join(sourceVitestDir, 'vitest.mjs'),
-      `import '${join(probeTree, 'src/x.test.mjs')}';
+      `import '${pathToFileURL(join(probeTree, 'src/x.test.mjs')).href}';
 process.stdout.write(JSON.stringify({
   testResults: [{
     name: ${JSON.stringify(join(probeTree, 'src/x.test.mjs'))},
