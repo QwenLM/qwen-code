@@ -1037,6 +1037,24 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -1048,6 +1066,12 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
@@ -1060,9 +1084,10 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
@@ -2452,6 +2477,24 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2470,6 +2513,12 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
@@ -2493,9 +2542,10 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
