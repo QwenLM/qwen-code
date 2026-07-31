@@ -393,7 +393,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
   });
 
   describe('Async Tool Handlers', () => {
-    // FIXME: Flaky on the live model: the model sometimes answers without
+    // FIXME(#8256): Flaky on the live model: the model sometimes answers without
     // calling the delayed_response tool, so the foundToolUse / tool-result
     // assertions fail intermittently on main. Already survived asserting on the
     // deterministic tool result, a forced prompt, retry: 2, and the 5-minute

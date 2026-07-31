@@ -245,7 +245,7 @@ describe('Subagents (E2E)', () => {
   });
 
   describe('Subagent Execution', () => {
-    // FIXME: Flaky on the live model: the main agent delegates, but the
+    // FIXME(#8256): Flaky on the live model: the main agent delegates, but the
     // file-reader subagent sometimes replies without calling read_file, so
     // foundSubagentToolCall fails (reproduced locally: "expected false to be
     // true" at that assertion). Already survived the forced-delegation prompt,
