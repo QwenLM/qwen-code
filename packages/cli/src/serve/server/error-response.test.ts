@@ -13,7 +13,10 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from '../daemon-logger.js';
-import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
 
@@ -104,6 +107,21 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it('maps runtime still starting to 503 with Retry-After', () => {
+    const { response, set, status, json } = responseMock();
+
+    sendBridgeError(response, new WorkspaceRuntimeStillStartingError(), {
+      route: 'POST /workspace/runtime/ensure',
+    });
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime is still starting',
+      code: 'runtime_still_starting',
     });
   });
 
