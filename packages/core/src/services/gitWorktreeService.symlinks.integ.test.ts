@@ -171,21 +171,22 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     // Put a sibling directory next to the repo so `../sibling` resolves to
     // something real — proving the guard fires on traversal shape rather
     // than on "source missing".
-    const siblingDir = path.join(path.dirname(repoRoot), 'qwen-wt-sibling');
+    const siblingName = `qwen-wt-sibling-${path.basename(repoRoot)}`;
+    const siblingDir = path.join(path.dirname(repoRoot), siblingName);
     await fs.mkdir(siblingDir);
     await fs.writeFile(path.join(siblingDir, 'marker'), 'outside');
 
     const service = new GitWorktreeService(repoRoot);
     const result = await service.createUserWorktree('traverse', 'main', {
-      symlinkDirectories: ['../qwen-wt-sibling'],
+      symlinkDirectories: [`../${siblingName}`],
     });
 
     try {
       expect(result.success).toBe(true);
-      const dest = path.join(result.worktree!.path, '..', 'qwen-wt-sibling');
+      const dest = path.join(result.worktree!.path, '..', siblingName);
       // No symlink was created inside the worktree directory.
       const stat = await fs
-        .lstat(path.join(result.worktree!.path, 'qwen-wt-sibling'))
+        .lstat(path.join(result.worktree!.path, siblingName))
         .catch(() => null);
       expect(stat).toBeNull();
       // Sibling itself is untouched.
