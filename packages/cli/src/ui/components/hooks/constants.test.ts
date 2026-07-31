@@ -163,7 +163,7 @@ describe('hooks constants', () => {
 
     it('should return description for SessionDelete', () => {
       expect(getHookShortDescription(HookEventName.SessionDelete)).toBe(
-        'After a session is deleted',
+        'After an explicitly selected session is deleted',
       );
     });
 

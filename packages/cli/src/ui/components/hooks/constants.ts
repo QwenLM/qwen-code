@@ -204,7 +204,9 @@ export function getHookShortDescription(eventName: string): string {
       'When the turn ends due to an API error (fires instead of Stop)',
     ),
     [HookEventName.SessionEnd]: t('When a session is ending'),
-    [HookEventName.SessionDelete]: t('After a session is deleted'),
+    [HookEventName.SessionDelete]: t(
+      'After an explicitly selected session is deleted',
+    ),
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
     ),
