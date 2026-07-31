@@ -1640,6 +1640,13 @@ describe('qwen-triage verify hardening', () => {
       const fb = emit(big, 45000);
       expect(fb).toContain('<pre><code>');
       expect(fb).toContain('Verification report (report.md, truncated)');
+
+      // Inflation: raw under the cap but sanitized over it (& -> &amp;).
+      const dense = join(dir, 'dense.md');
+      writeFileSync(dense, '&'.repeat(44000));
+      const inflated = emit(dense, 45000);
+      expect(inflated).toContain('<pre><code>');
+      expect(inflated).toContain('Verification report (report.md, truncated)');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

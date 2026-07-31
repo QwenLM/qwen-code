@@ -3355,13 +3355,18 @@ jobs:
             if ! (
               set -o pipefail
               tr -d '\000' < "$file" |
-                sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
-                  -e 's/&lt;\(\/\{0,1\}\)\(details\|summary\|pre\|code\|br\)&gt;/<\1\2>/g' \
+                sed -E -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                  -e 's/&lt;(\/{0,1})(details|summary|pre|code|br)&gt;/<\1\2>/g' \
                   -e 's/&lt;!--/\&lt;!\\-\\-/g' \
                   -e 's/@/\&#64;/g' > "$san_file"
             ); then
               rm -f "$san_file"
               emit_block 'Verification report (report.md)' "$file" "$max"
+              return 0
+            fi
+            if [ "$(wc -c < "$san_file")" -gt "$max" ]; then
+              rm -f "$san_file"
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0
             fi
             local opens closes
