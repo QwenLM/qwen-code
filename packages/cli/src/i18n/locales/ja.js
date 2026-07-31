@@ -2008,4 +2008,62 @@ export default {
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、新しいセッションを開始して記録を再開してください。詳細はデバッグログを確認してください。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、`/clear` を実行して記録可能な新しいセッションを開始してください。詳細はデバッグログを確認してください。',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    '最近の使用状況に基づいてプロジェクトの自動スキルを管理します。',
+  'Show project auto-skill lifecycle status.':
+    'プロジェクトの自動スキルのライフサイクル状態を表示します。',
+  'Run project auto-skill lifecycle maintenance.':
+    'プロジェクトの自動スキルのライフサイクル保守を実行します。',
+  'Restore an archived project auto-skill.':
+    'アーカイブ済みのプロジェクト自動スキルを復元します。',
+  'Auto-skill curator': '自動スキル管理',
+  'Last run: {{time}}': '前回の実行：{{time}}',
+  'Active: {{count}}': '有効：{{count}}',
+  'Stale: {{count}}': '非アクティブ：{{count}}',
+  'Archived: {{count}}': 'アーカイブ済み：{{count}}',
+  'Stale skills:': '非アクティブなスキル：',
+  'Pinned skills:': '固定済みのスキル：',
+  'Archived skills:': 'アーカイブ済みのスキル：',
+  'Dry run complete.': 'ドライランが完了しました。',
+  'Curator run complete.': '自動スキル管理の実行が完了しました。',
+  'Checked: {{count}}': '確認済み：{{count}}',
+  'First observed: {{count}}': '初回検出：{{count}}',
+  'Marked stale: {{count}}': '非アクティブ化：{{count}}',
+  'Reactivated: {{count}}': '再有効化：{{count}}',
+  'Skipped archive collisions: {{count}}':
+    'スキップしたアーカイブ先の競合：{{count}}',
+  'Archive candidates:': 'アーカイブ候補：',
+  'Skipped archive collisions:': 'スキップしたアーカイブ先の競合：',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': 'アーカイブ予定',
+  Archived: 'アーカイブ済み',
+  'Failed to read auto-skill curator status: {{message}}':
+    '自動スキル管理の状態を読み取れませんでした：{{message}}',
+  'Usage: /curator run [--dry-run]': '使用方法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '自動スキル管理を実行できませんでした：{{message}}',
+  'Usage: /curator restore <directory>':
+    '使用方法：/curator restore <ディレクトリ>',
+  'Restored auto-skill: {{name}}': '自動スキルを復元しました：{{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    '自動スキルを復元できませんでした：{{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    '自動スキルを自動保守の対象外にします。',
+  'Return a pinned auto-skill to automatic maintenance.':
+    '固定済みの自動スキルを自動保守の対象に戻します。',
+  'Usage: /curator pin <directory>': '使用方法：/curator pin <ディレクトリ>',
+  'Usage: /curator unpin <directory>':
+    '使用方法：/curator unpin <ディレクトリ>',
+  'Pinned auto-skill: {{name}}': '自動スキルを固定しました：{{name}}',
+  'Unpinned auto-skill: {{name}}': '自動スキルの固定を解除しました：{{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    '自動スキルの固定状態を更新できませんでした：{{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'セーフモードでは自動スキル管理による変更は無効です。',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
 };
