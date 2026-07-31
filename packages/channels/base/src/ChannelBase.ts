@@ -208,6 +208,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Adapter-owned persistent state directory. */
+  stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   channelMemoryRecallObserver?: (
@@ -359,6 +361,8 @@ export abstract class ChannelBase {
   protected readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  /** Adapter-owned persistent state directory, when supplied by the runtime. */
+  protected readonly stateDir?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -789,6 +793,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;

@@ -5,7 +5,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import * as nodeConstants from 'node:constants';
+import { createHash, randomUUID, type Hash } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -20,6 +21,17 @@ const CLAIMED_PRIMARY_WAIT_ATTEMPTS = 20;
 const RELEASE_PRECHECK_ATTEMPTS = 3;
 const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
+const TRANSCRIPT_SNAPSHOT_ATTEMPTS = 3;
+const TRANSCRIPT_HASH_BUFFER_BYTES = 1024 * 1024;
+const TRANSCRIPT_NO_FOLLOW_FLAG = nodeConstants.O_NOFOLLOW ?? 0;
+const TRANSCRIPT_NONBLOCK_FLAG = nodeConstants.O_NONBLOCK ?? 0;
+const TRANSCRIPT_READ_FLAGS =
+  nodeConstants.O_RDONLY | TRANSCRIPT_NO_FOLLOW_FLAG | TRANSCRIPT_NONBLOCK_FLAG;
+const TRANSCRIPT_APPEND_FLAGS =
+  nodeConstants.O_APPEND |
+  nodeConstants.O_RDWR |
+  TRANSCRIPT_NO_FOLLOW_FLAG |
+  TRANSCRIPT_NONBLOCK_FLAG;
 const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
 
 function describeError(error: unknown): string {
@@ -168,6 +180,10 @@ type ExistingLockState =
 interface TranscriptFingerprint {
   dev: number;
   ino: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  nlink: number;
   birthtimeMs: number;
   ctimeMs: number;
   mtimeMs: number;
@@ -180,6 +196,12 @@ type TranscriptState =
       byteLength: number;
       fingerprint: TranscriptFingerprint;
     };
+
+interface TranscriptSnapshot {
+  state: TranscriptState;
+  hasher: Hash;
+  attempts: number;
+}
 
 interface OpenTranscriptProof {
   readonly state: TranscriptState;
@@ -366,6 +388,10 @@ function transcriptFingerprint(stat: Stats): TranscriptFingerprint {
   return {
     dev: stat.dev,
     ino: stat.ino,
+    mode: stat.mode,
+    uid: stat.uid,
+    gid: stat.gid,
+    nlink: stat.nlink,
     birthtimeMs: stat.birthtimeMs,
     ctimeMs: stat.ctimeMs,
     mtimeMs: stat.mtimeMs,
@@ -376,10 +402,31 @@ function sameFileIdentity(
   left: TranscriptFingerprint,
   right: TranscriptFingerprint,
 ): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileSecurityMetadata(
+  left: TranscriptFingerprint,
+  right: TranscriptFingerprint,
+): boolean {
   return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.birthtimeMs === right.birthtimeMs
+    left.mode === right.mode &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.nlink === right.nlink
+  );
+}
+
+function sameHardTranscriptState(
+  left: TranscriptState,
+  right: TranscriptState,
+): boolean {
+  if (left.exists !== right.exists) return false;
+  if (!left.exists || !right.exists) return true;
+  return (
+    left.byteLength === right.byteLength &&
+    sameFileIdentity(left.fingerprint, right.fingerprint) &&
+    sameFileSecurityMetadata(left.fingerprint, right.fingerprint)
   );
 }
 
@@ -390,11 +437,52 @@ function sameTranscriptState(
   if (left.exists !== right.exists) return false;
   if (!left.exists || !right.exists) return true;
   return (
-    left.byteLength === right.byteLength &&
-    sameFileIdentity(left.fingerprint, right.fingerprint) &&
+    sameHardTranscriptState(left, right) &&
+    left.fingerprint.birthtimeMs === right.fingerprint.birthtimeMs &&
     left.fingerprint.ctimeMs === right.fingerprint.ctimeMs &&
     left.fingerprint.mtimeMs === right.fingerprint.mtimeMs
   );
+}
+
+function transcriptStateFromStat(
+  stat: Stats,
+): Extract<TranscriptState, { exists: true }> {
+  return {
+    exists: true,
+    byteLength: stat.size,
+    fingerprint: transcriptFingerprint(stat),
+  };
+}
+
+function transcriptStateChangedFields(
+  left: TranscriptState,
+  right: TranscriptState,
+): string[] {
+  if (left.exists !== right.exists) return ['exists'];
+  if (!left.exists || !right.exists) return [];
+  const fields: string[] = [];
+  if (left.byteLength !== right.byteLength) fields.push('byteLength');
+  const fingerprintFields = [
+    'dev',
+    'ino',
+    'mode',
+    'uid',
+    'gid',
+    'nlink',
+    'birthtimeMs',
+    'ctimeMs',
+    'mtimeMs',
+  ] as const;
+  for (const field of fingerprintFields) {
+    if (left.fingerprint[field] !== right.fingerprint[field]) {
+      fields.push(field);
+    }
+  }
+  return fields;
+}
+
+function transcriptHashesEqual(left: Hash, right: Hash): boolean {
+  return left.copy().digest().equals(right.copy().digest());
 }
 
 async function assertTranscriptPathMissing(filePath: string): Promise<void> {
@@ -409,51 +497,263 @@ async function assertTranscriptPathMissing(filePath: string): Promise<void> {
   });
 }
 
-async function getTranscriptState(filePath: string): Promise<TranscriptState> {
-  let handle: fs.FileHandle | undefined;
+async function getOpenTranscriptState(
+  filePath: string,
+  handle: fs.FileHandle,
+  invalidPathIsChange: boolean,
+): Promise<Extract<TranscriptState, { exists: true }>> {
+  let handleStat: Stats;
   try {
-    try {
-      handle = await fs.open(filePath, 'r');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        await assertTranscriptPathMissing(filePath);
-        return { exists: false, byteLength: 0 };
-      }
-      throw error;
-    }
-    const [handleStat, pathStat] = await Promise.all([
-      handle.stat(),
-      fs.lstat(filePath),
-    ]);
+    handleStat = await handle.stat();
+  } catch (error) {
     if (
-      !handleStat.isFile() ||
-      !pathStat.isFile() ||
-      pathStat.isSymbolicLink()
+      invalidPathIsChange &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
     ) {
-      throw new SessionWriterUnavailableError();
-    }
-    const handleFingerprint = transcriptFingerprint(handleStat);
-    const pathFingerprint = transcriptFingerprint(pathStat);
-    if (!sameFileIdentity(handleFingerprint, pathFingerprint)) {
       throw new SessionTranscriptChangedError();
     }
-    if (handleStat.size > 0) {
-      const lastByte = Buffer.allocUnsafe(1);
-      const { bytesRead } = await handle.read(
-        lastByte,
-        0,
-        1,
-        handleStat.size - 1,
-      );
-      if (bytesRead !== 1 || lastByte[0] !== 0x0a) {
+    throw error;
+  }
+  if (!handleStat.isFile()) {
+    if (invalidPathIsChange) throw new SessionTranscriptChangedError();
+    throw new SessionWriterUnavailableError();
+  }
+  if (handleStat.size > 0) {
+    const lastByte = Buffer.allocUnsafe(1);
+    const { bytesRead } = await handle.read(
+      lastByte,
+      0,
+      1,
+      handleStat.size - 1,
+    );
+    if (bytesRead !== 1 || lastByte[0] !== 0x0a) {
+      throw new SessionTranscriptChangedError();
+    }
+  }
+  let pathStat: Stats;
+  try {
+    pathStat = await fs.lstat(filePath);
+  } catch (error) {
+    if (
+      invalidPathIsChange &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+    throw error;
+  }
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    if (invalidPathIsChange) throw new SessionTranscriptChangedError();
+    throw new SessionWriterUnavailableError();
+  }
+  const handleState = transcriptStateFromStat(handleStat);
+  const pathState = transcriptStateFromStat(pathStat);
+  if (!sameHardTranscriptState(handleState, pathState)) {
+    throw new SessionTranscriptChangedError();
+  }
+  return pathState;
+}
+
+async function inspectTranscriptPath(
+  filePath: string,
+  invalidPathIsChange: boolean,
+): Promise<TranscriptState> {
+  let stat: Stats;
+  try {
+    stat = await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { exists: false, byteLength: 0 };
+    }
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    if (invalidPathIsChange) throw new SessionTranscriptChangedError();
+    throw new SessionWriterUnavailableError();
+  }
+  return transcriptStateFromStat(stat);
+}
+
+async function openTranscriptForRead(
+  filePath: string,
+  expectedState: TranscriptState | undefined,
+): Promise<fs.FileHandle | undefined> {
+  const pathState = await inspectTranscriptPath(
+    filePath,
+    expectedState !== undefined,
+  );
+  if (expectedState && !sameHardTranscriptState(pathState, expectedState)) {
+    throw new SessionTranscriptChangedError();
+  }
+  if (!pathState.exists) return undefined;
+
+  try {
+    return await fs.open(filePath, TRANSCRIPT_READ_FLAGS);
+  } catch (error) {
+    if (expectedState !== undefined) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
+        throw new SessionTranscriptChangedError();
+      }
+      const currentState = await inspectTranscriptPath(filePath, true);
+      if (!sameHardTranscriptState(currentState, expectedState)) {
         throw new SessionTranscriptChangedError();
       }
     }
-    return {
-      exists: true,
-      byteLength: handleStat.size,
-      fingerprint: handleFingerprint,
-    };
+    throw error;
+  }
+}
+
+async function openTranscriptForAppend(
+  filePath: string,
+  expectedState: TranscriptState,
+): Promise<fs.FileHandle> {
+  const pathState = await inspectTranscriptPath(filePath, true);
+  if (!sameHardTranscriptState(pathState, expectedState)) {
+    throw new SessionTranscriptChangedError();
+  }
+
+  try {
+    const flags = expectedState.exists
+      ? TRANSCRIPT_APPEND_FLAGS
+      : TRANSCRIPT_APPEND_FLAGS | nodeConstants.O_CREAT | nodeConstants.O_EXCL;
+    return await fs.open(filePath, flags, 0o600);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' || code === 'ENOENT' || code === 'ELOOP') {
+      throw new SessionTranscriptChangedError();
+    }
+    const currentState = await inspectTranscriptPath(filePath, true);
+    if (!sameHardTranscriptState(currentState, expectedState)) {
+      throw new SessionTranscriptChangedError();
+    }
+    throw error;
+  }
+}
+
+async function getTranscriptState(
+  filePath: string,
+  expectedState: TranscriptState | undefined,
+): Promise<TranscriptState> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await openTranscriptForRead(filePath, expectedState);
+    if (!handle) return { exists: false, byteLength: 0 };
+    return await getOpenTranscriptState(
+      filePath,
+      handle,
+      expectedState !== undefined,
+    );
+  } catch (error) {
+    if (error instanceof SessionWriterError) throw error;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function captureOpenTranscriptSnapshot(
+  filePath: string,
+  handle: fs.FileHandle,
+  expectedState: TranscriptState | undefined,
+  shouldAbort: () => boolean,
+): Promise<TranscriptSnapshot> {
+  let buffer: Buffer | undefined;
+  for (let attempt = 1; attempt <= TRANSCRIPT_SNAPSHOT_ATTEMPTS; attempt++) {
+    if (shouldAbort()) throw new SessionWriterLostError();
+    const beforeState = await getOpenTranscriptState(
+      filePath,
+      handle,
+      expectedState !== undefined,
+    );
+    if (expectedState && !sameHardTranscriptState(beforeState, expectedState)) {
+      throw new SessionTranscriptChangedError();
+    }
+
+    const bufferBytes = Math.min(
+      TRANSCRIPT_HASH_BUFFER_BYTES,
+      beforeState.byteLength,
+    );
+    if (!buffer || buffer.byteLength < bufferBytes) {
+      buffer = Buffer.allocUnsafe(bufferBytes);
+    }
+    const hasher = createHash('sha256');
+    let position = 0;
+    while (position < beforeState.byteLength) {
+      if (shouldAbort()) throw new SessionWriterLostError();
+      const length = Math.min(
+        buffer.byteLength,
+        beforeState.byteLength - position,
+      );
+      if (length === 0) throw new SessionWriterUnavailableError();
+      let chunkBytesRead = 0;
+      while (chunkBytesRead < length) {
+        if (shouldAbort()) throw new SessionWriterLostError();
+        const { bytesRead } = await handle.read(
+          buffer,
+          chunkBytesRead,
+          length - chunkBytesRead,
+          position + chunkBytesRead,
+        );
+        if (bytesRead === 0) throw new SessionTranscriptChangedError();
+        chunkBytesRead += bytesRead;
+      }
+      hasher.update(buffer.subarray(0, chunkBytesRead));
+      position += chunkBytesRead;
+    }
+
+    if (shouldAbort()) throw new SessionWriterLostError();
+    const afterState = await getOpenTranscriptState(
+      filePath,
+      handle,
+      expectedState !== undefined,
+    );
+    if (!sameHardTranscriptState(beforeState, afterState)) {
+      throw new SessionTranscriptChangedError();
+    }
+    if (sameTranscriptState(beforeState, afterState)) {
+      return { state: afterState, hasher, attempts: attempt };
+    }
+    debugLogger.debug(
+      `Session transcript snapshot retry attempt=${attempt} ` +
+        `changedFields=${transcriptStateChangedFields(beforeState, afterState).join(',')}`,
+    );
+  }
+  throw new SessionWriterUnavailableError({
+    cause: new Error('Session transcript metadata did not stabilize'),
+  });
+}
+
+async function captureTranscriptSnapshot(
+  filePath: string,
+  expectedState: TranscriptState | undefined,
+  shouldAbort: () => boolean,
+): Promise<TranscriptSnapshot> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await openTranscriptForRead(filePath, expectedState);
+    if (!handle) {
+      const missingState: TranscriptState = { exists: false, byteLength: 0 };
+      if (
+        expectedState &&
+        !sameHardTranscriptState(missingState, expectedState)
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      return {
+        state: missingState,
+        hasher: createHash('sha256'),
+        attempts: 1,
+      };
+    }
+    return await captureOpenTranscriptSnapshot(
+      filePath,
+      handle,
+      expectedState,
+      shouldAbort,
+    );
   } catch (error) {
     if (error instanceof SessionWriterError) throw error;
     throw new SessionWriterUnavailableError({
@@ -595,7 +895,7 @@ async function validateOpenTranscriptProof(
   proof: OpenTranscriptProof,
 ): Promise<void> {
   if (!proof.state.exists) {
-    const current = await getTranscriptState(filePath);
+    const current = await getTranscriptState(filePath, undefined);
     if (!sameTranscriptState(current, proof.state)) {
       throw new SessionTranscriptChangedError();
     }
@@ -1123,6 +1423,7 @@ export class SessionWriterLease {
   readonly runtimeBaseDir: string;
   readonly transcriptPath: string;
   private expectedTranscriptState: TranscriptState | undefined;
+  private expectedTranscriptHasher: Hash | undefined;
   private released = false;
   private terminalPromise: Promise<void> | undefined;
   private operationTail: Promise<void> = Promise.resolve();
@@ -1310,11 +1611,14 @@ export class SessionWriterLease {
         }
         primaryInstalled = true;
         await assertPathMissing(claimPath);
-        const lease = await SessionWriterLease.finishAcquisition(
+        const finishingLease = SessionWriterLease.finishAcquisition(
           lockPath,
           lockRecord,
           normalizedOptions,
         );
+        // finishAcquisition now owns exact-record cleanup for this primary lock.
+        primaryInstalled = false;
+        const lease = await finishingLease;
         await removeOwnedLock(reclaimPath, lockRecord.owner_id).catch(() => {});
         return lease;
       } catch (error) {
@@ -1478,9 +1782,14 @@ export class SessionWriterLease {
     const lease = new SessionWriterLease(lockPath, lockRecord, options);
     try {
       options.onOwnershipAcquired?.(lease);
-      lease.expectedTranscriptState = await getTranscriptState(
+      const snapshot = await captureTranscriptSnapshot(
         options.transcriptPath,
+        undefined,
+        () => lease.released,
       );
+      await lease.readOwnedLock();
+      lease.expectedTranscriptState = snapshot.state;
+      lease.expectedTranscriptHasher = snapshot.hasher;
       if (
         requiredTranscriptState &&
         !sameTranscriptState(
@@ -1493,9 +1802,14 @@ export class SessionWriterLease {
       return lease;
     } catch (error) {
       try {
-        await removeOwnedLock(lockPath, lockRecord.owner_id);
-      } catch {
-        throw new SessionWriterUnavailableError();
+        await lease.release();
+      } catch (releaseError) {
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, releaseError],
+            'Session writer acquisition cleanup failed',
+          ),
+        });
       }
       throw error;
     }
@@ -1594,13 +1908,25 @@ export class SessionWriterLease {
 
   private async assertOwnedAndUnchangedOnce(): Promise<void> {
     await this.readOwnedLock();
-    if (!this.expectedTranscriptState) {
+    const expectedState = this.expectedTranscriptState;
+    if (!expectedState || !this.expectedTranscriptHasher) {
       throw new SessionWriterUnavailableError();
     }
-    const transcriptState = await getTranscriptState(this.transcriptPath);
-    if (!sameTranscriptState(transcriptState, this.expectedTranscriptState)) {
+    const transcriptState = await getTranscriptState(
+      this.transcriptPath,
+      expectedState,
+    );
+    if (sameTranscriptState(transcriptState, expectedState)) {
+      debugLogger.debug('Session transcript verified path=fast');
+      return;
+    }
+    if (!sameHardTranscriptState(transcriptState, expectedState)) {
+      debugLogger.debug(
+        `Session transcript hard state changed changedFields=${transcriptStateChangedFields(expectedState, transcriptState).join(',')}`,
+      );
       throw new SessionTranscriptChangedError();
     }
+    await this.reconcileTranscriptMetadata(transcriptState);
   }
 
   appendJsonLine(value: unknown): Promise<void> {
@@ -1619,53 +1945,128 @@ export class SessionWriterLease {
     if (serialized === undefined) throw new SessionWriterUnavailableError();
     const bytes = Buffer.from(`${serialized}\n`, 'utf8');
     await this.assertOwnedAndUnchangedOnce();
-    const expectedBefore = this.expectedTranscriptState;
-    if (!expectedBefore) throw new SessionWriterUnavailableError();
-    const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
+    let expectedBefore = this.expectedTranscriptState;
+    if (!expectedBefore || !this.expectedTranscriptHasher) {
+      throw new SessionWriterUnavailableError();
+    }
     let handle: fs.FileHandle | undefined;
     try {
       await fs.mkdir(path.dirname(this.transcriptPath), {
         recursive: true,
         mode: 0o700,
       });
-      handle = await fs.open(
+      handle = await openTranscriptForAppend(
         this.transcriptPath,
-        expectedBefore.exists ? 'a+' : 'ax+',
-        0o600,
+        expectedBefore,
       );
-      const beforeStat = await handle.stat();
-      const beforeState: TranscriptState = {
-        exists: true,
-        byteLength: beforeStat.size,
-        fingerprint: transcriptFingerprint(beforeStat),
-      };
-      if (
-        expectedBefore.exists
-          ? !sameTranscriptState(beforeState, expectedBefore)
-          : beforeStat.size !== 0
-      ) {
+      let beforeState = await getOpenTranscriptState(
+        this.transcriptPath,
+        handle,
+        true,
+      );
+      if (expectedBefore.exists) {
+        if (!sameTranscriptState(beforeState, expectedBefore)) {
+          if (!sameHardTranscriptState(beforeState, expectedBefore)) {
+            throw new SessionTranscriptChangedError();
+          }
+          await this.reconcileTranscriptMetadata(beforeState, handle);
+          expectedBefore = this.expectedTranscriptState;
+          if (!expectedBefore?.exists) {
+            throw new SessionWriterUnavailableError();
+          }
+          beforeState = expectedBefore;
+        }
+      } else if (beforeState.byteLength !== 0) {
         throw new SessionTranscriptChangedError();
       }
+      const expectedHasher = this.expectedTranscriptHasher;
+      if (!expectedHasher) throw new SessionWriterUnavailableError();
+      const candidateHasher = expectedHasher.copy();
+      candidateHasher.update(bytes);
+      const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
       await this.readOwnedLock();
       await handle.writeFile(bytes);
       await handle.sync();
       const afterStat = await handle.stat();
-      if (afterStat.size !== nextByteLength) {
-        throw new SessionTranscriptChangedError();
-      }
-      const writtenFingerprint = transcriptFingerprint(afterStat);
-      await handle.close();
-      handle = undefined;
-      const transcriptState = await getTranscriptState(this.transcriptPath);
+      const afterState = transcriptStateFromStat(afterStat);
       if (
-        !transcriptState.exists ||
-        transcriptState.byteLength !== nextByteLength ||
-        !sameFileIdentity(transcriptState.fingerprint, writtenFingerprint)
+        afterState.byteLength !== nextByteLength ||
+        !sameFileIdentity(afterState.fingerprint, beforeState.fingerprint) ||
+        !sameFileSecurityMetadata(
+          afterState.fingerprint,
+          beforeState.fingerprint,
+        )
       ) {
         throw new SessionTranscriptChangedError();
       }
+      await handle.close();
+      handle = undefined;
+      const transcriptState = await getTranscriptState(
+        this.transcriptPath,
+        afterState,
+      );
+      if (
+        !transcriptState.exists ||
+        transcriptState.byteLength !== nextByteLength ||
+        !sameFileIdentity(
+          transcriptState.fingerprint,
+          afterState.fingerprint,
+        ) ||
+        !sameFileSecurityMetadata(
+          transcriptState.fingerprint,
+          afterState.fingerprint,
+        )
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      let committedState: TranscriptState = transcriptState;
+      let committedHasher = candidateHasher;
+      let appendReconciliation:
+        | {
+            changedFields: string[];
+            attempts: number;
+            startedAt: number;
+          }
+        | undefined;
+      if (!sameTranscriptState(transcriptState, afterState)) {
+        const changedFields = transcriptStateChangedFields(
+          afterState,
+          transcriptState,
+        );
+        const startedAt = Date.now();
+        await this.readOwnedLock();
+        const snapshot = await captureTranscriptSnapshot(
+          this.transcriptPath,
+          afterState,
+          () => this.released,
+        );
+        if (!transcriptHashesEqual(snapshot.hasher, candidateHasher)) {
+          debugLogger.debug(
+            `Session transcript content changed after append metadata signal ` +
+              `path=slow changedFields=${changedFields.join(',')} ` +
+              `attempts=${snapshot.attempts} durationMs=${Date.now() - startedAt}`,
+          );
+          throw new SessionTranscriptChangedError();
+        }
+        committedState = snapshot.state;
+        committedHasher = snapshot.hasher;
+        appendReconciliation = {
+          changedFields,
+          attempts: snapshot.attempts,
+          startedAt,
+        };
+      }
       await this.readOwnedLock();
-      this.expectedTranscriptState = transcriptState;
+      this.expectedTranscriptHasher = committedHasher;
+      this.expectedTranscriptState = committedState;
+      if (appendReconciliation) {
+        debugLogger.debug(
+          `Session transcript append metadata reconciled path=slow ` +
+            `changedFields=${appendReconciliation.changedFields.join(',')} ` +
+            `attempts=${appendReconciliation.attempts} ` +
+            `durationMs=${Date.now() - appendReconciliation.startedAt}`,
+        );
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'EEXIST' || code === 'ENOENT') {
@@ -1678,6 +2079,56 @@ export class SessionWriterLease {
     } finally {
       await handle?.close().catch(() => {});
     }
+  }
+
+  private async reconcileTranscriptMetadata(
+    observedState: TranscriptState,
+    handle?: fs.FileHandle,
+  ): Promise<void> {
+    const expectedState = this.expectedTranscriptState;
+    const expectedHasher = this.expectedTranscriptHasher;
+    if (
+      !expectedState ||
+      !expectedHasher ||
+      !sameHardTranscriptState(observedState, expectedState)
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+
+    const changedFields = transcriptStateChangedFields(
+      expectedState,
+      observedState,
+    );
+    const startedAt = Date.now();
+    await this.readOwnedLock();
+    const snapshot = handle
+      ? await captureOpenTranscriptSnapshot(
+          this.transcriptPath,
+          handle,
+          expectedState,
+          () => this.released,
+        )
+      : await captureTranscriptSnapshot(
+          this.transcriptPath,
+          expectedState,
+          () => this.released,
+        );
+    if (!transcriptHashesEqual(snapshot.hasher, expectedHasher)) {
+      debugLogger.debug(
+        `Session transcript content changed after metadata signal ` +
+          `path=slow changedFields=${changedFields.join(',')} ` +
+          `attempts=${snapshot.attempts} durationMs=${Date.now() - startedAt}`,
+      );
+      throw new SessionTranscriptChangedError();
+    }
+    await this.readOwnedLock();
+    this.expectedTranscriptHasher = snapshot.hasher;
+    this.expectedTranscriptState = snapshot.state;
+    debugLogger.debug(
+      `Session transcript metadata reconciled path=slow ` +
+        `changedFields=${changedFields.join(',')} attempts=${snapshot.attempts} ` +
+        `durationMs=${Date.now() - startedAt}`,
+    );
   }
 
   release(): Promise<void> {
