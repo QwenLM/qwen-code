@@ -199,6 +199,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
@@ -306,6 +307,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
@@ -4423,6 +4425,10 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const requestedSessionId =
+      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
+        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
+        : undefined;
     const sessionSource = getSessionSource(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
@@ -4446,7 +4452,7 @@ class QwenAgent implements Agent {
             mcpServers,
             settings,
             sessionSource,
-            undefined,
+            requestedSessionId,
             undefined,
             shouldDeferMcpDiscovery(params)
               ? { skipMcpDiscovery: true }
@@ -10904,6 +10910,9 @@ class QwenAgent implements Agent {
         );
       });
     } catch (error) {
+      if (error instanceof SessionIdConflictError) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -11029,6 +11038,12 @@ class QwenAgent implements Agent {
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
+      // The daemon owns the settings watcher lifecycle.
+      undefined,
+      // A duplicate caller-supplied session id must fail this one request,
+      // not process.exit(1) the shared ACP child and every session on its
+      // channel. newSessionConfig maps the throw to a RequestError.
+      true,
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);

@@ -109,6 +109,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
 } from './bridgeTypes.js';
@@ -2602,6 +2603,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
+    requestedSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2658,8 +2660,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const request = telemetry.injectPromptContext({
               cwd: boundWorkspace,
               mcpServers: [],
-              ...(sourceType
-                ? { _meta: sessionSourceRequestMeta(sourceType, sourceId) }
+              ...(requestedSessionId || sourceType
+                ? {
+                    _meta: {
+                      ...sessionSourceRequestMeta(sourceType, sourceId),
+                      ...(requestedSessionId
+                        ? {
+                            [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                          }
+                        : {}),
+                    },
+                  }
                 : {}),
             });
             const response = await withTimeout(
@@ -5355,6 +5366,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceId,
         req.worktree,
         req.branch,
+        req.sessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
