@@ -845,6 +845,25 @@ describe('GitlabChannel', () => {
       );
     });
 
+    it('does not award twice when onPromptStart is called again', async () => {
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+
+      expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalledTimes(1);
+    });
+
     it('handles award failure as best-effort', async () => {
       mockApi.IssueNoteAwardEmojis.award.mockRejectedValueOnce(
         new Error('403'),
