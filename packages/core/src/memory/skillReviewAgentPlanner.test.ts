@@ -22,6 +22,7 @@ import {
   AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
   createSkillScopedAgentConfig,
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
   DEFAULT_AUTO_SKILL_TIMEOUT_MS,
   listExistingSkillDirNames,
   runSkillReviewByAgent,
@@ -464,6 +465,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
       }),
     );

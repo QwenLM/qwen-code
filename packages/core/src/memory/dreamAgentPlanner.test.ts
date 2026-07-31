@@ -171,6 +171,20 @@ describe('dreamAgentPlanner', () => {
     );
   });
 
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
   it('can read transcripts while keeping writes project-memory-only', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
