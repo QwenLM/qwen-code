@@ -72,7 +72,7 @@ describe('release notes body preparation', () => {
     // Cut lands inside the emoji run: a code-unit slice would leave a lone
     // surrogate and an invalid body.
     const maxChars = 200;
-    const body = `${'a'.repeat(120)}${'😀'.repeat(200)}`;
+    const body = `${'a'.repeat(50)}${'😀'.repeat(200)}`;
 
     const result = prepareReleaseNotes({ ...context, body, maxChars });
 
@@ -81,6 +81,18 @@ describe('release notes body preparation', () => {
       result.body,
     );
     assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(result.body));
+  });
+
+  it('falls back to a minimal body when the footer alone exceeds the cap', () => {
+    const result = prepareReleaseNotes({
+      ...context,
+      body: 'x'.repeat(100),
+      maxChars: 10,
+    });
+
+    assert.equal(result.body, 'Release v0.21.2');
+    assert.equal(result.truncated, true);
+    assert.equal(result.fallback, true);
   });
 
   it('falls back to a minimal body when nothing was generated', () => {
