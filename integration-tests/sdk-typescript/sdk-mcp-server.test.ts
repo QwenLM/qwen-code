@@ -393,13 +393,15 @@ describe('SDK MCP Server Integration (E2E)', () => {
   });
 
   describe('Async Tool Handlers', () => {
-    // FIXME(#8256): Flaky on the live model: the model sometimes answers without
-    // calling the delayed_response tool, so the foundToolUse / tool-result
-    // assertions fail intermittently on main. Already survived asserting on the
-    // deterministic tool result, a forced prompt, retry: 2, and the 5-minute
-    // suite timeout. Skipped like the other model-nondeterministic cases
-    // (permission-control.test.ts); the durable fix is driving it with the fake
-    // OpenAI server harness the interactive tests use.
+    // FIXME(#8256): Flaky on the live model. The failure recorded for this case
+    // (run 30650798703, macOS shard 2/2) was a 300000ms timeout: the real-model
+    // query() hung / exceeded the 5-minute suite timeout. The suspected shared
+    // cause with the subagents case is model nondeterminism (the model sometimes
+    // answers without calling the delayed_response tool). Already survived
+    // asserting on the deterministic tool result, a forced prompt, retry: 2, and
+    // the 5-minute suite timeout. Skipped like the other model-nondeterministic
+    // cases (permission-control.test.ts); the durable fix is driving it with the
+    // fake OpenAI server harness the interactive tests use.
     it.skip('should handle async tool handlers with delays', async () => {
       // Define a tool with async delay using Zod schema
       const delayedTool = tool(
