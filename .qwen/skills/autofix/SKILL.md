@@ -48,7 +48,7 @@ review comments, and it does not use `/loop`.
    `is_background: true`:
 
    ```bash
-   QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --effort high --json --quiet
+   env -u SANDBOX QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --approval-mode auto --effort high --json --quiet
    ```
 
    Do not append `&` or set a tool timeout. While the status is `running`, do
@@ -60,8 +60,9 @@ review comments, and it does not use `/loop`.
    it remains `running`. At terminal status, read the complete background
    output file as the result JSON. This leaves the timeout to `review run`
    itself instead of the shell tool's shorter foreground limit. The explicit
-   `QWEN_SANDBOX=true` is mandatory: the nested headless review uses YOLO mode,
-   so it must not run project commands directly at host-process privilege.
+   Auto approval mode and sandbox are mandatory. Clearing inherited `SANDBOX`
+   prevents a stale marker from bypassing sandbox startup; if either Auto mode
+   or sandbox setup cannot run, the review must fail closed as incomplete.
 
    Do not pass a target or `--comment`. The omitted target is what makes review
    capture staged, unstaged, and untracked changes together.

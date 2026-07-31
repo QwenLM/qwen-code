@@ -24,7 +24,7 @@ has two entry paths:
 The local path repeatedly runs the existing machine-readable review command:
 
 ```bash
-QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --effort high --json --quiet
+env -u SANDBOX QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --approval-mode auto --effort high --json --quiet
 ```
 
 The command runs as a managed background shell so its own timeout, rather than
@@ -35,13 +35,15 @@ sidecar at a bounded, increasing cadence. Working-tree fingerprints around the
 review and immediately before convergence make any review side effect or
 concurrent edit a visible `BLOCKED` outcome.
 
-The nested headless review always runs in the Qwen sandbox because its review
-process uses YOLO approval mode. If untracked, non-ignored files exist, Autofix
-lists them and waits for explicit consent before their contents enter review
-model context. Non-interactive runs stop `BLOCKED` when that consent is not
-available. On Windows, local Autofix requires Git Bash/MSYS because the bundled
-review workflow uses POSIX shell syntax; native cmd.exe and PowerShell fail
-closed before review starts.
+The nested headless review uses Auto approval mode inside the Qwen sandbox.
+Autofix clears an inherited `SANDBOX` marker before startup so it cannot bypass
+containment; an unavailable approval classifier or sandbox produces an
+incomplete review and fails closed. If untracked, non-ignored files exist,
+Autofix lists them and waits for explicit consent before their contents enter
+review model context. Non-interactive runs stop `BLOCKED` when that consent is
+not available. On Windows, local Autofix requires Git Bash/MSYS because the
+bundled review workflow uses POSIX shell syntax; native cmd.exe and PowerShell
+fail closed before review starts.
 
 After each complete review, Autofix reads the emitted report, verifies every
 finding against the code, applies one minimal coherent fix batch, runs the
