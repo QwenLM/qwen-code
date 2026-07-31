@@ -856,7 +856,7 @@ describe('AgentTool', () => {
           subagent_type: 'fork',
           fork_tools: ['*'],
         }),
-      ).toMatch(/omit it for unrestricted execution/i);
+      ).toMatch(/omit it to allow every otherwise-executable inherited tool/i);
     });
 
     it.each([
@@ -3058,6 +3058,10 @@ describe('AgentTool', () => {
       expect(childMessage).not.toContain(
         'commit your changes before reporting',
       );
+      expect(childMessage).toContain(
+        `The ${ToolNames.ASK_USER_QUESTION} tool cannot be executed`,
+      );
+      expect(childMessage).toContain('report the blocker to the parent');
     });
 
     it('adds the execution restriction only when fork_tools is supplied', () => {
@@ -3385,6 +3389,11 @@ describe('AgentTool', () => {
           description: 'Edit a file',
           parameters: { type: 'object', properties: {} },
         },
+        {
+          name: ToolNames.ASK_USER_QUESTION,
+          description: 'Ask the user a question',
+          parameters: { type: 'object', properties: {} },
+        },
       ];
       vi.mocked(config.getGeminiClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
@@ -3402,7 +3411,7 @@ describe('AgentTool', () => {
         description: 'read only task',
         prompt: 'inspect the implementation',
         subagent_type: 'fork',
-        fork_tools: [ToolNames.READ_FILE],
+        fork_tools: [ToolNames.READ_FILE, ToolNames.ASK_USER_QUESTION],
       });
       await invocation.execute();
 
@@ -3414,6 +3423,7 @@ describe('AgentTool', () => {
       expect(toolConfig?.tools).toStrictEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.ASK_USER_QUESTION,
       ]);
       expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
       expect(mockContextState.set).toHaveBeenCalledWith(
@@ -3630,6 +3640,10 @@ describe('AgentTool', () => {
         prompt: 'do the thing',
         subagent_type: 'fork',
       };
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.ASK_USER_QUESTION,
+      ]);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -3652,7 +3666,7 @@ describe('AgentTool', () => {
       // ToolConfig inherits wildcard for first-turn fallback.
       const toolConfig = createArgs[5];
       expect(toolConfig?.tools).toEqual(['*']);
-      expect(toolConfig?.executionAllowedTools).toBeUndefined();
+      expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
 
       // Fork returns the placeholder synchronously.
       const llmText = partToString(result.llmContent);
@@ -6200,72 +6214,93 @@ describe('AgentTool', () => {
       });
     });
 
-    it('stores fork execution policy in the sidecar without capability snapshots in the bootstrap transcript', async () => {
-      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
-        .fn()
-        .mockReturnValue(true);
-
-      const forkParams: AgentParams = {
-        description: 'Fork task',
-        prompt: 'Investigate issue',
-        subagent_type: 'fork',
-        fork_tools: ['Read'],
-        run_in_background: true,
-      };
-      const generationConfig = {
-        systemInstruction: {
-          role: 'system',
-          parts: [{ text: 'parent system' }],
-        },
-        tools: [{ functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] }],
-      };
-      const geminiClient = {
-        getHistory: vi
+    it.each([
+      {
+        policy: 'explicit caller allowlist',
+        forkTools: ['Read'] as string[] | undefined,
+        expectedStoredPolicy: ['Read'] as string[] | undefined,
+      },
+      {
+        policy: 'derived default allowlist',
+        forkTools: undefined as string[] | undefined,
+        expectedStoredPolicy: undefined as string[] | undefined,
+      },
+    ])(
+      'stores only $policy in the sidecar without capability snapshots in the bootstrap transcript',
+      async ({ forkTools, expectedStoredPolicy }) => {
+        (config as unknown as Record<string, unknown>)['isInteractive'] = vi
           .fn()
-          .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
-        getChat: vi.fn().mockReturnValue({
-          getGenerationConfig: () => generationConfig,
-        }),
-      };
-      vi.mocked(config.getGeminiClient).mockReturnValue(
-        geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
-      );
+          .mockReturnValue(true);
 
-      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
-      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
-      const createSpy = vi
-        .spyOn(AgentHeadless, 'create')
-        .mockResolvedValue(mockAgent);
+        const forkParams: AgentParams = {
+          description: 'Fork task',
+          prompt: 'Investigate issue',
+          subagent_type: 'fork',
+          ...(forkTools !== undefined ? { fork_tools: forkTools } : {}),
+          run_in_background: true,
+        };
+        const generationConfig = {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: 'parent system' }],
+          },
+          tools: [
+            { functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] },
+          ],
+        };
+        const geminiClient = {
+          getHistory: vi
+            .fn()
+            .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
+          getChat: vi.fn().mockReturnValue({
+            getGenerationConfig: () => generationConfig,
+          }),
+        };
+        vi.mocked(config.getGeminiClient).mockReturnValue(
+          geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
+        );
 
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation(forkParams);
-      await invocation.execute();
+        const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+        const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        const createSpy = vi
+          .spyOn(AgentHeadless, 'create')
+          .mockResolvedValue(mockAgent);
 
-      const writerOptions = attachSpy.mock.calls[0]?.[2];
-      expect(writerOptions).toBeDefined();
-      expect(writerOptions).not.toHaveProperty('bootstrapSystemInstruction');
-      expect(writerOptions).not.toHaveProperty('bootstrapTools');
-      expect(writerOptions).not.toHaveProperty(
-        'bootstrapExecutionAllowedTools',
-      );
-      expect(writerOptions).toMatchObject({
-        bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
-        launchTaskPrompt: expect.any(String),
-      });
-      expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
-        executionAllowedTools: ['Read'],
-      });
-      const createArgs = createSpy.mock.calls[0];
-      expect(createArgs?.[5]).toEqual({
-        tools: ['Bash', 'Read'],
-        executionAllowedTools: ['Read'],
-      });
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(forkParams);
+        await invocation.execute();
 
-      attachSpy.mockRestore();
-      writeMetaSpy.mockRestore();
-      createSpy.mockRestore();
-    });
+        const writerOptions = attachSpy.mock.calls[0]?.[2];
+        expect(writerOptions).toBeDefined();
+        expect(writerOptions).not.toHaveProperty('bootstrapSystemInstruction');
+        expect(writerOptions).not.toHaveProperty('bootstrapTools');
+        expect(writerOptions).not.toHaveProperty(
+          'bootstrapExecutionAllowedTools',
+        );
+        expect(writerOptions).toMatchObject({
+          bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
+          launchTaskPrompt: expect.any(String),
+        });
+        const writtenMeta = writeMetaSpy.mock.calls[0]?.[1];
+        if (expectedStoredPolicy === undefined) {
+          expect(writtenMeta).not.toHaveProperty('executionAllowedTools');
+        } else {
+          expect(writtenMeta).toMatchObject({
+            executionAllowedTools: expectedStoredPolicy,
+          });
+        }
+        const createArgs = createSpy.mock.calls[0];
+        expect(createArgs?.[5]).toEqual({
+          tools: ['Bash', 'Read'],
+          executionAllowedTools: forkTools ?? ['Bash', 'Read'],
+        });
+
+        attachSpy.mockRestore();
+        writeMetaSpy.mockRestore();
+        createSpy.mockRestore();
+      },
+    );
   });
 });
 

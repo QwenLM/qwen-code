@@ -3,11 +3,11 @@ import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import { ToolNames } from '../tool-names.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
 } from '../../utils/environmentContext.js';
-import { ToolNames } from '../tool-names.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -100,6 +100,15 @@ export function registerForkDisplayImageForCache(
 
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
+
+export function buildForkExecutionAllowlist(
+  requestedTools: readonly string[] | undefined,
+  declaredTools: readonly string[],
+): string[] {
+  return (requestedTools ?? declaredTools).filter(
+    (toolName) => toolName !== ToolNames.ASK_USER_QUESTION,
+  );
+}
 
 export type ForkTurns = 'all' | `${number}`;
 export type NormalizedForkTurns = 'all' | number;
@@ -324,7 +333,7 @@ You are a forked worker process. You are NOT the main agent.
 
 RULES (non-negotiable):
 1. You ARE the fork. Do NOT spawn sub-agents; execute directly.
-2. Do NOT converse, ask questions, or suggest next steps
+2. Do NOT converse, ask questions, or suggest next steps. The ${ToolNames.ASK_USER_QUESTION} tool cannot be executed. If missing user input blocks the directive, report the blocker to the parent in Issues and stop.
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.
 5. If you modify files, report the files changed and verification performed. Do NOT create a commit unless the directive explicitly asks you to.

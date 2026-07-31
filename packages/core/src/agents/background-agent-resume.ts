@@ -50,6 +50,7 @@ import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  buildForkExecutionAllowlist,
   registerForkDisplayImageForCache,
   resolveForkExecutionAllowedTools,
   runInForkContext,
@@ -1670,20 +1671,21 @@ export class BackgroundAgentResumeService {
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
-    const allowedTools = resolveForkExecutionAllowedTools(
-      runtime.toolNames,
-      executionAllowedTools,
-      agentConfig.getToolRegistry().getAllToolNames(),
-    );
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
       initialMessages,
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
-      ...(allowedTools !== undefined
-        ? { executionAllowedTools: allowedTools }
-        : {}),
+      // Combine the ask_user_question restriction (buildForkExecutionAllowlist)
+      // with the display_image restriction (resolveForkExecutionAllowedTools):
+      // a resumed fork keeps the parent's display_image declaration for cache
+      // parity but must not execute it.
+      executionAllowedTools: resolveForkExecutionAllowedTools(
+        runtime.toolNames,
+        buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
+        agentConfig.getToolRegistry().getAllToolNames(),
+      ),
     };
 
     return AgentHeadless.create(

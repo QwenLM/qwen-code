@@ -95,6 +95,7 @@ describe('HookSystem', () => {
       fireMessageDisplayEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
+      fireSessionDeleteEvent: vi.fn(),
       firePreToolUseEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
       firePostToolUseFailureEvent: vi.fn(),
@@ -262,6 +263,16 @@ describe('HookSystem', () => {
 
       expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
         'SessionEnd',
+      );
+    });
+
+    it('should check the correct event name for SessionDelete', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('SessionDelete');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'SessionDelete',
       );
     });
 
@@ -843,6 +854,25 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('fireSessionDeleteEvent', () => {
+    it('should fire the event with the deleted session id', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'allow',
+      });
+      vi.mocked(mockHookEventHandler.fireSessionDeleteEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionDeleteEvent('deleted-id');
+
+      expect(mockHookEventHandler.fireSessionDeleteEvent).toHaveBeenCalledWith(
+        'deleted-id',
+        undefined,
+      );
+      expect(result).toBeDefined();
     });
   });
 
