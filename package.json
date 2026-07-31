@@ -96,9 +96,6 @@
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
-    "@modelcontextprotocol/sdk@^1.30.0": {
-      "@hono/node-server": "^2.0.5"
-    },
     "baseline-browser-mapping": "^2.9.19",
     "normalize-package-data": "^7.0.1",
     "react": "^19.2.4",
