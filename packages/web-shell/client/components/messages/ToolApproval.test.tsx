@@ -360,4 +360,18 @@ describe('ToolApproval accessibility', () => {
     expect(labels).toContain('Yes, restore previous mode');
     expect(labels).toContain('Yes, and manually approve edits');
   });
+
+  it('falls back to i18n when a standard option has an empty label', () => {
+    render(undefined, {
+      id: 'req-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'reject', label: '', kind: 'reject_once' },
+      ],
+    });
+    const labels = optionLabels();
+    expect(labels).toContain('Yes, allow once');
+    expect(labels).toContain('Reject');
+  });
 });

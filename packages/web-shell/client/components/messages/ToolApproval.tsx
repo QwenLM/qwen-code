@@ -404,6 +404,9 @@ export function ToolApproval({
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);
+          // Server labels are context-dependent (e.g. `proceed_once` is
+          // "Allow" for tools, "Submit" for questions), so they take
+          // precedence; i18n keys cover the empty-label fallback.
           const label = option.label || (i18nKey ? t(i18nKey) : option.label);
           return (
             <button
