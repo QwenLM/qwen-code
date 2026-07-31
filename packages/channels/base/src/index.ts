@@ -1,4 +1,9 @@
-export { getGlobalQwenDir, resolvePath } from './paths.js';
+export {
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
+  resolvePath,
+} from './paths.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
@@ -81,7 +86,6 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
