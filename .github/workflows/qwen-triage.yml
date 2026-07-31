@@ -3348,6 +3348,7 @@ jobs:
             local file="$1" max="$2"
             [ -n "$file" ] && [ -f "$file" ] || return 0
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (report exceeds size cap) for $file" >&2
               emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0
             fi
@@ -3360,11 +3361,13 @@ jobs:
                   -e 's/&lt;!--/\&lt;!\\-\\-/g' \
                   -e 's/@/\&#64;/g' > "$san_file"
             ); then
+              echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
               rm -f "$san_file"
               emit_block 'Verification report (report.md)' "$file" "$max"
               return 0
             fi
             if [ "$(wc -c < "$san_file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap) for $file" >&2
               rm -f "$san_file"
               emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0
@@ -3384,6 +3387,7 @@ jobs:
             local deficit=$(( opens - closes ))
             if [ "$deficit" -gt 0 ] && \
                [ $(( $(wc -c < "$san_file") + deficit * 11 + 30 )) -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (fold-closer overhead exceeds size cap) for $file" >&2
               rm -f "$san_file"
               emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0

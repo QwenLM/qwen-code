@@ -1567,6 +1567,21 @@ describe('qwen-triage verify hardening', () => {
       script.indexOf('EVIDENCE_SECTION='),
     );
     expect(helpers).toContain('emit_report()');
+    // Each fallback branch announces itself in the Actions log (mirroring
+    // emit_block's failure warning) so a degradation to the escaped pre dump
+    // is attributable, not silent.
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report exceeds size cap)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitize failed)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (fold-closer overhead exceeds size cap)',
+    );
     // The report call site uses the rendering path; the tmux lane keeps
     // its escaped embedding.
     expect(script).toContain('emit_report "$REPORT" 45000');
