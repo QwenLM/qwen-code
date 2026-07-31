@@ -342,7 +342,7 @@ describe('Subagents (E2E)', () => {
       } finally {
         await q.close();
       }
-    }, 60000); // Increase timeout for subagent execution
+    });
 
     it('should complete simple task with subagent', async () => {
       const simpleTaskAgent: SubagentConfig = {
@@ -397,7 +397,7 @@ describe('Subagents (E2E)', () => {
       } finally {
         await q.close();
       }
-    }, 60000);
+    });
   });
 
   describe('Subagent Error Handling', () => {
