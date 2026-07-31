@@ -187,7 +187,7 @@ export class ChannelLoopScheduler {
     const latestJob = await this.findJob(job.id);
     if (!latestJob?.enabled) return;
     if (this.generation !== generation) return;
-    const recoveryEpoch = this.recoveryEpoch;
+    let recoveryEpoch = this.recoveryEpoch;
 
     const runningSince = now.toISOString();
     let resultPreview: string | undefined;
@@ -200,6 +200,7 @@ export class ChannelLoopScheduler {
         await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
+      recoveryEpoch = this.recoveryEpoch;
       resultPreview = await channel.runLoopPrompt(latestJob, {
         timeoutMs: this.loopTimeoutMs,
         shouldContinue: async () => {

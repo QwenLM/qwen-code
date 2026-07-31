@@ -145,21 +145,24 @@ describe('AcpBridge', () => {
 
   it('times out bridge initialization and stops the child', async () => {
     vi.useFakeTimers();
-    child.setInitializeImplementation(() => new Promise(() => {}));
-    const bridge = new AcpBridge({
-      cliEntryPath: '/tmp/qwen',
-      cwd: '/tmp',
-    });
+    try {
+      child.setInitializeImplementation(() => new Promise(() => {}));
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      });
 
-    const start = bridge.start();
-    const rejection = expect(start).rejects.toThrow(
-      `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
-    );
-    await vi.advanceTimersByTimeAsync(1000 + ACP_START_TIMEOUT_MS);
+      const start = bridge.start();
+      const rejection = expect(start).rejects.toThrow(
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await vi.advanceTimersByTimeAsync(1000 + ACP_START_TIMEOUT_MS);
 
-    await rejection;
-    expect(child.instances[0]!.kill).toHaveBeenCalledOnce();
-    vi.useRealTimers();
+      await rejection;
+      expect(child.instances[0]!.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
