@@ -306,7 +306,7 @@ new session arrives.
 
 ## Configuration
 
-- `BridgeOptions.maxSessions` (default 20) — cap.
+- `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
 - `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
