@@ -576,41 +576,31 @@ jobs:
           fi
 
           # Generate the body up front so an unusable one can be repaired here
-          # instead of aborting `gh release create`.
+          # instead of aborting `gh release create`. A failed call still prints
+          # the API error payload on stdout, so its output is discarded rather
+          # than published as release notes.
           NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
-          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f "tag_name=${RELEASE_TAG}" \
-            -f "target_commitish=${RELEASE_BRANCH}" \
-            "${NOTES_ARGS[@]}" \
-            --jq '.body' > "${NOTES_FILE}"; then
-            echo "::warning::Could not generate notes anchored at ${PREVIOUS_RELEASE_TAG:-<none>}; retrying without an anchor"
+          generate_notes() {
             gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
               -f "tag_name=${RELEASE_TAG}" \
               -f "target_commitish=${RELEASE_BRANCH}" \
-              --jq '.body' > "${NOTES_FILE}" ||
-              printf 'Release %s\n' "${RELEASE_TAG}" > "${NOTES_FILE}"
-          fi
-          if [[ ! -s "${NOTES_FILE}" ]]; then
-            printf 'Release %s\n' "${RELEASE_TAG}" > "${NOTES_FILE}"
+              "$@" \
+              --jq '.body'
+          }
+          if ! generate_notes "${NOTES_ARGS[@]}" > "${NOTES_FILE}"; then
+            echo "::warning::Could not generate notes anchored at ${PREVIOUS_RELEASE_TAG:-<none>}; retrying without an anchor"
+            generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"
           fi
 
-          # Cap the body below the 125000 character API limit. iconv -c drops a
-          # trailing multi-byte sequence that head may have split, so an
-          # oversized changelog degrades the notes instead of the release.
-          MAX_BODY_BYTES=120000
-          if (( $(wc -c < "${NOTES_FILE}") > MAX_BODY_BYTES )); then
-            echo "::warning::Generated notes exceed ${MAX_BODY_BYTES} bytes; truncating"
-            head -c "${MAX_BODY_BYTES}" "${NOTES_FILE}" | iconv -c -f utf-8 -t utf-8 > "${NOTES_FILE}.capped"
-            {
-              printf '\n\n_Release notes were truncated._'
-              if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-                printf ' Full changelog: %s/%s/compare/%s...%s' \
-                  "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${PREVIOUS_RELEASE_TAG}" "${RELEASE_TAG}"
-              fi
-              printf '\n'
-            } >> "${NOTES_FILE}.capped"
-            mv "${NOTES_FILE}.capped" "${NOTES_FILE}"
-          fi
+          # Caps the body below the 125000 character API limit and substitutes a
+          # minimal body when nothing was generated, so an oversized or missing
+          # changelog degrades the notes instead of the release.
+          node .github/scripts/cap-release-notes.mjs \
+            --file "${NOTES_FILE}" \
+            --tag "${RELEASE_TAG}" \
+            --previous-tag "${PREVIOUS_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --server-url "${GITHUB_SERVER_URL}"
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \

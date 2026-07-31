@@ -43,8 +43,13 @@ describe('stable release notes workflow', () => {
     // stable release, and unanchored notes span the whole branch history and
     // overrun the 125000 character body limit.
     expect(step).not.toContain('git merge-base --is-ancestor');
-    expect(step).toContain('MAX_BODY_BYTES=120000');
-    expect(step).toContain('iconv -c -f utf-8 -t utf-8');
+    expect(step).toContain('node .github/scripts/cap-release-notes.mjs');
+    expect(step).toContain('--file "${NOTES_FILE}"');
+    // gh prints the API error payload on stdout, so a failed attempt's output
+    // must not survive into the release body.
+    expect(step).toContain(
+      'generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"',
+    );
     expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
