@@ -161,16 +161,21 @@ function getOptionI18nKey(
   return undefined;
 }
 
-function deduplicateByLabel(
+function deduplicateOptions(
   options: PermissionRequest['options'],
 ): PermissionRequest['options'] {
   const seen = new Set<string>();
   return options.filter((option) => {
-    const key = getOptionI18nKey(option) ?? option.label;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seen.has(option.id)) return false;
+    seen.add(option.id);
     return true;
   });
+}
+
+function prepareDisplayOptions(
+  options: PermissionRequest['options'],
+): PermissionRequest['options'] {
+  return deduplicateOptions(orderPermissionOptions(options));
 }
 
 function getOptionClassName(
@@ -192,13 +197,11 @@ export function ToolApproval({
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
-    () => deduplicateByLabel(orderPermissionOptions(request.options)),
+    () => prepareDisplayOptions(request.options),
     [request.options],
   );
   const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(
-      deduplicateByLabel(orderPermissionOptions(request.options)),
-    ),
+    getSafeDefaultIndex(prepareDisplayOptions(request.options)),
   );
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -213,7 +216,7 @@ export function ToolApproval({
 
   useEffect(() => {
     const safeDefaultIndex = getSafeDefaultIndex(
-      deduplicateByLabel(orderPermissionOptions(requestRef.current.options)),
+      prepareDisplayOptions(requestRef.current.options),
     );
     submittedRef.current = false;
     selectedRef.current = safeDefaultIndex;
@@ -266,11 +269,7 @@ export function ToolApproval({
     // snapping focus back to the default and silently changing their choice.
     focusOption(
       requestChanged
-        ? getSafeDefaultIndex(
-            deduplicateByLabel(
-              orderPermissionOptions(requestRef.current.options),
-            ),
-          )
+        ? getSafeDefaultIndex(prepareDisplayOptions(requestRef.current.options))
         : selectedRef.current,
     );
   }, [keyboardActive, request.id, focusOption]);

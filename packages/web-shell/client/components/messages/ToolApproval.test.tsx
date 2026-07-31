@@ -310,25 +310,47 @@ describe('ToolApproval accessibility', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it('deduplicates options with the same display label', () => {
+  it('deduplicates options with the same id', () => {
     const dupRequest: PermissionRequest = {
       id: 'req-dup',
       content: [],
       options: [
-        { id: 'proceed_once', label: 'Yes, allow once', kind: 'allow_once' },
-        {
-          id: 'proceed_once_dup',
-          label: 'Yes, allow once',
-          kind: 'allow_once',
-        },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
         { id: 'reject', label: 'Reject', kind: 'reject_once' },
       ],
     };
     render(undefined, dupRequest);
     const opts = optionButtons();
-    // Two allow_once options with the same label should collapse to one button.
     expect(opts).toHaveLength(2);
     expect(opts[0]!.textContent).toContain('Reject');
     expect(opts[1]!.textContent).toContain('Yes, allow once');
+  });
+
+  it('preserves distinct allow_once options with different ids', () => {
+    const planRequest: PermissionRequest = {
+      id: 'req-plan',
+      content: [],
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, planRequest);
+    const opts = optionButtons();
+    expect(opts).toHaveLength(3);
+    const ids = opts.map((o) => o.getAttribute('data-option-id'));
+    expect(ids).toContain('restore_previous');
+    expect(ids).toContain('proceed_once');
+    expect(ids).toContain('reject');
   });
 });
