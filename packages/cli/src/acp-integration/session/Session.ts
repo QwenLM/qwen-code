@@ -217,6 +217,7 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import { getFollowupSuggestionFeatureDecision } from '../../ui/utils/followup-suggestions.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import {
   isTerminalGoalStatusKind,
@@ -2519,10 +2520,31 @@ export class Session implements SessionContext {
     ) {
       return;
     }
-    // Enabled by default — only an explicit `false` opts out. The schema
-    // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
-    // value must be treated as enabled here.
-    if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
+    let followupSuggestionDecision: ReturnType<
+      typeof getFollowupSuggestionFeatureDecision
+    >;
+    try {
+      followupSuggestionDecision = getFollowupSuggestionFeatureDecision(
+        this.settings,
+        this.config,
+      );
+    } catch (err) {
+      debugLogger.debug(
+        `Skipping followup suggestion: feature gate failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    if (!followupSuggestionDecision.enabled) {
+      if (
+        followupSuggestionDecision.suppressedReason ===
+        'loopback_openai_default'
+      ) {
+        debugLogger.debug(
+          'Skipping followup suggestion: loopback OpenAI-compatible provider defaults disabled; set ui.enableFollowupSuggestions=true to override.',
+        );
+      }
+      return;
+    }
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
     const chat = this.config.getGeminiClient()?.getChat();
