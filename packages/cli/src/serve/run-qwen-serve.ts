@@ -1641,6 +1641,7 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    webShellMounted?: boolean;
   } = {},
 ): Application {
   const app = express();
@@ -1666,11 +1667,14 @@ function createDelegatingServeApp(
         // the token travels in the URL fragment, which never reaches the
         // server). Gating them here would 401 a desktop shell / `--open`
         // browser that races the deferred runtime startup — skip the gate and
-        // let the runtime app apply its own (pre-auth) policy once ready.
+        // let the runtime app apply its own (pre-auth) policy once ready. When
+        // the shell is not mounted (`--no-web`) there is no pre-auth route to
+        // protect, so keep the gate closed instead of booting the runtime for
+        // an unauthenticated static request.
         const authGate = webhookRequest
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
-          : isPreAuthWebShellRequest(req)
+          : options.webShellMounted === true && isPreAuthWebShellRequest(req)
             ? undefined
             : options.authenticateDeferredRuntimeRequest;
         if (authGate) {
@@ -5628,6 +5632,7 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      webShellMounted,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but

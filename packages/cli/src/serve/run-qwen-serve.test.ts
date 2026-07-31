@@ -37,6 +37,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as webShellResolver from './web-shell-resolver.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -4695,6 +4696,11 @@ describe('runQwenServe runtime startup failures', () => {
       });
       return app;
     });
+    // Mount the shell so the deferred gate opens for these static routes
+    // (resolveWebShellDir is the source of truth for `webShellMounted`).
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(
+      path.join(tmpDir, 'web-shell'),
+    );
 
     const handle = await runQwenServe(
       {
@@ -4703,7 +4709,7 @@ describe('runQwenServe runtime startup failures', () => {
         mode: 'http-bridge',
         workspace: tmpDir,
         maxSessions: 1,
-        serveWebShell: false,
+        serveWebShell: true,
         token: 'desktop-secret',
         requireAuth: true,
       },
@@ -4730,6 +4736,60 @@ describe('runQwenServe runtime startup failures', () => {
       const asset = await fetch(`${handle.url}/assets/app.js`);
       expect(asset.status).toBe(200);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the deferred bearer gate closed for static routes when the Web Shell is not mounted', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-no-web-gate-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    // The runtime app would serve these static routes, but the shell is not
+    // mounted here (`--no-web`), so the deferred gate must stay closed and
+    // reject them before booting the runtime.
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.get('/', (_req, res) => {
+        res.status(200).type('html').send('<html>shell</html>');
+      });
+      app.get('/assets/app.js', (_req, res) => {
+        res.status(200).type('text/javascript').send('// chunk');
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'no-web-secret',
+        requireAuth: true,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const shell = await fetch(`${handle.url}/`);
+      expect(shell.status).toBe(401);
+      const asset = await fetch(`${handle.url}/assets/app.js`);
+      expect(asset.status).toBe(401);
+      // Both were rejected at the gate before the runtime started.
+      expect(createBridge).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }
