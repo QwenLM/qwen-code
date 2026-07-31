@@ -41,6 +41,11 @@ import {
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  serializeLedger,
+  type Ledger,
+  type LedgerFinding,
+} from './lib/ledger.js';
+import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
   countInlineFindings,
@@ -1632,6 +1637,51 @@ export const composeReviewCommand: CommandModule = {
       ...parsed,
       ...countInlineFindings(drafted),
     });
+    // Embed the next round's machine ledger in the body about to be posted —
+    // the durable copy every future environment can read back via pr-context.
+    // The round number comes from the side file pr-context recovered from the
+    // PREVIOUS posted round (+1), never from the model; a first review is
+    // round 1. PR-mode only: a local review has no PR to carry the marker.
+    try {
+      const planRaw = parsed.planPath
+        ? (JSON.parse(readFileSync(parsed.planPath, 'utf8')) as {
+            prNumber?: unknown;
+          })
+        : null;
+      const pr = planRaw?.prNumber;
+      const isPr =
+        (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+        (typeof pr === 'string' && /^\d+$/.test(pr));
+      if (isPr && parsed.planPath) {
+        let prevRound = 0;
+        try {
+          const prev = JSON.parse(
+            readFileSync(
+              join(
+                dirname(parsed.planPath),
+                `qwen-review-pr-${pr}-prev-ledger.json`,
+              ),
+              'utf8',
+            ),
+          ) as Ledger;
+          if (Number.isInteger(prev.round) && prev.round > 0) {
+            prevRound = prev.round;
+          }
+        } catch {
+          // No previous posted round recovered: this is round 1.
+        }
+        const ledger = buildLedger(
+          prevRound + 1,
+          drafted as Array<{ path?: unknown; line?: unknown; body?: unknown }>,
+          toStringList(parsed.bodyCriticals, 'bodyCriticals'),
+        );
+        result.body = `${result.body}\n\n${serializeLedger(ledger)}`;
+      }
+    } catch {
+      // The ledger is a carry-forward convenience, never worth failing the
+      // verdict over. A round without a marker costs the NEXT round its
+      // memory, nothing else.
+    }
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
@@ -1666,6 +1716,49 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /** The terminal verdict, in the words Step 6 is told to print. */
+/**
+ * The next round's ledger: every finding this review is posting as its own —
+ * the drafted inline comments plus the body Criticals. Low-confidence findings
+ * never reach either input (they are terminal-only), so the ledger holds only
+ * claims the review stands behind, which is what the next round re-asserts.
+ */
+export function buildLedger(
+  round: number,
+  drafted: Array<{ path?: unknown; line?: unknown; body?: unknown }>,
+  bodyCriticals: string[],
+): Ledger {
+  const findings: LedgerFinding[] = [];
+  for (const c of drafted) {
+    const body = typeof c.body === 'string' ? c.body : '';
+    const sev = body.startsWith('**[Critical]**')
+      ? ('C' as const)
+      : body.startsWith('**[Suggestion]**')
+        ? ('S' as const)
+        : null;
+    if (!sev) continue;
+    const title = body
+      .replace(/^\*\*\[(Critical|Suggestion)\]\*\*:?\s*/, '')
+      .split('\n')[0]
+      .trim();
+    findings.push({
+      id: `R${round}-${findings.length + 1}`,
+      sev,
+      file: typeof c.path === 'string' ? c.path : '(unknown)',
+      ...(typeof c.line === 'number' ? { line: c.line } : {}),
+      title,
+    });
+  }
+  for (const b of bodyCriticals) {
+    findings.push({
+      id: `R${round}-${findings.length + 1}`,
+      sev: 'C',
+      file: '(body)',
+      title: b.split('\n')[0].trim(),
+    });
+  }
+  return { v: 1, round, findings };
+}
+
 export function verdictLine(r: ComposeReviewResult): string {
   const label: Record<ReviewEvent, string> = {
     APPROVE: 'Approve',

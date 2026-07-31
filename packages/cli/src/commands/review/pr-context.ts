@@ -15,10 +15,17 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
+import {
+  currentUser,
+  ensureAuthenticated,
+  gh,
+  ghApiAll,
+  setGhHost,
+} from './lib/gh.js';
+import { parseLedger, stripLedgerMarker, type Ledger } from './lib/ledger.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -633,6 +640,49 @@ function blockerSection(
   return out;
 }
 
+/**
+ * The latest machine ledger the REVIEWING account itself posted, if any.
+ *
+ * Own-account only: the ledger claims "these are the findings the previous
+ * /review round stood behind", and only this account's reviews can make that
+ * claim. Another user's marker — pasted, forged, or their own tooling's — is
+ * data about THEIR review, not ours, and is ignored rather than trusted.
+ * Latest by submitted_at wins: each posted round embeds a fresh full copy.
+ */
+export function latestOwnLedger(
+  reviews: RawReview[],
+  login: string | null,
+): Ledger | null {
+  if (!login) return null;
+  let best: { at: string; ledger: Ledger } | null = null;
+  for (const r of reviews) {
+    if (r.user?.login !== login) continue;
+    const ledger = parseLedger(r.body);
+    if (!ledger) continue;
+    const at = r.submitted_at ?? '';
+    if (!best || at > best.at) best = { at, ledger };
+  }
+  return best?.ledger ?? null;
+}
+
+/** Render the previous round's ledger for the context file. */
+export function renderLedgerSection(ledger: Ledger): string {
+  const rows = ledger.findings.map(
+    (f) =>
+      `| ${f.id} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${f.file}${f.line ? `:${f.line}` : ''}\` | ${f.title} |`,
+  );
+  return [
+    '## Previous /review round (machine ledger)',
+    '',
+    `Round ${ledger.round}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.`,
+    '',
+    '| id | severity | location | title |',
+    '| --- | --- | --- | --- |',
+    ...rows,
+    '',
+  ].join('\n');
+}
+
 export function buildMarkdown(
   prNumber: string,
   ownerRepo: string,
@@ -640,6 +690,7 @@ export function buildMarkdown(
   inline: RawComment[],
   issue: RawComment[],
   reviews: RawReview[],
+  prevLedger: Ledger | null = null,
 ): string {
   const {
     openRoots,
@@ -713,6 +764,10 @@ export function buildMarkdown(
   // future agents to remember (e.g. "the previously-flagged X is no longer
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
+  if (prevLedger) {
+    parts.push(renderLedgerSection(prevLedger));
+  }
+
   const meaningfulReviews = reviews
     .filter((r) => isReviewWorthShowing(r.body))
     .sort((a, b) => (a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
@@ -730,7 +785,9 @@ export function buildMarkdown(
         `### @${r.user?.login ?? '?'} [${r.state ?? 'COMMENTED'}]${date ? ` ${date}` : ''}${idNote}`,
       );
       parts.push('');
-      parts.push(quoteBlock(fullBody(r.body, r.id, ctx)));
+      parts.push(
+        quoteBlock(fullBody(stripLedgerMarker(r.body ?? ''), r.id, ctx)),
+      );
       parts.push('');
     }
   }
@@ -866,7 +923,32 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
-  const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
+  // Recover the previous round's machine ledger from this account's own last
+  // posted review, and persist it beside the context file: compose-review reads
+  // the side file for the round number, and Step 6 owes each entry a ruling.
+  // Best-effort — offline/unauthenticated just means no ledger, never a failure.
+  let prevLedger: Ledger | null = null;
+  try {
+    prevLedger = latestOwnLedger(reviews, currentUser());
+  } catch {
+    prevLedger = null;
+  }
+  if (prevLedger) {
+    writeFileSync(
+      join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+      JSON.stringify(prevLedger, null, 2),
+    );
+  }
+
+  const md = buildMarkdown(
+    prNumber,
+    ownerRepo,
+    meta,
+    inline,
+    issue,
+    reviews,
+    prevLedger,
+  );
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, md, 'utf8');

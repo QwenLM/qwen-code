@@ -23,6 +23,8 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
+  latestOwnLedger,
+  renderLedgerSection,
 } from './pr-context.js';
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
@@ -986,5 +988,62 @@ describe('prContextCommand builder', () => {
     } as unknown as Argv;
     ((prContextCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
     expect(opts).toContain('host');
+  });
+});
+
+describe('latestOwnLedger', () => {
+  const marker = (round: number) =>
+    `LGTM <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"a.ts","title":"t"}]} -->`;
+  const review = (login: string, at: string, body: string) => ({
+    id: 1,
+    user: { login },
+    submitted_at: at,
+    body,
+  });
+
+  it('takes the LATEST marker from the reviewing account only', () => {
+    const ledger = latestOwnLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        review('bot', '2026-01-03T00:00:00Z', marker(3)),
+        review('bot', '2026-01-02T00:00:00Z', marker(2)),
+        // Another account's marker is data about THEIR review — ignored.
+        review('stranger', '2026-01-09T00:00:00Z', marker(9)),
+      ],
+      'bot',
+    );
+    expect(ledger?.round).toBe(3);
+  });
+
+  it('yields nothing with no login, no marker, or a malformed one', () => {
+    expect(
+      latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
+    ).toBeNull();
+    expect(
+      latestOwnLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
+    ).toBeNull();
+    expect(
+      latestOwnLedger(
+        [review('bot', '2026-01-01', '<!-- qwen-review-ledger nope -->')],
+        'bot',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('renderLedgerSection', () => {
+  it('renders a work-list table that names the ruling owed per entry', () => {
+    const md = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [
+        { id: 'R2-1', sev: 'C', file: 'src/a.ts', line: 7, title: 'leak' },
+        { id: 'R2-2', sev: 'S', file: 'src/b.ts', title: 'gap' },
+      ],
+    });
+    expect(md).toContain('## Previous /review round (machine ledger)');
+    expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
+    expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
+    expect(md).toContain('owed a this-round ruling');
   });
 });

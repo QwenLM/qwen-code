@@ -440,6 +440,16 @@ A human reviewer's round-2 comment opens with "M1 is fixed"; the pipeline's roun
 
 So the cache now carries the findings themselves, with round-scoped ids (`R1-2`), and an incremental re-review owes each entry a ruling under the same bar the open-Criticals re-check already enforces — _fixed_ requires tracing that the mechanism can no longer fire, not observing that the diff contains a fix. Two boundaries keep the ledger honest: only **confirmed high-confidence** findings enter (next round re-asserts each entry by id, so the ledger holds claims the review stands behind), and a finding ruled fixed _leaves_ (the cache is what the next round must check, not history — the report already told the story). The fail-closed rules are unchanged: a run that must not advance the cache does not advance the ledger either.
 
+## Why the ledger's authoritative copy rides the posted review, not the cache
+
+The round ledger shipped as a local cache file and its first multi-round live use exposed the flaw immediately: four model-comparison rounds reviewed the same two PRs from the same machine at medium effort, and every round opened from scratch — medium never reads the cache, and had the rounds run from CI or another clone there would have been no cache to read. Meanwhile the one artifact every environment can see — the posted review — carried nothing machine-readable, even though the human it imitates opens round 2 with "M1 is fixed" precisely because the previous report is right there on the PR.
+
+So the authoritative ledger now travels in the posted body as an HTML-comment marker: invisible on the PR page, durable as the comment, recovered by the next round's `pr-context` wherever it runs, with the local cache demoted to fallback for rounds that never posted. Three boundaries keep it honest:
+
+- **Own-account, latest round only.** The ledger claims "these are the findings the previous /review stood behind", and only this account's reviews can make that claim — another user's marker is data about _their_ tooling. Each posted round embeds a fresh full copy, so the newest marker is the whole state.
+- **Data, not authority.** Every recovered entry is owed a Step 6 ruling against the code — the ledger routes work, it never rules. A tampered or stale marker therefore costs a few wasted rulings, not a wrong verdict, which is why parsing is fail-quiet and the round number feeds `compose-review` from a CLI-written side file rather than a model's memory.
+- **Medium reads, high writes.** Recovering the ledger is free (the reviews were already fetched), so the default-effort re-review finally opens like a round-2 comment; the cache write and the posting that carries the marker keep their existing effort gates untouched.
+
 ## Why three more mutation operators, and why each is shaped the way it is
 
 Statement deletion with a safety-verb filter was the first operator because it has the cleanest survivor semantics. But a live maintainer re-verification produced a survivor list the deletion operator cannot express — and every entry mapped to one of three shapes, each with equally crisp semantics:

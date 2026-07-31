@@ -20,6 +20,7 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import {
   composeReview,
+  buildLedger,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -3089,5 +3090,46 @@ describe('testPlanGate — Test Plan rulings, disclosed but never capping', () =
     // never make a PR un-Approvable. Both paths return notes only.
     expect(testPlanGate(writePlan()).notes).toEqual([]);
     expect(testPlanGate(join(dir, 'nope.json')).notes).toEqual([]);
+  });
+});
+
+describe('buildLedger', () => {
+  it('numbers findings round-scoped, inline first then body Criticals', () => {
+    const l = buildLedger(
+      3,
+      [
+        {
+          path: 'src/a.ts',
+          line: 12,
+          body: '**[Critical]**: double free\ndetail',
+        },
+        { path: 'src/b.ts', line: 4, body: '**[Suggestion]** untested guard' },
+        { path: 'src/c.ts', body: 'no marker — not a finding' },
+      ],
+      ['`src/d.ts` unanchorable blocker'],
+    );
+    expect(l.round).toBe(3);
+    expect(l.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+      {
+        id: 'R3-2',
+        sev: 'S',
+        file: 'src/b.ts',
+        line: 4,
+        title: 'untested guard',
+      },
+      {
+        id: 'R3-3',
+        sev: 'C',
+        file: '(body)',
+        title: '`src/d.ts` unanchorable blocker',
+      },
+    ]);
   });
 });
