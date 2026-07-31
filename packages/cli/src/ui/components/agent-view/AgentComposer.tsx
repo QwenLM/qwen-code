@@ -104,7 +104,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   useKeypress(
     (key) => {
-      const isShiftTab = key.shift && key.name === 'tab';
+      const isShiftTab = key.shift && key.name === 'tab' && !key.ctrl;
       const isWindowsTab =
         process.platform === 'win32' &&
         key.name === 'tab' &&

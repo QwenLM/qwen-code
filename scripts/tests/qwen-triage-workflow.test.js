@@ -3164,13 +3164,17 @@ describe('qwen-triage verify round-3 hardening', () => {
       'QWEN_VERIFY_CHROMIUM',
     );
 
-    // And the skill must stop calling captures optional, must name the
-    // gate, and must forbid the install the agent cannot complete.
+    // And the skill must stop calling captures optional.
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain('Produce these whenever you ran a harness');
-    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
-    expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
   });
 
   // The browser step's require.resolve + cli.js join is otherwise guarded
@@ -3395,11 +3399,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     );
     // A numbered budget item alongside the A/B, harnesses and gates.
     expect(scope).toMatch(/^4\. \*\*Capture/m);
-    expect(scope).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
     // Time reserved, and the failure that motivated it named — a rule
     // stated without its failure reads as advice and gets skipped.
-    expect(scope).toContain('~5 minutes');
-    expect(scope).toContain('produced **zero**');
+    expect(scope).toContain('four live runs produced zero images');
     // Bounded: the cap exists so "budget it" does not become eight images.
     expect(scope).toMatch(/normally two, at most a handful/);
 
