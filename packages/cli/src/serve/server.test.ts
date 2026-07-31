@@ -20476,9 +20476,24 @@ describe('createServeApp', () => {
         });
       } finally {
         await Promise.all([
-          fsp.rm(tempHome, { recursive: true, force: true }),
-          fsp.rm(primary, { recursive: true, force: true }),
-          fsp.rm(secondary, { recursive: true, force: true }),
+          fsp.rm(tempHome, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(primary, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(secondary, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
         restoreEnv('QWEN_SHARED_WEBHOOK_SECRET', previousWebhookSecret);
@@ -20581,8 +20596,18 @@ describe('createServeApp', () => {
         expect((await send('next', 'next-secret')).status).toBe(401);
       } finally {
         await Promise.all([
-          fsp.rm(tempHome, { recursive: true, force: true }),
-          fsp.rm(workspace, { recursive: true, force: true }),
+          fsp.rm(tempHome, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(workspace, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
@@ -20774,8 +20799,18 @@ describe('createServeApp', () => {
           });
         expect(secondWebhook.status).toBe(429);
       } finally {
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
@@ -20836,8 +20871,18 @@ describe('createServeApp', () => {
         ).toBe(true);
       } finally {
         stderrSpy.mockRestore();
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
@@ -20919,8 +20964,18 @@ describe('createServeApp', () => {
         ).toBe(true);
       } finally {
         stderrSpy.mockRestore();
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
