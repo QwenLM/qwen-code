@@ -3660,24 +3660,22 @@ describe('qwen-autofix workflow', () => {
     // Re-running the identical address-everything prompt after a timeout
     // walks straight into the same wall (#7929 burned three 50-minute
     // timeouts that way, #7846 two). From the second attempt on, the
-    // feedback file ends with an explicit narrowing instruction: smallest
-    // blocking subset first, commit early, and defer through the SKILL
-    // contract (out of resolved-comments.txt, into comment-replies.json)
-    // — never only into the summary, which is exactly the cheap path a
-    // budget-pressured agent would otherwise take.
+    // feedback carries the measured timeout fact; the project skill owns the
+    // narrowing policy so Actions and local entry points do not grow separate
+    // model instructions.
     expect(prepareBranchAndFeedbackStep).toContain('PRIOR_TIMEOUTS=');
     expect(prepareBranchAndFeedbackStep).toContain(
       'Budget warning: previous round(s) ran out of time',
     );
-    expect(prepareBranchAndFeedbackStep).toContain(
+    const skill = readAutofixSkill();
+    expect(skill).toContain('smallest blocking subset');
+    expect(skill).toContain('comment-replies.json');
+    expect(skill).toContain('decline nonessential refactors');
+    expect(skill).toContain('fix that exact rejection before other feedback');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
       'commit as soon as that subset is done',
     );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      'record each deferral in comment-replies.json',
-    );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      'decline refactors and nice-to-haves with a one-line reason',
-    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('Fix this first');
     // The trigger threshold itself is pinned — a `-ge 99` mutation would
     // otherwise leave the feature inert with every string pin green.
     expect(prepareBranchAndFeedbackStep).toContain(
@@ -4588,7 +4586,7 @@ describe('qwen-autofix workflow', () => {
     // The develop-issue mode must also require a Verification section in its
     // e2e-report, not just address-review — same regression, different mode.
     expect(flat).toContain(
-      'section that lists each command you ran and its result (see Shared Rules)',
+      'section that lists each command you ran and its result (see GitHub Actions Rules)',
     );
     // The Verification section ends the English body, before the collapsed
     // Chinese translation — not after it.
@@ -4894,7 +4892,7 @@ describe('qwen-autofix workflow', () => {
       mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
       writeFileSync(
         join(dir, 'autofix-skill', 'SKILL.md'),
-        '---\nname: autofix-workflow\n---\nSTAGED_SKILL_SENTINEL\n',
+        '---\nname: autofix\n---\nSTAGED_SKILL_SENTINEL\n',
       );
       const stagedRunner = join(
         dir,
@@ -5145,7 +5143,7 @@ describe('qwen-autofix workflow', () => {
   it('keeps agent decision logic in the project autofix skill', () => {
     const skill = readAutofixSkill();
 
-    expect(skill).toContain('name: autofix-workflow');
+    expect(skill).toContain('name: autofix');
     for (const requiredText of [
       'assess-candidates',
       'develop-issue',
@@ -5167,11 +5165,6 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(skill).toContain(requiredText);
     }
-
-    expect(skill).not.toMatch(/^name: autofix$/m);
-    expect(
-      readFileSync('packages/core/src/skills/bundled/autofix/SKILL.md', 'utf8'),
-    ).toMatch(/^name: autofix$/m);
 
     expect(assessCandidatesStep).toContain(
       'run-agent.mjs \\\n            --mode assess-candidates',
@@ -5222,7 +5215,55 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('keeps the workflow autofix skill limited to workflow-invoked modes', () => {
+  it('uses the project skill for manual local convergence', () => {
+    const skill = readAutofixSkill();
+    const flatSkill = skill.replace(/\s+/g, ' ');
+
+    expect(skill).toContain('disable-model-invocation: true');
+    expect(skill).toContain('Mode: local working tree');
+    expect(skill).toContain('review run --effort high --json --quiet');
+    expect(skill).toContain('is_background: true');
+    expect(flatSkill).toContain('terminal task notification');
+    expect(flatSkill).toContain(
+      'yield the current assistant pass without an outcome',
+    );
+    expect(flatSkill).toContain(
+      'including ACP, stream-json, and headless runs',
+    );
+    expect(flatSkill).toContain('at least 30 seconds between checks');
+    expect(flatSkill).toContain("shell tool's shorter foreground limit");
+    expect(flatSkill).toContain('content fingerprint');
+    expect(flatSkill).toContain('review-time or concurrent changes');
+    expect(flatSkill).toContain(
+      'match the post-review fingerprint from this round',
+    );
+    expect(skill).toContain('staged, unstaged, and untracked');
+    for (const resultField of [
+      'completed',
+      'timedOut',
+      'childSignal',
+      'childExitCode',
+      'reportPath',
+      'event',
+      'baseEvent',
+      'cappedBy',
+      'downgraded',
+    ]) {
+      expect(skill).toContain(`\`${resultField}\``);
+    }
+    expect(skill).toContain('There is no fixed round limit');
+    expect(skill).toContain('changes oscillate');
+    expect(skill).toContain('staged-diff hash must match');
+    expect(skill).toContain('NO_CHANGES');
+    expect(skill).toContain('CONVERGED');
+    expect(skill).toContain('BLOCKED');
+    expect(skill).toContain('STALLED');
+    expect(skill).not.toContain('/autofix on');
+    expect(skill).not.toContain('/autofix off');
+    expect(skill).not.toContain('/autofix status');
+  });
+
+  it('keeps the runner limited to workflow-invoked modes', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
@@ -5256,7 +5297,7 @@ describe('qwen-autofix workflow', () => {
     expect(stdout).toContain('Mode: address-review');
     expect(stdout).toContain('Invocation:');
     expect(stdout).toContain(
-      '/autofix-workflow address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
+      '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
     );
   });
 
@@ -6267,8 +6308,11 @@ describe('qwen-autofix workflow', () => {
     expect(repairDeterministicRejectionStep).toContain(
       'cat "${WORKDIR}/gate-rejection.md"',
     );
-    expect(repairDeterministicRejectionStep).toContain(
+    expect(repairDeterministicRejectionStep).not.toContain(
       'Keep that commit and add one follow-up commit',
+    );
+    expect(readAutofixSkill().replace(/\s+/g, ' ')).toContain(
+      'preserve the existing rejected commit and add one verified follow-up commit',
     );
     const repairCleanup =
       repairDeterministicRejectionStep.match(

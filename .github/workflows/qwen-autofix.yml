@@ -3101,7 +3101,7 @@ jobs:
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window's Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. The workflow excluded the non-Critical feedback below from this round's actionable sections; the items remain open for human follow-up. Maintainer feedback is deferred only after its author has used ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches in this window's Critical-only tail; authors at that budget, if any, are named below. (\`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
@@ -3156,7 +3156,7 @@ jobs:
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式：以上为自动评审的非 Critical 建议，予以延后、保持开放并留待人工跟进——不要为其修改代码、解决线程或代为回复。维护者的反馈仅在其本人于本窗口 Critical-only 阶段已被处理 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈之后才会被延后——账号可能挂着自动评审循环，因此刹车依据实测的再生频度而非身份；达到预算的作者（如有）在下方点名。（如需解除该模式，评论 \`@qwen-code /retry\` 即可开启新的计数窗口。）"
+              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式。本轮可执行区域已排除下方非 Critical 反馈；这些条目保持开放，留待人工跟进。维护者反馈仅在其本人于本窗口 Critical-only 阶段已使用 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈预算后才会延后；达到预算的作者（如有）在下方点名。（评论 \`@qwen-code /retry\` 可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"
@@ -3273,8 +3273,6 @@ jobs:
               echo
               echo '## Your previous attempt was REJECTED by the verification gate'
               echo
-              echo 'Fix this first — the same change will be rejected again otherwise.'
-              echo
               printf '%s\n' "${LAST_REJECTION}"
             fi
             # Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean
@@ -3308,10 +3306,7 @@ jobs:
               echo
               echo '## Budget warning: previous round(s) ran out of time'
               echo
-              echo "${PRIOR_TIMEOUTS} round(s) since the last successful round exhausted the agent time budget before finishing anything. Do NOT attempt everything at once this round:"
-              echo '- Address the smallest set of blocking (Critical) findings first, and commit as soon as that subset is done.'
-              echo '- Prefer minimal, focused diffs; decline refactors and nice-to-haves with a one-line reason rather than implementing them.'
-              echo '- If the remaining feedback cannot fit the budget, defer it the normal way: leave those findings out of resolved-comments.txt and record each deferral in comment-replies.json so every open thread gets its reason — never let a deferral live only in the summary.'
+              echo "${PRIOR_TIMEOUTS} round(s) since the last successful round exhausted the agent time budget before finishing anything."
             fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
@@ -3526,7 +3521,6 @@ jobs:
             echo '## Same-run verification repair'
             echo
             echo 'The previous commit was rejected by deterministic verification.'
-            echo 'Keep that commit and add one follow-up commit that fixes this rejection:'
             echo
             cat "${WORKDIR}/gate-rejection.md"
           } > "${WORKDIR}/feedback.retry.md"

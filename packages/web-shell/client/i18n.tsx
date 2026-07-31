@@ -1370,7 +1370,7 @@ const EN: Messages = {
   'skilldesc.agentReproduceFeature':
     'Reproduce an existing Codex/Claude Code feature',
   'skilldesc.autofix':
-    'Implement approved issues or address PR review feedback',
+    'Review and fix local changes or run repository Autofix workflows',
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
@@ -3890,7 +3890,7 @@ const ZH: Messages = {
   'skilldesc.agentReproduceAlign':
     '将已移植的 Codex/Claude Code 功能与原版对齐',
   'skilldesc.agentReproduceFeature': '复现 Codex/Claude Code 的现有功能',
-  'skilldesc.autofix': '实现已批准的 issue 或处理 PR 审查反馈',
+  'skilldesc.autofix': '审查并修复本地改动，或运行仓库 Autofix 工作流',
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
