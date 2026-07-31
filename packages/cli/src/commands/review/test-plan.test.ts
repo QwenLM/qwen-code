@@ -212,6 +212,19 @@ describe('observedTestCounts', () => {
     ).toEqual([12]);
   });
 
+  it('reads a summary interleaved with ANSI color codes', () => {
+    // What a real color-enabled pipe delivers — the codes sit BETWEEN tokens,
+    // so a token-level regex without the strip finds nothing. From a live
+    // review of PR #8176.
+    expect(
+      observedTestCounts(
+        report([
+          'Tests\x1b[2m  \x1b[22m\x1b[1m\x1b[31m3 failed\x1b[39m\x1b[22m\x1b[2m | \x1b[22m\x1b[1m\x1b[32m1132 passed\x1b[39m\x1b[22m (1135)',
+        ]),
+      ),
+    ).toEqual([1132]);
+  });
+
   it('reads a summary that also reports failures', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   runBuildTest,
+  trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
@@ -452,6 +453,28 @@ describe('runBuildTest', () => {
   const okExec: NonNullable<Parameters<typeof runBuildTest>[0]['exec']> = (
     command,
   ) => ({ command, exitCode: 0, seconds: 1, timedOut: false, output: '' });
+
+  it('rescues the runner summary from a trimmed middle', () => {
+    // A failing suite's tail is all failure details and npm epilogue, which
+    // pushes the one-line `Tests  3 failed | 1132 passed` summary into the
+    // omitted middle — measured live on PR #8176, where the count check then
+    // found no summary anywhere in the kept report. Tested against trimOutput
+    // directly: the injected exec seam used elsewhere bypasses the trim, which
+    // is exactly how the gap shipped.
+    const summary = 'Tests  3 failed | 1132 passed (1135)';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${summary}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(summary);
+    expect(trimmed).toContain('runner summaries kept');
+    // The colored form a real pipe delivers is rescued too.
+    const colored = `Tests\x1b[2m  \x1b[22m\x1b[31m3 failed\x1b[39m | 1132 passed`;
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
 
   it('buildOnly builds the same set but runs NO tests', () => {
     // For the merge-base tree an A/B probe compares against: base's suite was

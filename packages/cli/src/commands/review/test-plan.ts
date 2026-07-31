@@ -296,8 +296,16 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // form `Tests  1 failed | 40 passed (41)` — vitest separates with ` | `,
     // jest with `, `, so the separator carries its own surrounding whitespace.
     const re = /^\s*Tests:?\s+(?:\d+\s+failed\s*[,|]\s*)?(\d+)\s+passed/gim;
+    // Strip ANSI SGR sequences first. A real runner writes its summary through
+    // a color-enabled pipe, so the kept text reads
+    // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
+    // the tokens, and no token-level regex survives that. Measured on a live
+    // review of PR #8176: the count claim fell to `unchecked` with the summary
+    // line right there in the report.
+    // eslint-disable-next-line no-control-regex -- ESC is the character under test
+    const text = (cmd.output ?? '').replace(/\x1b\[[0-9;]*m/g, '');
     let m: RegExpExecArray | null;
-    while ((m = re.exec(cmd.output ?? ''))) {
+    while ((m = re.exec(text))) {
       total += Number(m[1]);
       saw = true;
     }
