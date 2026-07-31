@@ -54,6 +54,7 @@ import {
   isAskUserQuestionToolName,
   isSkillToolName,
   isShellToolName,
+  localizeAgentTypeName,
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
@@ -1199,7 +1200,7 @@ export const ToolLine = memo(function ToolLine({
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
     const displayName = info.explicitAgentType
-      ? `${t('agent.label')} (${info.explicitAgentType})`
+      ? `${t('agent.label')} (${localizeAgentTypeName(info.explicitAgentType, t)})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const isBackground = isBackgroundSubAgentToolCall(tool);
