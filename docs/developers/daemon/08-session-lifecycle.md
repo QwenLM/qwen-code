@@ -311,7 +311,7 @@ resets that window, including when the channel was already live.
 
 ## Configuration
 
-- `BridgeOptions.maxSessions` (default 20) — cap.
+- `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — absolute Channel factory
   plus ACP `initialize` startup deadline.
