@@ -265,10 +265,17 @@ export function extractClaims(section: string): Array<{
   const isPathClaim = (t: string): boolean => {
     const bare = t.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
     if (bare.startsWith('.qwen/')) return false;
+    // Build output is gitignored — absent at the reviewed commit by
+    // construction, the same category as .qwen/ above.
+    if (/(?:^|\/)(?:dist|build|out|bundle|coverage|node_modules)\//.test(bare))
+      return false;
     return /\.\w+$/.test(bare) || t.startsWith('./');
   };
 
   for (const span of codeSpans(section)) {
+    // A unified diff pasted into the Test Plan (the template's Evidence
+    // section invites it) is not a set of path claims about the tree.
+    if (/^(?:diff --git|---|\+\+\+|@@)\s/.test(span)) continue;
     if (RUNNER_RE.test(span)) push('command', span);
     if (PATH_RE.test(span)) {
       if (isPathClaim(span)) push('path', span);

@@ -1414,6 +1414,31 @@ describe('selectHunkProbes', () => {
     expect(selected.length).toBeGreaterThan(0);
   });
 
+  it('skips added files whose reverse-apply deletes the whole file', () => {
+    // An added file's hunk probe reverse-applies to a deletion — guaranteed
+    // inconclusive when a probe imports it, and a file-level statement wearing
+    // a hunk-level message when nothing does.
+    const added = {
+      file: 'src/new.ts',
+      diff: [
+        'diff --git a/src/new.ts b/src/new.ts',
+        'new file mode 100644',
+        '--- /dev/null',
+        '+++ b/src/new.ts',
+        '@@ -0,0 +1,3 @@',
+        '+const a = 1;',
+        '+const b = 2;',
+        '+const c = 3;',
+        '',
+      ].join('\n'),
+      hasNewTests: false,
+      mutantLines: [] as number[],
+    };
+    const { selected } = selectHunkProbes([added, file()]);
+    expect(selected.every((c) => c.file !== 'src/new.ts')).toBe(true);
+    expect(selected.length).toBeGreaterThan(0);
+  });
+
   it('has nothing to probe when every hunk is mutant-covered', () => {
     const { selected, skippedForCap } = selectHunkProbes([
       file({ mutantLines: [2, 21] }),

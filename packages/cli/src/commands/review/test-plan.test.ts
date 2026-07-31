@@ -252,6 +252,36 @@ describe('extractClaims', () => {
       [],
     );
   });
+
+  it('skips unified-diff headers pasted into the Test Plan', () => {
+    // The template's Evidence section invites pasting diffs; their a/ b/
+    // prefixes are not path claims about the reviewed tree.
+    const claims = extractClaims(
+      [
+        '```diff',
+        'diff --git a/packages/cli/src/foo.ts b/packages/cli/src/foo.ts',
+        '--- a/packages/cli/src/foo.ts',
+        '+++ b/packages/cli/src/foo.ts',
+        '@@ -1,3 +1,4 @@',
+        '+added line',
+        '```',
+      ].join('\n'),
+    );
+    expect(claims.filter((c) => c.kind === 'path')).toEqual([]);
+  });
+
+  it('does not extract a gitignored build-output path as a claim', () => {
+    // dist/ is absent at the reviewed commit by construction — a Test Plan
+    // naming it is telling the reader to build, not claiming the commit ships it.
+    const claims = extractClaims(
+      'Run `node packages/cli/dist/index.js --yolo`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('dist/')),
+    ).toBe(false);
+  });
 });
 
 describe('observedTestCounts', () => {

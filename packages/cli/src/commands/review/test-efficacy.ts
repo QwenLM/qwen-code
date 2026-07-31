@@ -1142,7 +1142,11 @@ export function selectHunkProbes(
     // A deleted file's hunks are all removals; `runOneHunkProbe` reads the
     // file first and returns `inconclusive` every time. Spending cap slots on
     // guaranteed inconclusives wastes the budget on a delete-heavy diff.
+    // An added file's reverse-apply deletes the whole file — the same waste
+    // when a probe imports it, and a file-level statement wearing a hunk-level
+    // message when nothing does.
     if (f.diff.includes('\n+++ /dev/null')) continue;
+    if (f.diff.includes('\n--- /dev/null')) continue;
     const hunks = splitDiffIntoHunks(f.diff);
     hunks.forEach((h, index) => {
       // Range from the header's new-side start, not `startLine`: that anchor

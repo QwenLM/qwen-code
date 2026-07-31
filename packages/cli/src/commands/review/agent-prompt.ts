@@ -861,8 +861,9 @@ export function buildRoleBrief(
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
           'different claims. Give this call `timeout: 600000` too — besides the revert ' +
-          'probe it runs up to 8 single-statement deletion mutants, each a suite run, and ' +
-          'it budgets itself to finish inside that ceiling:',
+          'probe it runs up to 8 single-statement deletion mutants and up to 6 per-hunk ' +
+          'reverse-apply probes, each a suite run, and it budgets itself to finish inside ' +
+          'that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
@@ -878,14 +879,18 @@ export function buildRoleBrief(
           'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
           'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
           'test in the diff fails when it is removed, which the whole-file ' +
-          "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
+          "revert cannot see when the file's other, tested behaviours mask it. " +
+          '`kind: "hunk-survived"` is a hunk the diff added whose reverse-apply left ' +
+          '**every affected test green** — that specific change ships with nothing gating it. ' +
+          'Report each as a ' +
           '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
           'test in this diff that would catch its removal. **`inconclusive` is not a ' +
-          'finding** — for probes and mutants alike, ' +
+          'finding** — for probes, mutants, and hunks alike, ' +
           "reverting or mutating the source often breaks the test's own compile, and that is " +
           'not the test catching anything. Mutants counted in `mutants.skippedForBudget`, ' +
           '`mutants.skippedForCap`, or `mutants.skippedForBaseline` never ran — not findings ' +
-          'either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
+          'either; the `hunks.*` counters of the same names work the same way. ' +
+          '`mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }
