@@ -593,6 +593,71 @@ describe('ArtifactPanel review downloads', () => {
     expect(downloads[1]?.disabled).toBe(false);
     expect(downloads[1]?.textContent?.trim()).toBe('Download');
   });
+
+  it('cancels the download and skips the error toast when the panel unmounts mid-download', async () => {
+    const changes = [
+      {
+        path: 'report.html',
+        status: 'modified' as const,
+        toolCallId: 'tool-report',
+        isArtifact: false,
+        diffs: [],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onError = vi.fn();
+    let resolveStat: ((value: unknown) => void) | undefined;
+    mockWorkspaceActions.stat.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onError={onError}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+
+    await act(async () => {
+      resolveStat?.({ sizeBytes: 3, modifiedMs: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+  });
 });
 
 describe('ArtifactPanel monitor tab', () => {
