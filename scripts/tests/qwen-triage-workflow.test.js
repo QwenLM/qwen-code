@@ -1729,6 +1729,21 @@ describe('qwen-triage verify hardening', () => {
       expect(surplusOut.split('<details>').length - 1).toBe(1);
       expect(surplusOut.split('</details>').length - 1).toBe(1);
 
+      // A report ending inside an open code fence: the sanitizer must
+      // close the fence so the wrapper's </details> and the composer's
+      // footer are not swallowed as inert code text.
+      const fence = join(dir, 'fence.md');
+      writeFileSync(fence, '# Title\n\n```bash\ncode here\n');
+      const fenceOut = emit(fence, 45000);
+      expect(fenceOut).toContain('<summary>Verification report</summary>');
+      expect(fenceOut).toContain('code here');
+      // The wrapper balances: its </details> is outside the fence.
+      expect(fenceOut.split('<details>').length - 1).toBe(1);
+      expect(fenceOut.split('</details>').length - 1).toBe(1);
+      // The prose (outside code) contains the wrapper closer.
+      const fenceProse = stripCode(fenceOut);
+      expect(fenceProse).toContain('</details>');
+
       // A NUL byte in the report is stripped (parity with emit_block's
       // tr -d '\000'); it must not reach the comment body.
       const nul = join(dir, 'nul.md');
@@ -1783,6 +1798,27 @@ describe('qwen-triage verify hardening', () => {
       const over = emit(folds, 2000);
       expect(over).toContain('<pre><code>');
       expect(over).toContain('Verification report (report.md, truncated)');
+
+      // Sanitizer crash → escaped-pre fallback. Override node so the
+      // sanitizer's `node -e` fails; emit_block's own node call has a
+      // head -c fallback so the escaped output still renders.
+      const crash = join(dir, 'crash.md');
+      writeFileSync(crash, '# crash report\n\nbody text\n');
+      const crashProc = spawnSync(
+        'bash',
+        [
+          '-c',
+          `node() { return 1; }\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          crash,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(crashProc.status).toBe(0);
+      expect(crashProc.stdout).toContain('<pre><code>');
+      expect(crashProc.stdout).toContain(
+        'Verification report (report.md, truncated)',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

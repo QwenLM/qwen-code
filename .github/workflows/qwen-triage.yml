@@ -3362,7 +3362,8 @@ jobs:
           #      quoted in a code span/fence is inert text and is no longer
           #      counted — surplus closers are dropped (they would otherwise
           #      close the wrapping fold early) and unclosed opens are closed
-          #      at the end, so a malformed report can neither swallow the
+          #      at the end; a dangling code fence is closed too, so a
+          #      malformed report can neither swallow the
           #      footer nor escape its wrapper.
           # Accepted tradeoff (named, not accidental): rendering promotes the
           # report from inert text to parsed markdown, so [links](…) and
@@ -3452,6 +3453,7 @@ jobs:
                   out.push(escCode(line));
                 }
               }
+              if (inFence) out.push(fc.repeat(fl));
               let result = out.join("\n");
               if (depth > 0) {
                 if (result && !result.endsWith("\n")) result += "\n";
