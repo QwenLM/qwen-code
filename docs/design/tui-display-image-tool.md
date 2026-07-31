@@ -52,11 +52,13 @@ Bare mode keeps its existing minimal tool set.
 
 ## Compatibility
 
-The first version supports PNG only. Kitty, Ghostty, and Warp use native image
-placement. Direct iTerm2 placement is intentionally excluded because its inline
-image protocol is cursor-positioned and the existing asynchronous Ink path
-already treats it as unsafe. iTerm2, tmux, SSH, and terminals without a native
-path can still render through `chafa` when it is installed.
+The first version supports PNG only. Kitty and Ghostty use native image
+placement. Warp is intentionally excluded because its Kitty support does not
+include the Unicode-placeholder extension used by this renderer. Direct iTerm2
+placement is also excluded because its inline image protocol is
+cursor-positioned and the existing asynchronous Ink path already treats it as
+unsafe. Warp, iTerm2, tmux, SSH, and terminals without a native path can still
+render through `chafa` when it is installed.
 
 ## Security and persistence
 

@@ -75,27 +75,34 @@ describe('terminalImageRenderer', () => {
     );
   });
 
-  it('recognizes Warp as supporting the Kitty image protocol', () => {
+  it('does not use Kitty Unicode placeholders in Warp', () => {
     expect(
       supportsKittyImageProtocol(
         { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
         true,
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       supportsKittyImageProtocol(
-        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        { TERM: 'xterm-kitty', TERM_PROGRAM: 'WarpTerminal' },
         true,
-        'win32',
       ),
     ).toBe(false);
     expect(
       getTerminalImageRenderSupport(
         imagePath,
-        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        {
+          PATH: tempDir,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
         true,
       ),
-    ).toEqual({ available: true });
+    ).toEqual({
+      available: false,
+      reason:
+        'No compatible native image protocol was detected, and chafa is not installed.',
+    });
   });
 
   it.runIf(process.platform !== 'win32')(
@@ -119,9 +126,11 @@ describe('terminalImageRenderer', () => {
         contentWidth: 20,
         env: {
           PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
           TEST_RENDERER_SECRET: 'must-not-reach-chafa',
         },
-        stdoutIsTTY: false,
+        stdoutIsTTY: true,
       });
 
       expect(result).toEqual({
@@ -133,8 +142,10 @@ describe('terminalImageRenderer', () => {
           imagePath,
           {
             PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+            TERM: 'xterm-256color',
+            TERM_PROGRAM: 'WarpTerminal',
           },
-          false,
+          true,
         ),
       ).toEqual({ available: true });
     },

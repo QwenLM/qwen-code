@@ -43,7 +43,6 @@ export interface TerminalImageRenderOptions {
 export function supportsKittyImageProtocol(
   env: NodeJS.ProcessEnv = process.env,
   stdoutIsTTY = process.stdout.isTTY,
-  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (!stdoutIsTTY || env['TMUX'] || env['SSH_TTY'] || env['SSH_CLIENT']) {
     return false;
@@ -51,11 +50,14 @@ export function supportsKittyImageProtocol(
 
   const term = env['TERM']?.toLowerCase() ?? '';
   const termProgram = env['TERM_PROGRAM']?.toLowerCase() ?? '';
+  if (termProgram === 'warpterminal') {
+    return false;
+  }
+
   return Boolean(
     env['KITTY_WINDOW_ID'] ||
       term.includes('kitty') ||
-      termProgram.includes('ghostty') ||
-      (termProgram === 'warpterminal' && platform !== 'win32'),
+      termProgram.includes('ghostty'),
   );
 }
 
