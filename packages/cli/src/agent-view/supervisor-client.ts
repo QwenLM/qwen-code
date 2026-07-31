@@ -66,7 +66,7 @@ export interface AgentViewSupervisorClientOptions {
 }
 
 export interface AgentViewSupervisorSubscriptionOptions
-  extends Omit<AgentViewSupervisorClientOptions, 'timeoutMs'> {
+  extends AgentViewSupervisorClientOptions {
   onError?: (error: Error) => void;
 }
 
@@ -365,6 +365,16 @@ export function subscribeAgentViewSupervisor(
     op: 'subscribe',
   };
 
+  const handshakeTimeout = setTimeout(() => {
+    notifySubscriptionError(
+      new AgentViewSupervisorClientError(
+        'Timed out waiting for Agent View subscription handshake.',
+        'timeout',
+      ),
+    );
+    socket.destroy();
+  }, options.timeoutMs ?? 5000);
+
   socket.setEncoding('utf8');
   socket.on('connect', () => {
     socket.write(`${JSON.stringify(request)}\n`);
@@ -403,6 +413,7 @@ export function subscribeAgentViewSupervisor(
           return;
         }
         subscribed = true;
+        clearTimeout(handshakeTimeout);
         continue;
       }
 
@@ -422,18 +433,20 @@ export function subscribeAgentViewSupervisor(
     }
   });
   socket.on('error', (error) => notifySubscriptionError(error));
-  socket.on('close', () =>
+  socket.on('close', () => {
+    clearTimeout(handshakeTimeout);
     notifySubscriptionError(
       new AgentViewSupervisorClientError(
         'Agent View supervisor subscription closed.',
         'closed',
       ),
-    ),
-  );
+    );
+  });
 
   return {
     dispose() {
       disposed = true;
+      clearTimeout(handshakeTimeout);
       socket.destroy();
     },
   };

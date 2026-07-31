@@ -8,8 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  attachAgentViewSupervisorTerminal,
   callAgentViewSupervisor,
   requestAgentViewSupervisor,
   subscribeAgentViewSupervisor,
@@ -871,6 +873,68 @@ describe('Agent View supervisor server', () => {
       await new Promise<void>((resolve) => silentServer.close(() => resolve()));
     }
   });
+
+  it('times out a subscription handshake that never acks', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const sockets: net.Socket[] = [];
+    const silentServer = net.createServer((socket) => {
+      sockets.push(socket);
+    });
+    await new Promise<void>((resolve) =>
+      silentServer.listen(socketPath, resolve),
+    );
+    try {
+      const errors: Error[] = [];
+      const subscription = subscribeAgentViewSupervisor(socketPath, () => {}, {
+        timeoutMs: 50,
+        onError: (error) => errors.push(error),
+      });
+      await waitFor(() => errors.length === 1);
+      expect(errors[0]).toMatchObject({ code: 'timeout' });
+      subscription.dispose();
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => silentServer.close(() => resolve()));
+    }
+  });
+
+  it('flushes coalesced attach bytes to stdout before bridging', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      attachStream: vi.fn(
+        (_params, socket: import('node:net').Socket, requestId: string) => {
+          // Handshake response and terminal bytes in a single packet: the
+          // client must split the JSON line from the leftover terminal bytes
+          // and flush them to stdout without dropping them.
+          socket.write(
+            `${JSON.stringify({
+              id: requestId,
+              ok: true,
+              result: { attached: true },
+            })}\nhello`,
+          );
+        },
+      ),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+    await server.listen();
+    try {
+      const stdout = new MemoryWritable();
+      await attachAgentViewSupervisorTerminal(socketPath, 'session-1', {
+        stdin: emptyInput(),
+        stdout,
+        rawMode: false,
+      });
+      expect(stdout.text()).toContain('hello');
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 async function makeSocketPath(): Promise<{ dir: string; socketPath: string }> {
@@ -922,4 +986,25 @@ async function readLine(socket: net.Socket): Promise<string> {
     socket.once('error', onError);
     socket.once('close', onClose);
   });
+}
+
+class MemoryWritable extends Writable {
+  private readonly chunks: Buffer[] = [];
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    callback();
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+
+async function* emptyInput(): AsyncGenerator<Buffer> {
+  // Ends immediately so the bridge returns once the leftover bytes flush.
 }

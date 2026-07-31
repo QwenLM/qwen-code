@@ -48,6 +48,36 @@ describe('agent view supervisor store', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('writes credential files without following a pre-placed symlink', async () => {
+    if (process.platform === 'win32') return;
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    fs.mkdirSync(paths.daemonDir, { recursive: true });
+    const symlinkTarget = path.join(tempDir, 'attacker-controlled.json');
+    fs.writeFileSync(symlinkTarget, 'untouched');
+    fs.symlinkSync(symlinkTarget, paths.supervisorPath);
+
+    await writeAgentViewSupervisor(
+      {
+        schemaVersion: 1,
+        pid: 1234,
+        socketPath: path.join(tempDir, 'supervisor.sock'),
+        authToken: 'secret-token',
+        startedAt: '2026-07-17T00:00:00.000Z',
+        updatedAt: '2026-07-17T00:00:00.000Z',
+        protocolVersion: 1,
+      },
+      { globalDir: tempDir },
+    );
+
+    // The symlink target must not receive the auth token, and the store path
+    // is replaced with a regular file rather than written through the link.
+    expect(fs.readFileSync(symlinkTarget, 'utf8')).toBe('untouched');
+    expect(fs.lstatSync(paths.supervisorPath).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(paths.supervisorPath, 'utf8')).toContain(
+      'secret-token',
+    );
+  });
+
   it('uses daemon and jobs directories under the global qwen dir', () => {
     expect(getAgentViewStorePaths({ globalDir: tempDir })).toEqual({
       globalDir: tempDir,
