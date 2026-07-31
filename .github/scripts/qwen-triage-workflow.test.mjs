@@ -493,7 +493,7 @@ describe('ci.yml: all self-hosted checkout jobs carry ownership recovery', () =>
     );
   });
 
-  it('rename-aside blocks are byte-identical across ci.yml and pr-review', () => {
+  it('rename-aside blocks are byte-identical across all four checkout jobs', () => {
     const extractBlock = (run, label) => {
       const marker = '# NOTE: This rename-aside block';
       const start = run.indexOf(marker);
@@ -503,13 +503,17 @@ describe('ci.yml: all self-hosted checkout jobs carry ownership recovery', () =>
       assert.ok(end !== -1, label + ': rename-aside block must end with done');
       return run.slice(start, end + endMarker.length);
     };
-    const ciBlock = extractBlock(ciOwnershipStep.run, 'ci.yml test');
-    const prBlock = extractBlock(prReviewOwnershipStep.run, 'pr-review');
-    assert.equal(
-      ciBlock,
-      prBlock,
-      'rename-aside blocks must be byte-identical — they are duplicated because extraction into .github/scripts/ is impossible before checkout',
-    );
+    const message =
+      'rename-aside blocks must be byte-identical — they are duplicated because extraction into .github/scripts/ is impossible before checkout';
+    const reference = extractBlock(ciOwnershipStep.run, 'ci.yml test');
+    const copies = {
+      'pr-review': prReviewOwnershipStep.run,
+      'ci.yml web_shell_e2e_smoke': ciWebShellOwnershipStep.run,
+      'ci.yml integration_cli': ciIntegrationOwnershipStep.run,
+    };
+    for (const [label, run] of Object.entries(copies)) {
+      assert.equal(extractBlock(run, label), reference, message);
+    }
   });
 });
 
