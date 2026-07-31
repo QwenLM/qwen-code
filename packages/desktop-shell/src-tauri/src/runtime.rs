@@ -304,12 +304,16 @@ fn monitor_runtime(
             };
             match process.try_wait() {
                 Ok(Some(status)) => {
-                    guard.take();
+                    if let Some(mut process) = guard.take() {
+                        let _ = process.kill();
+                    }
                     Some(status.to_string())
                 }
                 Ok(None) => None,
                 Err(error) => {
-                    guard.take();
+                    if let Some(mut process) = guard.take() {
+                        let _ = process.kill();
+                    }
                     Some(format!("failed to inspect daemon: {error}"))
                 }
             }

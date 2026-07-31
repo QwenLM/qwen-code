@@ -257,6 +257,10 @@ jobs:
         working-directory: 'packages/desktop-shell'
         run: 'npm test'
 
+      - name: 'Run desktop release tests'
+        working-directory: 'packages/desktop-shell'
+        run: 'npm run test:release'
+
       - name: 'Build desktop installers'
         working-directory: 'packages/desktop-shell'
         shell: 'bash'

@@ -27,9 +27,7 @@ const appId = 'com.qwen.code.desktop';
 const logRoot =
   process.platform === 'darwin'
     ? path.join(isolatedHome, 'Library', 'Logs', appId)
-    : process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA ?? isolatedState, appId, 'logs')
-      : path.join(isolatedState, appId, 'logs');
+    : path.join(isolatedState, appId, 'logs');
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
 const previousSize = 0;
@@ -41,6 +39,7 @@ const child = spawn(executable, [], {
     QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
     QWEN_DESKTOP_TEST_RUNTIME_INFO: runtimeInfoPath,
     HOME: isolatedHome,
+    LOCALAPPDATA: isolatedState,
     XDG_STATE_HOME: isolatedState,
     XDG_DATA_HOME: isolatedState,
     ...(process.platform === 'linux'
@@ -60,10 +59,14 @@ const child = spawn(executable, [], {
 });
 let processOutput = '';
 let completed = false;
+let exitFailure;
 captureProcessOutput(child.stdout, 'stdout');
 captureProcessOutput(child.stderr, 'stderr');
 child.on('exit', (code, signal) => {
   processOutput += `[exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`;
+  exitFailure = new Error(
+    `Packaged desktop runtime exited before readiness (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
+  );
 });
 child.unref();
 
@@ -87,6 +90,7 @@ function captureProcessOutput(stream, name) {
 async function waitForReady(offset) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
+    if (exitFailure) throw exitFailure;
     const contents = fs
       .readFileSync(logPath, {
         encoding: 'utf8',

@@ -4646,6 +4646,8 @@ describe('runQwenServe runtime startup failures', () => {
       const api = await fetch(`${handle.url}/session`, { method: 'POST' });
       expect(api.status).toBe(401);
       expect(await api.json()).toEqual({ error: 'Unauthorized' });
+      const getApi = await fetch(`${handle.url}/session`);
+      expect(getApi.status).toBe(401);
 
       const shell = await fetch(`${handle.url}/`);
       expect(shell.status).toBe(200);

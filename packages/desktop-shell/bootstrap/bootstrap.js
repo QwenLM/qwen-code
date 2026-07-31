@@ -75,14 +75,15 @@ async function installUpdate() {
   try {
     await invoke('install_update');
   } catch (failure) {
-    update.disabled = false;
-    update.textContent = 'Install update';
     setStatus(
       'error',
       'Update failed',
       'Qwen Code remains usable. Try again or update manually.',
       String(failure),
     );
+  } finally {
+    update.disabled = false;
+    update.textContent = 'Install update';
   }
 }
 
