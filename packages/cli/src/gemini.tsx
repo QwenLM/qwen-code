@@ -168,7 +168,10 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
-import { handleUncaughtException, isExpectedPtyRaceError } from './cli.js';
+import {
+  handleUncaughtException,
+  isExpectedPtyRaceError,
+} from './utils/uncaught-exception-handler.js';
 
 let uncaughtExceptionHandler: ((error: unknown) => void) | undefined;
 

@@ -16,6 +16,10 @@ import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
+import {
+  handleUncaughtException,
+  isExpectedPtyRaceError,
+} from './utils/uncaught-exception-handler.js';
 
 // Preserve the old entrypoint's profiling baseline before route-specific
 // dynamic imports or command handling shift startup measurements.
@@ -390,42 +394,6 @@ export async function runCliEntry(
   await main();
 }
 
-function getErrnoCode(error: unknown): string | undefined {
-  if (!error || typeof error !== 'object') {
-    return undefined;
-  }
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : undefined;
-}
-
-export function isExpectedPtyRaceError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message;
-  const code = getErrnoCode(error);
-
-  if (
-    (code === 'EIO' && message.includes('read')) ||
-    message.includes('read EIO')
-  ) {
-    return true;
-  }
-
-  if (
-    (code === 'EAGAIN' && message.includes('read')) ||
-    message.includes('read EAGAIN')
-  ) {
-    return true;
-  }
-
-  return (
-    message.includes('ioctl(2) failed, EBADF') ||
-    message.includes('Cannot resize a pty that has already exited')
-  );
-}
-
 export async function handleCriticalError(error: unknown): Promise<void> {
   const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
     import('./utils/deferred-core-runtime.js'),
@@ -533,29 +501,13 @@ export function stampCliEntryEnv(entryPath?: string): void {
   }
 }
 
-/**
- * The process-level `uncaughtException` handler registered at the entry point,
- * before the session ID (and thus the debug-log path) is known. Benign PTY
- * teardown races are suppressed; anything else is reported to stderr and fatal.
- *
- * `setupUncaughtExceptionHandler` in gemini.tsx removes this handler and
- * installs a session-aware replacement once interactive startup is far enough
- * along to leave the alternate screen and write the debug file. Exactly one
- * listener must be active: two would conflict (the first calls `process.exit`
- * before the second runs) and this basic one lacks the visibility behavior.
- */
-export function handleUncaughtException(error: unknown): void {
-  if (isExpectedPtyRaceError(error)) {
-    return;
-  }
-
-  if (error instanceof Error) {
-    writeStderrLine(error.stack ?? error.message);
-  } else {
-    writeStderrLine(String(error));
-  }
-  process.exit(1);
-}
+// handleUncaughtException and isExpectedPtyRaceError live in
+// ./utils/uncaught-exception-handler.js and are re-exported here for existing
+// importers (cli.test.ts). gemini.tsx must import them from that leaf module
+// directly: a static import of this entry file from a module the bundle loads
+// lazily makes esbuild hoist this entry into a shared chunk, which silently
+// disables the bootstrap guard at the bottom.
+export { handleUncaughtException, isExpectedPtyRaceError };
 
 export async function runCliEntryPoint(
   run: () => Promise<void> = runCliEntry,
