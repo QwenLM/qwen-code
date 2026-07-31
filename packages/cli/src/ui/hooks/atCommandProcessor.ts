@@ -408,6 +408,7 @@ export async function resolveAtCommandQuery({
 
     let resolvedSuccessfully = false;
     let sawNotFound = false;
+    let deferredIgnoreReason: string | undefined;
     for (const dir of config.getWorkspaceContext().getDirectories()) {
       try {
         const absolutePath = path.resolve(dir, pathName);
@@ -421,11 +422,11 @@ export async function resolveAtCommandQuery({
           onDebugMessage(
             `Path ${pathName} is not in the workspace and will be skipped.`,
           );
-          break;
+          continue;
         }
         const canonicalIgnoreReason = getIgnoreReason(canonicalPath);
         if (canonicalIgnoreReason) {
-          ignoredByReason[canonicalIgnoreReason].push(pathName);
+          deferredIgnoreReason = canonicalIgnoreReason;
           const reasonText =
             canonicalIgnoreReason === 'both'
               ? 'ignored by both git and qwen'
@@ -435,7 +436,7 @@ export async function resolveAtCommandQuery({
           onDebugMessage(
             `Path ${pathName} is ${reasonText} and will be skipped.`,
           );
-          break;
+          continue;
         }
         if (stats.isDirectory()) {
           onDebugMessage(`Path ${pathName} resolved to directory.`);
@@ -469,6 +470,9 @@ export async function resolveAtCommandQuery({
       onDebugMessage(
         `Path ${pathName} not found. Path ${pathName} will be skipped.`,
       );
+    }
+    if (!resolvedSuccessfully && deferredIgnoreReason) {
+      ignoredByReason[deferredIgnoreReason].push(pathName);
     }
   }
 

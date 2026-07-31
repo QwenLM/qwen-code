@@ -391,6 +391,126 @@ describe('handleAtCommand', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path escapes workspace',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot-'),
+        ),
+      );
+      const outsideDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-outside-')),
+      );
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fsPromises.writeFile(outsideFile, 'outside secret');
+      // Symlink in first dir escapes the workspace
+      await fsPromises.mkdir(path.join(testRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.symlink(
+        outsideFile,
+        path.join(testRootDir, 'src', 'index.ts'),
+      );
+      // Valid file in second dir at the same relative path
+      await fsPromises.mkdir(path.join(secondRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'src', 'index.ts'),
+        'valid content from second root',
+      );
+
+      const isWithinWorkspace = (candidate: string) => {
+        const absolute = path.isAbsolute(candidate)
+          ? candidate
+          : path.resolve(testRootDir, candidate);
+        for (const dir of [testRootDir, secondRootDir]) {
+          const rel = path.relative(dir, absolute);
+          if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+            return true;
+          }
+        }
+        return false;
+      };
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: isWithinWorkspace,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@src/index.ts',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 700,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('outside secret');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path is ignored',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot2-'),
+        ),
+      );
+      // Set up git ignore in first dir
+      await fsPromises.mkdir(path.join(testRootDir, '.git'), {
+        recursive: true,
+      });
+      await createTestFile(path.join(testRootDir, '.gitignore'), 'secret.txt');
+      const secretFile = await createTestFile(
+        path.join(testRootDir, 'secret.txt'),
+        'ignored content',
+      );
+      // Symlink in first dir points to the ignored file
+      await fsPromises.symlink(secretFile, path.join(testRootDir, 'data.txt'));
+      // Valid file in second dir at the same relative path
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'data.txt'),
+        'valid content from second root',
+      );
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => true,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@data.txt',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 701,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('ignored content');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('should process a valid directory path', async () => {
     const filePath = await createTestFile(
       path.join(testRootDir, 'path', 'to', 'file.txt'),
