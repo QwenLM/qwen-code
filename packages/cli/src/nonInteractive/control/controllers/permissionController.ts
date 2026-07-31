@@ -21,6 +21,7 @@ import type {
   ApprovalMode,
   TeammateApprovalRequestEvent,
   ToolConfirmationPayload,
+  WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -418,6 +419,60 @@ export class PermissionController extends BaseController {
           cancelError,
         );
       }
+    }
+  }
+
+  async handleWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void> {
+    const registry = this.context.config.getWorkflowRunRegistry();
+    const signal = AbortSignal.any([this.context.abortSignal, approvalSignal]);
+    try {
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: approval.name,
+          tool_use_id: approval.approvalId,
+          input: rawArgs,
+          permission_suggestions: buildPermissionSuggestions(
+            approval.confirmationDetails,
+          ),
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
+        signal,
+      );
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const allowed =
+        response.subtype === 'success' &&
+        String(payload['behavior'] || '').toLowerCase() === 'allow';
+      const confirmationPayload = allowed
+        ? this.buildAllowConfirmationPayload(
+            approval.name,
+            payload['updatedInput'],
+          )
+        : undefined;
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        allowed
+          ? ToolConfirmationOutcome.ProceedOnce
+          : ToolConfirmationOutcome.Cancel,
+        confirmationPayload,
+      );
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Workflow approval failed:',
+        error,
+      );
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
     }
   }
 
