@@ -7812,7 +7812,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           message.messageId === messageId &&
           message.originatorClientId === originatorClientId,
       );
-      if (index === -1) return { removed: false };
+      if (index === -1) {
+        // A miss is the interesting race (already drained mid-turn, or the
+        // caller's clientId doesn't match the queued originator) — log it
+        // like the enqueue / pending-removal siblings so it shows in daemon logs.
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} remove missed messageId=${messageId} (already drained or originator mismatch)`,
+        );
+        return { removed: false };
+      }
       entry.midTurnMessageQueue.splice(index, 1);
       return { removed: true };
     },

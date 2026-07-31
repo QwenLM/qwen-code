@@ -1668,10 +1668,12 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
-    case MID_TURN_MESSAGE_INJECTED_EVENT:
-      return isMidTurnMessageInjectedData(event.data)
-        ? (event as DaemonMidTurnMessageInjectedEvent)
+    case MID_TURN_MESSAGE_INJECTED_EVENT: {
+      const data = asMidTurnMessageInjectedData(event.data);
+      return data
+        ? ({ ...event, data } as DaemonMidTurnMessageInjectedEvent)
         : undefined;
+    }
     case PENDING_PROMPT_ADDED_EVENT:
       return isPendingPromptAddedData(event.data)
         ? (event as DaemonPendingPromptAddedEvent)
@@ -2668,19 +2670,32 @@ function isArtifactChangedData(
   );
 }
 
-function isMidTurnMessageInjectedData(
+function asMidTurnMessageInjectedData(
   value: unknown,
-): value is DaemonMidTurnMessageInjectedData {
-  return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    Array.isArray(value['messages']) &&
-    value['messages'].every((message) => typeof message === 'string') &&
-    (value['messageIds'] === undefined ||
-      (Array.isArray(value['messageIds']) &&
-        value['messageIds'].length === value['messages'].length &&
-        value['messageIds'].every(isNonEmptyString)))
-  );
+): DaemonMidTurnMessageInjectedData | undefined {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !Array.isArray(value['messages']) ||
+    !value['messages'].every((message) => typeof message === 'string')
+  ) {
+    return undefined;
+  }
+  const messageIds = value['messageIds'];
+  // `messageIds` is an optional enrichment: a misaligned or malformed batch is
+  // dropped (mirroring `parseSidechannelMidTurnInjected`) rather than rejecting
+  // the whole event, so a buggy daemon can't silently lose the injection signal.
+  const alignedMessageIds =
+    Array.isArray(messageIds) &&
+    messageIds.length === value['messages'].length &&
+    messageIds.every(isNonEmptyString)
+      ? (messageIds as string[])
+      : undefined;
+  return {
+    ...(value as DaemonMidTurnMessageInjectedData),
+    messages: value['messages'] as string[],
+    messageIds: alignedMessageIds,
+  };
 }
 
 function isPendingPromptAddedData(

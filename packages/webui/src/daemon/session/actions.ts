@@ -1079,9 +1079,16 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // The bridge removes a mid-turn message only on an exact originator
+        // match, so forward our clientId like the same-session path does —
+        // without it the removal resolves to an undefined originator and never
+        // matches the id stamped at enqueue.
         return await session.client.removeMidTurnMessage(
           opts.sessionId,
           messageId,
+          {
+            ...(session.clientId ? { clientId: session.clientId } : {}),
+          },
         );
       }
       return await session.removeMidTurnMessage(messageId);

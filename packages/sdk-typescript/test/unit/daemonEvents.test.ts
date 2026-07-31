@@ -20,7 +20,10 @@ import {
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
-import type { DaemonGithubSetupCompletedData } from '../../src/daemon/events.js';
+import type {
+  DaemonGithubSetupCompletedData,
+  DaemonMidTurnMessageInjectedEvent,
+} from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
@@ -442,18 +445,6 @@ describe('daemon event schema', () => {
         v: 1,
         type: 'session_died',
         data: { sessionId: 's-1', reason: 'killed', signalCode: 9 },
-      }),
-    ).toBeUndefined();
-    expect(
-      asKnownDaemonEvent({
-        id: 8,
-        v: 1,
-        type: 'mid_turn_message_injected',
-        data: {
-          sessionId: 's-1',
-          messages: ['a'],
-          messageIds: [''],
-        },
       }),
     ).toBeUndefined();
 
@@ -991,18 +982,35 @@ describe('daemon event schema', () => {
         data: { messages: ['x'] },
       }),
     ).toBeUndefined();
-    expect(
-      asKnownDaemonEvent({
-        id: 7,
-        v: 1,
-        type: 'mid_turn_message_injected',
-        data: {
-          sessionId: 's-1',
-          messages: ['a', 'b'],
-          messageIds: ['mid-a'],
-        },
-      }),
-    ).toBeUndefined();
+    // A misaligned or malformed `messageIds` is an optional enrichment: it is
+    // stripped rather than rejecting the whole event (mirroring the sidechannel
+    // parser), so a buggy daemon can't silently lose the injection signal.
+    const misaligned = asKnownDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(misaligned).toBeDefined();
+    expect(misaligned?.data.messages).toEqual(['a', 'b']);
+    expect(misaligned?.data.messageIds).toBeUndefined();
+
+    const emptyId = asKnownDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a'],
+        messageIds: [''],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(emptyId).toBeDefined();
+    expect(emptyId?.data.messageIds).toBeUndefined();
   });
 
   it('reduces session_closed as terminal and clears pending permissions', () => {

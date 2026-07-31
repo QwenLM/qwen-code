@@ -135,6 +135,7 @@ interface MockClient {
   removeMidTurnMessage: (
     sessionId: string,
     messageId: string,
+    opts?: { clientId?: string },
   ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
@@ -1838,6 +1839,7 @@ describe('DaemonSessionProvider', () => {
     const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
     const session = createMockSession({
       sessionId: 'session-current',
+      clientId: 'client-current',
       removeMidTurnMessage,
     });
     sdkMocks.sessions.push(session);
@@ -1861,9 +1863,13 @@ describe('DaemonSessionProvider', () => {
     ).resolves.toEqual({ removed: true });
 
     expect(removeMidTurnMessage).toHaveBeenCalledWith('mid-current');
+    // The cross-session branch must forward our clientId: the bridge removes a
+    // mid-turn message only on an exact originator match, so a removal issued
+    // without one could never match the id stamped at enqueue.
     expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
       'session-old',
       'mid-old',
+      { clientId: 'client-current' },
     );
   });
 
