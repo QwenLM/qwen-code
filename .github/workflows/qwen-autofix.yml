@@ -119,6 +119,9 @@ env:
   # changes, failed checks, and base conflicts may drive code changes;
   # lower-severity feedback is recorded and left open.
   CRITICAL_ONLY_AFTER_ROUND: '5'
+  # Takeover is explicitly delegated work and gets a wider suggestion window
+  # before the same Critical-only brake engages.
+  TAKEOVER_CRITICAL_ONLY_AFTER_ROUND: '10'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
@@ -2471,10 +2474,10 @@ jobs:
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
             # Per AGENTS.md's review policy, Suggestion-level findings are
-            # actionable during the first five change-producing rounds. The
-            # scan still selects later feedback so prepare can record and
-            # watermark its deferral; only the address job filters what may
-            # drive code changes.
+            # actionable during the initial change-producing rounds; takeover
+            # extends that window. The scan still selects later feedback so
+            # prepare can record and watermark its deferral; only the address
+            # job filters what may drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -3024,8 +3027,12 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND="${CRITICAL_ONLY_AFTER_ROUND}"
+          if [[ "${LIVE_TAKEOVER}" == "true" ]]; then
+            EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND="${TAKEOVER_CRITICAL_ONLY_AFTER_ROUND}"
+          fi
           CRITICAL_ONLY='false'
-          if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
+          if [[ "${ROUND}" -ge "${EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND}" ]]; then
             CRITICAL_ONLY='true'
           fi
           # Which trusted humans have exhausted their per-window regular
@@ -3048,7 +3055,7 @@ jobs:
             OVER_BUDGET_AUTHORS="$(jq -n \
               --arg key "${LIVE_REARM_KEY}" --arg ab "${AUTOFIX_BOT}" --arg rb "${REVIEW_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" \
-              --argjson r5 "${CRITICAL_ONLY_AFTER_ROUND}" \
+              --argjson critical_after "${EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND}" \
               --argjson k "${CRITICAL_ONLY_HUMAN_BATCHES}" \
               --slurpfile rv "${WORKDIR}/rv.json" --slurpfile rc "${WORKDIR}/rc.json" --slurpfile ic "${WORKDIR}/ic.json" '
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -3058,7 +3065,7 @@ jobs:
                | sort_by(.at)) as $ms
               | ([ range(0; ($ms | length)) as $i
                    | ($ms[$i]
-                      | select((.acted == "true" and .round > $r5) or (.acted == "false" and .round >= $r5))
+                      | select((.acted == "true" and .round > $critical_after) or (.acted == "false" and .round >= $critical_after))
                       | {lo: (if $i == 0 then "" else ($ms[$i - 1].ts) end), hi: .ts}) ]) as $spans
               | ($rv | add) as $reviews
               | ($rc | add) as $comments
@@ -3101,7 +3108,7 @@ jobs:
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window's Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
+              echo "Critical-only mode is active after ${EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window's Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
@@ -3156,7 +3163,7 @@ jobs:
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式：以上为自动评审的非 Critical 建议，予以延后、保持开放并留待人工跟进——不要为其修改代码、解决线程或代为回复。维护者的反馈仅在其本人于本窗口 Critical-only 阶段已被处理 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈之后才会被延后——账号可能挂着自动评审循环，因此刹车依据实测的再生频度而非身份；达到预算的作者（如有）在下方点名。（如需解除该模式，评论 \`@qwen-code /retry\` 即可开启新的计数窗口。）"
+              echo "完成 ${EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式：以上为自动评审的非 Critical 建议，予以延后、保持开放并留待人工跟进——不要为其修改代码、解决线程或代为回复。维护者的反馈仅在其本人于本窗口 Critical-only 阶段已被处理 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈之后才会被延后——账号可能挂着自动评审循环，因此刹车依据实测的再生频度而非身份；达到预算的作者（如有）在下方点名。（如需解除该模式，评论 \`@qwen-code /retry\` 即可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"

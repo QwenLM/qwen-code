@@ -3812,28 +3812,31 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('switches to Critical-only feedback after five change rounds', () => {
-    // ROUND counts change-producing rounds, so 4 still starts the fifth
-    // suggestion-capable change while 5 starts the first Critical-only round.
+  it('gives takeover ten suggestion-capable change rounds', () => {
+    // ROUND counts change-producing rounds. Standard management enters
+    // Critical-only mode after 5 changes; explicit takeover enters after 10.
     expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
+    expect(workflow).toContain("TAKEOVER_CRITICAL_ONLY_AFTER_ROUND: '10'");
     expect(prepareBranchAndFeedbackStep).toContain(
-      '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
+      '[[ "${ROUND}" -ge "${EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
     const modeBlock = prepareBranchAndFeedbackStep.match(
-      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+      /(EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND="\$\{CRITICAL_ONLY_AFTER_ROUND\}"[\s\S]*?CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
     )?.[1];
     expect(modeBlock).toBeTruthy();
-    const modeAt = (round) =>
+    const modeAt = (round, takeover) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nLIVE_TAKEOVER=${takeover}\nCRITICAL_ONLY_AFTER_ROUND=5\nTAKEOVER_CRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(4)).toBe('false');
-    expect(modeAt(5)).toBe('true');
+    expect(modeAt(4, false)).toBe('false');
+    expect(modeAt(5, false)).toBe('true');
+    expect(modeAt(9, true)).toBe('false');
+    expect(modeAt(10, true)).toBe('true');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -4519,7 +4522,7 @@ describe('qwen-autofix workflow', () => {
             "AUTOFIX_BOT='qwen-code-dev-bot'",
             "REVIEW_BOT='qwen-code-ci-bot'",
             `TRUSTED_ASSOC='["OWNER","MEMBER","COLLABORATOR"]'`,
-            'CRITICAL_ONLY_AFTER_ROUND=5',
+            'EFFECTIVE_CRITICAL_ONLY_AFTER_ROUND=5',
             'CRITICAL_ONLY_HUMAN_BATCHES=2',
             censusBlock.replace(/\n {10}/g, '\n'),
             'printf %s "${OVER_BUDGET_AUTHORS}"',
