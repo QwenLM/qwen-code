@@ -3056,50 +3056,6 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('passes the desktop bootstrap marker from the daemon environment', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-desktop-bootstrap-env-')),
-    );
-    const originalDesktop = process.env['QWEN_CODE_DESKTOP'];
-    process.env['QWEN_CODE_DESKTOP'] = '1';
-    let desktopShellBootstrap: boolean | undefined;
-    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
-      (_opts, _getPort, deps) => {
-        desktopShellBootstrap = deps?.desktopShellBootstrap;
-        return express();
-      },
-    );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        serveWebShell: false,
-      },
-      {
-        bridge: makeRuntimeBridge(),
-        bootSettings: {},
-        daemonLogBaseDir: path.join(tmpDir, 'debug'),
-        resolveOnListen: true,
-      },
-    );
-
-    try {
-      await handle.runtimeReady;
-      expect(desktopShellBootstrap).toBe(true);
-    } finally {
-      if (originalDesktop === undefined) {
-        delete process.env['QWEN_CODE_DESKTOP'];
-      } else {
-        process.env['QWEN_CODE_DESKTOP'] = originalDesktop;
-      }
-      await handle.close();
-    }
-  });
-
   it('rebuilds runtime env from the immutable daemon base after workspace reload', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),
@@ -4637,6 +4593,66 @@ describe('runQwenServe runtime startup failures', () => {
       expect(authorizedRes.status).toBe(201);
       expect(await authorizedRes.json()).toEqual({ sessionId: 'session-1' });
       expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves unauthenticated Web Shell navigations during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-web-shell-preauth-')),
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    // Stand-in for the real serve app: `GET /` and `GET /assets/*` are
+    // mounted before bearerAuth there, so the deferred gate must not 401
+    // them first (the desktop shell navigates with the token only in the
+    // URL fragment, which never reaches the server).
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.get('/', (_req, res) => {
+        res.status(200).type('html').send('<html>shell</html>');
+      });
+      app.get('/assets/app.js', (_req, res) => {
+        res.status(200).type('text/javascript').send('// chunk');
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'desktop-secret',
+        requireAuth: true,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // Non-static routes keep the deferred bearer gate (probed first, while
+      // the runtime is still deferred — a static navigation below starts it).
+      const api = await fetch(`${handle.url}/session`, { method: 'POST' });
+      expect(api.status).toBe(401);
+      expect(await api.json()).toEqual({ error: 'Unauthorized' });
+
+      const shell = await fetch(`${handle.url}/`);
+      expect(shell.status).toBe(200);
+      expect(await shell.text()).toBe('<html>shell</html>');
+
+      const asset = await fetch(`${handle.url}/assets/app.js`);
+      expect(asset.status).toBe(200);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
       await handle.close();

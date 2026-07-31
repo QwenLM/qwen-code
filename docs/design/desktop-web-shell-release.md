@@ -54,7 +54,9 @@ flowchart LR
 | `failed`          | 精简错误摘要                     | 重试、选择其他目录、打开日志    |
 | `stopped`         | daemon 意外退出提示              | 重启 daemon、选择目录、打开日志 |
 
-应用先创建 bootstrap 窗口，再异步启动 daemon。daemon 健康检查通过后，同一个窗口导航到带一次性 query token 的 Web Shell；daemon 随即写入 HttpOnly cookie 并重定向到无 token URL。这样慢启动和失败路径都有可见 UI。
+应用先创建 bootstrap 窗口，再异步启动 daemon。daemon 深度健康检查（`/health?deep=true`）通过后，同一个窗口导航到 `http://127.0.0.1:<port>/#token=<token>`。token 只存在于 URL fragment 中，永远不会随请求发往服务端，因此不需要 cookie 握手，也不会进入 access log 或 Referer。这样慢启动和失败路径都有可见 UI。
+
+必须使用深度健康检查：serve fast path 在真正的 runtime（含 Web Shell）挂载之前，就会用 bootstrap app 应答浅层 `/health`。此时 `/health?deep=true` 仍返回 `503 {"reason": "bootstrap"}`，因此只有它变为 200 才代表 Web Shell 可用；若用浅层健康检查判定就绪，导航会撞进 deferred runtime 窗口。
 
 ## 工作区选择与持久化
 
@@ -83,7 +85,7 @@ flowchart LR
 
 ## Runtime 生命周期与恢复
 
-- 每次启动生成 256-bit bearer token，只通过子进程环境和一次性 URL query 传递；daemon 设置 HttpOnly、SameSite=Strict cookie 后立即重定向到无 token URL。
+- 每次启动生成 256-bit bearer token，通过子进程环境（`QWEN_SERVER_TOKEN`）下发给 daemon，并通过 URL fragment（`/#token=<token>`）交给 Web Shell 前端；前端读取后从 URL 中清除，并以 `Authorization: Bearer` 头调用 API。fragment 不会发送到服务端，因此不需要 cookie。
 - daemon 绑定 `127.0.0.1` 随机端口并启用 `--require-auth`。
 - stdout 和 stderr 同时写入滚动日志，并保留有限启动摘要供 UI 展示。
 - Rust 监视 daemon 进程退出；非应用退出导致的停止会触发 `runtime-stopped` 事件并返回 bootstrap 故障页。
@@ -158,5 +160,5 @@ Windows WebView2 使用 download bootstrapper；系统离线且缺失 WebView2 �
 - 无效工作区、缺失 runtime、daemon 提前退出均显示恢复页。
 - daemon 运行中被终止后，用户能在原窗口重启。
 - 外链进入系统浏览器，主窗口不离开 daemon origin。
-- 三平台 packaged app smoke 观测到 `/health` 和 Web Shell root。
+- 三平台 packaged app smoke 观测到 `/health`、未认证的 Web Shell root 导航返回 200（且不下发任何 cookie）、未携带 token 的 `/capabilities` 返回 401。
 - updater manifest 签名可被客户端验证，版本回退被拒绝。

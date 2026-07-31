@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { timingSafeEqual } from 'node:crypto';
 import express from 'express';
-import type { Application, NextFunction, Request, Response } from 'express';
+import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
@@ -66,7 +65,6 @@ import {
   type ServeOptions,
 } from './types.js';
 import {
-  isDocumentNavigation,
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
@@ -388,8 +386,6 @@ export interface ServeAppDeps {
    * are unaffected.
    */
   webShellDir?: string;
-  /** Enables the one-time desktop Web Shell token-to-cookie bootstrap. */
-  desktopShellBootstrap?: boolean;
   /**
    * Qwen Code version advertised to web/SDK clients. Production passes the
    * resolved CLI package version; tests/direct embeds may omit it.
@@ -1198,32 +1194,6 @@ export function createServeApp(
             o.startsWith('moz-extension://'),
         )
       : [];
-  const desktopShellBootstrap =
-    deps.desktopShellBootstrap ?? daemonEnv['QWEN_CODE_DESKTOP'] === '1';
-  if (webShellDir && opts.token && desktopShellBootstrap) {
-    const token = opts.token;
-    app.use((req: Request, res: Response, next: NextFunction) => {
-      const queryToken = req.query['token'];
-      const tokenMatches =
-        typeof queryToken === 'string' &&
-        queryToken.length === token.length &&
-        timingSafeEqual(Buffer.from(queryToken), Buffer.from(token));
-      if (!isDocumentNavigation(req) || !tokenMatches) {
-        next();
-        return;
-      }
-      const url = new URL(
-        `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-      );
-      url.searchParams.delete('token');
-      res.cookie('qwen-daemon-token', token, {
-        httpOnly: true,
-        sameSite: 'strict',
-        secure: req.secure,
-      });
-      res.redirect(303, `${url.pathname}${url.search}${url.hash}`);
-    });
-  }
 
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
@@ -1275,19 +1245,6 @@ export function createServeApp(
     });
   }
 
-  if (desktopShellBootstrap) {
-    app.use((req: Request, _res: Response, next: NextFunction) => {
-      const cookieToken = req.headers.cookie
-        ?.split(';')
-        .map((part) => part.trim())
-        .find((part) => part.startsWith('qwen-daemon-token='))
-        ?.slice('qwen-daemon-token='.length);
-      if (!req.headers.authorization && cookieToken) {
-        req.headers.authorization = `Bearer ${cookieToken}`;
-      }
-      next();
-    });
-  }
   app.use(bearerAuth(opts.token));
 
   // Rate limiter: after auth (only count authenticated requests), except

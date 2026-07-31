@@ -2927,75 +2927,6 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
-    it('bootstraps authenticated browser navigation with an HttpOnly cookie', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
-        undefined,
-        { webShellDir, desktopShellBootstrap: true },
-      );
-      const bootstrap = await request(app)
-        .get('/?token=desktop-secret')
-        .set('Host', host)
-        .set('Sec-Fetch-Mode', 'navigate');
-      expect(bootstrap.status).toBe(303);
-      expect(bootstrap.headers.location).toBe('/');
-      const cookie = bootstrap.headers['set-cookie']?.[0];
-      expect(cookie).toContain('qwen-daemon-token=desktop-secret');
-      expect(cookie).toContain('HttpOnly');
-      expect(cookie).toContain('SameSite=Strict');
-
-      const health = await request(app)
-        .get('/health')
-        .set('Host', host)
-        .set('Cookie', cookie ?? '');
-      expect(health.status).toBe(200);
-      expect(health.body).toEqual({ status: 'ok' });
-    });
-
-    it('bootstraps browser auth from the daemon desktop marker', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
-        undefined,
-        { webShellDir, daemonEnv: { QWEN_CODE_DESKTOP: '1' } },
-      );
-      const response = await request(app)
-        .get('/?token=desktop-secret')
-        .set('Host', host)
-        .set('Sec-Fetch-Mode', 'navigate');
-      expect(response.status).toBe(303);
-      expect(response.headers['set-cookie']?.[0]).toContain(
-        'qwen-daemon-token=desktop-secret',
-      );
-    });
-
-    it('does not mint browser auth cookies outside the desktop shell', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
-        undefined,
-        { webShellDir, desktopShellBootstrap: false },
-      );
-      const response = await request(app)
-        .get('/?token=desktop-secret')
-        .set('Host', host)
-        .set('Sec-Fetch-Mode', 'navigate');
-      expect(response.status).toBe(200);
-      expect(response.headers['set-cookie']).toBeUndefined();
-    });
-
-    it('does not accept an invalid browser bootstrap token', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
-        undefined,
-        { webShellDir, desktopShellBootstrap: true },
-      );
-      const response = await request(app)
-        .get('/?token=wrong-secret')
-        .set('Host', host)
-        .set('Sec-Fetch-Mode', 'navigate');
-      expect(response.status).toBe(200);
-      expect(response.headers['set-cookie']).toBeUndefined();
-    });
-
     it('allows configured extension origins to frame the shell without self-framing', async () => {
       const app = createServeApp(
         {
@@ -19796,14 +19727,20 @@ describe('createServeApp', () => {
       expect(res.status).toBe(401);
     });
 
-    it('prefers an explicit Authorization header over the daemon cookie', async () => {
+    it('ignores daemon cookies entirely now that fragment auth replaced them', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
-      const res = await request(app)
+      const cookieOnly = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret');
+      expect(cookieOnly.status).toBe(401);
+
+      const cookieWithWrongBearer = await request(app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Cookie', 'qwen-daemon-token=secret')
         .set('Authorization', 'Bearer wrong');
-      expect(res.status).toBe(401);
+      expect(cookieWithWrongBearer.status).toBe(401);
     });
 
     it('accepts the right token', async () => {

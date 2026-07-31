@@ -24,11 +24,42 @@ const root = fs.mkdtempSync(
   path.join(os.tmpdir(), 'qwen-desktop-release-test-'),
 );
 try {
+  testBootstrapBridgeConfiguration();
   testUpdateManifest(path.join(root, 'manifest'));
   testVersionSynchronization(path.join(root, 'version'));
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+function testBootstrapBridgeConfiguration() {
+  const config = JSON.parse(
+    fs.readFileSync(
+      path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+      'utf8',
+    ),
+  );
+  assert.equal(
+    config.app?.withGlobalTauri,
+    true,
+    'The Bootstrap UI requires window.__TAURI__ for desktop commands.',
+  );
+  assert.deepEqual(
+    config.app?.security?.capabilities,
+    ['bootstrap'],
+    'The Bootstrap UI capability must be enabled for the main window.',
+  );
+  const capability = JSON.parse(
+    fs.readFileSync(
+      path.join(packageDir, 'src-tauri', 'capabilities', 'bootstrap.json'),
+      'utf8',
+    ),
+  );
+  assert.deepEqual(capability.windows, ['main']);
+  assert.deepEqual(capability.permissions, [
+    'core:event:allow-listen',
+    'core:event:allow-unlisten',
+  ]);
 }
 
 function testUpdateManifest(directory) {

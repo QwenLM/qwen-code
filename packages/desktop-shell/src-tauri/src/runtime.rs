@@ -125,8 +125,14 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn web_url(&self) -> Url {
-        authenticated_web_url(&self.base_url, &self.token)
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
+    }
+
+    pub fn authenticated_web_url(&self) -> Url {
+        let mut url = self.base_url.clone();
+        url.set_fragment(Some(&format!("token={}", self.token)));
+        url
     }
 }
 
@@ -334,12 +340,6 @@ fn parse_listening_url(line: &str) -> Option<Url> {
     }
 }
 
-fn authenticated_web_url(base_url: &Url, token: &str) -> Url {
-    let mut url = base_url.clone();
-    url.set_query(Some(&format!("token={token}")));
-    url
-}
-
 fn write_test_runtime_info(base_url: &Url, token: &str) -> Result<(), String> {
     let Some(path) = std::env::var_os(TEST_RUNTIME_INFO_ENV) else {
         return Ok(());
@@ -392,8 +392,13 @@ fn wait_for_health(
     deadline: Instant,
     failure_output: &Mutex<String>,
 ) -> Result<Url, String> {
+    // `?deep=true` matters: the serve fast path answers a shallow `/health`
+    // from its bootstrap app before the real runtime (and the Web Shell) is
+    // mounted. Deep health stays 503 (`reason: "bootstrap"`) until the
+    // runtime app is ready, so navigating after a 200 cannot race into the
+    // deferred-runtime window.
     let health_url = base_url
-        .join("health")
+        .join("health?deep=true")
         .map_err(|error| format!("Failed to construct runtime health URL: {error}"))?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(HEALTH_REQUEST_TIMEOUT))
@@ -460,7 +465,7 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_failure_output, authenticated_web_url, parse_listening_url, runtime_arguments,
+        append_failure_output, parse_listening_url, runtime_arguments, DesktopRuntime,
         RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     use std::path::Path;
@@ -485,14 +490,19 @@ mod tests {
     }
 
     #[test]
-    fn carries_the_daemon_token_only_in_the_bootstrap_query() {
-        let base_url = Url::parse("http://127.0.0.1:49152/").expect("base URL");
-        let web_url = authenticated_web_url(&base_url, "secret-token");
+    fn carries_the_daemon_token_only_in_the_url_fragment() {
+        let runtime = DesktopRuntime {
+            id: 1,
+            base_url: Url::parse("http://127.0.0.1:49152/").expect("base URL"),
+            token: "secret-token".to_string(),
+            child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
         assert_eq!(
-            web_url.as_str(),
-            "http://127.0.0.1:49152/?token=secret-token"
+            runtime.authenticated_web_url().as_str(),
+            "http://127.0.0.1:49152/#token=secret-token"
         );
-        assert_eq!(base_url.as_str(), "http://127.0.0.1:49152/");
+        assert_eq!(runtime.base_url().as_str(), "http://127.0.0.1:49152/");
     }
 
     #[test]

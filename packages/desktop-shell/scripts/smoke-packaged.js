@@ -127,9 +127,13 @@ async function verifyAuthenticatedShell({ url, token }, contents) {
       contents,
     );
   }
-  const bootstrapUrl = new URL('/', url);
-  bootstrapUrl.searchParams.set('token', token);
-  const shell = await fetch(bootstrapUrl, {
+  // The shell is reached by navigating to `/#token=<token>`: the fragment
+  // never leaves the browser, so the document request itself is
+  // unauthenticated and must still return the HTML shell (the front-end
+  // reads the token from `location.hash` and sends it as a bearer). This is
+  // also the regression guard for the deferred-runtime window, where the
+  // daemon used to answer this navigation with 401 Unauthorized.
+  const shell = await fetch(new URL('/', url), {
     redirect: 'manual',
     headers: {
       Accept: 'text/html',
@@ -137,18 +141,29 @@ async function verifyAuthenticatedShell({ url, token }, contents) {
       'Sec-Fetch-Mode': 'navigate',
     },
   });
-  if (shell.status !== 303 || shell.headers.get('location') !== '/') {
+  if (shell.status !== 200) {
     throw smokeError(
-      `Packaged desktop Web Shell bootstrap failed: ${shell.status}`,
+      `Packaged desktop Web Shell navigation failed: ${shell.status}`,
       contents,
     );
   }
-  const cookie = shell.headers
-    .getSetCookie()
-    .find((value) => value.startsWith('qwen-daemon-token='));
-  if (!cookie?.includes('HttpOnly') || !cookie.includes('SameSite=Strict')) {
+  if (shell.headers.getSetCookie().length > 0) {
     throw smokeError(
-      'Packaged desktop Web Shell bootstrap cookie is invalid',
+      'Packaged desktop Web Shell must not mint auth cookies',
+      contents,
+    );
+  }
+  if (!(await shell.text()).includes('<!doctype html>')) {
+    throw smokeError(
+      'Packaged desktop Web Shell navigation did not return the HTML shell',
+      contents,
+    );
+  }
+  // API routes stay bearer-gated even while the shell is public.
+  const unauthenticated = await fetch(new URL('/capabilities', url));
+  if (unauthenticated.status !== 401) {
+    throw smokeError(
+      `Packaged desktop API is not token-gated: ${unauthenticated.status}`,
       contents,
     );
   }

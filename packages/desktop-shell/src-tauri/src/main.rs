@@ -182,12 +182,18 @@ fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
 }
 
 #[tauri::command]
-fn choose_workspace(app: AppHandle) -> Result<Option<String>, String> {
-    let folder = app
-        .dialog()
-        .file()
-        .set_title("Choose a Qwen Code workspace")
-        .blocking_pick_folder();
+async fn choose_workspace(app: AppHandle) -> Result<Option<String>, String> {
+    let folder = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || {
+            app.dialog()
+                .file()
+                .set_title("Choose a Qwen Code workspace")
+                .blocking_pick_folder()
+        }
+    })
+    .await
+    .map_err(|error| format!("Failed to show workspace picker: {error}"))?;
     let Some(folder) = folder else {
         return Ok(None);
     };
@@ -309,8 +315,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                     runtime.stop();
                     return;
                 }
-                let web_url = runtime.web_url();
-                let origin = match origin_of(&runtime.base_url) {
+                let origin = match origin_of(runtime.base_url()) {
                     Ok(origin) => origin,
                     Err(error) => {
                         runtime.stop();
@@ -324,18 +329,25 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                     return;
                 }
                 *lock(&state.origin) = Some(origin);
-                *lock(&state.runtime) = Some(runtime);
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(error) = window.navigate(web_url) {
-                        stop_runtime(&app);
-                        emit_runtime_failure(
-                            &app,
-                            generation,
-                            format!("Failed to load Web Shell: {error}"),
-                        );
-                        return;
-                    }
+                let Some(window) = app.get_webview_window("main") else {
+                    runtime.stop();
+                    emit_runtime_failure(
+                        &app,
+                        generation,
+                        "Desktop window is unavailable.".to_string(),
+                    );
+                    return;
+                };
+                if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
+                    runtime.stop();
+                    emit_runtime_failure(
+                        &app,
+                        generation,
+                        format!("Failed to authenticate and load Web Shell: {error}"),
+                    );
+                    return;
                 }
+                *lock(&state.runtime) = Some(runtime);
                 state
                     .starting
                     .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
