@@ -45,13 +45,13 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import {
-  MEMORY_PROJECT_SCOPES,
-  type AuthType,
-  type ProviderSetupInputs,
-  type TelemetryRuntimeConfig,
-  type TelemetrySettings,
+import type {
+  AuthType,
+  ProviderSetupInputs,
+  TelemetryRuntimeConfig,
+  TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through

@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { QWEN_DIR, resolvePath, sanitizeCwd } from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
+import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
@@ -30,12 +31,10 @@ export const USER_AUTO_MEMORY_DIRNAME = 'memories';
  */
 export const TEAM_AUTO_MEMORY_DIRNAME = 'team-memory';
 
-/**
- * Valid project-memory partitioning modes. Exported so CLI yargs choices,
- * type declarations, and runtime guards share one source of truth.
- */
-export const MEMORY_PROJECT_SCOPES = ['git-root', 'workspace'] as const;
-export type MemoryProjectScope = (typeof MEMORY_PROJECT_SCOPES)[number];
+// Canonical definitions live in scopes.ts (a zero-import leaf module that can
+// be subpath-imported without pulling the core barrel). Re-exported here so
+// the barrel surface is unchanged.
+export { MEMORY_PROJECT_SCOPES, type MemoryProjectScope } from './scopes.js';
 
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
@@ -92,7 +91,7 @@ function resolveWorkspaceProjectScope(): boolean {
   if (normalized === 'workspace') return true;
   if (
     normalized !== '' &&
-    normalized !== 'git-root' &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(normalized) &&
     !warnedUnknownMemoryProjectScope
   ) {
     warnedUnknownMemoryProjectScope = true;
