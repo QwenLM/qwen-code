@@ -152,7 +152,44 @@ describe('runExtractStep', () => {
   });
 });
 
+describe('multi-line env values stay comments', () => {
+  it('prefixes EVERY line of a block-scalar env value', () => {
+    // An unprefixed second line would sit in the script as an executable line.
+    const wf = [
+      'jobs:',
+      '  j:',
+      '    steps:',
+      '      - name: s',
+      '        env:',
+      '          SCRIPT: |',
+      '            first',
+      '            rm -rf /tmp/x',
+      '        run: echo ok',
+    ].join('\n');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-es-env-'));
+    const p = join(dir, 'wf.yml');
+    writeFileSync(p, wf);
+    const meta = runExtractStep({
+      workflow: p,
+      job: 'j',
+      step: 's',
+      out: join(dir, 'o.sh'),
+    });
+    const script = readFileSync(meta.scriptPath, 'utf8');
+    for (const line of script.split('\n')) {
+      if (line.includes('rm -rf')) expect(line.startsWith('#')).toBe(true);
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('expressionsOf / invokedCommandsOf', () => {
+  it('captures an expression containing its own closing brace', () => {
+    expect(expressionsOf("a ${{ format('{0}', x) }} b")).toEqual([
+      "${{ format('{0}', x) }}",
+    ]);
+  });
+
   it('dedupes expression sites across script and env', () => {
     expect(expressionsOf('a ${{ x }} b ${{ x }}', '${{ y }}')).toEqual([
       '${{ x }}',

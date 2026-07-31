@@ -179,7 +179,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // manufacture the strongest evidence this command produces out of an
     // infrastructure timeout. The files stay unattributed (neither list), and
     // the note says why.
-    const baseUnusable = base.timedOut;
+    // ...and so does a base rerun that failed without naming a single failing
+    // file: an install/toolchain failure exits non-zero with no FAIL lines, and
+    // reading that as "base is green" would promote every PR-side failure to
+    // net-new off a base that never ran its tests (reviewed live on this PR).
+    const baseUnusable =
+      base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
     return {
       command: t.command,
       prFailingFiles,

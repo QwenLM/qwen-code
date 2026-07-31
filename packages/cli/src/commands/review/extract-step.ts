@@ -69,7 +69,10 @@ export interface ExtractedStep {
 export function expressionsOf(...texts: string[]): string[] {
   const seen = new Set<string>();
   for (const t of texts) {
-    for (const m of t.matchAll(/\$\{\{[^}]*\}\}/g)) seen.add(m[0].trim());
+    // `[\s\S]*?` to the closing `}}`, not `[^}]*`: an expression containing
+    // its own `}` (`format('{0}')`, object literals) must not be missed —
+    // a missed site is a stub the caller never learns about.
+    for (const m of t.matchAll(/\$\{\{[\s\S]*?\}\}/g)) seen.add(m[0].trim());
   }
   return [...seen];
 }
@@ -203,7 +206,15 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
     `#!/usr/bin/env ${shell === 'bash' ? 'bash' : shell}`,
     `# extracted verbatim from ${args.workflow} — job \`${args.job}\`, step \`${String(step.name ?? step.id ?? index)}\``,
     ...(shell === 'bash' ? ['set -e'] : []),
-    ...Object.entries(env).map(([k, v]) => `# env ${k}=${v}`),
+    // Every LINE of a multi-line value gets its own `#`: an unprefixed second
+    // line of a YAML block scalar would sit in the script as an executable
+    // line (reviewed live on this PR — a comment block you can break out of
+    // is an injection, not a comment).
+    ...Object.entries(env).flatMap(([k, v]) =>
+      String(v)
+        .split('\n')
+        .map((line, i) => (i === 0 ? `# env ${k}=${line}` : `#   ${line}`)),
+    ),
     '',
   ].join('\n');
   writeFileSync(outPath, header + script + (script.endsWith('\n') ? '' : '\n'));

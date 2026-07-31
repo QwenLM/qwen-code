@@ -172,6 +172,16 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('timed out');
   });
 
+  it('does NOT read a base rerun that failed without failing files as green', () => {
+    // An install/toolchain failure exits non-zero with zero FAIL lines; scoring
+    // it "base green" would promote every PR-side failure to net-new.
+    const r = runWith([cmd({ output: 'FAIL src/x.test.ts' })], () =>
+      cmd({ exitCode: 1, output: 'npm ERR! missing script: test' }),
+    );
+    expect(r.netNew).toEqual([]);
+    expect(r.entries[0].shared).toEqual([]);
+  });
+
   it('has nothing to do when every PR-side test command passed', () => {
     const r = runWith([cmd({ exitCode: 0 })], '');
     expect(r.entries).toEqual([]);
