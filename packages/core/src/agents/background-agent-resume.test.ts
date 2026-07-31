@@ -2029,16 +2029,27 @@ describe('BackgroundAgentResumeService', () => {
         },
         tools: [{ name: 'Bash' }, { name: 'mcp__removed__search' }],
       },
-      executionAllowedTools: ['Read'] as string[] | undefined,
+      executionAllowedTools: ['Read', ToolNames.ASK_USER_QUESTION] as
+        | string[]
+        | undefined,
+      deniedTool: 'Edit',
+      expectedExecutionAllowedTools: ['Read'],
     },
     {
       format: 'history-only bootstrap',
       legacyCapabilities: {},
       executionAllowedTools: undefined as string[] | undefined,
+      deniedTool: ToolNames.ASK_USER_QUESTION,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
     },
   ])(
     'resumes fork agents with the current parent prompt and live tool registry ($format)',
-    async ({ legacyCapabilities, executionAllowedTools }) => {
+    async ({
+      legacyCapabilities,
+      executionAllowedTools,
+      deniedTool,
+      expectedExecutionAllowedTools,
+    }) => {
       const sessionId = 'session-fork-resume';
       const agentId = 'agent-fork-resume';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2131,17 +2142,18 @@ describe('BackgroundAgentResumeService', () => {
           const subagent = await originalCreate(...args);
           vi.spyOn(subagent, 'execute').mockImplementation(async (context) => {
             executeContext = context;
-            if (executionAllowedTools === undefined) {
-              return;
-            }
             const denial = await subagent
               .getCore()
               .processFunctionCalls(
-                [{ id: 'call-edit', name: 'Edit', args: {} }],
+                [{ id: 'call-denied', name: deniedTool, args: {} }],
                 new AbortController(),
                 'resume-policy-test',
                 1,
-                [{ name: 'Read' }, { name: 'Edit' }],
+                [
+                  { name: 'Read' },
+                  { name: 'Edit' },
+                  { name: ToolNames.ASK_USER_QUESTION },
+                ],
               );
             deniedError =
               denial.messages[0]?.parts?.[0]?.functionResponse?.response?.[
@@ -2164,11 +2176,19 @@ describe('BackgroundAgentResumeService', () => {
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
             { name: 'Edit', description: 'advertised edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'advertised interactive question schema',
+            },
             { name: 'mcp__removed__search' },
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
             { name: 'Edit', description: 'registered edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'registered interactive question schema',
+            },
           ],
         },
       });
@@ -2197,10 +2217,8 @@ describe('BackgroundAgentResumeService', () => {
         max_turns: FORK_DEFAULT_MAX_TURNS,
       });
       expect(createArgs?.[5]).toEqual({
-        tools: ['Read', 'Edit'],
-        ...(executionAllowedTools !== undefined
-          ? { executionAllowedTools }
-          : {}),
+        tools: ['Read', 'Edit', ToolNames.ASK_USER_QUESTION],
+        executionAllowedTools: expectedExecutionAllowedTools,
       });
       expect(executeContext).toBeDefined();
       const contextArg = executeContext as
@@ -2214,14 +2232,10 @@ describe('BackgroundAgentResumeService', () => {
         'Earlier capability listings in the conversation history are obsolete',
       );
       expect(contextArg.get('task_prompt')).toContain('continue');
-      if (executionAllowedTools !== undefined) {
-        expect(deniedError).toContain('execution allowlist');
-        expect(deniedError).not.toContain('not found');
-        expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
-        expect(deniedBuild).not.toHaveBeenCalled();
-      } else {
-        expect(deniedError).toBeUndefined();
-      }
+      expect(deniedError).toContain('execution allowlist');
+      expect(deniedError).not.toContain('not found');
+      expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
+      expect(deniedBuild).not.toHaveBeenCalled();
       createSpy.mockRestore();
     },
   );

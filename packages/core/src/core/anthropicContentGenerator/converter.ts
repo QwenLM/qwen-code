@@ -138,6 +138,35 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Strip a trailing assistant message that would otherwise be sent as an
+   * "assistant-turn prefill" (a request whose final message has
+   * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
+   * family — Fable 5, Mythos 5, …) reject prefill outright:
+   *
+   *   "This model does not support assistant message prefill. The
+   *    conversation must end with a user message."
+   *
+   * Per Anthropic's own migration guidance this is a model-generation
+   * change, not a backend quirk — it 400s identically on the native API,
+   * Vertex AI, and Bedrock for every 4.6+ model.
+   *
+   * A trailing assistant message reaches the converter when Gemini history
+   * ends on a model turn with no follow-up (e.g. context-window trimming
+   * drops the next user turn, or a subagent's transcript is replayed
+   * mid-turn). Two cases are handled:
+   *   - The trailing assistant message is empty/whitespace-only (a
+   *     leftover prefill artifact with no real content) — drop it.
+   *   - The trailing assistant message carries real content (text,
+   *     tool_use, thinking) — keep it in history but append a synthetic
+   *     user turn so the request satisfies "must end with a user message"
+   *     without discarding anything the model already said.
+   *
+   * Only meaningful when the active model requires adaptive thinking
+   * (Claude 4.6+); older models accept prefill on every backend, so this
+   * should be gated on `modelSupportsAdaptiveThinking()` in the caller.
+   */
+  stripTrailingAssistantPrefill?: boolean;
+  /**
    * Per-call override for `enableCacheControl`. Falls back to the value
    * captured at construction. The generator passes the live
    * `contentGeneratorConfig.enableCacheControl` here so a hot
@@ -188,6 +217,15 @@ export interface ConvertGeminiRequestToAnthropicOptions {
 export class AnthropicContentConverter {
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
+  /**
+   * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
+   * The converter instance is long-lived across requests (constructed once
+   * per generator), so this state is reset at the top of every
+   * `convertGeminiRequestToAnthropic` call rather than at construction.
+   */
+  private readonly toolIdMap = new Map<string, string>();
+  private readonly usedToolIds = new Set<string>();
+  private generatedToolIdCounter = 0;
 
   constructor(
     _model: string,
@@ -205,6 +243,7 @@ export class AnthropicContentConverter {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
+    this.resetToolIdState();
     let messages: AnthropicMessageParam[] = [];
 
     const systemText = this.extractTextFromContentUnion(
@@ -244,6 +283,9 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -498,7 +540,6 @@ export class AnthropicContentConverter {
     const parts = content.parts || [];
     const role = content.role === 'model' ? 'assistant' : 'user';
     const contentBlocks: AnthropicContentBlockParam[] = [];
-    let toolCallIndex = 0;
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -536,11 +577,10 @@ export class AnthropicContentConverter {
         if (role === 'assistant') {
           contentBlocks.push({
             type: 'tool_use',
-            id: part.functionCall.id || `tool_${toolCallIndex}`,
+            id: this.resolveToolUseId(part.functionCall.id),
             name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
-          toolCallIndex += 1;
         }
       }
 
@@ -555,6 +595,24 @@ export class AnthropicContentConverter {
     }
 
     if (contentBlocks.length > 0) {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use -- it doesn't scan past a leading
+      // non-tool_result block to find the result later in the same
+      // message. The source Gemini parts can arrive in any order (e.g. a
+      // text part preceding the functionResponse part within the same
+      // Content), so move tool_result blocks to the front of a user
+      // message whenever any are present. A stable sort preserves the
+      // relative order of multiple tool_result blocks against each other.
+      if (
+        role === 'user' &&
+        contentBlocks.some((b) => b.type === 'tool_result')
+      ) {
+        contentBlocks.sort((a, b) => {
+          if (a.type === 'tool_result' && b.type !== 'tool_result') return -1;
+          if (a.type !== 'tool_result' && b.type === 'tool_result') return 1;
+          return 0;
+        });
+      }
       messages.push({ role, content: contentBlocks });
     }
   }
@@ -588,13 +646,82 @@ export class AnthropicContentConverter {
 
     return {
       type: 'tool_result',
-      tool_use_id: response.id || '',
+      tool_use_id: this.resolveToolUseId(response.id),
       content,
       ...(response.response &&
       Object.prototype.hasOwnProperty.call(response.response, 'error')
         ? { is_error: true }
         : {}),
     };
+  }
+
+  private resetToolIdState(): void {
+    this.toolIdMap.clear();
+    this.usedToolIds.clear();
+    this.generatedToolIdCounter = 0;
+  }
+
+  /**
+   * Resolve a `functionCall.id` / `functionResponse.id` into a wire-safe
+   * `tool_use.id` / `tool_result.tool_use_id`. Anthropic validates both
+   * fields against `^[a-zA-Z0-9_-]+$` server-side (HTTP 400 otherwise) and
+   * rejects the empty string the same way, since `+` requires at least one
+   * character. The Gemini lingua-franca's `id` field has no such
+   * constraint -- it can carry another provider's ID scheme, a
+   * composite/namespaced ID, or be entirely absent.
+   *
+   * The same source ID always resolves to the same wire ID within a
+   * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
+   * that shares a source ID still links up correctly after sanitization.
+   * State is scoped to a single `convertGeminiRequestToAnthropic` call
+   * (reset via {@link resetToolIdState}), since the converter instance
+   * itself is long-lived across requests.
+   */
+  private resolveToolUseId(rawId?: string): string {
+    const sourceId = typeof rawId === 'string' ? rawId.trim() : '';
+    const existingId = sourceId ? this.toolIdMap.get(sourceId) : undefined;
+    if (existingId) {
+      return existingId;
+    }
+
+    const baseId = sourceId
+      ? this.sanitizeToolUseId(sourceId)
+      : this.nextGeneratedToolId();
+    const uniqueId = this.makeUniqueToolUseId(baseId);
+
+    if (sourceId) {
+      this.toolIdMap.set(sourceId, uniqueId);
+    }
+
+    return uniqueId;
+  }
+
+  private sanitizeToolUseId(id: string): string {
+    const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return cleaned || this.nextGeneratedToolId();
+  }
+
+  private nextGeneratedToolId(): string {
+    const id = `tool_${this.generatedToolIdCounter}`;
+    this.generatedToolIdCounter += 1;
+    return id;
+  }
+
+  private makeUniqueToolUseId(baseId: string): string {
+    if (!this.usedToolIds.has(baseId)) {
+      this.usedToolIds.add(baseId);
+      return baseId;
+    }
+
+    let suffix = 1;
+    let candidate = `${baseId}_${suffix}`;
+    while (this.usedToolIds.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseId}_${suffix}`;
+    }
+
+    this.usedToolIds.add(candidate);
+    return candidate;
   }
 
   private createMediaBlockFromPart(
@@ -1095,6 +1222,58 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Strip a trailing empty-content assistant message, or append a
+   * synthetic user turn to satisfy Anthropic's "must end with a user
+   * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
+   * conversation would otherwise end on a non-empty assistant message.
+   * See {@link ConvertGeminiRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   */
+  private stripTrailingAssistantPrefill(
+    messages: AnthropicMessageParam[],
+  ): void {
+    // Phase 1: drop genuinely empty trailing assistant messages (no real
+    // content — a leftover prefill artifact from history trimming/replay).
+    while (messages.length > 0) {
+      const last = messages[messages.length - 1]!;
+      if (last.role !== 'assistant') return;
+      if (!this.isEmptyAssistantMessage(last)) break;
+      messages.pop();
+    }
+
+    // Phase 2: a real-content assistant message is still trailing — keep
+    // it in history (it may carry tool_use/thinking the model needs to see
+    // again) and append a synthetic user turn instead of dropping it.
+    if (
+      messages.length > 0 &&
+      messages[messages.length - 1]!.role === 'assistant'
+    ) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'Continue.' }],
+      });
+    }
+  }
+
+  private isEmptyAssistantMessage(message: AnthropicMessageParam): boolean {
+    const content = message.content;
+    if (!content) return true;
+    if (typeof content === 'string') return content.trim().length === 0;
+    if (!Array.isArray(content) || content.length === 0) return true;
+
+    for (const block of content) {
+      const type = (block as { type?: string }).type;
+      if (type === 'text') {
+        const text = (block as { text?: string }).text;
+        if (typeof text === 'string' && text.trim().length > 0) return false;
+      } else {
+        // Any non-text block (tool_use, thinking, etc.) is real content.
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
    *
@@ -1222,6 +1401,15 @@ function mergeConsecutiveAssistantMessages(
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
  *
+ * A `tool_use` in the very last message (no message follows it at all) is
+ * never condemned as orphaned here -- "no result yet" isn't the same as
+ * "no result ever": the tool may simply not have finished executing yet,
+ * or this conversion may not be building the completed turn to send to
+ * Anthropic at all (token counting, a resumed/replayed session snapshot,
+ * a retry issued before tool execution completes, ...). Only a `tool_use`
+ * whose subsequent message was actually scanned and found lacking a
+ * matching `tool_result` is a genuine orphan.
+ *
  * Empty messages produced by the cleanup are dropped entirely. A subsequent
  * mergeConsecutiveAssistantMessages call fixes any alternation issues
  * created by dropped messages.
@@ -1249,6 +1437,20 @@ function cleanOrphanedToolCalls(
       }
     }
     if (toolUseBlocks.size === 0) continue;
+
+    // No message follows this assistant turn at all -- these tool_use
+    // blocks are unresolved (the tool hasn't finished executing yet, or
+    // this conversion isn't building the completed turn for Anthropic at
+    // all, e.g. a token-count pass or a mid-tool-call snapshot), not
+    // orphaned. Protect them from the filter below. A genuine orphan
+    // requires a subsequent message that was actually scanned and found
+    // to lack a matching tool_result -- "history ends here" is not that.
+    if (i === messages.length - 1) {
+      for (const block of toolUseBlocks.values()) {
+        validToolUseBlocks.add(block as object);
+      }
+      continue;
+    }
 
     for (let j = i + 1; j < messages.length; j++) {
       const nextMessage = messages[j];
