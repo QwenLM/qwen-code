@@ -1542,6 +1542,7 @@ const EN: Messages = {
     'Enter a GitHub, Git, or npm extension source.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
+  'extensions.manage.installTitle': 'Add Extension',
   'extensions.manage.installType': 'Install type:',
   'extensions.manage.mcpServers': 'MCP servers:',
   'extensions.manage.marketplaceRoot': 'Marketplace root',
@@ -4039,6 +4040,7 @@ const ZH: Messages = {
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
+  'extensions.manage.installTitle': '添加扩展',
   'extensions.manage.installType': '安装类型：',
   'extensions.manage.mcpServers': 'MCP servers：',
   'extensions.manage.marketplaceRoot': '此市场根目录',
