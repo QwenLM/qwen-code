@@ -250,7 +250,7 @@ describe('Subagents (E2E)', () => {
         name: 'file-reader',
         description: 'Reads a requested file and reports its exact contents.',
         systemPrompt:
-          'Use read_file to read the requested file, then report its exact contents.',
+          'Use the read_file tool to read the requested file, then report its exact contents. Never answer from memory.',
         level: 'session',
         tools: ['read_file'],
       };
@@ -258,6 +258,7 @@ describe('Subagents (E2E)', () => {
       const testFile = helper.getPath('test.txt');
       const q = query({
         prompt:
+          `Do not read the file yourself; you must delegate this task. ` +
           `Use the agent tool to ask the file-reader subagent to read ${testFile}. ` +
           `Return the file contents reported by the subagent.`,
         options: {

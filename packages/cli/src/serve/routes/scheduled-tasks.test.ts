@@ -96,6 +96,7 @@ interface Harness {
   scratch: string;
   workspace: string;
   bridge: StubBridge;
+  cleanupSession: ReturnType<typeof vi.fn>;
   channelDeliveryAuthorizations: ChannelDeliveryAuthorizationStore;
 }
 
@@ -119,11 +120,20 @@ async function makeHarness(
           ({
             workspaceId: 'primary',
             workspaceCwd: workspace,
+            sessionRuntimeBaseDir: scratch,
             primary: true,
             trusted: runtimeTrusted,
             bridge,
             generationGuard,
           }) as unknown as WorkspaceRuntime;
+  const cleanupSession = vi.fn(
+    async (_runtime: WorkspaceRuntime, sessionId: string) => {
+      await bridge.closeSession(sessionId);
+      await new SessionService(workspace, {
+        runtimeBaseDir: scratch,
+      }).removeSession(sessionId);
+    },
+  );
   const app = express();
   app.use(express.json());
   registerScheduledTasksRoutes(app, {
@@ -133,13 +143,14 @@ async function makeHarness(
     safeBody,
     bridge,
     channelDeliveryAuthorizations,
-    ...(getRuntime ? { getRuntime } : {}),
+    ...(getRuntime ? { getRuntime, cleanupSession } : {}),
   });
   return {
     app,
     scratch,
     workspace,
     bridge,
+    cleanupSession,
     channelDeliveryAuthorizations,
   };
 }
@@ -226,6 +237,10 @@ describe('scheduled-tasks routes', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.cleanupSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: h.workspace }),
+      'sess-1',
+    );
     expect(h.bridge.closed).toEqual(['sess-1']);
     await expect(
       fsp.readFile(getCronFilePath(h.workspace), 'utf8'),
@@ -1778,6 +1793,7 @@ describe('scheduledTaskSessionName', () => {
 interface QualifiedRuntime {
   workspaceId: string;
   workspaceCwd: string;
+  sessionRuntimeBaseDir: string;
   trusted: boolean;
   bridge: StubBridge;
 }
@@ -1846,6 +1862,7 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
     return {
       workspaceId: `id-${name}`,
       workspaceCwd,
+      sessionRuntimeBaseDir: path.join(scratch, `runtime-${name}`),
       trusted,
       bridge: makeStubBridge(),
     };
@@ -1866,6 +1883,7 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     bridge: primary.bridge,
+    getRuntime: () => primary as unknown as WorkspaceRuntime,
   });
   registerWorkspaceQualifiedScheduledTasksRoutes(app, {
     workspaceRegistry: makeStubRegistry(runtimes),
@@ -1888,6 +1906,10 @@ describe('workspace-qualified scheduled-tasks routes', () => {
   });
 
   const qualified = (id: string) => `/workspaces/${id}/scheduled-tasks`;
+  const cronFilePath = (runtime: QualifiedRuntime) =>
+    Storage.runWithResolvedRuntimeBaseDir(runtime.sessionRuntimeBaseDir, () =>
+      getCronFilePath(runtime.workspaceCwd),
+    );
 
   it('creates a task in the targeted workspace, isolated from the primary', async () => {
     const res = await request(h.app)
@@ -1913,12 +1935,15 @@ describe('workspace-qualified scheduled-tasks routes', () => {
       .post(qualified(h.secondary.workspaceId))
       .send({ cron: '0 9 * * *', prompt: 'p' });
     const onDisk = JSON.parse(
-      await fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+      await fsp.readFile(cronFilePath(h.secondary), 'utf-8'),
     );
     expect(onDisk).toHaveLength(1);
-    // The primary's file was never created.
+    // Neither the primary runtime nor the process-global fallback was touched.
     await expect(
-      fsp.readFile(getCronFilePath(h.primary.workspaceCwd), 'utf-8'),
+      fsp.readFile(cronFilePath(h.primary), 'utf-8'),
+    ).rejects.toThrow();
+    await expect(
+      fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
     ).rejects.toThrow();
   });
 

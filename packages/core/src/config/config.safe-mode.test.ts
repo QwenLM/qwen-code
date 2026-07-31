@@ -290,6 +290,15 @@ describe('Config safe mode', () => {
       });
       expect(config.getAllowedHttpHookUrls()).toEqual([]);
     });
+
+    it('disables private network hooks in safe mode', () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowPrivateNetworkHooks: true,
+      });
+      expect(config.getAllowPrivateNetworkHooks()).toBe(false);
+    });
   });
 
   describe('safe mode blocks local/ambient MCP servers, preserves caller-supplied top-tier ones', () => {
@@ -315,7 +324,10 @@ describe('Config safe mode', () => {
         topTierMcpServers: { probe: { command: 'probe', args: [] } },
       });
       expect(config.getMcpServers()).toEqual({
-        probe: { command: 'probe', args: [] },
+        probe: {
+          command: 'probe',
+          args: [],
+        },
       });
     });
 
@@ -334,7 +346,10 @@ describe('Config safe mode', () => {
         },
       });
       expect(config.getMcpServers()).toEqual({
-        probe: { command: 'probe', args: [] },
+        probe: {
+          command: 'probe',
+          args: [],
+        },
       });
     });
   });

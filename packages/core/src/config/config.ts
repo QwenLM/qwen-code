@@ -165,6 +165,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -190,7 +191,9 @@ import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
+  registerSessionModel,
   registerSessionProjectDir,
+  unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
@@ -250,6 +253,13 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+/** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
+const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
+
+// Default `tools.toolSearch.threshold` (percent of the context window):
+// mirrors the settings-schema default in packages/cli.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
 
 import {
   ModelsConfig,
@@ -977,6 +987,16 @@ export interface ConfigParameters {
    * silently ignored (they don't cause config errors).
    */
   visibleTools?: string[];
+  /**
+   * Percentage of the model's context window used as the session-start
+   * budget for preloading deferred tools. When the combined estimated
+   * schema size of every deferred tool — bundled built-ins and MCP alike
+   * — fits within the budget, they are all revealed upfront instead of
+   * loaded on demand via `tool_search`, keeping the declaration list
+   * stable for the whole session (prefix-cache friendly). `0` disables
+   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   */
+  toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -985,6 +1005,11 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional host policy evaluated with final tool arguments immediately
+   * before execution. A configured guard fails closed.
+   */
+  toolInvocationGuard?: ToolInvocationGuard;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1310,6 +1335,11 @@ export interface ConfigParameters {
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
   allowedHttpHookUrls?: string[];
   /**
+   * When true, HTTP hooks may target private/link-local IP ranges
+   * (from security.allowPrivateNetworkHooks; trusted scopes only).
+   */
+  allowPrivateNetworkHooks?: boolean;
+  /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
    * to project or user settings when the user clicks "Always Allow".
@@ -1552,6 +1582,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 let projectDirEnvClaimed = false;
+let modelEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -1642,14 +1673,30 @@ export type SubSessionSpawner = (
 
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
+function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
+  return (
+    error === candidate ||
+    (error instanceof Error &&
+      error.cause instanceof AggregateError &&
+      error.cause.errors.includes(candidate))
+  );
+}
+
 export class Config {
   private sessionId: string;
+  private sessionSourceType?: string;
+  private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  private pendingSessionWriterRelease:
+    | { lease: SessionWriterLease; promise: Promise<void> }
+    | undefined;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
+  private sessionWriterHandoffRequested = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
   private sessionWriterClosePromise: Promise<void> | undefined;
   /**
@@ -1698,6 +1745,7 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -1748,6 +1796,7 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1835,6 +1884,9 @@ export class Config {
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
+  private activeTodoReminders = new Map<string, string>();
+  private activeTodoWorkChainOwners = new Map<string, string>();
+  private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -1932,6 +1984,7 @@ export class Config {
   private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
+  private readonly allowPrivateNetworkHooks: boolean;
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -1993,6 +2046,10 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
+  // (first in this process); gates the global write in publishModelEnv so no
+  // other instance updates it. Per-session publishing is not gated on it.
+  private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
@@ -2048,10 +2105,13 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    this.toolSearchThreshold =
+      params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -2204,6 +2264,7 @@ export class Config {
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
+    this.allowPrivateNetworkHooks = params.allowPrivateNetworkHooks ?? false;
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // (web search removed)
@@ -2315,6 +2376,20 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+
+    // Publish the active model id for shell subprocesses. Every Config
+    // publishes its own session's model — publishModelEnv registers it per
+    // session, like the project dir above, so daemon-mode subprocesses read
+    // theirs, not the first session's. The process-global slot is claimed
+    // first-writer-wins, as QWEN_CODE_SESSION_ID is, so a throwaway Config
+    // never clobbers the live session's global value. Done here rather than
+    // alongside the session ID because the value comes from the ModelsConfig
+    // just constructed.
+    if (!modelEnvClaimed && process.env) {
+      modelEnvClaimed = true;
+      this.ownsModelEnvSlot = true;
+    }
+    this.publishModelEnv();
 
     if (
       this.telemetrySettings.enabled &&
@@ -2475,6 +2550,9 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (containsErrorByIdentity(error, closeError)) {
+          throw error;
+        }
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
             [error, closeError],
@@ -2989,9 +3067,13 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
+        takeoverPolicy: this.sessionWriterTakeoverPolicy,
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
+          if (this.sessionWriterShutdownRequested) {
+            this.startPendingSessionWriterRelease(acquiredLease);
+          }
         },
       });
       if (this.sessionWriterShutdownRequested) {
@@ -3038,12 +3120,19 @@ export class Config {
       }
       try {
         const ownedLease = lease ?? this.pendingSessionWriterLease;
-        await ownedLease?.release();
+        await this.startPendingSessionWriterRelease(ownedLease);
         if (
           this.pendingSessionWriterLease === ownedLease &&
           (ownedLease?.isReleased ?? true)
         ) {
           this.pendingSessionWriterLease = undefined;
+        }
+        if (
+          this.sessionWriterShutdownRequested &&
+          failure instanceof SessionWriterLostError &&
+          ownedLease?.isReleased
+        ) {
+          failure = new SessionWriterShutdownError();
         }
       } catch (releaseError) {
         if (
@@ -3051,7 +3140,7 @@ export class Config {
           (lease ?? this.pendingSessionWriterLease)?.isReleased
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else {
+        } else if (!containsErrorByIdentity(failure, releaseError)) {
           failure = new SessionWriterUnavailableError({
             cause: new AggregateError(
               [failure, releaseError],
@@ -3534,6 +3623,9 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    // Auth flows call refreshAuth directly — no model-change notification
+    // fires — and the resolved model can differ from the pre-auth one.
+    this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
     if (priorReasoningEffort) {
@@ -3581,6 +3673,19 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  setSessionSource(sourceType: string, sourceId?: string): void {
+    this.sessionSourceType = sourceType;
+    this.sessionSourceId = sourceId;
+  }
+
+  getSessionSourceType(): string | undefined {
+    return this.sessionSourceType;
+  }
+
+  getSessionSourceId(): string | undefined {
+    return this.sessionSourceId;
   }
 
   /**
@@ -3639,8 +3744,18 @@ export class Config {
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
+    // Re-key the per-session model registry onto the new session id. Without
+    // this the entry stays keyed on the outgoing id, so after /clear (or
+    // /reset, /new, /resume) a non-owner Config's subprocesses resolve the
+    // model by the new id, miss, and fall back to another session's value.
+    // Drop the orphaned entry too — shutdown only unregisters the current id.
+    unregisterSessionModel(previousSessionId);
+    this.publishModelEnv();
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
+    this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -3825,9 +3940,30 @@ export class Config {
   }
 
   private notifyModelChangeListeners(): void {
+    this.publishModelEnv();
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
+    }
+  }
+
+  // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
+  // has no other authoritative source: settings files miss /model switches and
+  // describe the wrong home under QWEN_HOME isolation. Published per session —
+  // every Config writes its OWN session's model, keyed on sessionId exactly
+  // like the project dir, so in daemon mode each session's subprocesses read
+  // theirs, not the first session's (a process-global slot alone would hold
+  // whichever session booted first). The process-global slot is the
+  // single-session CLI fallback, gated on the claiming instance so a throwaway
+  // Config never clobbers the live session's value there.
+  private publishModelEnv(): void {
+    if (!process.env) {
+      return;
+    }
+    const model = this.getModel();
+    registerSessionModel(this.sessionId, model);
+    if (this.ownsModelEnvSlot) {
+      process.env['QWEN_CODE_MODEL'] = model;
     }
   }
 
@@ -4190,6 +4326,9 @@ export class Config {
         config.enableCacheControl;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
+      this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
+      this.contentGeneratorConfig.cacheRetentionByBlock =
+        config.cacheRetentionByBlock;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -4216,6 +4355,14 @@ export class Config {
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
           sources['forceGlobalCacheScope'];
+      }
+      if ('cacheRetention' in sources) {
+        this.contentGeneratorConfigSources['cacheRetention'] =
+          sources['cacheRetention'];
+      }
+      if ('cacheRetentionByBlock' in sources) {
+        this.contentGeneratorConfigSources['cacheRetentionByBlock'] =
+          sources['cacheRetentionByBlock'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -4477,7 +4624,10 @@ export class Config {
     newDir: string,
     expectedCanonicalDir?: string,
     opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
-  ): Promise<{ memoryRefreshError?: unknown }> {
+  ): Promise<{
+    memoryRefreshError?: unknown;
+    mcpRefreshError?: unknown;
+  }> {
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -4542,12 +4692,25 @@ export class Config {
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 
+    let memoryRefreshError: unknown;
     try {
       await this.refreshHierarchicalMemory();
-      return {};
     } catch (error) {
-      return { memoryRefreshError: error };
+      memoryRefreshError = error;
     }
+
+    let mcpRefreshError: unknown;
+    try {
+      await this.waitForMcpReady();
+      await this.refreshMcpServers();
+    } catch (error) {
+      mcpRefreshError = error;
+    }
+
+    return {
+      ...(memoryRefreshError !== undefined && { memoryRefreshError }),
+      ...(mcpRefreshError !== undefined && { mcpRefreshError }),
+    };
   }
 
   /**
@@ -4703,6 +4866,10 @@ export class Config {
         unregisterSessionProjectDir(this.sessionId);
         this.sessionProjectDirRegistered = false;
       }
+      // Drop this session's model registry entry. It is registered at
+      // construction (publishModelEnv), so it is released on every shutdown —
+      // same daemon-mode leak rationale as the project dir above.
+      unregisterSessionModel(this.sessionId);
 
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();
@@ -4724,6 +4891,7 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
@@ -4886,6 +5054,15 @@ export class Config {
    */
   getVisibleTools(): ReadonlySet<string> {
     return this.visibleTools;
+  }
+
+  /**
+   * Percentage of the context window used as the session-start budget for
+   * preloading deferred tools. See
+   * {@link ConfigParameters.toolSearchThreshold}.
+   */
+  getToolSearchThreshold(): number {
+    return this.toolSearchThreshold;
   }
 
   /**
@@ -5231,6 +5408,10 @@ export class Config {
         this.recentlyRemovedMcpServers.add(name);
       }
     }
+    await this.refreshMcpServers();
+  }
+
+  private async refreshMcpServers(): Promise<void> {
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -5238,13 +5419,12 @@ export class Config {
       );
       return;
     }
+
     if (this.mcpReconcileInProgress) {
       // Coalesce: a pass is already running. Mark that the desired state
       // advanced so its drain loop runs again with the latest config, and
       // await that in-flight pass — NOT a resolved promise — so this caller
-      // does not proceed (e.g. the hot-reload listener emitting approval events
-      // and logging "complete") before its coalesced change is actually
-      // reconciled, and so it observes a shared reconcile failure.
+      // does not proceed before its coalesced change is actually reconciled.
       this.mcpReconcilePending = true;
       this.debugLogger.debug(
         '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
@@ -5253,8 +5433,7 @@ export class Config {
     }
     this.mcpReconcileInProgress = true;
     const registry = this.getToolRegistry();
-    // Run pass 1 + its drain loop as a single promise, assigned BEFORE the
-    // first await so a coalesced caller arriving mid-flight can await it.
+    // Assign before the first await so a coalesced caller can await this pass.
     const runReconcile = (async () => {
       try {
         this.debugLogger.debug(
@@ -5263,9 +5442,8 @@ export class Config {
         await registry
           .getMcpClientManager()
           .discoverAllMcpToolsIncremental(this);
-        // Drain any change that arrived while this pass was in flight. The pool
-        // path returns the in-flight promise rather than queuing, so awaiting
-        // is not enough — re-run once more to pick up the latest config.
+        // The pool path returns an in-flight promise, so re-run after any
+        // coalesced change to ensure the latest effective config is applied.
         let pass = 1;
         while (this.mcpReconcilePending) {
           this.mcpReconcilePending = false;
@@ -5289,17 +5467,13 @@ export class Config {
         throw err;
       } finally {
         this.mcpReconcileInProgress = false;
-        // Clear the coalesce flag too: if a pass threw, a pending follow-up
-        // would otherwise stay stuck `true` and make the next (unrelated)
-        // reconcile run an extra no-op drain pass. The next real settings
-        // change re-triggers reconcile anyway.
+        // A failed pass must not leak a pending drain into the next reconcile.
         this.mcpReconcilePending = false;
         this.mcpReconcilePromise = undefined;
       }
     })();
     this.mcpReconcilePromise = runReconcile;
-    // Propagate failure to this caller (and, via the shared promise, to any
-    // coalesced callers). Existing callers rely on the throw.
+    // Propagate failure to this caller and every coalesced caller.
     await runReconcile;
   }
 
@@ -6036,6 +6210,122 @@ export class Config {
     return this.geminiClient;
   }
 
+  private getOwnActiveTodoReminders(): Map<string, string> {
+    if (!Object.prototype.hasOwnProperty.call(this, 'activeTodoReminders')) {
+      this.activeTodoReminders = new Map();
+    }
+    return this.activeTodoReminders;
+  }
+
+  private getOwnActiveTodoWorkChainOwners(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoWorkChainOwners')
+    ) {
+      this.activeTodoWorkChainOwners = new Map();
+    }
+    return this.activeTodoWorkChainOwners;
+  }
+
+  private getOwnActiveTodoReminderTurns(): Map<string, number> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoReminderTurns')
+    ) {
+      this.activeTodoReminderTurns = new Map();
+    }
+    return this.activeTodoReminderTurns;
+  }
+
+  getActiveTodoWorkChainOwner(
+    promptId: string,
+    fallbackOwner = promptId,
+  ): string {
+    return (
+      this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? fallbackOwner
+    );
+  }
+
+  getActiveTodoReminder(promptId: string): string | undefined {
+    return this.getOwnActiveTodoReminders().get(
+      this.getActiveTodoWorkChainOwner(promptId),
+    );
+  }
+
+  /**
+   * Reads the reminder for injection, re-issuing it only every
+   * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
+   * chat history permanently, so per-turn injection would grow the context
+   * linearly with tool turns. `force` is for turn-start injections (retry /
+   * related automatic turns), which always need the context and reset the
+   * cadence.
+   */
+  takeActiveTodoReminder(promptId: string, force = false): string | undefined {
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    const reminder = this.getOwnActiveTodoReminders().get(owner);
+    if (!reminder) return undefined;
+    const turns = this.getOwnActiveTodoReminderTurns();
+    const elapsed = (turns.get(owner) ?? 0) + 1;
+    if (!force && elapsed < ACTIVE_TODO_REMINDER_REFRESH_TURNS) {
+      turns.set(owner, elapsed);
+      return undefined;
+    }
+    turns.set(owner, 0);
+    return reminder;
+  }
+
+  setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    if (reminder) {
+      reminders.set(owner, reminder);
+      // The todo_write result itself just presented the full state.
+      this.getOwnActiveTodoReminderTurns().set(owner, 0);
+    } else {
+      reminders.delete(owner);
+      this.getOwnActiveTodoReminderTurns().delete(owner);
+    }
+  }
+
+  startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    if (!continuedFrom) {
+      reminders.clear();
+      owners.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
+      owners.set(promptId, promptId);
+      return;
+    }
+
+    const owner = this.getActiveTodoWorkChainOwner(continuedFrom);
+    for (const reminderOwner of reminders.keys()) {
+      if (reminderOwner !== owner) reminders.delete(reminderOwner);
+    }
+    owners.clear();
+    owners.set(promptId, owner);
+  }
+
+  startAutomaticActiveTodoWorkChain(
+    promptId: string,
+    continuedFrom?: string,
+  ): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = continuedFrom
+      ? this.getActiveTodoWorkChainOwner(continuedFrom)
+      : promptId;
+    owners.set(promptId, owner);
+    if (owner === promptId) reminders.delete(owner);
+  }
+
+  endAutomaticActiveTodoWorkChain(promptId: string): void {
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    owners.delete(promptId);
+    if (![...owners.values()].includes(owner)) {
+      this.getOwnActiveTodoReminders().delete(owner);
+    }
+  }
+
   /**
    * Session-scoped memory pressure monitor. Child Configs created with
    * `Object.create(parent)` inherit the parent's monitor through the prototype
@@ -6626,6 +6916,16 @@ export class Config {
       : this.allowedHttpHookUrls;
   }
 
+  /**
+   * Returns whether HTTP hooks may target private/link-local IP ranges.
+   * Only settable from trusted settings scopes (User/System/SystemDefaults).
+   */
+  getAllowPrivateNetworkHooks(): boolean {
+    return this.getBareMode() || this.isSafeMode()
+      ? false
+      : this.allowPrivateNetworkHooks;
+  }
+
   isTrustedFolder(): boolean {
     // isWorkspaceTrusted in cli/src/config/trustedFolder.js returns undefined
     // when the file based trust value is unavailable, since it is mainly used
@@ -7031,31 +7331,49 @@ export class Config {
     this.sessionWriterReclaimPolicy = policy;
   }
 
-  closeSessionWriter(): Promise<void> {
+  setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterTakeoverPolicy = policy;
+  }
+
+  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
+      this.sessionWriterHandoffRequested = true;
+    }
     this.sessionWriterShutdownRequested = true;
-    this.chatRecordingService?.beginClose();
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
+    this.startPendingSessionWriterRelease();
     this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
     return this.sessionWriterClosePromise;
   }
 
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
+    const activation = this.sessionWriterActivationPromise;
     try {
-      await this.sessionWriterActivationPromise;
+      await activation;
     } catch (error) {
       if (!(error instanceof SessionWriterShutdownError)) {
         failures.push(error);
       }
     }
     try {
-      await this.chatRecordingService?.close();
+      await this.chatRecordingService?.close({
+        handoff: this.sessionWriterHandoffRequested,
+      });
     } catch (error) {
       failures.push(error);
     }
-    const pendingLease = this.pendingSessionWriterLease;
+    const pendingLease = activation
+      ? undefined
+      : this.pendingSessionWriterLease;
     if (pendingLease) {
       try {
-        await pendingLease.release();
+        await this.startPendingSessionWriterRelease(pendingLease);
         if (
           this.pendingSessionWriterLease === pendingLease &&
           pendingLease.isReleased
@@ -7078,6 +7396,18 @@ export class Config {
     if (failures.length > 1) {
       throw new AggregateError(failures, 'Session writer shutdown failed');
     }
+  }
+
+  private startPendingSessionWriterRelease(
+    lease = this.pendingSessionWriterLease,
+  ): Promise<void> | undefined {
+    if (!lease) return undefined;
+    const existing = this.pendingSessionWriterRelease;
+    if (existing?.lease === lease) return existing.promise;
+    const promise = lease.release();
+    this.pendingSessionWriterRelease = { lease, promise };
+    void promise.catch(() => undefined);
+    return promise;
   }
 
   getSessionRuntimeBaseDir(): string {
@@ -7320,6 +7650,10 @@ export class Config {
 
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
+  }
+
+  getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    return this.toolInvocationGuard;
   }
 
   /**

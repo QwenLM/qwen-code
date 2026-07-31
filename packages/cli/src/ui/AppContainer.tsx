@@ -115,7 +115,6 @@ const MCP_BATCH_FLUSH_MS = 16;
 const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
-import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
 import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
@@ -170,6 +169,7 @@ import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
 } from './utils/workflow-keyword.js';
+import { parseSlashCommand } from '../utils/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
@@ -2260,6 +2260,15 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       if (
         streamingState === StreamingState.Responding &&
+        isSlashCommand(userPromptText) &&
+        parseSlashCommand(userPromptText, slashCommands).commandToExecute
+          ?.canRunDuringStreaming
+      ) {
+        void handleSlashCommand(userPromptText);
+        return;
+      }
+      if (
+        streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
         void submitUserQuery({
@@ -2404,6 +2413,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isProcessing,
       submitUserQuery,
       handleSlashCommand,
+      slashCommands,
       config,
       geminiClient,
       historyManager,
@@ -3098,8 +3108,12 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
-  // Repaint static history on the trailing edge of a resize burst (#4891).
-  useResizeSettleRepaint(terminalWidth, refreshStatic);
+  // Resize no longer repaints static history (#8004). The old settle →
+  // refreshStatic path wrote clearTerminal (destroying scrollback) and remounted
+  // <Static>, re-emitting all history in 50-item chunks — a scroll storm when
+  // the terminal's resize animation exceeded the debounce window (e.g. Ghostty
+  // panel toggle). Ink's dynamic region already re-renders on width changes via
+  // useTerminalSize; modern terminals reflow scrollback natively.
 
   // Repaint after the process resumes from OS sleep / suspend (lid close,
   // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but

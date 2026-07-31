@@ -167,6 +167,12 @@ export function useMouseEvents(
   const enabled =
     isActive && isRawModeSupported && vpGateOpen && Boolean(stdout.isTTY);
 
+  // Synchronous guard: the subscription effect cleanup runs after paint, so a
+  // mouse event dispatched between re-render and cleanup would still reach the
+  // handler. The ref keeps the callback in lockstep with the computed flag.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
   useEffect(() => {
     if (!enabled) return;
 
@@ -178,6 +184,7 @@ export function useMouseEvents(
   }, [enabled, stdout, tracking]);
 
   const mouseCallback = useCallback((event: MouseEvent) => {
+    if (!enabledRef.current) return;
     handlerRef.current(event);
   }, []);
 
