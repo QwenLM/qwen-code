@@ -1342,11 +1342,13 @@ function CustomColumnsPopover({
         <Button
           variant="ghost"
           size="sm"
-          className={styles.toolbarControl}
+          className={`${styles.toolbarControl} ${styles.compactToolbarControl}`}
           type="button"
         >
           <BoltIcon />
-          {t('markdownTable.customColumns')}
+          <span className={styles.compactToolbarLabel}>
+            {t('markdownTable.customColumns')}
+          </span>
         </Button>
       </PopoverTrigger>
       <PopoverContent
