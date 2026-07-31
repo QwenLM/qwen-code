@@ -1382,8 +1382,8 @@ describe('AppContainer State Management', () => {
       expect(unbind).toHaveBeenCalledTimes(1);
     });
 
-    it('keeps a held user turn while the Goal resumes and drains it after completion', async () => {
-      let goalStatus: 'blocked' | 'active' | 'complete' = 'blocked';
+    it('holds ordinary input while the Goal is active and drains it once paused', async () => {
+      let goalStatus: 'active' | 'paused' = 'active';
       let goalListener: (() => void) | undefined;
       const unsubscribe = vi.fn();
       const goalRuntime = {
@@ -1400,6 +1400,8 @@ describe('AppContainer State Management', () => {
       const submitQuery = vi.fn().mockResolvedValue(undefined);
       let userPopped = false;
       const popNextSubmission = vi.fn((mode = 'normal') => {
+        // 'priority' (active Goal) holds the plain user batch; 'normal'
+        // (paused) drains it.
         if (mode !== 'normal' || userPopped) return null;
         userPopped = true;
         return {
@@ -1427,27 +1429,22 @@ describe('AppContainer State Management', () => {
         }),
       );
 
-      await vi.waitFor(() => {
-        expect(popNextSubmission).toHaveBeenCalledWith('only');
-      });
-      expect(submitQuery).not.toHaveBeenCalled();
-
-      goalStatus = 'active';
-      act(() => {
-        goalListener?.();
-      });
-
+      // While the Goal is active the drain selects 'priority' and the plain
+      // user batch stays held (criterion #2).
       await vi.waitFor(() => {
         expect(popNextSubmission).toHaveBeenCalledWith('priority');
       });
       expect(submitQuery).not.toHaveBeenCalled();
 
-      goalStatus = 'complete';
+      // Pausing the Goal releases the held input: the drain switches to
+      // 'normal' and the user work is delivered.
+      goalStatus = 'paused';
       act(() => {
         goalListener?.();
       });
 
       await vi.waitFor(() => {
+        expect(popNextSubmission).toHaveBeenCalledWith('normal');
         expect(submitQuery).toHaveBeenCalledWith(
           'held user work',
           SendMessageType.UserQuery,
@@ -1461,65 +1458,60 @@ describe('AppContainer State Management', () => {
       expect(unsubscribe).toHaveBeenCalledOnce();
     });
 
-    it('drains Goal controls before held user turns while paused', async () => {
-      const goalRuntime = {
-        getSnapshot: () => ({ goal: { status: 'paused' } }),
-        subscribe: () => vi.fn(),
-      } as unknown as ReturnType<Config['getGoalRuntime']>;
-      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+    it('treats paused, blocked and usage_limited Goals as drain-eligible', async () => {
+      const getGoalRuntimeSpy = vi.spyOn(mockConfig, 'getGoalRuntime');
+      for (const status of ['paused', 'blocked', 'usage_limited'] as const) {
+        getGoalRuntimeSpy.mockReturnValue({
+          getSnapshot: () => ({ goal: { status } }),
+          subscribe: () => vi.fn(),
+        } as unknown as ReturnType<Config['getGoalRuntime']>);
 
-      const submitQuery = vi.fn().mockResolvedValue(undefined);
-      let submissionPopped = false;
-      const popNextSubmission = vi.fn((mode = 'normal') => {
-        if (submissionPopped) return null;
-        submissionPopped = true;
-        return {
-          kind: 'user' as const,
-          modelText:
-            mode === 'only' ? '/goal edit revised objective' : 'held user work',
-          turnKey:
-            mode === 'only'
-              ? 'message-queue:goal-edit'
-              : 'message-queue:held-user',
-        };
-      });
+        const submitQuery = vi.fn().mockResolvedValue(undefined);
+        let popped = false;
+        const popNextSubmission = vi.fn(() => {
+          if (popped) return null;
+          popped = true;
+          return {
+            kind: 'user' as const,
+            modelText: 'ordinary user work',
+            turnKey: `message-queue:${status}`,
+          };
+        });
 
-      renderHook(() =>
-        useQueuedSubmissionDrain({
-          config: mockConfig,
-          isConfigInitialized: true,
-          streamingState: StreamingState.Idle,
-          isProcessing: false,
-          dialogsVisible: false,
-          isTranscriptOpen: false,
-          pendingSubmissionCount: 2,
-          getPendingSubmissionCount: () => 2,
-          popNextSubmission,
-          enqueueGoalTurn: vi.fn(),
-          restoreMessages: vi.fn(),
-          submitQuery,
-          submissionInFlightRef: { current: false },
-          submissionSettledRevision: 0,
-        }),
-      );
-
-      await vi.waitFor(() => {
-        expect(popNextSubmission).toHaveBeenCalledWith('only');
-        expect(submitQuery).toHaveBeenCalledWith(
-          '/goal edit revised objective',
-          SendMessageType.UserQuery,
-          undefined,
-          expect.objectContaining({
-            userAdmission: { turnKey: 'message-queue:goal-edit' },
+        const view = renderHook(() =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            isTranscriptOpen: false,
+            pendingSubmissionCount: 1,
+            getPendingSubmissionCount: () => (popped ? 0 : 1),
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision: 0,
           }),
         );
-      });
-      expect(submitQuery).not.toHaveBeenCalledWith(
-        'held user work',
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-      );
+
+        // No turn is running in these states, so the queue drains in 'normal'
+        // mode and the ordinary message is delivered instead of being held.
+        await vi.waitFor(() => {
+          expect(popNextSubmission).toHaveBeenCalledWith('normal');
+          expect(submitQuery).toHaveBeenCalledWith(
+            'ordinary user work',
+            SendMessageType.UserQuery,
+            undefined,
+            expect.objectContaining({
+              userAdmission: { turnKey: `message-queue:${status}` },
+            }),
+          );
+        });
+        view.unmount();
+      }
     });
 
     it('does not hot-loop a queued submission whose admission keeps failing', async () => {
@@ -2471,6 +2463,7 @@ describe('AppContainer State Management', () => {
       } | null;
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
+      wasGoalTurn?: boolean;
     }) => void;
     let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
 
@@ -2913,6 +2906,80 @@ describe('AppContainer State Management', () => {
       expect(mockSetText).toHaveBeenCalledWith('main prompt');
       expect(mockStripOrphans).toHaveBeenCalled();
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('strips the orphaned continuation prompt when a Goal turn is cancelled', async () => {
+      const mockStripOrphans = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+      } as unknown as GeminiClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // A Goal continuation turn adds no UI user item, so lastTurnUserItem is
+      // null and the auto-restore branch (with its own orphan strip) bails.
+      // wasGoalTurn must trigger the strip independently so the synthetic
+      // "no new real user input" prompt can't merge into the next message.
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: null,
+        canUndoLastLoggedUserMessage: false,
+        turnProducedMeaningfulContent: false,
+        wasGoalTurn: true,
+      });
+
+      expect(mockStripOrphans).toHaveBeenCalled();
+      // Auto-restore itself bailed: there was no user item to rewind.
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
     });
 
     it('reuses the cancelled turn provenance on an unchanged resubmit', async () => {

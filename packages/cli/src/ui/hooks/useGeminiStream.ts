@@ -440,6 +440,14 @@ export interface CancelSubmitInfo {
    * when the consumer's React history snapshot is still stale.
    */
   turnProducedMeaningfulContent: boolean;
+  /**
+   * True when the cancelled turn was a Goal continuation turn. Such a turn
+   * appends a synthetic continuation prompt to the chat history but, unlike a
+   * UserQuery, adds no UI user item, so the cancel handler's auto-restore
+   * branch bails before its orphan strip runs. The handler uses this flag to
+   * strip that prompt so it can't merge into the user's next real message.
+   */
+  wasGoalTurn: boolean;
 }
 
 /**
@@ -1061,6 +1069,7 @@ export const useGeminiStream = (
         lastTurnUserItem: lastTurnUserItemRef.current,
         canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
+        wasGoalTurn: activeGoalTurnRef.current !== null,
       });
     } finally {
       setIsResponding(false);

@@ -433,13 +433,11 @@ export function useQueuedSubmissionDrain({
     let goalControlMode: Parameters<typeof popNextSubmission>[0] = 'normal';
     try {
       const status = config.getGoalRuntime().getSnapshot().goal?.status;
-      if (
-        status === 'blocked' ||
-        status === 'usage_limited' ||
-        status === 'paused'
-      ) {
-        goalControlMode = 'only';
-      } else if (status === 'active') {
+      // Only an actively-running Goal holds ordinary input: while a Goal turn
+      // is in flight the message can't be delivered, so it queues (criterion
+      // #2). In paused/blocked/usage_limited nothing is running, so the queue
+      // drains normally — holding input there stranded it until /goal clear.
+      if (status === 'active') {
         goalControlMode = 'priority';
       }
     } catch {
@@ -2861,6 +2859,18 @@ export const AppContainer = (props: AppContainerProps) => {
             ? `${popped.modelText}\n${currentText}`
             : popped.modelText,
         );
+      }
+
+      // A cancelled Goal continuation turn appended its synthetic prompt to
+      // the chat history but has no UI user item (lastTurnUserItem is null),
+      // so the auto-restore branch below bails out before its orphan strip
+      // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
+      // merges the user's NEXT real message into the "no new real user input"
+      // preamble. Safe even if the turn already produced a model response:
+      // the strip only pops trailing user entries, and a responded prompt is
+      // not trailing.
+      if (info?.wasGoalTurn) {
+        geminiClient?.stripOrphanedUserEntriesFromHistory?.();
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
