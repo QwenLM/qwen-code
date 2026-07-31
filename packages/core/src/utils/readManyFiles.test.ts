@@ -1006,6 +1006,30 @@ describe('readManyFiles', () => {
       );
       expect(content).not.toContain('qwen-validated-read-');
     });
+
+    it('surfaces a size error for a validated file too large to snapshot', async () => {
+      const relativePath = 'huge-image.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const handle = await fs.open(absolutePath, 'w');
+      await handle.truncate(101 * 1024 * 1024 + 1);
+      await handle.close();
+      const stats = await fs.stat(absolutePath);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
+
+      const content = contentToString(result.contentParts);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toMatch(/exceeds/i);
+      expect(content).not.toContain(
+        'No files matching the criteria were found',
+      );
+    });
   });
 
   // Issue #6289: files attached via `@path` load their content into context
@@ -1030,6 +1054,28 @@ describe('readManyFiles', () => {
       // a redundant read_file.
       const after = await checkPriorRead(cache, absolutePath, 'editing');
       expect(after.ok).toBe(true);
+    });
+
+    it('records a validated text read by canonical path for prior-read enforcement', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('validated.ts');
+      const approvedStats = await fs.stat(absolutePath);
+      const cache = new FileReadCache();
+      const fileSystemService = new StandardFileSystemService();
+      const mockConfig = {
+        ...createMockConfigWithCache(tempRootDir, cache),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+      });
+
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(true);
     });
 
     it('records the read as fresh and cacheable in the FileReadCache', async () => {

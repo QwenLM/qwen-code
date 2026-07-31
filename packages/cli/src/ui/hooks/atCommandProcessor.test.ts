@@ -390,6 +390,57 @@ describe('handleAtCommand', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
+    'accepts a temp-dir file via the realpath branch when the configured path is a symlink',
+    async () => {
+      const realDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-real-')),
+      );
+      const linkDir = path.join(testRootDir, 'temp-link');
+      await fsPromises.symlink(realDir, linkDir);
+      const filePath = path.join(realDir, 'file.txt');
+      await fsPromises.writeFile(filePath, 'temp content');
+      const tempDirSpy = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(linkDir);
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: (candidate: string) => {
+            const absolute = path.isAbsolute(candidate)
+              ? candidate
+              : path.resolve(testRootDir, candidate);
+            const relative = path.relative(testRootDir, absolute);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          },
+          getDirectories: () => [testRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: `@${filePath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 628,
+          signal: abortController.signal,
+        });
+
+        expect(result.processedQuery).toContainEqual({
+          text: 'temp content',
+        });
+        expect(result.shouldProceed).toBe(true);
+      } finally {
+        tempDirSpy.mockRestore();
+        await fsPromises.rm(linkDir, { force: true });
+        await fsPromises.rm(realDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'multi-root workspace: continues to next dir when canonical path escapes workspace',
     async () => {
       const secondRootDir = await fsPromises.realpath(

@@ -194,7 +194,9 @@ export async function readManyFiles(
           const fileType = await detectFileType(fullPath);
           shouldUseTextHandle = standardFileSystem && fileType === 'text';
           shouldSnapshot =
-            !shouldUseTextHandle && (standardFileSystem || fileType !== 'text');
+            !shouldUseTextHandle &&
+            (standardFileSystem || fileType !== 'text') &&
+            stats.size <= SNAPSHOT_MAX_SIZE_BYTES;
         }
         const snapshot = shouldSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity!, signal)
