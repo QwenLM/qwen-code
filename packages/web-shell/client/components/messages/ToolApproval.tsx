@@ -201,7 +201,7 @@ export function ToolApproval({
     [request.options],
   );
   const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(prepareDisplayOptions(request.options)),
+    getSafeDefaultIndex(displayOptions),
   );
   const requestRef = useRef(request);
   requestRef.current = request;
