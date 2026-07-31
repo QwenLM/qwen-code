@@ -758,15 +758,16 @@ describe('BundledSkillLoader', () => {
       const result = await invokeAutofix('off');
 
       expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
-      expect(scheduler.delete).toHaveBeenCalledTimes(1);
+      expect(scheduler.delete).toHaveBeenCalledTimes(2);
       expect(scheduler.list).toHaveBeenCalledTimes(2);
-      expect(scheduler.delete).not.toHaveBeenCalledWith('job-2');
+      expect(scheduler.delete).toHaveBeenCalledWith('job-1');
+      expect(scheduler.delete).toHaveBeenCalledWith('job-2');
       expect(scheduler.delete).not.toHaveBeenCalledWith('ordinary-job');
       expect(scheduler.delete).not.toHaveBeenCalledWith('similar-prefix-job');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'Disabled 1 Autofix watcher.',
+        content: 'Disabled 2 Autofix watchers.',
       });
     });
 
