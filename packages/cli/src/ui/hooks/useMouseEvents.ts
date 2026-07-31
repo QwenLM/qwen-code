@@ -158,16 +158,17 @@ export function useMouseEvents(
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
+  // Respect the ui.mouseTracking setting: when explicitly disabled, skip SGR
+  // mouse tracking so the terminal can handle right-click context menus and
+  // OSC 8 hyperlink clicks natively. Defaults to true when unset.
+  const mouseTrackingEnabled = settings?.merged.ui?.mouseTracking !== false;
+
   // Never write SGR mouse-mode escapes (?1002h ?1006h) unless stdout is a TTY.
   // `isRawModeSupported` only reflects stdin; with stdout piped/redirected
   // (`qwen | tee log`) an active, raw-mode-capable surface — e.g. the non-TTY
   // transcript's focused ScrollableList (`bypassVpGate`) — would otherwise emit
   // raw control bytes into the captured output. Mirrors AlternateScreen's
   // `process.stdout.isTTY` guard so the non-TTY fallback stays byte-clean.
-  // Respect the ui.mouseTracking setting: when explicitly disabled, skip SGR
-  // mouse tracking so the terminal can handle right-click context menus and
-  // OSC 8 hyperlink clicks natively. Defaults to true when unset.
-  const mouseTrackingEnabled = settings?.merged.ui?.mouseTracking !== false;
   const enabled =
     isActive &&
     isRawModeSupported &&

@@ -40,6 +40,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.showLineNumbers',
   'ui.renderMode',
   'ui.useTerminalBuffer',
+  'ui.mouseTracking',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
