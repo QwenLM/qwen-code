@@ -31,16 +31,20 @@ describe('stable release notes workflow', () => {
   it('publishes immediately with GitHub-generated notes', () => {
     const step = getStep(releaseWorkflow, 'Create GitHub Release and Tag');
 
-    expect(step).toContain('--notes-start-tag "${PREVIOUS_RELEASE_TAG}"');
-    expect(step).toContain('--generate-notes');
     expect(step).toContain(
-      'git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD',
+      'repos/${GITHUB_REPOSITORY}/releases/generate-notes',
     );
-    expect(step).toContain('NOTES_START_TAG_FLAG=()');
-    expect(step).toContain(
-      'echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"',
-    );
-    expect(step).toContain('"${NOTES_START_TAG_FLAG[@]}"');
+    expect(step).toContain('-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}"');
+    expect(step).toContain('"${NOTES_ARGS[@]}"');
+    expect(step).toContain('--notes-file "${NOTES_FILE}"');
+    // Stable tags live on their own release/* branch and are merged back to
+    // main only afterwards, so the previous tag is never an ancestor of the
+    // branch being released. Anchoring on ancestry dropped the anchor on every
+    // stable release, and unanchored notes span the whole branch history and
+    // overrun the 125000 character body limit.
+    expect(step).not.toContain('git merge-base --is-ancestor');
+    expect(step).toContain('MAX_BODY_BYTES=120000');
+    expect(step).toContain('iconv -c -f utf-8 -t utf-8');
     expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
