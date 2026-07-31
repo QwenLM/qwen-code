@@ -32,7 +32,10 @@ export interface DashScopeUploaderOptions {
   /**
    * Chat-completions base URL (e.g. https://dashscope.aliyuncs.com/compatible-mode/v1).
    * The uploads endpoint lives at `<origin>/api/v1/uploads`; only the origin
-   * is used. Defaults to the official public endpoint when omitted.
+   * is used. Defaults to the official public endpoint when omitted — but the
+   * production gate (isOmniVideoDeliveryActive) requires a concrete DashScope
+   * baseUrl, so the credential is never sent to an origin the user did not
+   * configure for this provider.
    */
   baseUrl?: string;
   fetchFn?: FetchFn;
@@ -63,6 +66,38 @@ function combineSignals(
 ): AbortSignal {
   const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/**
+ * Compact, injection-resistant summary of an upstream HTTP failure. The raw
+ * body is deliberately NOT echoed (it can reach model-visible error text);
+ * only the status plus parsed `code`/`message` fields survive, truncated.
+ */
+async function summarizeHttpFailure(res: Response): Promise<string> {
+  const body = await res.text().catch(() => '');
+  try {
+    const parsed = JSON.parse(body) as {
+      code?: string;
+      message?: string;
+      error?: { code?: string; message?: string };
+    };
+    const code = parsed.code ?? parsed.error?.code;
+    const message = parsed.message ?? parsed.error?.message;
+    const detail = [code, message]
+      .filter((v): v is string => typeof v === 'string' && v.length > 0)
+      .join(': ')
+      .slice(0, 160);
+    if (detail) return `HTTP ${res.status} (${detail})`;
+  } catch {
+    // Non-JSON body: report the status only.
+  }
+  return `HTTP ${res.status}`;
+}
+
+/** Rethrow user/timeout aborts untouched so cancellation propagates as
+ * cancellation instead of being wrapped into a generic failure. */
+function rethrowIfAborted(err: unknown, signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw err;
 }
 
 /**
@@ -103,6 +138,7 @@ export class DashScopeUploader {
         signal: combineSignals(GET_POLICY_TIMEOUT_MS, signal),
       });
     } catch (err) {
+      rethrowIfAborted(err, signal);
       throw new Error(
         `DashScope upload getPolicy request failed: ${
           err instanceof Error ? err.message : String(err)
@@ -110,9 +146,8 @@ export class DashScopeUploader {
       );
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
       throw new Error(
-        `DashScope upload getPolicy failed: HTTP ${res.status} ${body.slice(0, 300)}`,
+        `DashScope upload getPolicy failed: ${await summarizeHttpFailure(res)}`,
       );
     }
     const payload = (await res.json().catch(() => undefined)) as
@@ -124,7 +159,9 @@ export class DashScopeUploader {
       !data.signature ||
       !data.upload_dir ||
       !data.upload_host ||
-      !data.oss_access_key_id
+      !data.oss_access_key_id ||
+      !data.x_oss_object_acl ||
+      !data.x_oss_forbid_overwrite
     ) {
       throw new Error(
         'DashScope upload getPolicy returned an incomplete policy payload.',
@@ -166,7 +203,7 @@ export class DashScopeUploader {
       blob = await openAsBlob(filePath, { type: mimeType });
     } catch (err) {
       throw new Error(
-        `Failed to open file for upload: ${filePath}: ${
+        `Failed to open file for upload: ${path.basename(filePath)}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -181,6 +218,7 @@ export class DashScopeUploader {
         signal: combineSignals(UPLOAD_TIMEOUT_MS, signal),
       });
     } catch (err) {
+      rethrowIfAborted(err, signal);
       throw new Error(
         `DashScope media upload failed: ${
           err instanceof Error ? err.message : String(err)
@@ -188,9 +226,8 @@ export class DashScopeUploader {
       );
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
       throw new Error(
-        `DashScope media upload failed: HTTP ${res.status} ${body.slice(0, 300)}`,
+        `DashScope media upload failed: ${await summarizeHttpFailure(res)}`,
       );
     }
     await res.body?.cancel().catch(() => {});

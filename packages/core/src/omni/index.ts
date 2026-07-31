@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
+import fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isFfmpegAvailable, isFfprobeAvailable } from './ffmpeg.js';
@@ -35,6 +38,14 @@ const debugLogger = createDebugLogger('omni');
 /** Default per-file upload ceiling: 1 GiB (DashScope instant-upload cap). */
 export const DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
 
+/**
+ * Placeholder the model-config resolver assigns under Qwen OAuth; the real
+ * token is swapped in per-request by QwenContentGenerator and never lands
+ * in the ContentGeneratorConfig, so it cannot authenticate the uploads
+ * endpoint. See modelConfigResolver.ts.
+ */
+const QWEN_OAUTH_PLACEHOLDER_API_KEY = 'QWEN_OAUTH_DYNAMIC_TOKEN';
+
 /** Result of the S1 video delivery pipeline. */
 export interface OmniVideoDelivery {
   /** `oss://…` URL to place in fileData.fileUri. */
@@ -50,7 +61,9 @@ export interface OmniVideoDelivery {
 }
 
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
- * surface the message instead of silently falling back to inline base64. */
+ * surface the message instead of silently falling back to inline base64.
+ * Messages must not contain absolute paths or raw upstream response
+ * bodies — they can reach model-visible content. */
 export class OmniDeliveryError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -59,20 +72,45 @@ export class OmniDeliveryError extends Error {
 }
 
 /**
- * Gate for the S1 video delivery path. All three conditions must hold:
- * omni enabled, provider is DashScope-compatible, and an API key exists
- * for the uploads endpoint. Video modality is checked by the caller
- * (fileUtils) alongside the existing modality gate.
+ * Gate for the S1 video delivery path. All conditions must hold:
+ *
+ * 1. omni enabled (settings or QWEN_CODE_ENABLE_OMNI=1);
+ * 2. trusted workspace (the pipeline writes .qwen/omni/ and uploads
+ *    workspace bytes off-machine);
+ * 3. a usable API key for the uploads endpoint — Qwen OAuth is excluded:
+ *    its ContentGeneratorConfig carries a placeholder, and the OAuth token
+ *    is not accepted by the uploads channel;
+ * 4. an explicit baseUrl (the uploads origin is derived from it — never
+ *    send the configured credential to an origin the user didn't set);
+ * 5. a DashScope-compatible provider.
+ *
+ * Any failed condition falls back to the pre-omni inline behavior.
+ * Video modality is checked by the caller (fileUtils) alongside the
+ * existing modality gate.
  */
 export function isOmniVideoDeliveryActive(config: Config): boolean {
   // Optional calls so stub Configs in tests (and embedders constructing
   // partial configs) don't need the omni accessors to process files.
   if (!config.isOmniEnabled?.()) return false;
+  if (config.isTrustedFolder?.() === false) {
+    debugLogger.debug('omni delivery inactive: untrusted workspace');
+    return false;
+  }
   const cgc = config.getContentGeneratorConfig?.();
   if (!cgc) return false;
-  if (!cgc.apiKey) {
+  if (
+    cgc.authType === AuthType.QWEN_OAUTH ||
+    !cgc.apiKey ||
+    cgc.apiKey === QWEN_OAUTH_PLACEHOLDER_API_KEY
+  ) {
     debugLogger.debug(
-      'omni enabled but no API key available for the uploads endpoint; falling back to inline delivery',
+      'omni delivery inactive: no static API key usable for the uploads endpoint (Qwen OAuth is not supported in S1)',
+    );
+    return false;
+  }
+  if (!cgc.baseUrl) {
+    debugLogger.debug(
+      'omni delivery inactive: no explicit baseUrl to derive the uploads origin from',
     );
     return false;
   }
@@ -84,13 +122,16 @@ export function isOmniVideoDeliveryActive(config: Config): boolean {
  * upload via the DashScope temporary channel → return the oss:// URL.
  *
  * No caching in S1: every invocation re-uploads (S3 adds the
- * (sha256, model) upload cache). Throws OmniDeliveryError on any failure.
+ * (sha256, model) upload cache). Throws OmniDeliveryError on any failure;
+ * user aborts propagate as the original abort error.
  */
 export async function processVideoForOmniDelivery(
   filePath: string,
   config: Config,
   signal?: AbortSignal,
 ): Promise<OmniVideoDelivery> {
+  const displayName = path.basename(filePath);
+
   // Defense in depth: startup validation already asserted this, but the
   // pipeline can also be reached in embedders that skip Config.initialize.
   const [ffmpeg, ffprobe] = await Promise.all([
@@ -103,25 +144,39 @@ export async function processVideoForOmniDelivery(
     );
   }
 
-  let recognized: RecognizedVideo;
-  try {
-    recognized = await recognizeVideoFile(filePath);
-  } catch (err) {
+  // Enforce the byte ceiling from a cheap stat BEFORE hashing/probing —
+  // a 60GB capture must not stream through SHA-256 only to be rejected.
+  const configuredMax = config.getOmniUploadMaxFileBytes?.();
+  const maxBytes =
+    configuredMax !== undefined && configuredMax > 0
+      ? configuredMax
+      : DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES;
+  const stat = await fs.stat(filePath).catch((err) => {
     throw new OmniDeliveryError(
-      `Video recognition failed for ${filePath}: ${
+      `Cannot stat video file ${displayName}: ${
         err instanceof Error ? err.message : String(err)
       }`,
       { cause: err },
     );
-  }
-
-  const maxBytes =
-    config.getOmniUploadMaxFileBytes() ?? DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES;
-  if (recognized.sizeBytes > maxBytes) {
+  });
+  if (stat.size > maxBytes) {
     throw new OmniDeliveryError(
-      `Video exceeds the omni upload limit: ${recognized.sizeBytes} bytes > ` +
+      `Video exceeds the omni upload limit: ${stat.size} bytes > ` +
         `${maxBytes} bytes (omni.upload.maxFileBytes). ` +
         `Reduce the file size before retrying.`,
+    );
+  }
+
+  let recognized: RecognizedVideo;
+  try {
+    recognized = await recognizeVideoFile(filePath, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new OmniDeliveryError(
+      `Video recognition failed for ${displayName}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      { cause: err },
     );
   }
 
@@ -130,10 +185,16 @@ export async function processVideoForOmniDelivery(
   let objectPath: string;
   let deduped: boolean;
   try {
-    const put = await store.putFile(filePath, recognized.sha256, extension);
+    const put = await store.putFile(
+      filePath,
+      recognized.sha256,
+      extension,
+      signal,
+    );
     objectPath = put.objectPath;
     deduped = put.deduped;
   } catch (err) {
+    if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
       `Failed to store video in the omni object store: ${
         err instanceof Error ? err.message : String(err)
@@ -156,6 +217,7 @@ export async function processVideoForOmniDelivery(
       signal,
     });
   } catch (err) {
+    if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
       err instanceof Error ? err.message : String(err),
       { cause: err },

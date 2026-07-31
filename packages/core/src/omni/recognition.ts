@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { probeVideoMetadata, type VideoProbeResult } from './ffmpeg.js';
 
@@ -77,9 +78,12 @@ export function extensionForVideoMime(mimeType: string): string {
 }
 
 /** Stream a file through SHA-256 without loading it into memory. */
-export async function hashFileSha256(filePath: string): Promise<string> {
+export async function hashFileSha256(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const hash = createHash('sha256');
-  await pipeline(createReadStream(filePath), hash);
+  await pipeline(createReadStream(filePath, signal ? { signal } : {}), hash);
   return hash.digest('hex');
 }
 
@@ -90,10 +94,12 @@ const SNIFF_BYTES = 4096;
  * Minimal S1 recognition for a local video file: content sniff (magic
  * bytes), streaming SHA-256, and ffprobe metadata. Throws when the file
  * does not sniff as a video container or when ffprobe fails — the omni
- * pipeline fails closed on unrecognizable input.
+ * pipeline fails closed on unrecognizable input. Error messages carry the
+ * file's basename only (they can reach model-visible content).
  */
 export async function recognizeVideoFile(
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<RecognizedVideo> {
   const handle = await fs.open(filePath, 'r');
   let header: Buffer;
@@ -111,13 +117,13 @@ export async function recognizeVideoFile(
   const detectedMimeType = sniffVideoMimeType(header);
   if (!detectedMimeType) {
     throw new Error(
-      `File content does not match a supported video container (mp4/mov/webm/mkv/avi): ${filePath}`,
+      `File content does not match a supported video container (mp4/mov/webm/mkv/avi): ${path.basename(filePath)}`,
     );
   }
 
   const [sha256, metadata] = await Promise.all([
-    hashFileSha256(filePath),
-    probeVideoMetadata(filePath),
+    hashFileSha256(filePath, signal),
+    probeVideoMetadata(filePath, signal),
   ]);
 
   return { sha256, detectedMimeType, sizeBytes, metadata };

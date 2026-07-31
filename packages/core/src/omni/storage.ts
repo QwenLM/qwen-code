@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 
 /** Result of promoting a file into the content-addressed object store. */
 export interface PutObjectResult {
@@ -14,6 +16,38 @@ export interface PutObjectResult {
   objectPath: string;
   /** True when an identical object already existed (dedup hit). */
   deduped: boolean;
+}
+
+async function hashFile(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const hash = createHash('sha256');
+  await pipeline(
+    createReadStream(filePath, signal ? { signal } : {}),
+    async (source) => {
+      for await (const chunk of source) {
+        hash.update(chunk as Buffer);
+      }
+    },
+  );
+  return hash.digest('hex');
+}
+
+/** Reject paths that exist but are not what the store expects (symlinks,
+ * devices, …). The store never follows symlinks for its own entries. */
+async function assertRealDirIfExists(p: string): Promise<void> {
+  let st;
+  try {
+    st = await fs.lstat(p);
+  } catch {
+    return; // Missing is fine — it will be created.
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(
+      `Omni object store path is not a real directory (symlink or special file refused): ${p}`,
+    );
+  }
 }
 
 /**
@@ -25,9 +59,12 @@ export interface PutObjectResult {
  *   ├── .gitignore            # "*" — self-ignoring
  *   └── objects/sha256/<h[0:2]>/<sha256><ext>
  *
- * Write protocol: copy to a sibling `.tmp-*` file in the final directory,
- * then atomically rename onto the content-addressed name. A pre-existing
- * target is a dedup hit — the temp file is discarded.
+ * Write protocol: stream-copy to a sibling `.tmp-*` file in the final
+ * directory while re-computing the content hash, verify it matches the
+ * expected object key, then atomically rename onto the content-addressed
+ * name. Dedup hits are verified by re-hashing the existing object — a
+ * pre-existing file with mismatched bytes (corruption, or content planted
+ * in a cloned repo) is healed by overwriting it with verified bytes.
  */
 export class OmniObjectStore {
   private readonly omniRoot: string;
@@ -57,10 +94,14 @@ export class OmniObjectStore {
 
   /**
    * Ensure the directory layout and the self-ignoring .gitignore exist.
-   * Idempotent and shared across concurrent callers.
+   * Idempotent and shared across concurrent callers. Refuses symlinked
+   * store directories.
    */
   ensureLayout(): Promise<void> {
     this.layoutReady ??= (async () => {
+      await assertRealDirIfExists(this.omniRoot);
+      await assertRealDirIfExists(path.join(this.omniRoot, 'objects'));
+      await assertRealDirIfExists(this.getObjectsDir());
       await fs.mkdir(this.getObjectsDir(), { recursive: true, mode: 0o700 });
       const gitignorePath = path.join(this.omniRoot, '.gitignore');
       try {
@@ -82,51 +123,71 @@ export class OmniObjectStore {
 
   /**
    * Promote a local file into the object store under its content hash.
-   * The caller is responsible for having computed `sha256` over the exact
-   * current content of `sourcePath`.
+   * The bytes are re-hashed while copying and verified against `sha256`,
+   * so a source file that changed since the caller hashed it (TOCTOU)
+   * fails closed instead of poisoning the immutable store.
    */
   async putFile(
     sourcePath: string,
     sha256: string,
     extension: string,
+    signal?: AbortSignal,
   ): Promise<PutObjectResult> {
     if (!/^[0-9a-f]{64}$/.test(sha256)) {
       throw new Error(`Invalid sha256 object key: ${sha256}`);
     }
     await this.ensureLayout();
     const objectPath = this.objectPathFor(sha256, extension);
+    const objectDir = path.dirname(objectPath);
+    await assertRealDirIfExists(objectDir);
 
-    if (await this.exists(objectPath)) {
-      return { objectPath, deduped: true };
+    // Dedup check verifies content, not just presence: an existing entry
+    // whose bytes do not hash to its name (corruption, or a planted file
+    // shipped inside a cloned repo before .gitignore applied) must never
+    // be reused or uploaded. Mismatches fall through and are overwritten
+    // with verified bytes.
+    const existing = await fs.lstat(objectPath).catch(() => undefined);
+    if (existing) {
+      if (existing.isFile() && !existing.isSymbolicLink()) {
+        const existingHash = await hashFile(objectPath, signal);
+        if (existingHash === sha256) {
+          return { objectPath, deduped: true };
+        }
+      }
+      await fs.rm(objectPath, { force: true });
     }
 
-    const objectDir = path.dirname(objectPath);
     await fs.mkdir(objectDir, { recursive: true, mode: 0o700 });
     const tmpPath = path.join(
       objectDir,
       `.tmp-${randomBytes(8).toString('hex')}`,
     );
     try {
-      await fs.copyFile(sourcePath, tmpPath);
+      const hash = createHash('sha256');
+      const source = createReadStream(sourcePath, signal ? { signal } : {});
+      source.on('data', (chunk) => hash.update(chunk as Buffer));
+      await pipeline(source, createWriteStream(tmpPath, { mode: 0o600 }));
+      const actual = hash.digest('hex');
+      if (actual !== sha256) {
+        throw new Error(
+          `Source content changed while storing (expected sha256 ${sha256.slice(0, 12)}…, got ${actual.slice(0, 12)}…). Retry the read.`,
+        );
+      }
       await fs.rename(tmpPath, objectPath);
     } catch (err) {
       await fs.rm(tmpPath, { force: true });
-      // Concurrent writer may have won the rename race — that is a dedup
-      // hit, not an error.
-      if (await this.exists(objectPath)) {
+      // Concurrent writer may have won the rename race with verified
+      // bytes of the same hash — treat as dedup, but only if it verifies.
+      const winner = await fs.lstat(objectPath).catch(() => undefined);
+      if (
+        winner?.isFile() &&
+        !winner.isSymbolicLink() &&
+        (await hashFile(objectPath).catch(() => undefined)) === sha256
+      ) {
         return { objectPath, deduped: true };
       }
       throw err;
     }
     return { objectPath, deduped: false };
-  }
-
-  private async exists(p: string): Promise<boolean> {
-    try {
-      await fs.access(p);
-      return true;
-    } catch {
-      return false;
-    }
   }
 }

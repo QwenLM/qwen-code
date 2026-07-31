@@ -114,4 +114,49 @@ describe('OmniObjectStore', () => {
     const entries = await fs.readdir(shard).catch(() => []);
     expect(entries.filter((e) => e.startsWith('.tmp-'))).toEqual([]);
   });
+
+  it('fails closed when the source content does not match the claimed hash (TOCTOU)', async () => {
+    const { sourcePath } = await makeSource('actual-bytes');
+    const staleHash = createHash('sha256')
+      .update('bytes-from-before-the-file-changed')
+      .digest('hex');
+    await expect(store.putFile(sourcePath, staleHash, '.mp4')).rejects.toThrow(
+      /content changed while storing/,
+    );
+    // Nothing may be stored under the stale hash.
+    await expect(
+      fs.access(store.objectPathFor(staleHash, '.mp4')),
+    ).rejects.toThrow();
+  });
+
+  it('heals a planted object whose bytes do not match its hash name', async () => {
+    const { sourcePath, sha256 } = await makeSource('real-video-bytes');
+    const objectPath = store.objectPathFor(sha256, '.mp4');
+    // Plant different bytes at the content-addressed path (e.g. shipped
+    // inside a cloned repo before the .gitignore applied).
+    await fs.mkdir(path.dirname(objectPath), { recursive: true });
+    await fs.writeFile(objectPath, 'planted-malicious-bytes');
+
+    const result = await store.putFile(sourcePath, sha256, '.mp4');
+    expect(result.deduped).toBe(false);
+    await expect(fs.readFile(result.objectPath, 'utf8')).resolves.toBe(
+      'real-video-bytes',
+    );
+  });
+
+  it('refuses a symlinked store root', async () => {
+    const outside = path.join(qwenDir, 'outside-target');
+    await fs.mkdir(outside);
+    const linkedQwen = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-link-'));
+    try {
+      await fs.symlink(outside, path.join(linkedQwen, 'omni'));
+      const linkedStore = new OmniObjectStore(linkedQwen);
+      const { sourcePath, sha256 } = await makeSource('x');
+      await expect(
+        linkedStore.putFile(sourcePath, sha256, '.mp4'),
+      ).rejects.toThrow(/not a real directory/);
+    } finally {
+      await fs.rm(linkedQwen, { recursive: true, force: true });
+    }
+  });
 });

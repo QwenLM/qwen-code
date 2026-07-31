@@ -5,6 +5,7 @@
  */
 
 import { execFile, type ExecFileOptions } from 'node:child_process';
+import path from 'node:path';
 import { FatalConfigError } from '../utils/errors.js';
 
 /**
@@ -172,10 +173,13 @@ function parseFrameRate(raw: string | undefined): number | undefined {
 /**
  * Probe a local video file with ffprobe. Throws on non-zero exit or
  * unparseable output — the omni pipeline treats a failed probe as a
- * recognition failure (fail closed), not as "probably fine".
+ * recognition failure (fail closed), not as "probably fine". Error
+ * messages carry the file's basename only (they can reach model-visible
+ * content).
  */
 export async function probeVideoMetadata(
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<VideoProbeResult> {
   const { stdout, code, stderr } = await execCommand(
     'ffprobe',
@@ -188,11 +192,14 @@ export async function probeVideoMetadata(
       '-show_streams',
       filePath,
     ],
-    { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
+    { timeout: 15_000, maxBuffer: 4 * 1024 * 1024, ...(signal && { signal }) },
   );
+  if (signal?.aborted) {
+    throw new Error(`ffprobe aborted for ${path.basename(filePath)}`);
+  }
   if (code !== 0) {
     throw new Error(
-      `ffprobe failed (exit ${code}) for ${filePath}: ${stderr.slice(0, 300)}`,
+      `ffprobe failed (exit ${code}) for ${path.basename(filePath)}: ${stderr.slice(0, 300)}`,
     );
   }
   let parsed: {
@@ -209,7 +216,9 @@ export async function probeVideoMetadata(
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    throw new Error(`ffprobe produced unparseable output for ${filePath}`);
+    throw new Error(
+      `ffprobe produced unparseable output for ${path.basename(filePath)}`,
+    );
   }
   const videoStream = parsed.streams?.find((s) => s.codec_type === 'video');
   const durationSeconds = Number(parsed.format?.duration);
