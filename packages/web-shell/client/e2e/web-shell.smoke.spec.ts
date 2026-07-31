@@ -69,23 +69,23 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
-test('pastes long plain text as a placeholder and expands it on submit @smoke', async ({
+test('pastes long plain text as editable composer content @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   const pasted = `${'original '.repeat(151)}end`;
-  const placeholder = `[Pasted Content ${pasted.length} chars]`;
   const edited = `${pasted} edited`;
 
   await gotoSession(page, scenario, daemon);
   await pasteComposerText(page, pasted);
 
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
-  await expect(editor).toHaveText(placeholder);
+  await expect(editor).toHaveText(pasted);
+  await expect(editor).not.toContainText('Pasted Content');
 
   await page.keyboard.type(' edited');
-  await expect(editor).toHaveText(`${placeholder} edited`);
+  await expect(editor).toHaveText(edited);
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);

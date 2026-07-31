@@ -262,8 +262,16 @@ Finish with exactly one outcome:
   finding that is RESOLVED IN THE CODE. That is the test, not "did I edit a
   file this round": a finding you implemented now, and one an earlier commit
   already fixed that you re-verified still holds, are both resolved and both
-  belong here. The workflow resolves exactly those review threads
-  after the push, so a human re-reviewing sees only what is still open — an
+  belong here. After the push, the workflow resolves exactly those review
+  threads only while the live PR head is still the exact commit covered by
+  deterministic verification. The workflow checks the live head and thread
+  state around each mutation and stops resolving more threads if the result
+  cannot be proven. It does not automatically reopen a thread because GitHub
+  cannot atomically prove which actor resolved it. If uncertainty is detected,
+  remaining threads stay open for a later round. This minimizes the chance of
+  hiding a finding after unverified code lands, while acknowledging that GitHub
+  provides no atomic head-SHA precondition for the resolution mutation. A human
+  re-reviewing can focus on what is still open — an
   already-fixed Critical left open reads as an unaddressed Critical. A
   finding you declined, deferred,
   or escalated for a maintainer's decision must stay unresolved so its recorded
