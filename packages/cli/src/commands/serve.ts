@@ -170,7 +170,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 20,
+        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',

@@ -1380,7 +1380,7 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
-  // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
+  // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
