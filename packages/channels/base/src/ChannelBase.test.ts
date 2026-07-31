@@ -16157,7 +16157,7 @@ describe('ChannelBase', () => {
         {
           bridgeRecovery: () => recoveryState.current,
           observedContacts: {
-            record: vi.fn().mockImplementation(() => contactRecord),
+            observe: vi.fn().mockImplementation(() => contactRecord),
           },
         },
       );
