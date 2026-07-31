@@ -63,6 +63,8 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
       pairing: {
         list: vi.fn(),
         approve: vi.fn(),
+        approvals: vi.fn(),
+        revoke: vi.fn(),
       },
     },
   },
@@ -179,6 +181,10 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ requests: [] });
   channelState.current.pairing.approve.mockReset();
+  channelState.current.pairing.approvals
+    .mockReset()
+    .mockResolvedValue({ senderIds: [] });
+  channelState.current.pairing.revoke.mockReset();
   workspaceState.current = {
     workspaceCwd: '/workspace/demo',
     token: 'secret',

@@ -178,6 +178,10 @@ class TestChannel extends ChannelBase {
     );
   }
 
+  stateDirForTest(): string | undefined {
+    return this.stateDir;
+  }
+
   debugPayloadForTest(platform: string, payload: unknown): void {
     this.logDebugPayload(platform, payload);
   }
@@ -411,6 +415,12 @@ describe('ChannelBase', () => {
       options,
     );
   }
+
+  it('exposes runtime-owned state to adapters', () => {
+    expect(
+      createChannel({}, { stateDir: '/tmp/channel-state' }).stateDirForTest(),
+    ).toBe('/tmp/channel-state');
+  });
 
   describe('proactive delivery boundary', () => {
     it('recognizes typed delivery errors across module instances', () => {

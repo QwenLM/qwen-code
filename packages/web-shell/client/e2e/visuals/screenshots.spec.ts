@@ -304,6 +304,9 @@ for (const theme of THEMES) {
             },
           ],
         },
+        pairingApprovals: {
+          dingtalk: ['user-18', 'release-manager'],
+        },
       });
       await page.addInitScript(() => {
         window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
@@ -340,7 +343,14 @@ for (const theme of THEMES) {
       });
       await expect(editHeading).toBeVisible();
       await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await expect(page.getByText('user-18', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('release-manager', { exact: true }),
+      ).toBeVisible();
       await editHeading.click();
+      await page
+        .getByRole('heading', { name: 'Pairing approvals' })
+        .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 

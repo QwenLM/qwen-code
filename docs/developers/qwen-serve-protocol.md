@@ -1293,6 +1293,15 @@ tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
 
+Repeated reads are served from the last committed workspace snapshot,
+periodically revalidated against the child's in-memory cache. A read never
+scans skill directories or reparses `SKILL.md` files. The child does verify
+that its extension sources are unchanged — one `readdir` of the extensions
+directory plus a `stat` per entry, the enablement file, and the store's
+activation state — and refreshes only when they moved, so an extension
+installed or toggled outside the daemon is still picked up on the next read.
+Safe and bare mode skip the check, matching their exclusion of extensions.
+
 ### `GET /workspace/providers`
 
 ```json
