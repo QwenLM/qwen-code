@@ -36,12 +36,19 @@ review comments, and it does not use `/loop`.
    `git diff --cached --binary`, a content fingerprint covering
    `git diff --binary HEAD` plus every untracked file, and
    `git status --porcelain=v1 --untracked-files=all`. If status is empty, finish
-   `NO_CHANGES` without starting a review.
-2. Launch exactly this command with `run_shell_command` and
+   `NO_CHANGES` without starting a review. If any untracked, non-ignored files
+   exist, list their paths and explain that review sends their contents to the
+   configured review models. Wait for the user's explicit confirmation before
+   continuing; a bare `/autofix` invocation is not consent to disclose
+   untracked contents. If the interaction mode cannot obtain confirmation, stop
+   `BLOCKED` without starting a review.
+2. The bundled review workflow requires a POSIX shell. On Windows, continue only
+   when the active shell is Git Bash/MSYS; otherwise stop `BLOCKED` with that
+   requirement. Launch exactly this command with `run_shell_command` and
    `is_background: true`:
 
    ```bash
-   "${QWEN_CODE_CLI:-qwen}" review run --effort high --json --quiet
+   QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --effort high --json --quiet
    ```
 
    Do not append `&` or set a tool timeout. While the status is `running`, do
@@ -52,7 +59,9 @@ review comments, and it does not use `/loop`.
    file with at least 30 seconds between checks and increase the interval while
    it remains `running`. At terminal status, read the complete background
    output file as the result JSON. This leaves the timeout to `review run`
-   itself instead of the shell tool's shorter foreground limit.
+   itself instead of the shell tool's shorter foreground limit. The explicit
+   `QWEN_SANDBOX=true` is mandatory: the nested headless review uses YOLO mode,
+   so it must not run project commands directly at host-process privilege.
 
    Do not pass a target or `--comment`. The omitted target is what makes review
    capture staged, unstaged, and untracked changes together.

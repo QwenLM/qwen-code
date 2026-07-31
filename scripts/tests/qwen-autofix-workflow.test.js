@@ -5218,10 +5218,20 @@ describe('qwen-autofix workflow', () => {
   it('uses the project skill for manual local convergence', () => {
     const skill = readAutofixSkill();
     const flatSkill = skill.replace(/\s+/g, ' ');
+    const launchIndex = skill.indexOf('Launch exactly this command');
 
     expect(skill).toContain('disable-model-invocation: true');
     expect(skill).toContain('Mode: local working tree');
-    expect(skill).toContain('review run --effort high --json --quiet');
+    expect(skill).toContain('explicit confirmation');
+    expect(skill).toContain('bare `/autofix` invocation is not consent');
+    expect(skill).toContain('Git Bash/MSYS');
+    expect(launchIndex).toBeGreaterThan(0);
+    expect(skill.indexOf('explicit confirmation')).toBeLessThan(launchIndex);
+    expect(skill.indexOf('Git Bash/MSYS')).toBeLessThan(launchIndex);
+    expect(skill.slice(0, launchIndex)).toContain('`BLOCKED`');
+    expect(skill).toContain(
+      'QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --effort high --json --quiet',
+    );
     expect(skill).toContain('is_background: true');
     expect(flatSkill).toContain('terminal task notification');
     expect(flatSkill).toContain(
@@ -5232,6 +5242,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(flatSkill).toContain('at least 30 seconds between checks');
     expect(flatSkill).toContain("shell tool's shorter foreground limit");
+    expect(flatSkill).toContain('nested headless review uses YOLO mode');
     expect(flatSkill).toContain('content fingerprint');
     expect(flatSkill).toContain('review-time or concurrent changes');
     expect(flatSkill).toContain(
