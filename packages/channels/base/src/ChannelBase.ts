@@ -218,6 +218,8 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  /** Return the active bridge recovery barrier, if recovery is in progress. */
+  bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
   observedContacts?: {
@@ -379,6 +381,7 @@ export abstract class ChannelBase {
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private readonly registerBridgeEvents: boolean;
+  private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
    * Per-session generation, bumped by /clear. A queued followup turn captures the
    * generation when it enqueues and bails if /clear bumped it before the turn ran,
@@ -804,6 +807,7 @@ export abstract class ChannelBase {
     );
     this.loopController = options?.loopController;
     this.observedContacts = options?.observedContacts;
+    this.bridgeRecovery = options?.bridgeRecovery;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
@@ -1461,6 +1465,7 @@ export abstract class ChannelBase {
       throw new Error(`Loop ${job.id} target is no longer authorized.`);
     }
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       job.target.senderId,
@@ -1611,6 +1616,7 @@ export abstract class ChannelBase {
         heldChunks.length = 0;
         this.onResponseBoundary(job.target.chatId, sessionId);
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
@@ -1778,6 +1784,7 @@ export abstract class ChannelBase {
   ): Promise<string | undefined> {
     const target = this.resolveWebhookTaskTarget(task);
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       target.senderId,
@@ -1906,6 +1913,7 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
 
@@ -4904,6 +4912,12 @@ export abstract class ChannelBase {
     this.preflightedEnvelopes.add(envelope);
   }
 
+  /** Wait until the currently active bridge recovery, if any, has completed. */
+  private async waitForBridgeRecovery(): Promise<void> {
+    const bridgeRecovery = this.bridgeRecovery?.();
+    if (bridgeRecovery) await bridgeRecovery;
+  }
+
   /**
    * Process an inbound message after preflight gates have passed.
    *
@@ -4912,6 +4926,7 @@ export abstract class ChannelBase {
    * already preflighted, such as during collect-buffer drain.
    */
   protected async processInbound(envelope: Envelope): Promise<void> {
+    await this.waitForBridgeRecovery();
     if (!this.preflightedEnvelopes.delete(envelope)) {
       throw new Error(
         'processInbound called without a successful preflightInbound check.',
@@ -5002,6 +5017,9 @@ export abstract class ChannelBase {
       }
     }
 
+    // Preprocessing above can await memory/command hooks; recovery may have
+    // started since the entry check. Recheck immediately before session routing.
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       envelope.senderId,
@@ -5487,6 +5505,9 @@ export abstract class ChannelBase {
         );
         streamer?.stop();
       };
+      // Queue wait and memory recall can outlive a bridge crash. Capture the
+      // bridge only after the latest recovery has restored session routing.
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);

@@ -21,11 +21,20 @@ export interface EventLoopLagMonitor {
 export interface EventLoopLagMonitorOptions {
   resolutionMs?: number;
   stallThresholdMs?: number;
+  /**
+   * Consider a long scheduling gap to be host suspension only when process CPU
+   * time stayed below this fraction of the gap. Default: 1%.
+   */
+  suspendCpuRatio?: number;
+  /** Minimum event-loop gap eligible for host-suspension filtering. */
+  suspendThresholdMs?: number;
   onNewMaxStall?: (maxMs: number) => void;
 }
 
 const DEFAULT_RESOLUTION_MS = 20;
 const DEFAULT_STALL_THRESHOLD_MS = 1_000;
+const DEFAULT_SUSPEND_THRESHOLD_MS = 10 * 60 * 1_000;
+const DEFAULT_SUSPEND_CPU_RATIO = 0.01;
 const NS_PER_MS = 1_000_000;
 
 export function startEventLoopLagMonitor(
@@ -39,16 +48,45 @@ export function startEventLoopLagMonitor(
     options.stallThresholdMs,
     DEFAULT_STALL_THRESHOLD_MS,
   );
+  const suspendThresholdMs = positiveFiniteOrDefault(
+    options.suspendThresholdMs,
+    DEFAULT_SUSPEND_THRESHOLD_MS,
+  );
+  const suspendCpuRatio = fractionOrDefault(
+    options.suspendCpuRatio,
+    DEFAULT_SUSPEND_CPU_RATIO,
+  );
   const histogram = monitorEventLoopDelay({ resolution: resolutionMs });
   histogram.enable();
 
   let disposed = false;
   let lastReportedMaxMs = 0;
+  let lastCheckTimeMs = Date.now();
+  let lastCpuUsage = safeCpuUsage();
   const readMaxMs = () => nsToMs(histogram.max);
-  const checkForNewMaxStall = () => {
-    if (disposed || !options.onNewMaxStall) return;
+  const checkHistogram = () => {
+    if (disposed) return;
+    const nowMs = Date.now();
+    const cpuUsage = safeCpuUsage();
+    const elapsedMs = Math.max(0, nowMs - lastCheckTimeMs);
     const maxMs = readMaxMs();
-    if (maxMs >= stallThresholdMs && maxMs > lastReportedMaxMs) {
+    const cpuRatio = calculateCpuRatio(lastCpuUsage, cpuUsage, elapsedMs);
+    lastCheckTimeMs = nowMs;
+    if (cpuUsage) lastCpuUsage = cpuUsage;
+    if (
+      maxMs >= suspendThresholdMs &&
+      cpuRatio !== undefined &&
+      cpuRatio <= suspendCpuRatio
+    ) {
+      histogram.reset();
+      lastReportedMaxMs = 0;
+      return;
+    }
+    if (
+      options.onNewMaxStall &&
+      maxMs >= stallThresholdMs &&
+      maxMs > lastReportedMaxMs
+    ) {
       lastReportedMaxMs = maxMs;
       try {
         options.onNewMaxStall(maxMs);
@@ -57,14 +95,12 @@ export function startEventLoopLagMonitor(
       }
     }
   };
-  const interval =
-    options.onNewMaxStall !== undefined
-      ? setInterval(checkForNewMaxStall, resolutionMs)
-      : undefined;
-  interval?.unref();
+  const interval = setInterval(checkHistogram, resolutionMs);
+  interval.unref();
 
   return {
     snapshot(): EventLoopLagSnapshot {
+      checkHistogram();
       return {
         meanMs: nsToMs(histogram.mean),
         p50Ms: nsToMs(histogram.percentile(50)),
@@ -75,12 +111,29 @@ export function startEventLoopLagMonitor(
     dispose(): void {
       if (disposed) return;
       disposed = true;
-      if (interval) {
-        clearInterval(interval);
-      }
+      clearInterval(interval);
       histogram.disable();
     },
   };
+}
+
+function safeCpuUsage(): NodeJS.CpuUsage | undefined {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return undefined;
+  }
+}
+
+function calculateCpuRatio(
+  previous: NodeJS.CpuUsage | undefined,
+  current: NodeJS.CpuUsage | undefined,
+  elapsedMs: number,
+): number | undefined {
+  if (!previous || !current || elapsedMs <= 0) return undefined;
+  const cpuMicroseconds =
+    current.user - previous.user + (current.system - previous.system);
+  return Math.max(0, cpuMicroseconds / (elapsedMs * 1_000));
 }
 
 function nsToMs(value: number): number {
@@ -89,6 +142,15 @@ function nsToMs(value: number): number {
 
 function positiveFiniteOrDefault(value: number | undefined, fallback: number) {
   return value !== undefined && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+function fractionOrDefault(value: number | undefined, fallback: number) {
+  return value !== undefined &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1
     ? value
     : fallback;
 }

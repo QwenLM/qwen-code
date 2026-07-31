@@ -775,7 +775,7 @@ describe('startCommand.handler', () => {
       const restartedBridge = mockAcpBridge.mock.results[1]!.value;
       expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
       expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
-      expect(mockChannelConnect).toHaveBeenCalledTimes(2);
+      expect(mockChannelConnect).toHaveBeenCalledTimes(1);
 
       const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
         ([eventName]) => eventName === 'sessionDied',
@@ -787,7 +787,7 @@ describe('startCommand.handler', () => {
       expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
-      expect(mockChannelConnect.mock.invocationCallOrder[1]).toBeLessThan(
+      expect(mockChannelConnect.mock.invocationCallOrder[0]).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
 
@@ -796,6 +796,145 @@ describe('startCommand.handler', () => {
       expect(mockRouterHandleSessionDied).toHaveBeenCalledWith(
         'dead-after-restart',
       );
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers a standalone bridge without reconnecting the channel adapter', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      expect(mockChannelConnect).toHaveBeenCalledTimes(1);
+      expect(mockChannelDisconnect).not.toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces duplicate standalone disconnect events into one recovery', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const firstRestart = disconnectedListener!();
+      const secondRestart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await Promise.all([firstRestart, secondRestart]);
+
+      expect(mockAcpBridge).toHaveBeenCalledTimes(2);
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the readiness gate blocked and coalesces replacement disconnects', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    let resolveFirstRestore:
+      | ((value: { failed: number; restored: number }) => void)
+      | undefined;
+    let resolveSecondRestore:
+      | ((value: { failed: number; restored: number }) => void)
+      | undefined;
+    mockRouterRestoreSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirstRestore = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecondRestore = resolve;
+          }),
+      );
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const options = mockCreateChannel.mock.calls[0]?.[3] as
+        | ChannelBaseOptions
+        | undefined;
+      const firstDisconnect = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => void) | undefined;
+      expect(firstDisconnect).toBeDefined();
+
+      vi.useFakeTimers();
+      firstDisconnect!();
+      const recoveryGate = options?.bridgeRecovery?.();
+      let gateReleased = false;
+      void recoveryGate?.then(() => {
+        gateReleased = true;
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() =>
+        expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1),
+      );
+
+      const disconnectListeners = mockBridgeOn.mock.calls.filter(
+        ([eventName]) => eventName === 'disconnected',
+      );
+      expect(disconnectListeners).toHaveLength(2);
+      const replacementDisconnect = disconnectListeners[1]![1] as () => void;
+      replacementDisconnect();
+      replacementDisconnect();
+
+      resolveFirstRestore!({ failed: 0, restored: 0 });
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() =>
+        expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(2),
+      );
+
+      expect(gateReleased).toBe(false);
+      expect(mockAcpBridge).toHaveBeenCalledTimes(3);
+
+      resolveSecondRestore!({ failed: 0, restored: 0 });
+      await vi.waitFor(() => expect(gateReleased).toBe(true));
+
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(2);
     } finally {
       processOnSpy.mockRestore();
       vi.useRealTimers();
@@ -1059,6 +1198,63 @@ describe('startCommand.handler', () => {
         ),
       ).toHaveLength(2);
       expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+  it('recovers a shared bridge without reconnecting channel adapters', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    const firstChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    const secondChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+      sessionScope: 'user',
+    }));
+    mockCreateChannel
+      .mockReturnValueOnce(firstChannel)
+      .mockReturnValueOnce(secondChannel);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      expect(firstChannel.connect).toHaveBeenCalledTimes(1);
+      expect(secondChannel.connect).toHaveBeenCalledTimes(1);
+      expect(firstChannel.disconnect).not.toHaveBeenCalled();
+      expect(secondChannel.disconnect).not.toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
     } finally {
       processOnSpy.mockRestore();
       vi.useRealTimers();

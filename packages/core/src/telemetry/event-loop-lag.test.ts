@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const histogram = vi.hoisted(() => ({
   enable: vi.fn(),
   disable: vi.fn(),
+  reset: vi.fn(),
   mean: Number.NaN,
   max: Number.NaN,
   percentile: vi.fn((_percentile: number) => Number.NaN),
@@ -18,6 +19,8 @@ vi.mock('node:perf_hooks', () => ({
   monitorEventLoopDelay: vi.fn(() => histogram),
 }));
 
+const cpuUsage = vi.hoisted(() => vi.fn());
+
 describe('startEventLoopLagMonitor', () => {
   let startEventLoopLagMonitor: typeof import('./event-loop-lag.js').startEventLoopLagMonitor;
 
@@ -25,6 +28,11 @@ describe('startEventLoopLagMonitor', () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.useFakeTimers();
+    cpuUsage.mockReset();
+    cpuUsage
+      .mockReturnValueOnce({ user: 0, system: 0 })
+      .mockReturnValue({ user: 0, system: 0 });
+    vi.spyOn(process, 'cpuUsage').mockImplementation(cpuUsage);
     histogram.mean = Number.NaN;
     histogram.max = Number.NaN;
     histogram.percentile.mockReturnValue(Number.NaN);
@@ -104,6 +112,167 @@ describe('startEventLoopLagMonitor', () => {
 
     await vi.advanceTimersByTimeAsync(10);
     expect(onNewMaxStall).toHaveBeenCalledWith(15);
+
+    monitor.dispose();
+  });
+
+  it('resets suspended samples without reporting them as stalls', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 15_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 10_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+    expect(onNewMaxStall).not.toHaveBeenCalled();
+
+    monitor.dispose();
+  });
+
+  it('resets suspended samples without a stall callback', () => {
+    histogram.mean = 15_000_000_000;
+    histogram.max = 15_000_000_000;
+    histogram.percentile.mockReturnValue(15_000_000_000);
+    histogram.reset.mockImplementation(() => {
+      histogram.mean = Number.NaN;
+      histogram.max = Number.NaN;
+      histogram.percentile.mockReturnValue(Number.NaN);
+    });
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      suspendThresholdMs: 10_000,
+    });
+
+    vi.setSystemTime(Date.now() + 10_000);
+    expect(monitor.snapshot()).toEqual({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    });
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+
+    monitor.dispose();
+  });
+
+  it('reports lower stalls after resetting a suspended sample', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 15_000_000_000;
+    histogram.reset.mockImplementation(() => {
+      histogram.max = Number.NaN;
+    });
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 10_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    histogram.max = 5_000_000_000;
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+    expect(onNewMaxStall).toHaveBeenCalledOnce();
+    expect(onNewMaxStall).toHaveBeenCalledWith(5_000);
+
+    monitor.dispose();
+  });
+
+  it('reports a real stall below the suspend threshold', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 5_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 10_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).not.toHaveBeenCalled();
+    expect(onNewMaxStall).toHaveBeenCalledWith(5_000);
+
+    monitor.dispose();
+  });
+
+  it('reports a stall just below the default suspend threshold', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 599_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).not.toHaveBeenCalled();
+    expect(onNewMaxStall).toHaveBeenCalledWith(599_000);
+
+    monitor.dispose();
+  });
+
+  it('resets a low-CPU sample at the default suspend threshold', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 600_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+    expect(onNewMaxStall).not.toHaveBeenCalled();
+
+    monitor.dispose();
+  });
+
+  it('reports a long active stall when CPU time advanced', async () => {
+    const onNewMaxStall = vi.fn();
+    cpuUsage
+      .mockReset()
+      .mockReturnValueOnce({ user: 0, system: 0 })
+      .mockReturnValue({ user: 20_000_000, system: 0 });
+    histogram.max = 600_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).not.toHaveBeenCalled();
+    expect(onNewMaxStall).toHaveBeenCalledWith(600_000);
+
+    monitor.dispose();
+  });
+
+  it('reports rather than suppressing when CPU usage is unavailable', async () => {
+    const onNewMaxStall = vi.fn();
+    cpuUsage.mockImplementation(() => {
+      throw new Error('cpu accounting unavailable');
+    });
+    histogram.max = 600_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      onNewMaxStall,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).not.toHaveBeenCalled();
+    expect(onNewMaxStall).toHaveBeenCalledWith(600_000);
 
     monitor.dispose();
   });

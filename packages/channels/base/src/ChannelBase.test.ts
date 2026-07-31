@@ -9318,7 +9318,9 @@ describe('ChannelBase', () => {
       const firstCancel = ch.handleInbound(envelope({ text: '/cancel' }));
       const secondCancel = ch.handleInbound(envelope({ text: '/cancel' }));
 
-      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledTimes(1),
+      );
       resolveCancel();
       await Promise.all([firstCancel, secondCancel]);
       resolvePrompt('late response');
@@ -15910,7 +15912,7 @@ describe('ChannelBase', () => {
           title: 'CI failed again',
         });
         secondRun.catch(() => undefined);
-        await Promise.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
         (
           ch as unknown as {
             sessionGenerations: Map<string, number>;
@@ -16012,6 +16014,197 @@ describe('ChannelBase', () => {
           .calls[1][1] as string;
         expect(collectedPrompt).toContain('follow-up while webhook runs');
       });
+
+      it('rechecks bridge recovery before a webhook prompt starts', async () => {
+        const recoveryState: { current?: Promise<void> } = {};
+        let releaseRecovery: (() => void) | undefined;
+        let releaseMemoryRead: (() => void) | undefined;
+        const memoryRead = new Promise<string>((resolve) => {
+          releaseMemoryRead = () => resolve('');
+        });
+        const channelMemory = createChannelMemory();
+        channelMemory.readChannelMemory.mockReturnValue(memoryRead);
+        const ch = createChannel(
+          { approvalMode: 'yolo', webhooks },
+          { bridgeRecovery: () => recoveryState.current, channelMemory },
+        );
+        ch.proactiveSupported = true;
+
+        const run = ch.runWebhookTask(webhookTask);
+        await vi.waitFor(() =>
+          expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+        );
+        recoveryState.current = new Promise<void>((resolve) => {
+          releaseRecovery = resolve;
+        });
+        releaseMemoryRead!();
+        await Promise.resolve();
+
+        expect(bridge.prompt).not.toHaveBeenCalled();
+
+        releaseRecovery!();
+        await expect(run).resolves.toBe('agent response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('waits for bridge recovery before resolving an inbound session', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+
+      const inbound = ch.handleInbound(envelope());
+      await Promise.resolve();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for bridge recovery after adapter-specific preflight', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+
+      const inbound = ch.processAfterAdapterPreflight(envelope());
+      await Promise.resolve();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks bridge recovery after inbound preprocessing has started', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let releaseContactRecord: (() => void) | undefined;
+      const contactRecord = new Promise<void>((resolve) => {
+        releaseContactRecord = resolve;
+      });
+      const ch = createChannel(
+        {},
+        {
+          bridgeRecovery: () => recoveryState.current,
+          observedContacts: {
+            record: vi.fn().mockImplementation(() => contactRecord),
+          },
+        },
+      );
+
+      const inbound = ch.handleInbound(envelope());
+      await vi.waitFor(() => expect(bridge.newSession).not.toHaveBeenCalled());
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      releaseContactRecord!();
+      await Promise.resolve();
+
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseRecovery!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for bridge recovery before running a loop prompt', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-recovery-gate',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat-1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await Promise.resolve();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await expect(loopRun).resolves.toBe('agent response');
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks bridge recovery before a loop prompt starts', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let releaseMemoryRead: (() => void) | undefined;
+      const memoryRead = new Promise<string>((resolve) => {
+        releaseMemoryRead = () => resolve('');
+      });
+      const channelMemory = createChannelMemory();
+      channelMemory.readChannelMemory.mockReturnValue(memoryRead);
+      const ch = createChannel(
+        {},
+        { bridgeRecovery: () => recoveryState.current, channelMemory },
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-late-recovery-gate',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat-1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      releaseMemoryRead!();
+      await Promise.resolve();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseRecovery!();
+      await expect(loopRun).resolves.toBe('agent response');
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {
@@ -17253,7 +17446,7 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       });
-      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
       expect(bridge.prompt).toHaveBeenCalledOnce();
       (
         ch as unknown as { sessionGenerations: Map<string, number> }
