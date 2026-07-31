@@ -1208,6 +1208,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('pa"ss');
   });
 
+  it.each([
+    ['?k=v', 'query'],
+    ['#f', 'fragment'],
+  ])(
+    'keeps the host when a pathless URL carries credentials and its %s holds an @',
+    async (tail) => {
+      // The counterpart to the prose-email case above, and the one that pins
+      // this file's notion of "host" to `sanitizeProviderBaseUrl`'s. A pathless
+      // URL is bounded by `?` or `#` as well as by `/`; drop either from
+      // `findAuthorityEnd` in utils/acpModelUtils.ts and the later `@` becomes
+      // the userinfo terminator, rewriting the host to `evil.com`. The
+      // credentials are still stripped either way, so only an assertion on the
+      // surviving host catches it.
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = `Cannot reach https://user:secret@host.example:8443${tail}@evil.com — retry`;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      expect(result.errors?.[0]?.error).toBe(
+        `Cannot reach https://host.example:8443${tail}@evil.com — retry`,
+      );
+      expect(JSON.stringify(result)).not.toContain('secret');
+    },
+  );
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),

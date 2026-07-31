@@ -354,6 +354,12 @@ const PORT_END = String.raw`[,.;:!?)\]}]`;
  * An unbalanced closer is a fourth: `:8443(ECONNREFUSED) — contact a@b.com` has
  * no opening paren before the URL, so nothing distinguishes it from a password
  * beginning `123(`. Wrapped in a balanced pair it is handled; bare it is not.
+ *
+ * This grammar decides only how much of the message is URL; the slice is then
+ * handed to `sanitizeProviderBaseUrl` in `utils/acpModelUtils.ts`, which locates
+ * the userinfo within it. The two must agree on where an authority ends, and
+ * neither can see the other — see that function's comment for the host rewrite
+ * that a disagreement produces.
  */
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
   // `\x60` is the backtick, spelled as an escape because a literal one cannot

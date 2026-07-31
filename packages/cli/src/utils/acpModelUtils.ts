@@ -161,6 +161,19 @@ export function getCurrentAcpModelId(
     : formatAcpModelId(modelId, authType);
 }
 
+/**
+ * Strips the userinfo from a URL, scoping the search to the authority.
+ *
+ * `serve/workspace-providers-status.ts` re-implements a parallel host grammar
+ * (`CREDENTIAL_PREFIX_PATTERN` / `HOST_AFTER_USERINFO`) to decide how much of a
+ * free-text message is URL, then feeds that slice here — so where this function
+ * thinks the authority ends is load-bearing for a caller in another directory.
+ * Narrowing `findAuthorityEnd` still strips the credentials, but it rewrites the
+ * host from whatever follows: `https://u:p@host.example:8443?k=v@evil.com`
+ * reports `evil.com`. Both suites pass under that change; the two
+ * `holds an @` cases in `serve/workspace-providers-status.test.ts` are what
+ * catch it.
+ */
 export function sanitizeProviderBaseUrl(baseUrl: string): string {
   const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
   if (!scheme) {
