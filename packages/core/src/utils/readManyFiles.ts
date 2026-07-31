@@ -112,6 +112,14 @@ const DEFAULT_OUTPUT_HEADER = '\n--- Content from referenced files ---';
 const DEFAULT_OUTPUT_TERMINATOR = '\n--- End of content ---';
 
 /**
+ * Upper bound on the size of a file we will snapshot-copy for a validated
+ * read. Files larger than this are always rejected by the downstream
+ * `processSingleFileContent` inline-data caps (100 MB for images, ≤ 10 MB
+ * for other binary types), so copying them to a temp file is wasted I/O.
+ */
+const SNAPSHOT_MAX_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+/**
  * Reads content from multiple files and directories specified by paths.
  *
  * For directories, returns the folder structure.
@@ -221,6 +229,8 @@ export async function readManyFiles(
               displayPath,
               snapshot?.stats,
               validateAfterRead,
+              undefined,
+              fullPath,
             );
           } finally {
             await snapshot?.cleanup();
@@ -291,6 +301,7 @@ async function readValidatedTextFileContent(
         textFileStats: stats,
         textFileMaxScanBytes: maxScanBytes,
       },
+      filePath,
     );
   } finally {
     await source.close();
@@ -345,6 +356,9 @@ async function snapshotValidatedFile(
         stats.dev !== expected.dev ||
         stats.ino !== expected.ino
       ) {
+        return undefined;
+      }
+      if (stats.size > SNAPSHOT_MAX_SIZE_BYTES) {
         return undefined;
       }
 
@@ -453,6 +467,7 @@ async function readFileContent(
     ProcessSingleFileContentOptions,
     'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes'
   >,
+  canonicalPath?: string,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
@@ -493,8 +508,10 @@ async function readFileContent(
 
     // Record the successful read in the session FileReadCache so a later
     // Edit / WriteFile on an `@`-attached file passes prior-read enforcement
-    // without a redundant read_file (issue #6289).
-    recordAttachedFileRead(config, displayPath, fileReadResult);
+    // without a redundant read_file (issue #6289). Key by the canonical
+    // (resolved) path — not the display alias — because Edit / WriteFile
+    // looks up the cache by canonical path.
+    recordAttachedFileRead(config, canonicalPath ?? filePath, fileReadResult);
 
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';
