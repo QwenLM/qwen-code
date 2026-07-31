@@ -551,7 +551,6 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.attributes).toMatchObject({
       model: 'test-model',
       prompt_id: 'prompt-span',
-      'llm_request.stream': false,
     });
     expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
@@ -632,7 +631,7 @@ describe('LoggingContentGenerator', () => {
     });
   });
 
-  it('marks non-stream LLM span with llm_request.stream=false', async () => {
+  it('omits standard stream attributes from non-stream LLM spans', async () => {
     const wrapped = createWrappedGenerator(
       vi
         .fn()
@@ -654,8 +653,8 @@ describe('LoggingContentGenerator', () => {
     await generator.generateContent(request, 'prompt-stream-attr');
 
     const spanRecord = getGenerateContentSpanRecord();
-    expect(spanRecord.attributes['llm_request.stream']).toBe(false);
     expect(spanRecord.attributes['gen_ai.request.stream']).toBeUndefined();
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
     expect(
       spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
     ).toBeUndefined();

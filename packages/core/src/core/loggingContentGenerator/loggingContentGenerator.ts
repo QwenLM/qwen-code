@@ -307,11 +307,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       providerName: this.genAiProviderName,
       outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
     });
-    try {
-      llmSpan.setAttribute('llm_request.stream', false);
-    } catch {
-      /* best-effort */
-    }
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
@@ -525,14 +520,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
     const { stream, requestIssuedAtMs } = streamRequest;
 
-    let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    if (this.openaiLogger) {
-      try {
-        resolvedRequest = await session.resolve(req);
-      } catch (loggingError) {
-        debugLogger.warn('Failed to resolve OpenAI request:', loggingError);
-      }
-    }
+    const openaiRequestPromise = this.openaiLogger
+      ? session.resolve(req).catch((loggingError: unknown) => {
+          debugLogger.warn('Failed to resolve OpenAI request:', loggingError);
+          return undefined;
+        })
+      : undefined;
 
     return context.with(spanContext, () =>
       this.loggingStreamWrapper(
@@ -541,7 +534,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         requestIssuedAtMs,
         userPromptId,
         req.model,
-        resolvedRequest,
+        openaiRequestPromise,
         llmSpan,
         spanContext,
         req.config?.abortSignal,
@@ -579,7 +572,9 @@ export class LoggingContentGenerator implements ContentGenerator {
     requestIssuedAtMs: number,
     userPromptId: string,
     model: string,
-    openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
+    openaiRequestPromise?: Promise<
+      OpenAI.Chat.ChatCompletionCreateParams | undefined
+    >,
     span?: Span,
     spanContext?: Context,
     abortSignal?: AbortSignal,
@@ -685,10 +680,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (!firstChunkObserved && !spanEndedByTimeout) {
           firstChunkObserved = true;
           try {
-            span?.setAttribute(
-              'gen_ai.response.time_to_first_chunk',
-              Math.max(0, performance.now() - requestIssuedAtMs) / 1000,
-            );
+            const timeToFirstChunk =
+              Math.max(0, performance.now() - requestIssuedAtMs) / 1000;
+            if (Number.isFinite(timeToFirstChunk)) {
+              span?.setAttribute(
+                'gen_ai.response.time_to_first_chunk',
+                timeToFirstChunk,
+              );
+            }
           } catch {
             // OTel errors must not interrupt the consumer.
           }
@@ -776,6 +775,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             ttftMs,
           ),
         );
+        const openaiRequest = await openaiRequestPromise;
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
             openaiRequest,
@@ -804,6 +804,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
           ),
         );
+        const openaiRequest = await openaiRequestPromise;
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
             openaiRequest,

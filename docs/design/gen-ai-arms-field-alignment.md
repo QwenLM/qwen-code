@@ -44,25 +44,24 @@ compatibility unless explicitly listed for removal below. Exact-equivalent
 private aliases and invalid GenAI aliases are removed without a dual-write
 period:
 
-| Removed attribute                                      | Replacement                                                                                                                                            |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| LLM `qwen-code.model`                                  | `gen_ai.request.model`; interaction spans continue using `qwen-code.model` because they are not GenAI inference spans                                  |
-| LLM `response_id`                                      | `gen_ai.response.id`; API response/error logs retain their existing `response_id` schema                                                               |
-| LLM `input_tokens`                                     | `gen_ai.usage.input_tokens` when the provider reports an input breakdown                                                                               |
-| LLM `output_tokens`                                    | `gen_ai.usage.output_tokens` when the provider reports an output breakdown                                                                             |
-| LLM `cached_input_tokens`                              | `gen_ai.usage.cache_read.input_tokens` when the provider reports cache reads                                                                           |
-| `qwen-code.tool` Span `tool.name`                      | `gen_ai.tool.name`; blocked-on-user and hook spans continue using `tool.name`                                                                          |
-| `gen_ai.usage.cached_tokens`                           | `gen_ai.usage.cache_read.input_tokens` when the provider reports cache reads                                                                           |
-| LLM `llm_request.stream=true`                          | `gen_ai.request.stream=true`; non-streaming spans retain `llm_request.stream=false` for compatibility                                                  |
-| LLM Span `ttft_ms`                                     | No exact replacement: use `gen_ai.response.time_to_first_chunk` for first-chunk latency or API response log `ttft_ms` for first-visible-output latency |
-| `gen_ai.server.time_to_first_token`                    | Not emitted; it is not equivalent to the standard first-chunk attribute                                                                                |
-| `gen_ai.usage.reasoning_tokens`                        | No ARMS/GenAI common attribute in this baseline; continue querying private `thoughts_token_count`                                                      |
-| LLM `system_prompt*`                                   | `gen_ai.system_instructions`; OpenAI system/developer messages are represented in `gen_ai.input.messages`                                              |
-| LLM `tools`, `tool_schema` events                      | `gen_ai.tool.definitions`                                                                                                                              |
-| LLM `response.model_output*`                           | `gen_ai.output.messages`                                                                                                                               |
-| Tool `tool_input*`                                     | `gen_ai.tool.call.arguments`                                                                                                                           |
-| Tool `tool_result*`                                    | `gen_ai.tool.call.result`                                                                                                                              |
-| `tools_count`, hash/preview/length/truncation metadata | No standard equivalent; removed                                                                                                                        |
+| Removed attribute                                      | Replacement                                                                                                           |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| LLM `qwen-code.model`                                  | `gen_ai.request.model`; interaction spans continue using `qwen-code.model` because they are not GenAI inference spans |
+| LLM `response_id`                                      | `gen_ai.response.id`; API response/error logs retain their existing `response_id` schema                              |
+| LLM `input_tokens`                                     | `gen_ai.usage.input_tokens` when the provider reports an input breakdown                                              |
+| LLM `output_tokens`                                    | `gen_ai.usage.output_tokens` when the provider reports an output breakdown                                            |
+| LLM `cached_input_tokens`                              | `gen_ai.usage.cache_read.input_tokens` when the provider reports cache reads                                          |
+| `qwen-code.tool` Span `tool.name`                      | `gen_ai.tool.name`; blocked-on-user and hook spans continue using `tool.name`                                         |
+| `gen_ai.usage.cached_tokens`                           | `gen_ai.usage.cache_read.input_tokens` when the provider reports cache reads                                          |
+| LLM `llm_request.stream`                               | `gen_ai.request.stream`; streaming emits `true`, non-streaming omits the attribute per the semantic convention        |
+| `gen_ai.server.time_to_first_token`                    | Not emitted; it is not equivalent to the standard first-chunk attribute                                               |
+| `gen_ai.usage.reasoning_tokens`                        | No ARMS/GenAI common attribute in this baseline; continue querying private `thoughts_token_count`                     |
+| LLM `system_prompt*`                                   | `gen_ai.system_instructions`; OpenAI system/developer messages are represented in `gen_ai.input.messages`             |
+| LLM `tools`, `tool_schema` events                      | `gen_ai.tool.definitions`                                                                                             |
+| LLM `response.model_output*`                           | `gen_ai.output.messages`                                                                                              |
+| Tool `tool_input*`                                     | `gen_ai.tool.call.arguments`                                                                                          |
+| Tool `tool_result*`                                    | `gen_ai.tool.call.result`                                                                                             |
+| `tools_count`, hash/preview/length/truncation metadata | No standard equivalent; removed                                                                                       |
 
 `gen_ai.response.finish_reasons` now preserves the provider's raw strings for
 all candidates instead of the previous Gemini-normalized values. Existing
@@ -72,10 +71,13 @@ provider values, such as `stop`, `length`, `tool_calls`, or `end_turn`.
 `gen_ai.response.time_to_first_chunk` uses a monotonic timer from immediately
 before the wrapped provider call to the first normalized
 `GenerateContentResponse` observed by `LoggingContentGenerator`. Provider
-adapters may filter or merge raw protocol frames, so this is not guaranteed to
-equal raw SSE first-frame latency. Metadata-only and usage-only normalized
-responses count as chunks. The attribute is retained if the stream later
-fails, is aborted, or times out, and is omitted when no chunk arrives.
+adapters may filter or merge raw protocol frames before they reach the logging
+wrapper, so frames an adapter drops (for example, the OpenAI pipeline's
+empty-response filter) are excluded from this measurement and the recorded
+value may be later than the true first network frame. Metadata-only and
+usage-only normalized responses that survive adapter filtering count as chunks.
+The attribute is retained if the stream later fails, is aborted, or times out,
+and is omitted when no chunk arrives.
 
 The internal `ttftMs` timer remains first-user-visible-output latency and
 continues driving `ApiResponseEvent.ttft_ms`, `sampling_ms`,
@@ -84,12 +86,10 @@ continues driving `ApiResponseEvent.ttft_ms`, `sampling_ms`,
 `sampling_ms`.
 
 Existing streaming-Span queries should replace
-`llm_request.stream=true` with `gen_ai.request.stream=true`. Queries that
-replace Span `ttft_ms` with `gen_ai.response.time_to_first_chunk` must multiply
-the standard value by 1000 when they still need milliseconds, and must account
-for the semantic change from first user-visible output to first normalized
-chunk. Queries that require the old first-visible-output meaning should read
-`ApiResponseEvent.ttft_ms` instead.
+`llm_request.stream=true` with `gen_ai.request.stream=true`. Span `ttft_ms`
+remains available for first-user-visible-output latency;
+`gen_ai.response.time_to_first_chunk` is an independent standard attribute
+measuring first normalized chunk latency in seconds.
 
 ## Provider and operation resolution
 
@@ -241,7 +241,8 @@ deferred until their trusted caller identity can be wired end to end.
 - `seed` and `top_k` have incompatible ARMS and GenAI types in the baselines.
 - Embedding needs a correct requested-model lifecycle before tracing.
 - ARMS time-to-first-token and OpenTelemetry time-to-first-chunk differ in name,
-  unit, and meaning. Qwen Code emits only the OpenTelemetry field and does not
-  promise automatic population of an ARMS first-token dashboard.
+  unit, and meaning. Qwen Code emits the standard
+  `gen_ai.response.time_to_first_chunk` alongside the private `ttft_ms` and
+  does not promise automatic population of an ARMS first-token dashboard.
 - Full GenAI span naming, CLIENT span kind, and logical retry topology are a
   separate compliance project.

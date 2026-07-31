@@ -734,6 +734,9 @@ export function endLLMRequestSpan(
         endAttributes['gen_ai.usage.cache_creation.input_tokens'] =
           metadata.cacheCreationInputTokens;
       }
+      if (metadata.ttftMs !== undefined) {
+        endAttributes['ttft_ms'] = metadata.ttftMs;
+      }
       if (metadata.requestSetupMs !== undefined) {
         endAttributes['request_setup_ms'] = metadata.requestSetupMs;
       }
