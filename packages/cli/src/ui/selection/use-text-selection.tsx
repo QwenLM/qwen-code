@@ -300,8 +300,9 @@ export function TextSelectionController(
         lastClickRef.current = null;
         // A scroll under the drag invalidates coordinates in B1.
         if (
+          !isFooterSelectionRef.current &&
           propsRef.current.getScrollState().scrollTop !==
-          dragScrollTopRef.current
+            dragScrollTopRef.current
         ) {
           clearSelection();
           return;
@@ -373,8 +374,9 @@ export function TextSelectionController(
         ? (propsRef.current.getFooterRect?.() ?? null)
         : propsRef.current.getViewportRect();
       if (
-        scrollTop !== baselineScrollTopRef.current ||
-        scrollHeight !== baselineScrollHeightRef.current ||
+        (!isFooterSelectionRef.current &&
+          (scrollTop !== baselineScrollTopRef.current ||
+            scrollHeight !== baselineScrollHeightRef.current)) ||
         !sameViewportRect(baselineViewportRectRef.current, viewportRect) ||
         !sameViewportContent(baselineFrameRef.current, frame, viewportRect)
       ) {
