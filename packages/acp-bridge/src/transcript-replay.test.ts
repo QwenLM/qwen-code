@@ -338,6 +338,7 @@ describe('createTranscriptReplayMachine', () => {
           },
           systemPayload: {
             displayText: 'my prompt',
+            hookContext: 'injected hook context',
           },
         }),
       );
@@ -379,6 +380,7 @@ describe('createTranscriptReplayMachine', () => {
           },
           systemPayload: {
             displayText: 'my image prompt',
+            hookContext: 'injected hook context',
           },
         }),
       );
@@ -415,6 +417,88 @@ describe('createTranscriptReplayMachine', () => {
         {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
+    it('does not trust bare displayText on plain user records', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-bare-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'model-bound prompt' },
+              { text: 'legacy bare hook context' },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'notification-style label',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'model-bound prompt' },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'legacy bare hook context' },
+        },
+      ]);
+      expect(projected).toHaveLength(3);
+    });
+
+    it('treats paired empty displayText as authoritative', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-empty-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'injected hook context',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
         },
       ]);
       expect(projected).toHaveLength(1);

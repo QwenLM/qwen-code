@@ -20,13 +20,6 @@ export const USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG =
   '</qwen:user-prompt-submit-context>';
 
 /**
- * Wraps sanitized UserPromptSubmit additional context in the reserved tag.
- */
-export function wrapUserPromptSubmitContext(context: string): string {
-  return `${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG}\n${context}\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG}`;
-}
-
-/**
  * Returns true when `text` is, in its entirety, a wrapped UserPromptSubmit
  * context block (allowing surrounding whitespace).
  *

@@ -9796,7 +9796,10 @@ Other open files:
         expect(recordUserMessage).toHaveBeenCalledWith(
           [{ text: 'my prompt' }, { text: taggedContext }],
           undefined,
-          { displayText: 'my prompt' },
+          {
+            displayText: 'my prompt',
+            hookContext: 'extra hook context',
+          },
         );
       });
 

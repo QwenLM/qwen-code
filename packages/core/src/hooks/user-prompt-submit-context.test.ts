@@ -6,12 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
 } from './user-prompt-submit-context.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 describe('wrapUserPromptSubmitContext', () => {
   it('wraps context between the open and close tags', () => {
