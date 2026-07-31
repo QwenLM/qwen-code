@@ -404,7 +404,7 @@ export function ToolApproval({
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);
-          const label = i18nKey ? t(i18nKey) : option.label;
+          const label = option.label || (i18nKey ? t(i18nKey) : option.label);
           return (
             <button
               key={option.id}

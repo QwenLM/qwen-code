@@ -90,6 +90,12 @@ function optionButtons(): HTMLButtonElement[] {
   );
 }
 
+function optionLabels(): (string | null | undefined)[] {
+  return optionButtons().map(
+    (o) => o.querySelector('span:last-child')?.textContent,
+  );
+}
+
 function pressKey(target: Element, key: string): void {
   act(() => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
@@ -176,12 +182,9 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
   });
 
-  it.each([
-    ['en' as const, 'Yes, allow once', 'Allow once and switch to Default mode'],
-    ['zh-CN' as const, '是，允许一次', '允许一次并切换到默认模式'],
-  ])(
+  it.each([['en' as const], ['zh-CN' as const]])(
     'distinguishes the switch-to-default approval in %s',
-    (language, allowOnceLabel, switchLabel) => {
+    (language) => {
       render(
         undefined,
         {
@@ -202,10 +205,11 @@ describe('ToolApproval accessibility', () => {
         language,
       );
 
-      expect(optionButtons().map((option) => option.textContent)).toEqual([
-        expect.stringContaining(allowOnceLabel),
-        expect.stringContaining(switchLabel),
-      ]);
+      const labels = optionLabels();
+      expect(labels).toContain('Allow');
+      expect(labels).toContain(
+        'Switch to Default Mode and allow once (recommended)',
+      );
 
       act(() => {
         optionButtons()[1]!.click();
@@ -323,11 +327,11 @@ describe('ToolApproval accessibility', () => {
     render(undefined, dupRequest);
     const opts = optionButtons();
     expect(opts).toHaveLength(2);
-    expect(opts[0]!.textContent).toContain('Reject');
-    expect(opts[1]!.textContent).toContain('Yes, allow once');
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('reject');
+    expect(opts[1]!.getAttribute('data-option-id')).toBe('proceed_once');
   });
 
-  it('preserves distinct allow_once options with different ids', () => {
+  it('preserves distinct allow_once options with different ids and labels', () => {
     const planRequest: PermissionRequest = {
       id: 'req-plan',
       content: [],
@@ -352,5 +356,8 @@ describe('ToolApproval accessibility', () => {
     expect(ids).toContain('restore_previous');
     expect(ids).toContain('proceed_once');
     expect(ids).toContain('reject');
+    const labels = optionLabels();
+    expect(labels).toContain('Yes, restore previous mode');
+    expect(labels).toContain('Yes, and manually approve edits');
   });
 });
