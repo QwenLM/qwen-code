@@ -538,7 +538,7 @@ Response shape:
     "sessionShellCommandEnabled": false
   },
   "limits": {
-    "maxSessions": 20,
+    "maxSessions": 32,
     "maxTotalSessions": null,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
@@ -915,8 +915,8 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
   ],
   "limits": {
     "maxPendingPromptsPerSession": 5,
-    "maxSessionsPerWorkspace": 20,
-    "maxTotalSessions": 40
+    "maxSessionsPerWorkspace": 32,
+    "maxTotalSessions": 64
   },
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/primary-workspace",

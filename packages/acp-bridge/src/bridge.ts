@@ -1347,7 +1347,7 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
 // (the analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
@@ -1380,7 +1380,7 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
-  // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
+  // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
