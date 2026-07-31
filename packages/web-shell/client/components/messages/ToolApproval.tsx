@@ -161,6 +161,18 @@ function getOptionI18nKey(
   return undefined;
 }
 
+function deduplicateByLabel(
+  options: PermissionRequest['options'],
+): PermissionRequest['options'] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    const key = getOptionI18nKey(option) ?? option.label;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function getOptionClassName(
   option: PermissionRequest['options'][number],
 ): string {
@@ -180,11 +192,13 @@ export function ToolApproval({
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
-    () => orderPermissionOptions(request.options),
+    () => deduplicateByLabel(orderPermissionOptions(request.options)),
     [request.options],
   );
   const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(orderPermissionOptions(request.options)),
+    getSafeDefaultIndex(
+      deduplicateByLabel(orderPermissionOptions(request.options)),
+    ),
   );
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -199,7 +213,7 @@ export function ToolApproval({
 
   useEffect(() => {
     const safeDefaultIndex = getSafeDefaultIndex(
-      orderPermissionOptions(requestRef.current.options),
+      deduplicateByLabel(orderPermissionOptions(requestRef.current.options)),
     );
     submittedRef.current = false;
     selectedRef.current = safeDefaultIndex;
@@ -253,7 +267,9 @@ export function ToolApproval({
     focusOption(
       requestChanged
         ? getSafeDefaultIndex(
-            orderPermissionOptions(requestRef.current.options),
+            deduplicateByLabel(
+              orderPermissionOptions(requestRef.current.options),
+            ),
           )
         : selectedRef.current,
     );

@@ -309,4 +309,26 @@ describe('ToolApproval accessibility', () => {
     // we assert the handler leaves the event un-cancelled instead.)
     expect(event.defaultPrevented).toBe(false);
   });
+
+  it('deduplicates options with the same display label', () => {
+    const dupRequest: PermissionRequest = {
+      id: 'req-dup',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Yes, allow once', kind: 'allow_once' },
+        {
+          id: 'proceed_once_dup',
+          label: 'Yes, allow once',
+          kind: 'allow_once',
+        },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, dupRequest);
+    const opts = optionButtons();
+    // Two allow_once options with the same label should collapse to one button.
+    expect(opts).toHaveLength(2);
+    expect(opts[0]!.textContent).toContain('Reject');
+    expect(opts[1]!.textContent).toContain('Yes, allow once');
+  });
 });
