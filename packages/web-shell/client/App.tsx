@@ -5764,8 +5764,10 @@ export function App({
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
+  const autoRecapVersionRef = useRef(0);
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
+    autoRecapVersionRef.current += 1;
   }, [connection.sessionId]);
   useEffect(() => {
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
@@ -5785,8 +5787,17 @@ export function App({
       if (currentCount - lastRecapBlockCountRef.current < MIN_NEW_BLOCKS)
         return;
       lastRecapBlockCountRef.current = currentCount;
+      const sessionId = connection.sessionId;
+      const version = autoRecapVersionRef.current;
       sessionActions.recapSession().then(
         (result) => {
+          if (
+            autoRecapVersionRef.current !== version ||
+            connectionRef.current.sessionId !== sessionId ||
+            result.sessionId !== sessionId
+          ) {
+            return;
+          }
           if (result.recap) {
             store.dispatch([
               {
@@ -5930,6 +5941,7 @@ export function App({
       if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
+        autoRecapVersionRef.current += 1;
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
