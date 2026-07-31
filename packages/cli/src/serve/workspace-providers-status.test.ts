@@ -1134,6 +1134,80 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     },
   );
 
+  it.each([
+    ['"', '"'],
+    ["'", "'"],
+    ['`', '`'],
+    ['<', '>'],
+    ['(', ')'],
+    ['[', ']'],
+  ])(
+    'strips a password containing %s%s from a URL wrapped in the same pair',
+    async (open, close) => {
+      // The closing character is legal in a password, so the first one in the
+      // span may be the credential's rather than the URL's. Ending the span
+      // there leaves no `@` behind it, nothing is recognised as a userinfo, and
+      // the password stays in the message — so a closer only ends a span when it
+      // is the last one on the line and a port sits immediately before it.
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = `Cannot reach ${open}https://user:pa${close}ss@host.example/v1${close} — retry`;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      expect(result.errors?.[0]?.error).toBe(
+        `Cannot reach ${open}https://host.example/v1${close} — retry`,
+      );
+      expect(JSON.stringify(result)).not.toContain(`pa${close}ss`);
+    },
+  );
+
+  it('strips a quoted URL whose password itself looks like a port', async () => {
+    // `:8443"` is the exact shape the delimiter rule looks for, but here it is a
+    // password, not a port. The port must be what the closer *closes on* — it is
+    // measured against the span the closer would cut, so digits that merely
+    // start a password do not qualify.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach "https://user:8443"abc secret@host.example/v1" — retry';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach "https://host.example/v1" — retry',
+    );
+    expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
+  it('strips a quoted URL whose closing quote is on a later line', async () => {
+    // The span still ends at the newline, so the only closer available is the
+    // one inside the password. Taking it would end the span mid-credential.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach "https://user:pa"ss@host.example/v1\nsee the log" — retry';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach "https://host.example/v1\nsee the log" — retry',
+    );
+    expect(JSON.stringify(result)).not.toContain('pa"ss');
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),

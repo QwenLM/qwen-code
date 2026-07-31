@@ -446,6 +446,16 @@ function findNextUrlStart(
  * these characters to `PORT_END` instead would let a password beginning `123"`
  * read as a port, and `:123"abc secret@host` would keep its password. Here the
  * same character is inert unless the matching opener sits before the URL.
+ *
+ * Balance alone is still not enough, because the same character is legal in a
+ * password: in `"https://user:pa"ss@host.example/v1"` the first closer sits
+ * inside the credential, and cutting there leaves no `@` in the span, so nothing
+ * is stripped and the password survives in full. Which is why a closer must
+ * carry two signals, in `findUrlSegmentEnd` — it must be the *last* one within
+ * the span, and a port must sit immediately before it. Either test alone leaks:
+ * without the port, `:8443"abc secret@host` cuts at the closer inside the
+ * password; without `lastIndexOf`, a closer in the password ends the span
+ * whenever no later one exists on the line.
  */
 const URL_QUOTE_PAIRS = new Map([
   ['"', '"'],
@@ -455,6 +465,16 @@ const URL_QUOTE_PAIRS = new Map([
   ['(', ')'],
   ['[', ']'],
 ]);
+
+/**
+ * A port sitting at the end of what the closer would cut.
+ *
+ * This is the second half of the evidence, and it is what keeps a closer that
+ * happens to fall inside a password from ending the span: the reason a balanced
+ * delimiter matters at all is that the port heuristic cannot see past it, so the
+ * closer only carries information when a port is what precedes it.
+ */
+const PORT_AT_END = /:\d+$/;
 
 function findUrlSegmentEnd(
   value: string,
@@ -469,15 +489,19 @@ function findUrlSegmentEnd(
   if (carriageReturn !== -1) lineEnd = Math.min(lineEnd, carriageReturn);
   if (lineFeed !== -1) lineEnd = Math.min(lineEnd, lineFeed);
 
+  const nextUrl = findNextUrlStart(value, afterMarker);
+  const bound = Math.min(lineEnd, nextUrl?.index ?? value.length);
+
   const closer = URL_QUOTE_PAIRS.get(before.slice(-1));
   if (closer !== undefined) {
-    const closed = value.indexOf(closer, afterMarker);
-    if (closed !== -1) lineEnd = Math.min(lineEnd, closed);
+    const closed = value.lastIndexOf(closer, bound - 1);
+    if (closed >= afterMarker) {
+      const upTo = value.slice(afterMarker, closed);
+      if (PORT_AT_END.test(upTo) && !upTo.includes('@')) return closed;
+    }
   }
 
-  const nextUrl = findNextUrlStart(value, afterMarker);
-
-  return Math.min(lineEnd, nextUrl?.index ?? value.length);
+  return bound;
 }
 
 function buildCurrent(
