@@ -2709,6 +2709,7 @@ describe('runNonInteractive', () => {
     });
     const selector = 'vision-agent\0https://vision.example/v1\0';
     let acceptedSameSelector = false;
+    let rejectedDifferentSelector = false;
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
       value: {
@@ -2723,6 +2724,10 @@ describe('runNonInteractive', () => {
       async (_config, _request, _signal, options) => {
         acceptedSameSelector =
           options.onToolResultFullTurnModel?.(selector) ?? false;
+        rejectedDifferentSelector =
+          options.onToolResultFullTurnModel?.(
+            'different-model\0https://vision.example/v1\0',
+          ) === false;
         return {
           responseParts: [{ text: 'tool response' }],
           modelOverride: 'other-model',
@@ -2749,6 +2754,7 @@ describe('runNonInteractive', () => {
       failClosed: true,
     });
     expect(acceptedSameSelector).toBe(true);
+    expect(rejectedDifferentSelector).toBe(true);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       headlessImageParts,
