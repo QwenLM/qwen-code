@@ -39,7 +39,6 @@ function setup(
 ) {
   const handlers = {
     onDelete: vi.fn(),
-    onInsert: vi.fn(),
     onEdit: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
@@ -74,10 +73,8 @@ describe('QueuedPromptDisplay', () => {
   });
 
   it('shows server queue status without an insert action', () => {
-    const onInsert = vi.fn();
     const { container } = setup({
       prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
-      onInsert,
     });
 
     expect(container.textContent).toContain('服务器排队中...');
@@ -89,7 +86,20 @@ describe('QueuedPromptDisplay', () => {
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(container.textContent).not.toContain('插入');
-    expect(onInsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps a mid-turn prompt queued until injection', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],
+    });
+
+    expect(container.textContent).toContain('排队中...');
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    expect(
+      [...container.querySelectorAll('button')].every(
+        (button) => button.disabled,
+      ),
+    ).toBe(true);
   });
 
   it('keeps the spinner while a prompt is still submitting', () => {
@@ -266,14 +276,11 @@ describe('QueuedPromptDisplay', () => {
     expect(handlers.onDelete).toHaveBeenCalledWith(42);
   });
 
-  it('disables insert for a command prompt', () => {
+  it('does not render an insert action for a command prompt', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '/help me' }],
     });
-    const insert = [...container.querySelectorAll('button')].find((b) =>
-      (b.textContent || '').includes(t('queue.insert')),
-    );
-    expect(insert).toBeTruthy();
-    expect((insert as HTMLButtonElement).disabled).toBe(true);
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    expect(container.textContent).not.toContain('插入');
   });
 });

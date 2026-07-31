@@ -412,7 +412,6 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt: vi.fn(),
-    insertQueuedPrompt: vi.fn(),
     editQueuedPrompt: vi.fn(),
     editLastQueuedPrompt,
     clearQueuedPrompts,

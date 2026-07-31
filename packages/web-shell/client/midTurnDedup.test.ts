@@ -14,12 +14,14 @@ interface Item {
   id: number;
   text: string;
   images?: unknown[];
+  midTurnState?: 'queued';
 }
 
 let nextId = 1;
 const q = (text: string, images?: unknown[]): Item => ({
   id: nextId++,
   text,
+  midTurnState: 'queued',
   ...(images ? { images } : {}),
 });
 const batch = (
@@ -86,6 +88,17 @@ describe('removeInjectedFromQueue', () => {
     expect(next).not.toBeNull();
     expect(next).toHaveLength(1);
     expect(next?.[0].images).toEqual([{ data: 'x' }]);
+  });
+
+  it('does not remove an ordinary queued prompt with the same text', () => {
+    const ordinary = { ...q('same'), midTurnState: undefined };
+    const inserted = q('same');
+    const next = removeInjectedFromQueue(
+      [ordinary, inserted],
+      [batch('s', 'same')],
+      's',
+    );
+    expect(next).toEqual([ordinary]);
   });
 
   it('skips batches for a different session', () => {

@@ -60,7 +60,6 @@ const daemonActions = {
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
-const insertQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
@@ -105,7 +104,6 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
     queuedTexts: queuedTextsMock,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -289,7 +287,6 @@ beforeEach(() => {
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
-  insertQueuedPrompt.mockClear();
   editQueuedPrompt.mockClear();
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();

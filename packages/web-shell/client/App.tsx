@@ -4688,17 +4688,11 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
-  const notifySuccess = useCallback(
-    (message: string) => pushToast('success', message),
-    [pushToast],
-  );
-
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -4711,7 +4705,6 @@ export function App({
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -10024,7 +10017,6 @@ export function App({
                           prompts={queuedPrompts}
                           t={t}
                           onDelete={removeQueuedPrompt}
-                          onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
                         {CustomComposerHeader && (

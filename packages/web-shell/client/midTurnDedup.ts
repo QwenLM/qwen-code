@@ -7,6 +7,7 @@
 export interface MidTurnQueueItem {
   text: string;
   images?: unknown[];
+  midTurnState?: unknown;
 }
 
 export interface MidTurnInjectedBatch {
@@ -55,6 +56,7 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
     for (const message of batch.messages) {
       const index = remaining.findIndex(
         (prompt) =>
+          prompt.midTurnState !== undefined &&
           prompt.text === message &&
           (!prompt.images || prompt.images.length === 0),
       );

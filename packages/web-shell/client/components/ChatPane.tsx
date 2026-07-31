@@ -333,11 +333,6 @@ export function ChatPane({
   );
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const notifySuccess = useCallback(
-    (message: string) => store.dispatch([{ type: 'status', text: message }]),
-    [store],
-  );
-
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -412,7 +407,6 @@ export function ChatPane({
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -425,7 +419,6 @@ export function ChatPane({
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -850,7 +843,6 @@ export function ChatPane({
           prompts={queuedPrompts}
           t={t}
           onDelete={removeQueuedPrompt}
-          onInsert={insertQueuedPrompt}
           onEdit={editQueuedPrompt}
         />
         <ChatEditor
