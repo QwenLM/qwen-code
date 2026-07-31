@@ -529,15 +529,18 @@ describe('readManyFiles', () => {
           if (args[0] === absolutePath) {
             const originalRead = handle.read.bind(handle);
             let appended = false;
-            vi.spyOn(handle, 'read').mockImplementation(
-              async (buffer, offset, length, position) => {
-                if (!appended && position === approvedStats.size) {
-                  appended = true;
-                  await fs.appendFile(absolutePath, Buffer.from([0x02]));
-                }
-                return originalRead(buffer, offset, length, position);
-              },
-            );
+            vi.spyOn(handle, 'read').mockImplementation((async (
+              buffer: NodeJS.ArrayBufferView,
+              offset?: number | null,
+              length?: number | null,
+              position?: number | null,
+            ) => {
+              if (!appended && position === approvedStats.size) {
+                appended = true;
+                await fs.appendFile(absolutePath, Buffer.from([0x02]));
+              }
+              return originalRead(buffer, offset, length, position);
+            }) as typeof handle.read);
           }
           return handle;
         });
