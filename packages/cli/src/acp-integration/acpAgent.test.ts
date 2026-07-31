@@ -869,6 +869,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   initializeAcpStartupProfiler,
@@ -3022,6 +3023,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
+      setSessionSource: vi.fn(),
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -3734,6 +3736,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('defers MCP discovery for a worktree session until relocation', async () => {
+    const innerConfig = await setupSessionMocks('worktree-mcp-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { [WORKTREE_MCP_DEFER_META_KEY]: true },
+    });
+
+    expect(innerConfig.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ skipMcpDiscovery: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('serializes a working-directory change and hard-suspends Todo Stop Guard', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const targetDir = await fs.mkdtemp(
@@ -3771,6 +3791,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock?.hardSuspendTodoStopGuard.mock.invocationCallOrder[0],
       ).toBeLessThan(relocateWorkingDirectory.mock.invocationCallOrder[0]!);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports an MCP refresh warning after changing the working directory', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-mcp-refresh-cwd-'),
+    );
+    const canonicalTargetDir = await fs.realpath(targetDir);
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory: vi.fn().mockResolvedValue({
+        mcpRefreshError: new Error('MCP failed'),
+      }),
+    });
+    Object.assign(innerConfig.getGeminiClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).resolves.toEqual({
+        previousCwd: '/tmp',
+        newCwd: canonicalTargetDir,
+        warnings: ['MCP refresh failed: MCP failed'],
+      });
     } finally {
       await fs.rm(targetDir, { recursive: true, force: true });
     }
@@ -5725,6 +5784,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     },
   );
+
+  it('stores ACP session source metadata on the session config', async () => {
+    const innerConfig = await setupSessionMocks('session-source');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'channel',
+            sourceId: 'feishu-main',
+          },
+        },
+      });
+
+      expect(innerConfig.setSessionSource).toHaveBeenCalledWith(
+        'channel',
+        'feishu-main',
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('session model selectors distinguish the same model id on different endpoints', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -12089,6 +12184,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keeps ACP stdio MCP cwd implicit so session relocation can rebind it', async () => {
+    await setupSessionMocks('session-stdio-cwd');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [
+        {
+          name: 'local',
+          command: 'node',
+          args: ['server.js'],
+          env: [],
+        } as unknown as McpServer,
+      ],
+    });
+
+    const sessionMcpServers = vi.mocked(loadCliConfig).mock.calls[0]?.[6];
+    const localConfig = sessionMcpServers?.['local'] as unknown as {
+      _args: unknown[];
+    };
+    expect(localConfig._args).toEqual(['node', ['server.js'], {}]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('passes undefined (not []) as the extension override to loadCliConfig', async () => {
     await setupSessionMocks('session-ext-override');
 
@@ -13276,6 +13407,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
+      setSessionSource: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),

@@ -57,6 +57,15 @@ const INSTANCE: DaemonChannelInstanceSnapshot = {
   runtime: { state: 'stopped' },
 };
 
+const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
+  ...INSTANCE,
+  config: {
+    ...INSTANCE.config,
+    senderPolicy: 'pairing',
+    allowedUsers: ['configured-user'],
+  },
+};
+
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
 const { I18nProvider } = await import('../../i18n');
 
@@ -79,6 +88,8 @@ async function renderDialog(
           onReload={vi.fn().mockResolvedValue(undefined)}
           listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
           approvePairingRequest={vi.fn()}
+          listPairingApprovals={vi.fn().mockResolvedValue({ senderIds: [] })}
+          revokePairingApproval={vi.fn()}
           {...props}
         />
       </I18nProvider>,
@@ -236,5 +247,23 @@ describe('ChannelEditorDialog', () => {
       'Reload is temporarily unavailable.',
     );
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it('shows the configured allowlist for a pairing Channel and hides it without one', async () => {
+    await renderDialog({ instance: PAIRING_INSTANCE });
+
+    expect(document.body.textContent).toContain('Configured allowlist');
+    expect(document.body.textContent).toContain('configured-user');
+  });
+
+  it('does not show the allowlist alert when no users are configured', async () => {
+    const pairingNoAllowlist: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: { ...INSTANCE.config, senderPolicy: 'pairing' },
+    };
+    await renderDialog({ instance: pairingNoAllowlist });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(document.body.textContent).not.toContain('Configured allowlist');
   });
 });

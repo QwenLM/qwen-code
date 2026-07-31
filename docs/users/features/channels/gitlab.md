@@ -156,6 +156,12 @@ The adapter uses GitLab's Todos API as the message source:
 
 The cursor (`lastProcessedId`) advances regardless of dispatch success or failure. Failed dispatches post a ⚠️ error comment on the issue/MR and are not retried — the user can re-mention the bot to trigger a new todo.
 
+## Response Feedback
+
+For an accepted comment mention (note with `#note_` anchor), the channel adds a 👀 award emoji to the note while the agent is working, then removes it when the run completes, fails, or is cancelled. Both operations are best-effort: an award emoji API or permission failure is logged and never prevents the final response.
+
+Description mentions (no `#note_` anchor) do not receive an award emoji because there is no specific note to react to.
+
 ## Known Limitations
 
 - **First start skips existing pending todos.** The cursor initializes to `{ lastProcessedId: 0, initialized: false }` on first launch. On the first poll cycle, all pre-existing pending todos are marked done without dispatch (the `initialized` flag gates this one-time drain), preventing a backlog flood.

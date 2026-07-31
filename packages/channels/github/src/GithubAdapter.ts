@@ -1,6 +1,15 @@
-import { createHash } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { Octokit } from '@octokit/rest';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -12,6 +21,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   getGlobalQwenDir,
+  getWorkspaceScopeDirName,
   PollingChannelBase,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
@@ -157,12 +167,36 @@ interface PublicationAuditRecord {
   sourceMessageId?: string;
   actor?: string;
   threadId?: string;
+  pendingId?: string;
   commentId?: number;
   commentUrl?: string;
   failurePhase?: 'delivery';
   failureError?: string;
   bodySha256: string;
   bodyChars: number;
+}
+
+type PublicationAuditBase = Omit<
+  PublicationAuditRecord,
+  | 'at'
+  | 'type'
+  | 'outcome'
+  | 'commentId'
+  | 'commentUrl'
+  | 'failurePhase'
+  | 'failureError'
+>;
+
+interface PendingFinalDelivery {
+  id: string;
+  createdAt: string;
+  chatId: string;
+  threadId: string;
+  fullText: string;
+  sessionId: string;
+  sourceMessageId?: string;
+  actor?: string;
+  triggerKind?: string;
 }
 
 class FinalPublicationError extends Error {}
@@ -189,8 +223,10 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
     status?: number;
     response?: { headers?: Record<string, string | number> };
   };
-  const remaining = Number(e.response?.headers?.['x-ratelimit-remaining']);
-  return e.status === 429 || (e.status === 403 && remaining === 0);
+  return (
+    (e.status === 403 || e.status === 429) &&
+    Number(e.response?.headers?.['x-ratelimit-remaining']) === 0
+  );
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -207,12 +243,30 @@ function buildTriggerGuidance(reason: string): string {
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
 }
 
+function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
+  const item = value as PendingFinalDelivery;
+  return (
+    item !== null &&
+    typeof item === 'object' &&
+    typeof item.id === 'string' &&
+    typeof item.createdAt === 'string' &&
+    typeof item.chatId === 'string' &&
+    typeof item.threadId === 'string' &&
+    typeof item.fullText === 'string' &&
+    typeof item.sessionId === 'string'
+  );
+}
+
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
   private readonly activeReactions = new Map<string, WorkingReaction>();
   private readonly reactionsPendingRemoval = new Set<string>();
+  private pendingFinalDeliveryRetry: Promise<void> | undefined;
+  private pendingFinalDeliveryRetryAbort: AbortController | undefined;
+  private pendingFinalDeliveryRequestsActive = 0;
+  private pendingFinalDeliveryRetryStopRequested = false;
   private reasonFilter: Set<string> | null = null;
 
   constructor(
@@ -303,11 +357,40 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     this.gate.replaceAllowedUsers(allowed);
+    this.migrateLegacyPublicationState();
+    this.pendingFinalDeliveryRetryStopRequested = false;
     this.startPollLoop();
+    if (this.pendingFinalDeliveryRetry) {
+      return;
+    }
+    const retryAbort = new AbortController();
+    const retry = this.retryPendingFinalDeliveries(retryAbort.signal)
+      .catch((err) => {
+        if (!retryAbort.signal.aborted) {
+          process.stderr.write(
+            `[Channel:${this.name}] pending GitHub delivery retry failed: ${sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              200,
+            )}\n`,
+          );
+        }
+      })
+      .finally(() => {
+        if (this.pendingFinalDeliveryRetry === retry) {
+          this.pendingFinalDeliveryRetry = undefined;
+          this.pendingFinalDeliveryRetryAbort = undefined;
+        }
+      });
+    this.pendingFinalDeliveryRetryAbort = retryAbort;
+    this.pendingFinalDeliveryRetry = retry;
   }
 
   disconnect(): void {
     this.stopPollLoop();
+    this.pendingFinalDeliveryRetryStopRequested = true;
+    if (this.pendingFinalDeliveryRequestsActive === 0) {
+      this.pendingFinalDeliveryRetryAbort?.abort();
+    }
   }
 
   async sendMessage(_chatId: string, _text: string): Promise<void> {
@@ -345,18 +428,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
-    const auditBase = {
-      channel: this.name,
-      triggerKind: parseTriggerKind(metadata),
-      repository: chatId,
-      number: threadMatch ? Number(threadMatch[2]) : undefined,
+    const auditBase = this.buildPublicationAuditBase({
+      chatId,
+      threadId,
+      fullText,
       sessionId,
       sourceMessageId: this.getResponseMessageId(sessionId),
       actor: this.getResponseSenderId(sessionId),
-      threadId,
-      bodySha256: createHash('sha256').update(fullText).digest('hex'),
-      bodyChars: Array.from(fullText).length,
-    };
+      metadata,
+    });
     if (isNoReplySentinel(fullText)) {
       this.recordPublicationAudit({
         ...auditBase,
@@ -405,11 +485,259 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           200,
         ),
       });
+      if (threadId && isDefiniteNoWriteGithubError(err)) {
+        this.enqueuePendingFinalDelivery({
+          ...auditBase,
+          chatId,
+          threadId,
+          fullText,
+        });
+      }
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
         { cause: err },
       );
     }
+  }
+
+  private buildPublicationAuditBase(input: {
+    chatId: string;
+    threadId?: string;
+    fullText: string;
+    sessionId: string;
+    sourceMessageId?: string;
+    actor?: string;
+    metadata?: string;
+  }): PublicationAuditBase {
+    const threadMatch = input.threadId?.match(/^(issue|pr):(\d+)$/);
+    return {
+      channel: this.name,
+      triggerKind: parseTriggerKind(input.metadata),
+      repository: input.chatId,
+      number: threadMatch ? Number(threadMatch[2]) : undefined,
+      sessionId: input.sessionId,
+      sourceMessageId: input.sourceMessageId,
+      actor: input.actor,
+      threadId: input.threadId,
+      bodySha256: createHash('sha256').update(input.fullText).digest('hex'),
+      bodyChars: Array.from(input.fullText).length,
+    };
+  }
+
+  private enqueuePendingFinalDelivery(
+    input: PublicationAuditBase & {
+      chatId: string;
+      threadId: string;
+      fullText: string;
+    },
+  ): void {
+    const record: PendingFinalDelivery = {
+      id: createHash('sha256')
+        .update(
+          JSON.stringify([
+            input.chatId,
+            input.threadId,
+            input.sessionId,
+            input.sourceMessageId ?? randomUUID(),
+            input.bodySha256,
+          ]),
+        )
+        .digest('hex'),
+      createdAt: new Date().toISOString(),
+      chatId: input.chatId,
+      threadId: input.threadId,
+      fullText: input.fullText,
+      sessionId: input.sessionId,
+      sourceMessageId: input.sourceMessageId,
+      actor: input.actor,
+      triggerKind: input.triggerKind,
+    };
+    try {
+      const pending = this.readPendingFinalDeliveries().filter(
+        (item) => item.id !== record.id,
+      );
+      this.writePendingFinalDeliveries([...pending, record]);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    }
+  }
+
+  private async retryPendingFinalDeliveries(
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const pending = this.readPendingFinalDeliveries();
+    for (const record of pending) {
+      if (signal?.aborted) return;
+      const auditBase = this.buildPublicationAuditBase({
+        chatId: record.chatId,
+        threadId: record.threadId,
+        fullText: record.fullText,
+        sessionId: record.sessionId,
+        sourceMessageId: record.sourceMessageId,
+        actor: record.actor,
+        metadata: record.triggerKind
+          ? `Trigger: ${record.triggerKind}.`
+          : undefined,
+      });
+      if (this.hasPostedPublicationAudit(record.id)) {
+        process.stderr.write(
+          `[Channel:${this.name}] dropping pending GitHub delivery already recorded as posted: ${sanitizeLogText(
+            record.id,
+            80,
+          )}\n`,
+        );
+        this.updatePendingFinalDeliveries((current) =>
+          current.filter((item) => item.id !== record.id),
+        );
+        continue;
+      }
+      try {
+        const comment = await this.createIssueComment(
+          record.chatId,
+          record.threadId,
+          record.fullText,
+          3,
+          isDefiniteNoWriteGithubError,
+          signal,
+        );
+        // ponytail: GitHub has no createComment idempotency key without adding
+        // a public marker to the verbatim final body; marker-upsert if that
+        // contract changes.
+        this.recordPublicationAudit({
+          ...auditBase,
+          at: new Date().toISOString(),
+          type: 'github_publication',
+          outcome: 'posted',
+          pendingId: record.id,
+          commentId: comment.id,
+          commentUrl: comment.html_url,
+        });
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
+      } catch (err) {
+        if (signal?.aborted) return;
+        if (isDefiniteNoWriteGithubError(err)) {
+          continue;
+        }
+        this.recordPublicationAudit({
+          ...auditBase,
+          at: new Date().toISOString(),
+          type: 'github_publication',
+          outcome: 'failed',
+          failurePhase: 'delivery',
+          failureError: sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          ),
+        });
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
+      }
+    }
+  }
+
+  private hasPostedPublicationAudit(pendingId: string): boolean {
+    try {
+      return readFileSync(this.channelFilePath('github-audit.jsonl'), 'utf-8')
+        .split('\n')
+        .some((line) => {
+          if (!line) return false;
+          let record: Partial<PublicationAuditRecord>;
+          try {
+            record = JSON.parse(line) as Partial<PublicationAuditRecord>;
+          } catch {
+            return false;
+          }
+          return record.outcome === 'posted' && record.pendingId === pendingId;
+        });
+    } catch {
+      return false;
+    }
+  }
+
+  private updatePendingFinalDeliveries(
+    update: (records: PendingFinalDelivery[]) => PendingFinalDelivery[],
+  ): boolean {
+    try {
+      this.writePendingFinalDeliveries(
+        update(this.readPendingFinalDeliveries(true)),
+      );
+      return true;
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to update pending GitHub deliveries: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+      return false;
+    }
+  }
+
+  private pendingFinalDeliveriesPath(): string {
+    return this.channelFilePath('github-pending-deliveries.json');
+  }
+
+  private readPendingFinalDeliveries(strict = false): PendingFinalDelivery[] {
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.pendingFinalDeliveriesPath(), 'utf-8'),
+      );
+      return Array.isArray(parsed) ? parsed.filter(isPendingFinalDelivery) : [];
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to read pending GitHub deliveries: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+        if (strict) throw err;
+      }
+      return [];
+    }
+  }
+
+  private writePendingFinalDeliveries(records: PendingFinalDelivery[]): void {
+    const path = this.pendingFinalDeliveriesPath();
+    if (records.length === 0) {
+      try {
+        unlinkSync(path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      return;
+    }
+    const dir = join(
+      getGlobalQwenDir(),
+      'channels',
+      getWorkspaceScopeDirName(this.config.cwd),
+    );
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const tmpPath = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmpPath, `${JSON.stringify(records)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
   }
 
   private async createIssueComment(
@@ -418,6 +746,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     text: string,
     retries = 3,
     shouldRetry: (err: unknown) => boolean = () => true,
+    signal?: AbortSignal,
   ): Promise<PostedGithubComment> {
     if (!threadId) {
       throw new Error(
@@ -433,16 +762,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const issueNumber = Number(match[1]);
     const [owner, repo] = chatId.split('/');
     const response = await this.githubApi(
-      () =>
-        this.octokit.rest.issues.createComment({
-          owner,
-          repo,
-          issue_number: issueNumber,
-          body: text,
-        }),
+      async () => {
+        this.pendingFinalDeliveryRequestsActive += 1;
+        try {
+          return await this.octokit.rest.issues.createComment({
+            owner,
+            repo,
+            issue_number: issueNumber,
+            body: text,
+            ...(signal ? { request: { signal } } : {}),
+          });
+        } finally {
+          this.pendingFinalDeliveryRequestsActive -= 1;
+          if (
+            this.pendingFinalDeliveryRequestsActive === 0 &&
+            this.pendingFinalDeliveryRetryStopRequested
+          ) {
+            this.pendingFinalDeliveryRetryAbort?.abort();
+          }
+        }
+      },
       `createComment(${threadId})`,
       retries,
       shouldRetry,
+      signal,
     );
     return response.data;
   }
@@ -955,11 +1298,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected recordPublicationAudit(record: PublicationAuditRecord): void {
     try {
-      const encodedName = this.name
-        .replace(/[^a-zA-Z0-9_-]/g, '_')
-        .slice(0, 200);
-      const dir = join(getGlobalQwenDir(), 'channels');
-      const path = join(dir, `${encodedName}-github-audit.jsonl`);
+      const dir = join(
+        getGlobalQwenDir(),
+        'channels',
+        getWorkspaceScopeDirName(this.config.cwd),
+      );
+      const path = this.channelFilePath('github-audit.jsonl');
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
       appendFileSync(path, `${JSON.stringify(record)}\n`, {
@@ -975,6 +1319,50 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         )}\n`,
       );
     }
+  }
+
+  private migrateLegacyPublicationState(): void {
+    try {
+      const channelsRoot = join(getGlobalQwenDir(), 'channels');
+      const encodedName = this.name
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 200);
+      const sentinel = this.channelFilePath('github-state-migrated');
+      if (existsSync(sentinel)) return;
+      mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
+      for (const suffix of [
+        'github-pending-deliveries.json',
+        'github-audit.jsonl',
+      ]) {
+        const legacyPath = join(channelsRoot, `${encodedName}-${suffix}`);
+        const scopedPath = this.channelFilePath(suffix);
+        if (!existsSync(scopedPath) && existsSync(legacyPath)) {
+          renameSync(legacyPath, scopedPath);
+        }
+      }
+      writeFileSync(sentinel, '', { mode: 0o600 });
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] legacy GitHub state migration failed: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    }
+  }
+
+  private channelFilePath(suffix: string): string {
+    const encodedName = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
+    const nameHash = createHash('sha256')
+      .update(this.name)
+      .digest('hex')
+      .slice(0, 16);
+    return join(
+      getGlobalQwenDir(),
+      'channels',
+      getWorkspaceScopeDirName(this.config.cwd),
+      `${encodedName}-${nameHash}-${suffix}`,
+    );
   }
 
   private extractFromSubjectUrl(
@@ -1008,11 +1396,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     label: string,
     retries = 3,
     shouldRetry: (err: unknown) => boolean = () => true,
+    signal?: AbortSignal,
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
+      if (signal?.aborted) throw new Error(`${label} aborted`);
       try {
         return await fn();
       } catch (err: unknown) {
+        if (signal?.aborted) throw err;
         if (attempt === retries || !shouldRetry(err)) throw err;
         // Octokit RequestError: { status, response?: { headers } }
         const e = err as {
@@ -1045,10 +1436,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${e.message}\n`,
         );
-        await this.abortableSleep(cooldown);
+        await this.sleepForRetry(cooldown, signal);
       }
     }
     throw new Error('unreachable');
+  }
+
+  private sleepForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.abortableSleep(ms);
+    return new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
