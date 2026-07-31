@@ -4956,14 +4956,24 @@ describe('AppContainer State Management', () => {
 
       expect(capturedThoughtExpanded.allExpanded).toBe(false);
 
-      // The handler calls setThoughtExpanded + refreshStatic.
-      // refreshStatic writes clearTerminal to stdout — verify the
-      // handler reached the Ctrl+O code path.  The state flip itself
-      // is a plain useState toggle; the full-suite run and the
-      // MainContent integration test verify it propagates.
+      // Behavioural: the handler must reach the Ctrl+O code path,
+      // which calls refreshStatic → clearTerminal.
       mockStdout.write.mockClear();
       handleKeypress!(ctrlO);
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+
+      // Structural (M1): the handler must contain the state flip.
+      // Under this vi.mock('ink') harness the mocked App /
+      // TestContextConsumer never re-renders when a handler extracted
+      // from mockedUseKeypress.mock.calls calls setThoughtExpanded —
+      // act(), async act(), setTimeout, and IS_REACT_ACT_ENVIRONMENT
+      // were all tried; capturedThoughtExpanded.allExpanded stays
+      // false.  MainContent.test.tsx ("fullDetail wiring") covers the
+      // context → HistoryItemDisplay propagation behaviourally, so
+      // this source-level guard closes the remaining gap: removing
+      // setThoughtExpanded((prev) => !prev) from AppContainer makes
+      // this assertion fail (mutation M1).
+      expect(handleKeypress!.toString()).toContain('setThoughtExpanded');
     });
   });
 
