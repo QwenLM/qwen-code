@@ -250,15 +250,29 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 /**
+ * What a host label is made of.
+ *
+ * Unicode rather than `[A-Za-z\d]`: an internationalized host reaches this code
+ * un-punycoded when it comes from a config file a person typed, and an
+ * ASCII-only class does not recognise it. Not recognising a host is what leaks a
+ * credential, so `münchen.de` had to be a host here for the same reason
+ * `example.com` does.
+ */
+const HOST_CHAR = String.raw`[\p{L}\p{N}\p{M}]`;
+const LABEL_CHAR = String.raw`[\p{L}\p{N}\p{M}-]`;
+
+/**
  * A host with nothing after it to mark where it ends, so its own shape is the
  * only evidence that it is one.
  *
- * Three shapes, because a single pattern for all of them would be wrong at the
+ * Four shapes, because a single pattern for all of them would be wrong at the
  * edges. A bracketed IPv6 literal. A dotted name, whose first label may be a
- * single character (`a.example`). Or a bare label — intranet proxies, container
+ * single character (`a.example`). A bare label — intranet proxies, container
  * names like `ollama`, and k8s service names have no dot — required to be at
  * least two characters, which is what keeps a one-letter fragment of a password
- * from passing for a host.
+ * from passing for a host. Or a single character carrying a port, since `:8443`
+ * is structural evidence of an authority in the same way a path is, and without
+ * it `@h:8443` fell through every shape and the `@` was taken from later prose.
  *
  * What follows the host is required only to be something a host cannot continue
  * into, rather than a fixed list of delimiters. Enumerating them meant a URL
@@ -267,7 +281,12 @@ const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
  * the list being incomplete was not a cosmetic problem. A trailing dot is
  * allowed to belong to the sentence rather than the name.
  */
-const UNDELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-z\d-]*\.)+[A-Za-z\d-]+|[A-Za-z\d][A-Za-z\d-]+)(?::\d+)?(?![A-Za-z\d-])`;
+const UNDELIMITED_HOST =
+  String.raw`(?:\[[0-9A-Fa-f:.]+\]` +
+  String.raw`|${HOST_CHAR}(?:${LABEL_CHAR}*\.)+${LABEL_CHAR}+` +
+  String.raw`|${HOST_CHAR}${LABEL_CHAR}+` +
+  String.raw`|${HOST_CHAR}:\d+)` +
+  String.raw`(?::\d+)?(?!${LABEL_CHAR})`;
 
 /**
  * A host followed by a path, query or fragment, which may be a single label.
@@ -281,10 +300,21 @@ const UNDELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-z\d
  * Raising the floor instead would have traded one leak for another: at three
  * characters, a two-character host leaks, and so on up.
  */
-const DELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d][A-Za-z\d-]*(?:\.[A-Za-z\d-]+)*)(?::\d+)?[/?#]`;
+const DELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|${HOST_CHAR}${LABEL_CHAR}*(?:\.${LABEL_CHAR}+)*)(?::\d+)?[/?#]`;
 
 /** A host addressable after a userinfo, delimited or not. */
 const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})`;
+
+/**
+ * How a port ends, and so what tells `:8443` from a password beginning `123`.
+ *
+ * A real port is only digits, so what follows a port is never a letter — which
+ * is the whole distinction. Written as an explicit closing set rather than
+ * "any non-digit", because a negated class also admits `_`, `=` and `%`, all
+ * legal in a password: `:123%abc secret@host` was read as a port and its
+ * password left in the message.
+ */
+const PORT_END = String.raw`[,.;:!?)\]}]`;
 
 /**
  * A `user:password@` prefix, where the password may contain spaces.
@@ -296,9 +326,8 @@ const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})
  * rather than the start of a password. `:8443 ` alone is not enough to tell
  * the two apart — a password may also begin with digits and a space
  * (`user:123 secret@host`) — so the digits count as a port when they end the
- * span, when a non-space follows them (sentence punctuation: `:8443, contact`),
- * or when a further space follows before the `@`, which is prose rather than a
- * one-space password.
+ * span, when a sentence closes on them (`:8443, contact`), or when a further
+ * space follows before the `@`, which is prose rather than a one-space password.
  *
  * Which `@` ends the userinfo: neither greediness setting is right, because a
  * greedy tail runs past the host into an `@` in trailing prose while a lazy one
@@ -309,14 +338,19 @@ const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})
  * that appears in configs where only a token is needed, so requiring a character
  * before the colon left its password unstripped.
  *
- * Two shapes are knowingly left unstripped, because nothing in them says which
- * reading is right: `p@ss word@host.example`, where the password's tail is a
- * valid host, and `123 secret word@host`, where a second space before the `@` is
- * the same evidence that tells a port from a password. Both are pinned by test
- * so that widening either rule has to choose deliberately.
+ * Three shapes are knowingly left as they are, because nothing in them says
+ * which reading is right: `p@ss word@host.example`, where the password's tail is
+ * a valid host; `123 secret word@host`, where a second space before the `@` is
+ * the same evidence that tells a port from a password; and `:8443 support@x.com`,
+ * where a port is followed by exactly one word ending in `@`, which is
+ * indistinguishable from a one-space password. All three are pinned by test so
+ * that changing any rule has to choose deliberately.
  */
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
-  String.raw`^[^\s/?#'"\`<>]*:(?!\d+(?:$|[^\s\d]|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  // `\x60` is the backtick, spelled as an escape because a literal one cannot
+  // appear in the template and `\`` is not a valid escape under the `u` flag.
+  String.raw`^[^\s/?#'"\x60<>]*:(?!\d+(?:$|${PORT_END}|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  'u',
 );
 
 /**

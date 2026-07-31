@@ -963,6 +963,107 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it('keeps a single-character host that carries a port', async () => {
+    // A one-character host fell through every host shape: the bare-label branch
+    // needs two characters and the delimited branch needs a path, so `@h:8443`
+    // was not recognised and the `@` was taken from the contact line instead --
+    // rewriting the host to `example.com` and deleting the prose. A port is the
+    // same structural evidence of an authority that a path is.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://user:pass@h:8443 — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://h:8443 — contact admin@example.com',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass@');
+  });
+
+  it('strips a spaced password whose first word begins with digits', async () => {
+    // `123abc` is not a port -- a port is digits and nothing else -- but the
+    // heuristic accepted any non-digit as the character after one, so a letter
+    // ended the "port" and the credentials were left in the message. PORT_END
+    // lists what actually closes a port instead.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:123abc secret@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+    expect(JSON.stringify(result)).not.toContain('123abc');
+  });
+
+  it('strips a spaced password whose first word contains a URL-legal symbol', async () => {
+    // The same defect through a different character: `%` and `_` are legal in a
+    // password, so "any non-digit ends the port" left `123%abc secret` in place.
+    // Guards against PORT_END being rewritten as a negated class.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:123%abc secret@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+    expect(JSON.stringify(result)).not.toContain('123%abc');
+  });
+
+  it('strips credentials before a non-ASCII host', async () => {
+    // An internationalized host arrives here un-punycoded when it comes from a
+    // config someone typed. The ASCII-only host classes did not recognise it, so
+    // the credential prefix was not found, the URL was cut at the space inside
+    // the password, and `user:my pass` was shown.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:my pass@münchen.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(JSON.stringify(result)).not.toContain('my pass');
+    expect(result.errors?.[0]?.error).toContain('/v1');
+  });
+
+  it('reads a port followed by one word ending in @ as a userinfo, and says so', async () => {
+    // The third documented tradeoff, and the only one that is not a regression:
+    // `:8443 support@example.com` is character-for-character a one-space
+    // password, and the deleted code produced this same output. Pinned because
+    // it is the case a future loosening of PORT_END would silently change.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443 support@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Cannot reach https://example.com');
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
