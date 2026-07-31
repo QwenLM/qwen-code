@@ -313,6 +313,11 @@ const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})
  * "any non-digit", because a negated class also admits `_`, `=` and `%`, all
  * legal in a password: `:123%abc secret@host` was read as a port and its
  * password left in the message.
+ *
+ * Quotes and brackets are deliberately absent for the same reason, even though
+ * `"https://api.example:8443"` puts one right after a port. That case is handled
+ * where the evidence is unambiguous — a *balanced* delimiter, in
+ * `findUrlSegmentEnd` — because `"` alone is as legal in a password as `%` is.
  */
 const PORT_END = String.raw`[,.;:!?)\]}]`;
 
@@ -345,6 +350,10 @@ const PORT_END = String.raw`[,.;:!?)\]}]`;
  * where a port is followed by exactly one word ending in `@`, which is
  * indistinguishable from a one-space password. All three are pinned by test so
  * that changing any rule has to choose deliberately.
+ *
+ * An unbalanced closer is a fourth: `:8443(ECONNREFUSED) — contact a@b.com` has
+ * no opening paren before the URL, so nothing distinguishes it from a password
+ * beginning `123(`. Wrapped in a balanced pair it is handled; bare it is not.
  */
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
   // `\x60` is the backtick, spelled as an escape because a literal one cannot
@@ -370,7 +379,12 @@ function sanitizeProviderWarning(warning: string): string {
   while (next) {
     result += warning.slice(index, next.index);
 
-    const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
+    const segmentEnd = findUrlSegmentEnd(
+      warning,
+      next.index,
+      next.marker,
+      warning.slice(0, next.index),
+    );
     const segment = warning.slice(next.index, segmentEnd);
     const urlEnd = findUrlEnd(segment, next.marker.length);
     result +=
@@ -420,10 +434,33 @@ function findNextUrlStart(
   return match ? { index: match.index, marker: match[0] } : undefined;
 }
 
+/**
+ * A quote that opened immediately before a URL, and so closes it.
+ *
+ * `"https://api.example:8443"` puts the closing quote right after the port,
+ * where the port heuristic expects a sentence character or a space and so reads
+ * the digits as the start of a password — matching the `@` in the prose beyond
+ * and deleting the real host. The closer is the evidence that the URL ended.
+ *
+ * Only a *balanced* delimiter counts, which is what makes this safe: adding
+ * these characters to `PORT_END` instead would let a password beginning `123"`
+ * read as a port, and `:123"abc secret@host` would keep its password. Here the
+ * same character is inert unless the matching opener sits before the URL.
+ */
+const URL_QUOTE_PAIRS = new Map([
+  ['"', '"'],
+  ["'", "'"],
+  ['`', '`'],
+  ['<', '>'],
+  ['(', ')'],
+  ['[', ']'],
+]);
+
 function findUrlSegmentEnd(
   value: string,
   start: number,
   marker: string,
+  before: string,
 ): number {
   const afterMarker = start + marker.length;
   const carriageReturn = value.indexOf('\r', afterMarker);
@@ -431,6 +468,12 @@ function findUrlSegmentEnd(
   let lineEnd = value.length;
   if (carriageReturn !== -1) lineEnd = Math.min(lineEnd, carriageReturn);
   if (lineFeed !== -1) lineEnd = Math.min(lineEnd, lineFeed);
+
+  const closer = URL_QUOTE_PAIRS.get(before.slice(-1));
+  if (closer !== undefined) {
+    const closed = value.indexOf(closer, afterMarker);
+    if (closed !== -1) lineEnd = Math.min(lineEnd, closed);
+  }
 
   const nextUrl = findNextUrlStart(value, afterMarker);
 

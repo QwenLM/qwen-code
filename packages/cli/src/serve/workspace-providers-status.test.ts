@@ -1064,6 +1064,76 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.errors?.[0]?.error).toBe('Cannot reach https://example.com');
   });
 
+  it.each([
+    ['"', '"'],
+    ["'", "'"],
+    ['`', '`'],
+    ['<', '>'],
+    ['(', ')'],
+    ['[', ']'],
+  ])(
+    'keeps the host and the prose when a URL ending in a port is wrapped in %s%s',
+    async (open, close) => {
+      // A closing delimiter sits where the port heuristic expects a sentence
+      // character or a space, so the digits read as the start of a password, the
+      // `@` in the prose beyond was taken as the end of a userinfo, and both the
+      // real host and the contact text were deleted.
+      const message = `Cannot reach ${open}https://api.example:8443${close} — contact admin@example.com`;
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = message;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      expect(result.errors?.[0]?.error).toBe(message);
+    },
+  );
+
+  it('still strips a credential from inside a quoted URL', async () => {
+    // The closing quote bounds the span; it must not stop the credential in the
+    // authority from being found, including a password containing a space.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach "https://user:123 secret@host.example/v1" — retry';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach "https://host.example/v1" — retry',
+    );
+    expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
+  it.each(['"', "'", '('])(
+    'reads %s in a password as a password character, not as a closing delimiter',
+    async (char) => {
+      // The fix must stay asymmetric: a delimiter only ends a port when the
+      // matching opener precedes the URL. Widening PORT_END to hold these
+      // characters instead would leave this password in the message.
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = `Failed https://user:123${char}abc secret@host.example/v1`;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+      expect(JSON.stringify(result)).not.toContain('secret');
+    },
+  );
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
