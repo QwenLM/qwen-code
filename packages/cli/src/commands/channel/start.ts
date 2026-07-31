@@ -223,6 +223,7 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
 
   const recoverBridge = (): void => {
     bridgeReadiness.block();
+    scheduler?.markBridgeRecovery();
     const task = (async () => {
       do {
         recoveryRequested = false;

@@ -366,6 +366,39 @@ describe('ChannelLoopScheduler', () => {
     writeSpy.mockRestore();
   });
 
+  it('clears an in-flight loop aborted by bridge recovery instead of failing it', async () => {
+    jobs = [{ ...baseJob, consecutiveFailures: 4 }];
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+      maxConsecutiveFailures: 5,
+    });
+    runLoopPrompt.mockImplementation(async () => {
+      // The bridge is replaced mid-prompt; recovery marks the scheduler before
+      // the in-flight prompt rejects.
+      scheduler.markBridgeRecovery();
+      throw new Error('bridge replaced during prompt');
+    });
+
+    await scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        runningSince: undefined,
+      });
+    });
+    const failureWrites = (
+      store.update as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      ([, patch]) => (patch as { lastStatus?: string }).lastStatus === 'error',
+    );
+    expect(failureWrites).toHaveLength(0);
+    expect(jobs[0]?.consecutiveFailures).toBe(4);
+    expect(jobs[0]?.enabled).toBe(true);
+  });
+
   it('disables one-shot loops after a failed attempt', async () => {
     jobs = [{ ...baseJob, recurring: false }];
     runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));

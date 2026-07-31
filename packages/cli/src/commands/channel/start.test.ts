@@ -83,10 +83,12 @@ const mockChannelLoopStore = vi.hoisted(() =>
 );
 const mockChannelLoopSchedulerStart = vi.hoisted(() => vi.fn());
 const mockChannelLoopSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelLoopSchedulerMarkRecovery = vi.hoisted(() => vi.fn());
 const mockChannelLoopScheduler = vi.hoisted(() =>
   vi.fn((_options?: unknown) => ({
     start: mockChannelLoopSchedulerStart,
     stop: mockChannelLoopSchedulerStop,
+    markBridgeRecovery: mockChannelLoopSchedulerMarkRecovery,
   })),
 );
 const mockSessionRouter = vi.hoisted(() =>

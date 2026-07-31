@@ -16065,9 +16065,15 @@ describe('ChannelBase', () => {
         ch.proactiveSupported = true;
 
         const run = ch.runWebhookTask(webhookTask);
-        await Promise.resolve();
+        // Absent the entry gate the (fully mocked) flow reaches bridge.prompt
+        // quickly; wait long enough that a missing gate would be caught.
+        await expect(
+          vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+            timeout: 500,
+            interval: 25,
+          }),
+        ).rejects.toThrow();
         expect(bridge.newSession).not.toHaveBeenCalled();
-        expect(bridge.prompt).not.toHaveBeenCalled();
 
         releaseBridge!();
         await expect(run).resolves.toBe('agent response');
@@ -16098,9 +16104,15 @@ describe('ChannelBase', () => {
           releaseRecovery = resolve;
         });
         releaseMemoryRead!();
-        await Promise.resolve();
-
-        expect(bridge.prompt).not.toHaveBeenCalled();
+        // Absent the recheck gate the (fully mocked) flow reaches bridge.prompt
+        // quickly; wait long enough that a missing gate would be caught, then
+        // confirm the gate held the prompt back until recovery resolved.
+        await expect(
+          vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+            timeout: 500,
+            interval: 25,
+          }),
+        ).rejects.toThrow();
 
         releaseRecovery!();
         await expect(run).resolves.toBe('agent response');
@@ -16135,9 +16147,15 @@ describe('ChannelBase', () => {
       const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
 
       const inbound = ch.processAfterAdapterPreflight(envelope());
-      await Promise.resolve();
+      // Absent the gate the (fully mocked) flow reaches bridge.prompt quickly;
+      // wait long enough that a missing gate would be caught.
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
       expect(bridge.newSession).not.toHaveBeenCalled();
-      expect(bridge.prompt).not.toHaveBeenCalled();
 
       releaseBridge!();
       await inbound;
@@ -16288,9 +16306,15 @@ describe('ChannelBase', () => {
         releaseRecovery = resolve;
       });
       releaseMemoryRead!();
-      await Promise.resolve();
-
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      // Absent the recheck gate the (fully mocked) flow reaches bridge.prompt
+      // quickly; wait long enough that a missing gate would be caught, then
+      // confirm the gate held the prompt back until recovery resolved.
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
 
       releaseRecovery!();
       await expect(loopRun).resolves.toBe('agent response');
