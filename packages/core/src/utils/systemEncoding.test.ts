@@ -527,8 +527,8 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(decoded).not.toContain('\uFFFD');
     });
 
-    it('Buffer.concat of empty array does not throw', () => {
-      expect(() => Buffer.concat([])).not.toThrow();
+    it('returns an empty string for an empty buffer', () => {
+      expect(decodeProcessOutput(Buffer.alloc(0))).toBe('');
     });
 
     it('falls back to utf-8 when TextDecoder rejects the encoding label', () => {
