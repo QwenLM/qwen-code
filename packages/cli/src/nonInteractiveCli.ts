@@ -75,7 +75,11 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
-import { resolveAutofixCronPrompt } from './utils/autofix.js';
+import {
+  AUTOFIX_EXPANSION_FAILED_TEXT,
+  autofixRejectedLabel,
+  resolveAutofixCronPrompt,
+} from './utils/autofix.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -2205,9 +2209,8 @@ export async function runNonInteractive(
                       'Failed to expand scheduled Autofix tick',
                       error,
                     );
-                    label = `Autofix rejected: ${job.id ?? 'unknown'}`;
-                    modelText =
-                      'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.';
+                    label = autofixRejectedLabel(job.id);
+                    modelText = AUTOFIX_EXPANSION_FAILED_TEXT;
                   }
                   localQueue.push({
                     displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,

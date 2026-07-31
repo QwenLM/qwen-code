@@ -16,7 +16,7 @@ import {
   AUTOFIX_CRON,
   AUTOFIX_USAGE,
   buildAutofixImmediatePrompt,
-  isAutofixCronJob,
+  hasAutofixPrompt,
   formatAutofixTick,
   matchingAutofixWatchers,
   resolveCurrentAutofixPullRequest,
@@ -120,7 +120,7 @@ export class BundledSkillLoader implements ICommandLoader {
           }
           if (match[1] === 'off') {
             const scheduler = this.config!.getCronScheduler();
-            const jobs = scheduler.list().filter(isAutofixCronJob);
+            const jobs = scheduler.list().filter(hasAutofixPrompt);
             const failures: string[] = [];
             for (const job of jobs) {
               try {
@@ -131,7 +131,7 @@ export class BundledSkillLoader implements ICommandLoader {
                 failures.push(job.id);
               }
             }
-            const remaining = scheduler.list().filter(isAutofixCronJob);
+            const remaining = scheduler.list().filter(hasAutofixPrompt);
             return remaining.length === 0 && failures.length === 0
               ? {
                   type: 'message',

@@ -30,6 +30,15 @@ export const AUTOFIX_CRON = '*/10 * * * *';
 export const AUTOFIX_USAGE =
   'Usage: /autofix status | on [propose-only|auto-commit|auto-push] | off';
 
+/** Fail-closed error text shown when an autofix tick cannot be expanded. */
+export const AUTOFIX_EXPANSION_FAILED_TEXT =
+  'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.';
+
+/** User-facing label for a rejected autofix job. */
+export function autofixRejectedLabel(jobId: string | undefined): string {
+  return `Autofix rejected: ${jobId ?? 'unknown'}`;
+}
+
 export type AutofixMode = 'propose-only' | 'auto-commit' | 'auto-push';
 
 type AutofixWatcherInput = Pick<CronJob, 'id' | 'prompt'> &
@@ -67,6 +76,15 @@ export function isAutofixCronJob(job: AutofixCronCandidate): boolean {
     job.cronExpr === AUTOFIX_CRON &&
     AUTOFIX_PROMPT_NAMESPACE_PATTERN.test(job.prompt)
   );
+}
+
+/**
+ * Broader check: does this job's prompt belong to the autofix namespace,
+ * regardless of cron expression? Used by `/autofix off` to catch watchers
+ * whose schedule may have drifted.
+ */
+export function hasAutofixPrompt(job: Pick<CronJob, 'prompt'>): boolean {
+  return AUTOFIX_PROMPT_NAMESPACE_PATTERN.test(job.prompt);
 }
 
 export function parseAutofixWatcher(
@@ -300,9 +318,10 @@ export async function resolveAutofixCronPrompt(
     }
     applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools);
     const content = buildSkillLlmContent(dirname(skill.filePath), skill.body);
+    const safeJobId = (job.id ?? 'unknown').replace(/[^A-Za-z0-9_-]/g, '_');
     return {
       displayText: `Autofix: ${watcher.repo}#${watcher.pr}`,
-      modelText: `${content}\n${job.prompt}\n<autofix-authority source="cron" repo="${watcher.repo}" pr="${watcher.pr}" mode="${watcher.mode}" rounds="${watcher.rounds}" infra-reruns="${watcher.infraReruns}" job="${job.id}" />`,
+      modelText: `${content}\n${job.prompt}\n<autofix-authority source="cron" repo="${watcher.repo}" pr="${watcher.pr}" mode="${watcher.mode}" rounds="${watcher.rounds}" infra-reruns="${watcher.infraReruns}" job="${safeJobId}" />`,
     };
   } catch (error) {
     return rejectedAutofixCronPrompt(

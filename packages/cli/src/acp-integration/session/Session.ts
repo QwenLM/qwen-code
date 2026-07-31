@@ -187,7 +187,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from '../extension-skills.js';
-import { resolveAutofixCronPrompt } from '../../utils/autofix.js';
+import {
+  AUTOFIX_EXPANSION_FAILED_TEXT,
+  autofixRejectedLabel,
+  resolveAutofixCronPrompt,
+} from '../../utils/autofix.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -5018,9 +5022,8 @@ export class Session implements SessionContext {
         .catch((error) => {
           debugLogger.error('Failed to expand scheduled Autofix tick', error);
           enqueue({
-            displayText: `Autofix rejected: ${job.id ?? 'unknown'}`,
-            modelText:
-              'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.',
+            displayText: autofixRejectedLabel(job.id),
+            modelText: AUTOFIX_EXPANSION_FAILED_TEXT,
           });
         });
     });

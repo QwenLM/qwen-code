@@ -101,7 +101,11 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
-import { resolveAutofixCronPrompt } from '../../utils/autofix.js';
+import {
+  AUTOFIX_EXPANSION_FAILED_TEXT,
+  autofixRejectedLabel,
+  resolveAutofixCronPrompt,
+} from '../../utils/autofix.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -3942,9 +3946,8 @@ export const useGeminiStream = (
                 'Failed to expand scheduled Autofix tick',
                 error,
               );
-              label = `Autofix rejected: ${job.id ?? 'unknown'}`;
-              modelText =
-                'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.';
+              label = autofixRejectedLabel(job.id);
+              modelText = AUTOFIX_EXPANSION_FAILED_TEXT;
             }
             notificationQueueRef.current.push({
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
