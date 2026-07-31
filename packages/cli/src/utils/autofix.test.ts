@@ -19,7 +19,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    default: { ...actual.default, execFile: ghMocks.execFile },
+    default: { ...actual, execFile: ghMocks.execFile },
     execFile: ghMocks.execFile,
   };
 });
