@@ -4406,6 +4406,16 @@ describe('qwen-triage tmux lane parity', () => {
       expect(clearIdx).toBeLessThan(restoreIdx);
     }
   });
+
+  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain("id: 'npm-cache'");
+      const reportStep = stepIn(jobName, 'Report npm cache hit');
+      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
+    }
+  });
 });
 
 describe('qwen-triage npm cache producer', () => {
@@ -4442,6 +4452,23 @@ describe('qwen-triage npm cache producer', () => {
   it('triggers on push to main', () => {
     expect(cacheProducerWorkflow).toMatch(/push:/);
     expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method, so a producer on a different runner or outside
+    // the container computes a different version and every restore misses
+    // even when the key and path strings match.
+    expect(cacheProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    for (const jobName of ['verify', 'tmux-testing']) {
+      expect(job(jobName)).toContain(
+        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+      );
+      expect(job(jobName)).toContain("image: 'node:22-bookworm'");
+    }
   });
 });
 

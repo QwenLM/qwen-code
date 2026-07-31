@@ -418,6 +418,26 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         `clear step must remove the restored cache directory (${dir})`,
       );
     });
+
+    it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        cacheStep.id,
+        'npm-cache',
+        'restore step needs an id so its cache-hit output is readable',
+      );
+      const reportStep = jobDef.steps.find(
+        (s) => s.name === 'Report npm cache hit',
+      );
+      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.match(
+        reportStep.run,
+        /steps\.npm-cache\.outputs\.cache-hit/,
+        'report step must surface the cache-hit output',
+      );
+    });
   }
 });
 
@@ -474,5 +494,28 @@ describe('qwen-triage: npm cache producer workflow', () => {
       populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
       `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
     );
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method. A producer on a different runner or outside the
+    // container computes a different version, so every restore misses even
+    // when the key and path strings match — pin runs-on + container to the
+    // consumers' so both match by construction.
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      assert.deepEqual(
+        saveJob['runs-on'],
+        jobDef['runs-on'],
+        `producer runs-on must match ${jobName}`,
+      );
+      assert.deepEqual(
+        saveJob.container,
+        jobDef.container,
+        `producer container must match ${jobName}`,
+      );
+    }
   });
 });
