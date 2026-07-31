@@ -1268,7 +1268,15 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('drops tool results that do not lead user content', () => {
+    it('reorders a tool_result ahead of other content in the same message rather than dropping it', () => {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use. A text part preceding the
+      // functionResponse part within the same Gemini Content used to be
+      // treated by cleanOrphanedToolCalls's own "seenNonToolResult" gate as
+      // if the tool_result never showed up at all -- silently discarding
+      // both the tool_result AND its paired tool_use, rather than fixing
+      // the order. Now the blocks are reordered before that gate runs, so
+      // the pairing is recognized and everything survives.
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1294,16 +1302,68 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+        },
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'Hi' },
+            { type: 'tool_result', tool_use_id: 't1', content: 'late' },
             {
               type: 'text',
               text: 'preface',
               cache_control: { type: 'ephemeral' },
             },
           ],
+        },
+      ]);
+    });
+
+    it('preserves relative order among multiple tool_result blocks when reordering ahead of text', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+              { functionCall: { id: 't2', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { text: 'preface' },
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 't2',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.content).toEqual([
+        { type: 'tool_result', tool_use_id: 't1', content: 'first' },
+        { type: 'tool_result', tool_use_id: 't2', content: 'second' },
+        {
+          type: 'text',
+          text: 'preface',
+          cache_control: { type: 'ephemeral' },
         },
       ]);
     });
