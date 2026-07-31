@@ -10021,6 +10021,46 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('fires onDeliveryFailed (not onDelivered) when a Goal turn hits a stream error', async () => {
+      (mockConfig as any).getHookSystem = vi.fn(() => null);
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'Goal terminal error' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const goal: QueuedGoalTurn = {
+        kind: 'goal',
+        permit: { goalId: 'goal-deliver', revision: 1, turnId: 'turn-deliver' },
+        turnKey: 'goal-runtime:turn-deliver',
+        continuationContext: 'continue toward the objective',
+      };
+
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          goal.continuationContext,
+          SendMessageType.Goal,
+          'prompt-id-goal-deliver',
+          { goal, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      await waitFor(() => expect(onDeliveryFailed).toHaveBeenCalled());
+      expect(onDelivered).not.toHaveBeenCalled();
+    });
+
     it('should memoize pendingHistoryItems', () => {
       mockUseReactToolScheduler.mockReturnValue([
         [],

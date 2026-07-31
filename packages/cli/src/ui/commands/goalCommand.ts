@@ -79,6 +79,7 @@ function formatLegacyTerminalSummary(event: GoalTerminalEvent): string {
 async function runLegacyGoalCommand(
   context: CommandContext,
   args: string,
+  explicitSet = false,
 ): Promise<SlashCommandActionReturn | void> {
   const { config } = context.services;
   if (!config) return errorMessage('Configuration is not available.');
@@ -110,7 +111,7 @@ async function runLegacyGoalCommand(
     };
   }
 
-  if (CLEAR_KEYWORDS.has(objective.toLowerCase())) {
+  if (!explicitSet && CLEAR_KEYWORDS.has(objective.toLowerCase())) {
     const cleared = unregisterGoalHook(config, sessionId);
     if (!cleared) {
       return {
@@ -269,9 +270,10 @@ export const goalCommand: SlashCommand = {
           `'/goal ${operation.kind}' is only available in interactive mode.`,
         );
       }
-      const legacyArgs = operation.kind === 'set' ? operation.objective : args;
+      const explicitSet = operation.kind === 'set';
+      const legacyArgs = explicitSet ? operation.objective : args;
       return (
-        (await runLegacyGoalCommand(context, legacyArgs)) ?? {
+        (await runLegacyGoalCommand(context, legacyArgs, explicitSet)) ?? {
           type: 'message',
           messageType: 'info',
           content: 'Command executed successfully.',

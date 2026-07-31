@@ -178,6 +178,61 @@ describe('goalCommand', () => {
     );
   });
 
+  it.each(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])(
+    'sets a literal %j objective instead of clearing in non-interactive mode',
+    async (keyword) => {
+      mockRegisterGoalHook.mockReturnValue({
+        condition: keyword,
+        setAt: Date.now(),
+      });
+      const config = {
+        getSessionId: () => 'test-session',
+        isTrustedFolder: () => true,
+        getDisableAllHooks: () => false,
+        getHookSystem: () => ({}),
+      } as unknown as Config;
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: { config },
+      });
+
+      const result = await goalCommand.action!(context, `set ${keyword}`);
+
+      expect(mockRegisterGoalHook).toHaveBeenCalledWith(
+        expect.objectContaining({ condition: keyword }),
+      );
+      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+    },
+  );
+
+  it('still clears on a bare clear keyword in non-interactive mode', async () => {
+    mockUnregisterGoalHook.mockReturnValue({
+      condition: 'Old goal',
+      iterations: 2,
+      setAt: Date.now() - 1000,
+    });
+    const config = {
+      getSessionId: () => 'test-session',
+      isTrustedFolder: () => true,
+      getDisableAllHooks: () => false,
+      getHookSystem: () => ({}),
+    } as unknown as Config;
+    const context = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: { config },
+    });
+
+    const result = await goalCommand.action!(context, 'clear');
+
+    expect(mockUnregisterGoalHook).toHaveBeenCalled();
+    expect(mockRegisterGoalHook).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      content: expect.stringMatching(/goal cleared/i),
+    });
+  });
+
   it('rejects invalid set and edit commands before runtime admission', async () => {
     const { runtime } = makeRuntime(noGoalSnapshot());
     const { context, getGoalRuntimeReady } = makeContext(runtime);

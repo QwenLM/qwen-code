@@ -3367,7 +3367,7 @@ export const useGeminiStream = (
             handleLoopDetectedEvent();
           }
 
-          if (lastPromptErroredRef.current) {
+          if (lastPromptErroredRef.current || goalTerminalErrorRef.current) {
             metadata?.onDeliveryFailed?.();
           } else {
             metadata?.onDelivered?.();
