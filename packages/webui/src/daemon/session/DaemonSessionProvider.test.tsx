@@ -2189,6 +2189,149 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('keeps an unbound local prompt active when a removed queued prompt completes', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const releaseQueuedTerminal = createDeferred<void>();
+    const queuedTerminalDelivered = createDeferred<void>();
+    const releaseRunningTerminal = createDeferred<void>();
+    const runningTerminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      submitPrompt: vi.fn(() => accepted.promise),
+      events: async function* queuedRemovalBeforeAdmission() {
+        await releaseQueuedTerminal.promise;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'pending_prompt_completed',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'queued-prompt',
+            state: 'removed',
+            previousState: 'queued',
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'queued-prompt',
+            stopReason: 'cancelled',
+          },
+        } satisfies DaemonEvent;
+        queuedTerminalDelivered.resolve();
+        await releaseRunningTerminal.promise;
+        yield {
+          id: 13,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'running-prompt',
+            stopReason: 'end_turn',
+          },
+        } satisfies DaemonEvent;
+        runningTerminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let promptResult: Promise<unknown> | undefined;
+    let promptSettled = false;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('running');
+      void promptResult.then(
+        () => {
+          promptSettled = true;
+        },
+        () => {
+          promptSettled = true;
+        },
+      );
+      releaseQueuedTerminal.resolve();
+      await queuedTerminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(streamingState).not.toBe('idle');
+    expect(promptSettled).toBe(false);
+
+    await act(async () => {
+      accepted.resolve({ promptId: 'running-prompt', lastEventId: 10 });
+      await flushPromises();
+      releaseRunningTerminal.resolve();
+      await runningTerminalDelivered.promise;
+      await flushPromises();
+    });
+    await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(streamingState).toBe('idle');
+  });
+
+  it('settles a bound local prompt when that queued prompt is removed', async () => {
+    const releaseTerminal = createDeferred<void>();
+    const terminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'queued-prompt',
+        lastEventId: 10,
+      })),
+      events: async function* removedBoundQueuedPrompt() {
+        await releaseTerminal.promise;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'pending_prompt_completed',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'queued-prompt',
+            state: 'removed',
+            previousState: 'queued',
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'queued-prompt',
+            stopReason: 'cancelled',
+          },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('queued');
+      await flushPromises();
+      releaseTerminal.resolve();
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    await expect(promptResult).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(streamingState).toBe('idle');
+  });
+
   it('allows the next prompt after a turn completes before acceptance returns', async () => {
     const firstAccepted = createDeferred<NonBlockingPromptAccepted>();
     const secondAccepted = createDeferred<NonBlockingPromptAccepted>();
@@ -4344,6 +4487,124 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(promptStatus).not.toBe('idle');
+  });
+
+  it('does not settle the running turn when a removed queued prompt completes', async () => {
+    const queuedTerminalDelivered = createDeferred<void>();
+    const runningTerminal = createDeferred<void>();
+    const runningTerminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* removedQueuedPromptThenRunningTurn() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'pending_prompt_completed',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'queued-prompt',
+            state: 'removed',
+            previousState: 'queued',
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'queued-prompt',
+            stopReason: 'cancelled',
+          },
+        } satisfies DaemonEvent;
+        queuedTerminalDelivered.resolve();
+        await runningTerminal.promise;
+        yield {
+          id: 8,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'running-prompt',
+            stopReason: 'end_turn',
+          },
+        } satisfies DaemonEvent;
+        runningTerminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await queuedTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).not.toBe('idle');
+
+    await act(async () => {
+      runningTerminal.resolve();
+      await runningTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('settles a restored running prompt when its removal terminal arrives', async () => {
+    const terminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* removedRunningPrompt() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'pending_prompt_completed',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'running-prompt',
+            state: 'removed',
+            previousState: 'running',
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'running-prompt',
+            stopReason: 'cancelled',
+          },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('idle');
   });
 
   it('settles restored active prompts when turn_complete arrives', async () => {

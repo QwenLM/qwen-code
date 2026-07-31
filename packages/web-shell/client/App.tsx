@@ -46,6 +46,7 @@ import type {
 import { type SessionGitIntent } from './components/GitModePopover';
 import {
   SESSION_LIST_PAGE_SIZE,
+  SESSION_MID_TURN_MESSAGE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
@@ -1878,6 +1879,10 @@ export function App({
   const monitorDetailsSupported =
     connection.capabilities?.features.includes(
       SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
+    ) === true;
+  const midTurnMessageSupported =
+    connection.capabilities?.features.includes(
+      SESSION_MID_TURN_MESSAGE_FEATURE,
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -4688,17 +4693,13 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
-  const notifySuccess = useCallback(
-    (message: string) => pushToast('success', message),
-    [pushToast],
-  );
-
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    insertQueuedPromptImmediately,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -4711,7 +4712,6 @@ export function App({
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -10025,6 +10025,8 @@ export function App({
                           t={t}
                           onDelete={removeQueuedPrompt}
                           onInsert={insertQueuedPrompt}
+                          onImmediateInsert={insertQueuedPromptImmediately}
+                          insertActionsEnabled={midTurnMessageSupported}
                           onEdit={editQueuedPrompt}
                         />
                         {CustomComposerHeader && (

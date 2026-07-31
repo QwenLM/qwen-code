@@ -108,6 +108,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_MODEL_INTERRUPT_METHOD,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -469,6 +470,97 @@ interface ChannelInfo {
   handshakeComplete: boolean;
 }
 
+interface SerialQueueTask<T> {
+  run: () => Promise<T>;
+  after?: () => Promise<void>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+  complete: () => void;
+  started: boolean;
+}
+
+class RemovableSerialQueue {
+  private readonly pending: Array<SerialQueueTask<unknown>> = [];
+  private running = false;
+  private tail: Promise<void> = Promise.resolve();
+
+  enqueue<T>(
+    run: () => Promise<T>,
+    after?: () => Promise<void>,
+  ): {
+    promise: Promise<T>;
+    cancelBeforeStart: (reason?: unknown) => boolean;
+  } {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    let complete!: () => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    const completion = new Promise<void>((res) => {
+      complete = res;
+    });
+    const task: SerialQueueTask<T> = {
+      run,
+      ...(after ? { after } : {}),
+      resolve,
+      reject,
+      complete,
+      started: false,
+    };
+    this.pending.push(task as SerialQueueTask<unknown>);
+    this.tail = this.tail.then(() => completion);
+    this.pump();
+    return {
+      promise,
+      cancelBeforeStart: (reason) => {
+        if (task.started) return false;
+        const index = this.pending.indexOf(task as SerialQueueTask<unknown>);
+        if (index === -1) return false;
+        this.pending.splice(index, 1);
+        reject(reason);
+        complete();
+        this.pump();
+        return true;
+      },
+    };
+  }
+
+  settledThroughCurrent(): Promise<void> {
+    return this.tail;
+  }
+
+  hasWork(): boolean {
+    return this.running || this.pending.length > 0;
+  }
+
+  private pump(): void {
+    if (this.running) return;
+    const task = this.pending.shift();
+    if (!task) return;
+    task.started = true;
+    this.running = true;
+    void Promise.resolve()
+      .then(task.run)
+      .then(
+        (value) => {
+          task.resolve(value);
+        },
+        (error) => {
+          task.reject(error);
+        },
+      )
+      .then(() => task.after?.())
+      .catch(() => {})
+      .finally(() => {
+        task.complete();
+        this.running = false;
+        this.pump();
+      });
+  }
+}
+
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
@@ -498,15 +590,9 @@ interface SessionEntry {
   closing: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
   cwdChangeQueue: Promise<void>;
-  /**
-   * Tail of the per-session prompt queue. Each new prompt chains off the
-   * resolved (or rejected) state of this promise so prompts run one at a
-   * time in arrival order. Always resolves — failures are swallowed at the
-   * tail so a prior failure doesn't block subsequent prompts; the original
-   * caller still observes the rejection on its own returned promise.
-   */
-  promptQueue: Promise<void>;
-  /** Accepted prompts that have not settled yet (queued + active). */
+  /** Serializes prompts and other agent mutations in arrival order. */
+  operationQueue: RemovableSerialQueue;
+  /** Live prompts that have not completed or been removed (queued + active). */
   pendingPromptCount: number;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
@@ -537,7 +623,7 @@ interface SessionEntry {
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
    * model requests) from racing into `unstable_setSessionModel` and
    * leaving the agent in non-deterministic state. Always resolves —
-   * failures swallowed at the tail like `promptQueue`.
+   * failures swallowed at the tail like the operation queue.
    */
   modelChangeQueue: Promise<void>;
   /**
@@ -1335,6 +1421,7 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
+const MID_TURN_MODEL_INTERRUPT_TIMEOUT_MS = 5_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
@@ -1359,7 +1446,7 @@ const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const MAX_EVENT_RING_SIZE = 1_000_000;
 // Bd1yh: per-permission-request wall clock. Without this, an agent
 // calling `requestPermission` while no SSE subscriber is connected
-// would hang the per-session FIFO promptQueue forever (the prompt
+// would hang the per-session FIFO forever (the prompt
 // can't complete, every subsequent prompt is blocked behind it).
 // 5 minutes is generous for "human reads UI, decides, clicks
 // approve" while still bounded enough to recover from a wedged
@@ -3916,7 +4003,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       recordingDegraded: false,
       closing: false,
       cwdChangeQueue: Promise.resolve(),
-      promptQueue: Promise.resolve(),
+      operationQueue: new RemovableSerialQueue(),
       pendingPromptCount: 0,
       pendingPromptList: [],
       midTurnMessageQueue: [],
@@ -5409,7 +5496,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
       // Pre-aborted: skip the queue entirely. Without this the prompt
-      // chains onto promptQueue, waits its turn, and the FIFO worker
+      // enters the operation queue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
       // queue churn on every retry-after-abort, plus a confusing trace
       // where the prompt appears to "run" before erroring.
@@ -5442,7 +5529,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         promptId,
         ...(originatorClientId ? { originatorClientId } : {}),
       });
-      const isQueued = entry.pendingPromptCount > 1;
+      const isQueued =
+        entry.pendingPromptCount > 1 || entry.operationQueue.hasWork();
       const pendingAbort = new AbortController();
       if (signal) {
         if (signal.aborted) {
@@ -5567,7 +5655,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
-      const result = entry.promptQueue.then(() =>
+      const drainCancelForwarding = async (): Promise<void> => {
+        try {
+          await pendingEntry.cancelForwardDrain;
+        } catch {
+          // The initiating mutation already reports or logs forwarding
+          // failures. The queue only needs to fence any in-flight write.
+        }
+      };
+      const dispatchPrompt = () =>
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
           telemetry.metrics?.promptQueueWait(queueWaitMs);
@@ -5636,7 +5732,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
-                  } as PromptRequest & { retry?: unknown; delivery?: unknown };
+                  } as PromptRequest & {
+                    retry?: unknown;
+                    delivery?: unknown;
+                  };
                   delete copy.retry;
                   delete copy.delivery;
                   const meta =
@@ -5839,8 +5938,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } finally {
             telemetry.metrics?.promptDuration(Date.now() - dispatchStartMs);
           }
-        }),
+        });
+      const queuedDispatch = entry.operationQueue.enqueue(
+        dispatchPrompt,
+        drainCancelForwarding,
       );
+      pendingEntry.cancelQueuedDispatch = (reason) => {
+        const cancelled = queuedDispatch.cancelBeforeStart(reason);
+        if (cancelled) releasePromptSlot();
+        return cancelled;
+      };
+      if (isQueued) {
+        const cancelQueuedDispatch = () =>
+          pendingEntry.cancelQueuedDispatch?.(pendingAbort.signal.reason);
+        if (pendingAbort.signal.aborted) {
+          cancelQueuedDispatch();
+        } else {
+          pendingAbort.signal.addEventListener('abort', cancelQueuedDispatch, {
+            once: true,
+          });
+        }
+      }
+      const result = queuedDispatch.promise;
       // Do not reorder — this `result.then` must stay registered before the
       // `result.finally` below: handlers on the same promise run in
       // registration order and the broadcasts are synchronous, which is what
@@ -5865,20 +5984,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
         },
-      );
-      // Tail swallows failures so subsequent prompts still run. The caller
-      // still sees rejections on its own `result` reference.
-      const drainCancelForwarding = async (): Promise<void> => {
-        try {
-          await pendingEntry.cancelForwardDrain;
-        } catch {
-          // The initiating mutation already reports or logs forwarding
-          // failures. The queue only needs to fence any in-flight write.
-        }
-      };
-      entry.promptQueue = result.then(
-        drainCancelForwarding,
-        drainCancelForwarding,
       );
       result
         .finally(() => {
@@ -6268,9 +6373,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
-      const branchResult = (
-        concurrentSideTask ? Promise.resolve() : entry.promptQueue
-      ).then(async () => {
+      const runBranch = async () => {
         if (entry.promptActive && !isSideTask) {
           throw new BranchWhilePromptActiveError(sessionId);
         }
@@ -6419,13 +6522,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         } finally {
           releaseAdmissionOnce();
         }
-      });
-      if (!concurrentSideTask) {
-        entry.promptQueue = branchResult.then(
-          () => undefined,
-          () => undefined,
-        );
-      }
+      };
+      const branchResult = concurrentSideTask
+        ? runBranch()
+        : entry.operationQueue.enqueue(runBranch).promise;
       return branchResult;
     },
 
@@ -6462,10 +6562,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
 
-      // Chain onto promptQueue and update tail — ensures:
+      // Chain onto the operation queue — ensures:
       // 1. cd waits for any in-flight prompt to complete
       // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
-      const cdPromise = entry.promptQueue.then(async () => {
+      const cdPromise = entry.operationQueue.enqueue(async () => {
         if (entry.promptActive) {
           throw new CdWhilePromptActiveError(sessionId);
         }
@@ -6510,14 +6610,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
 
         return extResult;
-      });
+      }).promise;
 
-      // Queue tail tied to the raw extMethod settlement — subsequent
-      // operations wait for the actual cd to finish, not the timeout.
-      entry.promptQueue = cdPromise.then(
-        () => undefined,
-        () => undefined,
-      );
       entry.cwdChangeQueue = cdPromise.then(
         () => undefined,
         () => undefined,
@@ -7689,15 +7783,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       writeStderrLine(
         `[pending-prompt] session=${sessionId} removing promptId=${promptId} state=${target.state}`,
       );
-      // Abort the prompt: for 'queued' prompts the FIFO will skip
-      // dispatch on the `signal.aborted` check; for 'running' prompts
-      // this triggers the cancel path.
+      // Abort the prompt: queued prompts are removed from the dispatcher;
+      // running prompts take the cancel path.
       target.abortController.abort(
         new DOMException('Prompt removed by user', 'AbortError'),
       );
       if (target.state === 'queued') {
-        // A queued prompt never dispatches once aborted — safe to drop
-        // from the list immediately.
         entry.pendingPromptList.splice(idx, 1);
       } else {
         // A RUNNING prompt must stay on the list (hidden from
@@ -7709,15 +7800,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // silently dropped.
         target.removed = true;
       }
-      // Keep the admission slot until this prompt's FIFO node reaches the head
-      // and settles through the original result.finally() path. Otherwise a
-      // client could enqueue/delete queued prompts repeatedly while one turn is
-      // running and bypass maxPendingPromptsPerSession with hidden backlog nodes.
       try {
         entry.events.publish({
           type: 'pending_prompt_completed',
           promptId,
-          data: { sessionId, promptId, state: 'removed' },
+          data: {
+            sessionId,
+            promptId,
+            state: 'removed',
+            previousState: target.state,
+          },
           ...(target.originatorClientId
             ? { originatorClientId: target.originatorClientId }
             : {}),
@@ -7783,6 +7875,39 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { accepted: true };
     },
 
+    async enqueueImmediateMidTurnMessage(sessionId, message, context) {
+      const result = bridgeApi.enqueueMidTurnMessage(
+        sessionId,
+        message,
+        context,
+      );
+      if (!result.accepted) return { accepted: false };
+      const entry = byId.get(sessionId)!;
+      let response: Record<string, unknown>;
+      try {
+        response = await withTimeout(
+          entry.connection.extMethod(MID_TURN_MODEL_INTERRUPT_METHOD, {
+            sessionId,
+          }),
+          MID_TURN_MODEL_INTERRUPT_TIMEOUT_MS,
+          MID_TURN_MODEL_INTERRUPT_METHOD,
+        );
+      } catch (error) {
+        writeStderrLine(
+          `[mid-turn] session=${sessionId} immediate model interrupt unavailable; message remains queued: ${extractErrorMessage(error)}`,
+        );
+        return {
+          accepted: true,
+          interruptStatus: 'unavailable',
+        };
+      }
+      const interrupted = response['interrupted'] === true;
+      return {
+        accepted: true,
+        interruptStatus: interrupted ? 'interrupted' : 'deferred',
+      };
+    },
+
     async generateSessionBtw(sessionId, question, signal, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -7843,7 +7968,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'Cannot fork while a response or tool call is in progress',
         );
       }
-      return entry.promptQueue.then(async () => {
+      return entry.operationQueue.settledThroughCurrent().then(async () => {
         if (entry.pendingPromptCount > 0 || entry.promptActive) {
           throw new SessionBusyError(
             sessionId,

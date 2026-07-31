@@ -29,6 +29,7 @@ import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import {
+  SESSION_MID_TURN_MESSAGE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
@@ -312,6 +313,10 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
+  const midTurnMessageSupported =
+    connection.capabilities?.features.includes(
+      SESSION_MID_TURN_MESSAGE_FEATURE,
+    ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
   const {
     followupState,
@@ -333,11 +338,6 @@ export function ChatPane({
   );
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const notifySuccess = useCallback(
-    (message: string) => store.dispatch([{ type: 'status', text: message }]),
-    [store],
-  );
-
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -413,6 +413,7 @@ export function ChatPane({
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    insertQueuedPromptImmediately,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -425,7 +426,6 @@ export function ChatPane({
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -851,6 +851,8 @@ export function ChatPane({
           t={t}
           onDelete={removeQueuedPrompt}
           onInsert={insertQueuedPrompt}
+          onImmediateInsert={insertQueuedPromptImmediately}
+          insertActionsEnabled={midTurnMessageSupported}
           onEdit={editQueuedPrompt}
         />
         <ChatEditor

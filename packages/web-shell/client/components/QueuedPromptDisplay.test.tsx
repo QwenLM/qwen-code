@@ -40,6 +40,7 @@ function setup(
   const handlers = {
     onDelete: vi.fn(),
     onInsert: vi.fn(),
+    onImmediateInsert: vi.fn(),
     onEdit: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
@@ -53,6 +54,7 @@ function setup(
       <QueuedPromptDisplay
         prompts={prompts}
         t={t}
+        insertActionsEnabled
         {...handlers}
         {...overrides}
       />
@@ -73,34 +75,160 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
-  it('shows server queue status without an insert action', () => {
+  it('hides insert actions when the daemon lacks the capability', () => {
+    const { container } = setup({ insertActionsEnabled: false });
+    expect(container.textContent).not.toContain('立即插入');
+    expect(container.querySelector('.lucide-corner-down-right')).toBeNull();
+    expect(container.querySelector('.lucide-zap')).toBeNull();
+    expect(container.querySelectorAll('button')).toHaveLength(4);
+  });
+
+  it('keeps insert available for a server-queued prompt', () => {
     const onInsert = vi.fn();
     const { container } = setup({
-      prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
+      prompts: [
+        {
+          id: 1,
+          text: '等待处理',
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        },
+      ],
       onInsert,
     });
 
-    expect(container.textContent).toContain('服务器排队中...');
+    expect(container.textContent).toContain('排队中...');
     expect(container.querySelector('[role="status"]')).toBeTruthy();
     expect(
       container.querySelector('[class*="queuedPromptSpinner"]'),
     ).toBeNull();
     const buttons = [...container.querySelectorAll('button')];
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(4);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
-    expect(container.textContent).not.toContain('插入');
-    expect(onInsert).not.toHaveBeenCalled();
+    const state = container.querySelector('[class*="queuedPromptState"]');
+    const actions = container.querySelector('[class*="queuedPromptActions"]');
+    expect(state?.nextElementSibling).toBe(actions);
+    const insert = buttons.find(
+      (button) => button.textContent?.trim() === '插入',
+    );
+    expect(insert?.querySelector('.lucide-corner-down-right')).toBeTruthy();
+    expect(
+      insert?.querySelector('[class*="queuedPromptActionIcon"]'),
+    ).toBeNull();
+    expect(insert?.title).toBe(
+      '不中断当前输出，在同一回合的下一次模型调用时生效。',
+    );
+    const immediate = buttons.find((button) =>
+      button.textContent?.includes('立即插入'),
+    );
+    expect(immediate?.querySelector('.lucide-zap')).toBeTruthy();
+    expect(
+      immediate?.querySelector('[class*="queuedPromptActionIcon"]'),
+    ).toBeNull();
+    expect(immediate?.title).toBe(
+      '打断当前模型输出，在同一回合立即插入并继续生成。',
+    );
+    act(() =>
+      insert!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onInsert).toHaveBeenCalledWith(1);
   });
 
-  it('keeps the spinner while a prompt is still submitting', () => {
+  it('offers immediate insert for server-queued prompts', () => {
+    const onImmediateInsert = vi.fn();
     const { container } = setup({
-      prompts: [{ id: 1, text: '正在发送', serverState: 'submitting' }],
+      prompts: [
+        {
+          id: 1,
+          text: '队首消息',
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        },
+        {
+          id: 2,
+          text: '后续消息',
+          serverPromptId: 'prompt-2',
+          serverState: 'queued',
+        },
+      ],
+      onImmediateInsert,
     });
 
-    expect(container.textContent).toContain('提交中...');
+    const immediateButtons = [...container.querySelectorAll('button')].filter(
+      (button) => button.textContent?.includes('立即插入'),
+    );
+    expect(immediateButtons).toHaveLength(2);
+    act(() =>
+      immediateButtons[1]!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(onImmediateInsert).toHaveBeenCalledWith(2);
+  });
+
+  it('shows immediate insert progress in place of queue actions', () => {
+    const inserting = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '准备立即插入',
+          midTurnState: 'submitting',
+          midTurnImmediate: true,
+        },
+      ],
+    });
+    const waiting = setup({
+      prompts: [
+        {
+          id: 2,
+          text: '等待立即生效',
+          midTurnState: 'queued',
+          midTurnImmediate: true,
+        },
+      ],
+    });
+
+    expect(inserting.container.textContent).toContain('正在立即插入...');
     expect(
-      container.querySelector('[class*="queuedPromptSpinner"]'),
+      inserting.container.querySelector('[class*="queuedPromptSpinner"]'),
     ).toBeTruthy();
+    expect(inserting.container.querySelectorAll('button')).toHaveLength(0);
+    expect(waiting.container.textContent).toContain('等待立即生效...');
+    expect(
+      waiting.container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeNull();
+    expect(waiting.container.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('keeps an accepted mid-turn insert visible until it is injected', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待插入', midTurnState: 'queued' }],
+    });
+
+    expect(container.textContent).toContain('等待插入');
+    expect(container.textContent).toContain('等待模型接收...');
+    expect(
+      container.querySelector('[role="status"]')?.getAttribute('title'),
+    ).toBe('将在下一次模型调用时生效。');
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(0);
+  });
+
+  it('keeps the spinner while a prompt or insert is still submitting', () => {
+    const prompt = setup({
+      prompts: [{ id: 1, text: '正在发送', serverState: 'submitting' }],
+    });
+    const insert = setup({
+      prompts: [{ id: 2, text: '正在插入', midTurnState: 'submitting' }],
+    });
+
+    expect(prompt.container.textContent).toContain('提交中...');
+    expect(insert.container.textContent).toContain('正在插入当前回合...');
+    for (const { container } of [prompt, insert]) {
+      expect(
+        container.querySelector('[class*="queuedPromptSpinner"]'),
+      ).toBeTruthy();
+    }
   });
 
   it('renders queued reference annotations as tags', () => {

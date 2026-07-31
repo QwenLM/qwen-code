@@ -494,6 +494,22 @@ function makeBridge(
       });
       return { accepted: workspaceCwd === SECONDARY_CWD };
     },
+    async enqueueImmediateMidTurnMessage(
+      sessionId: string,
+      message: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      midTurnMessageCalls.push({
+        sessionId,
+        message,
+        ...(context ? { context } : {}),
+      });
+      const accepted = workspaceCwd === SECONDARY_CWD;
+      return {
+        accepted,
+        ...(accepted ? { interruptStatus: 'interrupted' as const } : {}),
+      };
+    },
     async cancelSessionTask(
       sessionId: string,
       taskId: string,

@@ -4286,7 +4286,7 @@ export function registerSessionRoutes(
     mutate(),
     withOwnerMutableSession(
       'POST /session/:id/mid-turn-message',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const message = body['message'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
@@ -4311,11 +4311,15 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = runtime.bridge.enqueueMidTurnMessage(
-          sessionId,
-          trimmed,
-          clientId !== undefined ? { clientId } : undefined,
-        );
+        const context = clientId !== undefined ? { clientId } : undefined;
+        const result =
+          body['immediate'] === true
+            ? await runtime.bridge.enqueueImmediateMidTurnMessage(
+                sessionId,
+                trimmed,
+                context,
+              )
+            : runtime.bridge.enqueueMidTurnMessage(sessionId, trimmed, context);
         res.status(200).json(result);
       },
     ),

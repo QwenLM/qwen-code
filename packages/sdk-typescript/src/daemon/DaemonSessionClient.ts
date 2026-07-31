@@ -605,10 +605,11 @@ export class DaemonSessionClient {
    */
   async enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; immediate?: boolean },
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.immediate === true ? { immediate: true } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

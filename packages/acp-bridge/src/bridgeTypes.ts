@@ -594,6 +594,9 @@ export interface BridgeHeartbeatState {
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
+/** Parent-to-agent request to stop only the active model call for mid-turn input. */
+export const MID_TURN_MODEL_INTERRUPT_METHOD = 'craft/interruptMidTurnModel';
+
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
@@ -693,6 +696,8 @@ export interface PendingPromptEntry {
   cancelForwardDeadline?: Promise<void>;
   /** True after the prompt request has been handed to the ACP connection. */
   dispatched?: boolean;
+  /** Removes a queued prompt from the serial dispatcher before it starts. */
+  cancelQueuedDispatch?: (reason?: unknown) => boolean;
   /**
    * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
    * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
@@ -901,8 +906,8 @@ export interface AcpSessionBridge {
 
   /**
    * Change the working directory of a live session. The session must be
-   * idle (no active prompt). Chains onto `entry.promptQueue` and updates
-   * the tail to prevent concurrent mutations.
+   * idle (no active prompt). Runs through the session operation queue to
+   * prevent concurrent mutations.
    *
    * Throws `CdWhilePromptActiveError` when a prompt is running,
    * `SessionNotFoundError` for unknown ids, and `InvalidClientIdError`
@@ -1429,6 +1434,21 @@ export interface AcpSessionBridge {
     message: string,
     context?: BridgeClientRequestContext,
   ): { accepted: boolean };
+
+  /**
+   * Queue a mid-turn message and request that the active model call stop so the
+   * ACP child drains the message immediately without ending the current turn.
+   * `interruptStatus` distinguishes a completed interruption, a tool-boundary
+   * deferral, and an unavailable interrupt request.
+   */
+  enqueueImmediateMidTurnMessage(
+    sessionId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    accepted: boolean;
+    interruptStatus?: 'interrupted' | 'deferred' | 'unavailable';
+  }>;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

@@ -3829,6 +3829,29 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('requests an immediate same-turn model interruption', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          accepted: true,
+          interruptStatus: 'interrupted',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.enqueueMidTurnMessage('s-1', 'apply now', {
+        immediate: true,
+      });
+
+      expect(result).toEqual({
+        accepted: true,
+        interruptStatus: 'interrupted',
+      });
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'apply now',
+        immediate: true,
+      });
+    });
+
     it('returns accepted:false verbatim when the session is idle', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(200, { accepted: false }),

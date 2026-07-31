@@ -1795,8 +1795,7 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'session-1',
       });
       const rejection =
-        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
-        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+        await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
       await callSeen.promise;
       await vi.advanceTimersByTimeAsync(60_000);
 
@@ -6799,13 +6798,15 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('keeps a removed queued prompt counted until its FIFO node drains', async () => {
+    it('releases a removed queued prompt slot without bypassing the active prompt', async () => {
       let releaseFirst: (() => void) | undefined;
+      const started: string[] = [];
       const factory: ChannelFactory = async () =>
         makeChannel({
           promptImpl: async (p) => {
             const text =
               (p.prompt[0] as { text?: string } | undefined)?.text ?? '';
+            started.push(text);
             if (text === 'hold') {
               await new Promise<void>((resolve) => {
                 releaseFirst = resolve;
@@ -6816,7 +6817,7 @@ describe('createAcpSessionBridge', () => {
         }).channel;
       const bridge = makeBridge({
         channelFactory: factory,
-        maxPendingPromptsPerSession: 2,
+        maxPendingPromptsPerSession: 5,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
@@ -6824,31 +6825,50 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: 'hold' }],
       });
-      const queued = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'remove me' }],
-      });
-
-      await vi.waitFor(() => {
-        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
-      });
-      const queuedId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
-      expect(queuedId).toBeDefined();
-      expect(bridge.removePendingPrompt(session.sessionId, queuedId!)).toEqual({
-        removed: true,
-      });
-
-      expect(() =>
+      const removed = Array.from({ length: 4 }, (_, index) =>
         bridge.sendPrompt(session.sessionId, {
           sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'overflow before drain' }],
+          prompt: [{ type: 'text', text: `remove-${index}` }],
         }),
-      ).toThrow(PromptQueueFullError);
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(5);
+      });
+      for (const queued of bridge
+        .getPendingPrompts(session.sessionId)
+        .filter((prompt) => prompt.state === 'queued')) {
+        expect(
+          bridge.removePendingPrompt(session.sessionId, queued.promptId),
+        ).toEqual({ removed: true });
+      }
+      expect(
+        bridge.getDaemonStatusSnapshot().sessions[0]?.pendingPromptCount,
+      ).toBe(1);
+
+      const replacements = Array.from({ length: 4 }, (_, index) =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: `replacement-${index}` }],
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(started).toEqual(['hold']);
 
       await vi.waitFor(() => expect(releaseFirst).toBeDefined());
       releaseFirst!();
       await active;
-      await expect(queued).rejects.toBeDefined();
+      await Promise.all(
+        removed.map((prompt) => expect(prompt).rejects.toBeDefined()),
+      );
+      await expect(Promise.all(replacements)).resolves.toHaveLength(4);
+      expect(started).toEqual([
+        'hold',
+        'replacement-0',
+        'replacement-1',
+        'replacement-2',
+        'replacement-3',
+      ]);
       await expect(
         bridge.sendPrompt(session.sessionId, {
           sessionId: session.sessionId,
@@ -6908,8 +6928,9 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('does not count queued branchSession work against the prompt cap', async () => {
+    it('releases a prompt queued behind branchSession when removed', async () => {
       let releaseBranch: (() => void) | undefined;
+      const startedPrompts: string[] = [];
       const factory: ChannelFactory = async () =>
         makeChannel({
           extMethodImpl: async (method) => {
@@ -6918,6 +6939,12 @@ describe('createAcpSessionBridge', () => {
               releaseBranch = resolve;
             });
             return { newSessionId: 'branch-1', title: 'Branch 1' };
+          },
+          promptImpl: async (request) => {
+            startedPrompts.push(
+              (request.prompt[0] as { text?: string } | undefined)?.text ?? '',
+            );
+            return { stopReason: 'end_turn' };
           },
           resumeSessionImpl: () => ({}),
         }).channel;
@@ -6934,14 +6961,35 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: 'after-branch' }],
       });
+      const promptRejection = await expect(prompt).rejects.toBeDefined();
 
       await vi.waitFor(() => expect(releaseBranch).toBeDefined());
+      const [queued] = bridge.getPendingPrompts(session.sessionId);
+      expect(queued).toMatchObject({ state: 'queued', text: 'after-branch' });
+      expect(
+        bridge.removePendingPrompt(session.sessionId, queued!.promptId),
+      ).toEqual({ removed: true });
+      expect(
+        bridge.getDaemonStatusSnapshot().sessions[0]?.pendingPromptCount,
+      ).toBe(0);
+
+      const replacement = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'replacement' }],
+      });
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { state: 'queued', text: 'replacement' },
+      ]);
+      expect(startedPrompts).toEqual([]);
+
       releaseBranch!();
       await expect(branch).resolves.toMatchObject({
         sessionId: 'branch-1',
         displayName: 'Branch 1',
       });
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await promptRejection;
+      await expect(replacement).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(startedPrompts).toEqual(['replacement']);
       await bridge.shutdown();
     });
 
@@ -7444,6 +7492,7 @@ describe('createAcpSessionBridge', () => {
         expect(removed?.data).toMatchObject({
           promptId: 'prompt-removed',
           state: 'removed',
+          previousState: 'queued',
         });
       });
       sub.catch(() => {});
@@ -7577,6 +7626,9 @@ describe('createAcpSessionBridge', () => {
             'removed',
       );
       expect(removedEvent).toBeDefined();
+      expect(removedEvent?.data).toMatchObject({
+        previousState: 'running',
+      });
 
       sub.catch(() => {});
       await bridge.shutdown();
@@ -18902,6 +18954,120 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, 'next time'),
     ).toEqual({ accepted: false });
+    await bridge.shutdown();
+  });
+
+  it('queues before requesting an immediate model-only interruption', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: async (method) => {
+        expect(method).toBe('craft/interruptMidTurnModel');
+        const drained = await handle.agentConnection.extMethod(
+          'craft/drainMidTurnQueue',
+          { sessionId: session.sessionId },
+        );
+        expect(drained).toMatchObject({ messages: ['apply now'] });
+        return { interrupted: true };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep working' }],
+      })
+      .catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(
+      bridge.enqueueImmediateMidTurnMessage(session.sessionId, 'apply now'),
+    ).resolves.toEqual({
+      accepted: true,
+      interruptStatus: 'interrupted',
+    });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('reports a deferred immediate insert when no model call is active', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: async () => ({ interrupted: false }),
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'run a tool' }],
+      })
+      .catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(
+      bridge.enqueueImmediateMidTurnMessage(session.sessionId, 'next boundary'),
+    ).resolves.toEqual({
+      accepted: true,
+      interruptStatus: 'deferred',
+    });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('keeps the message queued when immediate interruption is unavailable', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: async () => {
+        throw new Error('method unavailable');
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep working' }],
+      })
+      .catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await expect(
+      bridge.enqueueImmediateMidTurnMessage(session.sessionId, 'still apply'),
+    ).resolves.toEqual({
+      accepted: true,
+      interruptStatus: 'unavailable',
+    });
+    await expect(
+      handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      }),
+    ).resolves.toMatchObject({ messages: ['still apply'] });
+
+    release?.();
+    await prompt;
     await bridge.shutdown();
   });
 

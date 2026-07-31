@@ -963,12 +963,13 @@
 }
 
 .queuedPrompts {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 6px;
   width: calc(100% - 32px);
-  margin: 0 auto -8px;
-  padding: 12px;
+  margin: 0 auto;
+  padding: 4px 12px;
   border: 1px solid var(--border);
   border-radius: 12px 12px 0 0;
   background: var(--background);
@@ -1028,8 +1029,10 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   margin-left: 8px;
   color: var(--secondary-foreground);
+  white-space: nowrap;
 }
 
 .queuedPromptSpinner {
@@ -1073,14 +1076,36 @@
   padding: 3px 6px;
 }
 
-.queuedPromptActionIcon {
+.queuedPromptActionIcon,
+.queuedPromptLucideIcon {
   width: 14px;
   height: 14px;
+  flex-shrink: 0;
 }
 
-.queuedPromptAction:hover {
+@container (max-width: 699px) {
+  .queuedPromptActionLabel,
+  .queuedPromptStateLabel {
+    display: none;
+  }
+
+  .queuedPromptState:not(.queuedPromptStateLoading) {
+    display: none;
+  }
+}
+
+.queuedPromptAction:not(:disabled):hover {
   background: var(--accent);
   color: var(--foreground);
+}
+
+.queuedPromptImmediateAction {
+  color: var(--warning-color);
+}
+
+.queuedPromptImmediateAction:not(:disabled):hover {
+  background: var(--warning-bg);
+  color: var(--warning-color);
 }
 
 .queuedPromptAction:disabled {

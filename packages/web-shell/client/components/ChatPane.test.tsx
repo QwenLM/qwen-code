@@ -221,7 +221,12 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div
+      data-testid="pane-queue"
+      data-insert-actions-enabled={String(props.insertActionsEnabled)}
+    >
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -1106,6 +1111,21 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
     expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
     expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates queue insertion actions on the daemon capability', () => {
+    render();
+    expect(
+      testid('pane-queue')?.getAttribute('data-insert-actions-enabled'),
+    ).toBe('false');
+
+    connectionState.capabilities = {
+      features: ['session_mid_turn_message'],
+    };
+    rerender();
+    expect(
+      testid('pane-queue')?.getAttribute('data-insert-actions-enabled'),
+    ).toBe('true');
   });
 
   it('passes follow-up suggestions to the pane editor', () => {

@@ -7,6 +7,7 @@
 export interface MidTurnQueueItem {
   text: string;
   images?: unknown[];
+  midTurnState?: 'submitting' | 'queued';
 }
 
 export interface MidTurnInjectedBatch {
@@ -18,9 +19,10 @@ export interface MidTurnInjectedBatch {
 
 /**
  * Reconcile injected mid-turn messages against the local pending queue: remove
- * the first text-only entry matching each injected message for `sessionId`,
- * across ALL `batches` (a multi-batch turn drains once per tool batch, so the
- * consumer must process every accumulated batch, not just the latest).
+ * the first matching text-only entry already submitted to the mid-turn queue
+ * for `sessionId`, across ALL `batches` (a multi-batch turn drains once per tool
+ * batch, so the consumer must process every accumulated batch, not just the
+ * latest).
  *
  * Matching is count-based — one removal per injected message — so a queue that
  * holds the same text twice loses one entry per matching injection. Entries
@@ -43,7 +45,6 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
   clientId?: string,
 ): T[] | null {
   const remaining = [...prompts];
-  let changed = false;
   for (const batch of batches) {
     if (batch.sessionId !== sessionId) continue;
     if (
@@ -56,13 +57,13 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
       const index = remaining.findIndex(
         (prompt) =>
           prompt.text === message &&
+          prompt.midTurnState !== undefined &&
           (!prompt.images || prompt.images.length === 0),
       );
       if (index >= 0) {
         remaining.splice(index, 1);
-        changed = true;
       }
     }
   }
-  return changed ? remaining : null;
+  return remaining.length < prompts.length ? remaining : null;
 }

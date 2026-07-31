@@ -195,7 +195,12 @@ describe('daemon event schema', () => {
       id: 12,
       v: 1,
       type: PENDING_PROMPT_COMPLETED_EVENT,
-      data: { sessionId: 's-1', promptId: 'p-1', state: 'removed' },
+      data: {
+        sessionId: 's-1',
+        promptId: 'p-1',
+        state: 'removed',
+        previousState: 'queued',
+      },
     };
 
     expect(asKnownDaemonEvent(added)).toBe(added);
@@ -235,6 +240,19 @@ describe('daemon event schema', () => {
         v: 1,
         type: PENDING_PROMPT_COMPLETED_EVENT,
         data: { sessionId: 's-1', promptId: 'p-1', state: 'done' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 13,
+        v: 1,
+        type: PENDING_PROMPT_COMPLETED_EVENT,
+        data: {
+          sessionId: 's-1',
+          promptId: 'p-1',
+          state: 'removed',
+          previousState: 'finished',
+        },
       }),
     ).toBeUndefined();
   });

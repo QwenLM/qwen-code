@@ -6327,6 +6327,102 @@ describe('Session', () => {
         ).toHaveBeenCalledWith([midTurnPart], '  please also check tests  ');
       });
 
+      it('interrupts only the active model call and continues the same turn with mid-turn input', async () => {
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          messages: ['apply this now'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              (async function* () {
+                yield {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: 'partial response' }] } },
+                    ],
+                  },
+                };
+                await new Promise<never>((_resolve, reject) => {
+                  request.config.abortSignal.addEventListener(
+                    'abort',
+                    () => reject(request.config.abortSignal.reason),
+                    { once: true },
+                  );
+                });
+              })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start working' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        expect(session.interruptActiveModelForMidTurn()).toBe(true);
+        await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        const continuation = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as { message: Part[] };
+        expect(continuation.message).toContainEqual({
+          text: '\n[User message received during tool execution]: apply this now',
+        });
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: apply this now',
+            },
+          ],
+          'apply this now',
+        );
+      });
+
+      it('interrupts automatic compression before the response stream starts', async () => {
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          messages: ['apply during recap'],
+        });
+        mockGeminiClient.tryCompressChat.mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+            new Promise((_, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start working' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(1);
+        });
+
+        expect(session.interruptActiveModelForMidTurn()).toBe(true);
+        await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        const continuation = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[0]?.[1] as { message: Part[] };
+        expect(continuation.message).toContainEqual({
+          text: '\n[User message received during tool execution]: apply during recap',
+        });
+      });
+
       it('injects drained structured mid-turn user messages with images', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
@@ -19181,6 +19277,43 @@ describe('Session', () => {
       await vi.waitFor(() => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
       });
+    });
+
+    it('keeps immediate input drained while preparing a Guard continuation', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      mockGuardDrainResponses(
+        { messages: [], hasQueuedPrompt: false },
+        { messages: [], hasQueuedPrompt: false },
+        () => {
+          expect(session.interruptActiveModelForMidTurn()).toBe(true);
+          return {
+            messages: ['direction inserted during Guard preparation'],
+            hasQueuedPrompt: false,
+          };
+        },
+        { messages: [], hasQueuedPrompt: false },
+      );
+
+      await runGuardPrompt();
+
+      const insertedCalls = vi
+        .mocked(mockChat.sendMessageStream)
+        .mock.calls.map((call) => call[1] as { message: Part[] })
+        .filter((call) =>
+          textParts(call.message)
+            .join('\n')
+            .includes('direction inserted during Guard preparation'),
+        );
+      expect(insertedCalls).toHaveLength(1);
+      const insertedCall = insertedCalls[0]!;
+      expect(textParts(insertedCall.message).join('\n')).toContain(
+        'direction inserted during Guard preparation',
+      );
+      expect(textParts(insertedCall.message).join('\n')).not.toContain(
+        '[Todo Stop Guard]',
+      );
     });
 
     it('preserves pre-compression drain input when a queued prompt wins the claim', async () => {

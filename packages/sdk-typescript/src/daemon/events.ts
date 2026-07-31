@@ -1019,6 +1019,7 @@ export interface DaemonPendingPromptCompletedData {
   sessionId: string;
   promptId: string;
   state: 'completed' | 'removed';
+  previousState?: 'queued' | 'running';
   [key: string]: unknown;
 }
 export type DaemonPendingPromptAddedEvent = DaemonEventEnvelope<
@@ -2708,7 +2709,10 @@ function isPendingPromptCompletedData(
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
-    (value['state'] === 'completed' || value['state'] === 'removed')
+    (value['state'] === 'completed' || value['state'] === 'removed') &&
+    (value['previousState'] === undefined ||
+      value['previousState'] === 'queued' ||
+      value['previousState'] === 'running')
   );
 }
 

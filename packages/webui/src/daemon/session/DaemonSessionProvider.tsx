@@ -702,6 +702,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let reconnectAttempt = 0;
       let skipMetadataRefresh = false;
       let hasCurrentSessionActivePrompt = () => false;
+      const removedQueuedPromptKeys = new Set<string>();
       // Set when the user explicitly deletes the session (server
       // publishes session_closed with reason 'client_close').
       // Reconnecting would auto-create a new session, undoing the
@@ -1566,6 +1567,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               reconnectAttempt = 0;
             }
             try {
+              const eventData: Record<string, unknown> = isRecord(event.data)
+                ? event.data
+                : {};
+              const eventPromptId = getString(eventData, 'promptId');
+              const eventPromptKey = eventPromptId
+                ? `${activeSession.sessionId}\0${eventPromptId}`
+                : undefined;
+              if (
+                event.type === 'pending_prompt_completed' &&
+                eventPromptKey &&
+                getString(eventData, 'state') === 'removed' &&
+                getString(eventData, 'previousState') === 'queued'
+              ) {
+                removedQueuedPromptKeys.add(eventPromptKey);
+              } else if (
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                eventPromptKey &&
+                removedQueuedPromptKeys.has(eventPromptKey)
+              ) {
+                removedQueuedPromptKeys.delete(eventPromptKey);
+                const activePrompt = activePromptsRef.current.get(
+                  activeSession.sessionId,
+                );
+                if (activePrompt?.promptId !== eventPromptId) {
+                  continue;
+                }
+              }
               const followupSuggestion =
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {

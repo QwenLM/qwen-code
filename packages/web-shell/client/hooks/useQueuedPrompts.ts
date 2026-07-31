@@ -47,7 +47,6 @@ interface UseQueuedPromptsArgs {
   store: DaemonTranscriptStore;
   editorRef: RefBox<EditorHandle | null>;
   reportError: (error: unknown, fallback: string) => void;
-  notifySuccess: (message: string) => void;
   t: ReturnType<typeof getTranslator>;
 }
 
@@ -88,6 +87,8 @@ function areQueuedPromptsEqual(
       prompt.text === other.text &&
       prompt.serverPromptId === other.serverPromptId &&
       prompt.serverState === other.serverState &&
+      prompt.midTurnState === other.midTurnState &&
+      prompt.midTurnImmediate === other.midTurnImmediate &&
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
@@ -118,6 +119,7 @@ export interface UseQueuedPromptsResult {
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
+  insertQueuedPromptImmediately: (id: number) => Promise<void>;
   editQueuedPrompt: (id: number) => Promise<void>;
   editLastQueuedPrompt: () => boolean;
   clearQueuedPrompts: () => boolean;
@@ -132,7 +134,6 @@ export function useQueuedPrompts({
   store,
   editorRef,
   reportError,
-  notifySuccess,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
@@ -182,6 +183,7 @@ export function useQueuedPrompts({
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
       const next = queuedPromptsRef.current.filter((p) => {
         if (!p.serverPromptId) return true;
+        if (p.midTurnState !== undefined) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
@@ -574,14 +576,6 @@ export function useQueuedPrompts({
     ],
   );
 
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
   const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;
     if (current.length === 0) return null;
@@ -683,7 +677,12 @@ export function useQueuedPrompts({
   const removeQueuedPrompt = useCallback(
     (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
-      if (target?.serverState === 'submitting') return;
+      if (
+        target?.serverState === 'submitting' ||
+        target?.midTurnState !== undefined
+      ) {
+        return;
+      }
       if (!target) return;
       if (!target.serverPromptId) {
         const next = queuedPromptsRef.current.filter(
@@ -702,12 +701,13 @@ export function useQueuedPrompts({
     [removeServerPromptForAction, t],
   );
 
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
+  const moveQueuedPromptMidTurn = useCallback(
+    async (id: number, immediate: boolean) => {
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (!prompt || (prompt.images?.length ?? 0) > 0) return;
       if (
         prompt.serverState === 'submitting' ||
+        prompt.midTurnState !== undefined ||
         prompt.isEditing ||
         prompt.isRemoving ||
         isCommandPrompt(prompt.text)
@@ -724,14 +724,31 @@ export function useQueuedPrompts({
         }
         removedCompletionCallback?.();
       };
+      const updatePrompt = (updates: Partial<QueuedPrompt>) => {
+        const next = queuedPromptsRef.current.map((item) =>
+          item.id === id ? { ...item, ...updates } : item,
+        );
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      };
+      const removePrompt = () => {
+        const next = queuedPromptsRef.current.filter((item) => item.id !== id);
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      };
+      updatePrompt({
+        midTurnState: 'submitting',
+        midTurnImmediate: immediate,
+      });
       if (
         prompt.serverPromptId &&
         !(await removeServerPromptForAction(
           prompt,
           { isRemoving: true },
-          t('queue.insertFailed'),
+          t(immediate ? 'queue.immediateInsertFailed' : 'queue.insertFailed'),
         ))
       ) {
+        updatePrompt({ midTurnState: undefined });
         return;
       }
       let abort = midTurnEnqueueAbortRef.current;
@@ -745,37 +762,73 @@ export function useQueuedPrompts({
       try {
         result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
           signal: abort.signal,
+          ...(immediate ? { immediate: true } : {}),
         });
       } catch (error) {
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
           finishRemovedPrompt();
+          removePrompt();
+        } else {
+          updatePrompt({ midTurnState: undefined });
         }
-        reportError(error, t('queue.insertFailed'));
+        reportError(
+          error,
+          t(immediate ? 'queue.immediateInsertFailed' : 'queue.insertFailed'),
+        );
         return;
       }
       if (!result.accepted) {
+        if (latestStreamingStateRef.current === 'idle') {
+          finishRemovedPrompt();
+          removePrompt();
+          enqueuePrompt(
+            prompt.text,
+            prompt.images,
+            undefined,
+            prompt.inputAnnotations,
+          );
+          return;
+        }
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
           finishRemovedPrompt();
+          removePrompt();
+        } else {
+          updatePrompt({ midTurnState: undefined });
         }
         reportError(
           new Error('Queued message was not accepted for insertion'),
-          t('queue.insertFailed'),
+          t(immediate ? 'queue.immediateInsertFailed' : 'queue.insertFailed'),
         );
         return;
       }
       finishRemovedPrompt();
-      if (!prompt.serverPromptId) {
-        const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-        queuedPromptsRef.current = next;
-        setQueuedPrompts(next);
+      if (latestStreamingStateRef.current === 'idle') {
+        removePrompt();
+        enqueuePrompt(
+          prompt.text,
+          prompt.images,
+          undefined,
+          prompt.inputAnnotations,
+        );
+        return;
       }
-      notifySuccess(t('queue.inserted'));
+      const immediateStillExpected =
+        immediate &&
+        (result.interruptStatus === 'interrupted' ||
+          result.interruptStatus === 'deferred');
+      updatePrompt({
+        serverPromptId: undefined,
+        serverState: undefined,
+        midTurnState: 'queued',
+        midTurnImmediate: immediateStillExpected,
+        isRemoving: false,
+      });
     },
     [
+      enqueuePrompt,
       removeServerPromptForAction,
-      notifySuccess,
       reportError,
       restoreTextToEditor,
       sessionActions,
@@ -783,10 +836,25 @@ export function useQueuedPrompts({
     ],
   );
 
+  const insertQueuedPrompt = useCallback(
+    async (id: number) => moveQueuedPromptMidTurn(id, false),
+    [moveQueuedPromptMidTurn],
+  );
+  const insertQueuedPromptImmediately = useCallback(
+    async (id: number) => moveQueuedPromptMidTurn(id, true),
+    [moveQueuedPromptMidTurn],
+  );
+
   const editQueuedPrompt = useCallback(
     async (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
-      if (!target || target.serverState === 'submitting') return;
+      if (
+        !target ||
+        target.serverState === 'submitting' ||
+        target.midTurnState !== undefined
+      ) {
+        return;
+      }
       if (target.isEditing || target.isRemoving) return;
       if (target.serverPromptId) {
         const removed = await removeServerPromptForAction(
@@ -817,6 +885,7 @@ export function useQueuedPrompts({
     if (!target) return false;
     if (
       target.serverState === 'submitting' ||
+      target.midTurnState !== undefined ||
       target.isEditing ||
       target.isRemoving
     ) {
@@ -853,11 +922,18 @@ export function useQueuedPrompts({
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
     const clearSessionId = latestSessionIdRef.current;
+    const retainedPrompts = queuedPromptsRef.current.filter(
+      (prompt) => prompt.midTurnState !== undefined,
+    );
     const submittingPrompts = queuedPromptsRef.current.filter(
-      (prompt) => prompt.serverState === 'submitting',
+      (prompt) =>
+        prompt.midTurnState === undefined &&
+        prompt.serverState === 'submitting',
     );
     const clearablePrompts = queuedPromptsRef.current.filter(
-      (prompt) => prompt.serverState !== 'submitting',
+      (prompt) =>
+        prompt.midTurnState === undefined &&
+        prompt.serverState !== 'submitting',
     );
     for (const prompt of [...submittingPrompts].reverse()) {
       restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
@@ -872,14 +948,17 @@ export function useQueuedPrompts({
       (prompt) => prompt.serverPromptId,
     );
     if (serverPrompts.length === 0) {
-      queuedPromptsRef.current = [];
-      setQueuedPrompts([]);
+      if (retainedPrompts.length === queuedPromptsRef.current.length) {
+        return true;
+      }
+      queuedPromptsRef.current = retainedPrompts;
+      setQueuedPrompts(retainedPrompts);
       store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
       return true;
     }
 
     const clearIds = new Set(
-      queuedPromptsRef.current.map((prompt) => prompt.id),
+      [...submittingPrompts, ...clearablePrompts].map((prompt) => prompt.id),
     );
     const serverPromptIds = new Set(
       serverPrompts
@@ -973,12 +1052,38 @@ export function useQueuedPrompts({
     );
   }, [midTurnInjectedBatches, sessionId, clientId, consumeMidTurnInjected]);
 
+  useEffect(() => {
+    if (streamingState !== 'idle') return;
+    const ctrl = midTurnEnqueueAbortRef.current;
+    ctrl?.abort();
+    midTurnEnqueueAbortRef.current = null;
+
+    const fallbackPrompts = queuedPromptsRef.current.filter(
+      (prompt) => prompt.midTurnState === 'queued',
+    );
+    if (fallbackPrompts.length === 0) return;
+    const next = queuedPromptsRef.current.filter(
+      (prompt) => prompt.midTurnState !== 'queued',
+    );
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+    for (const prompt of fallbackPrompts) {
+      enqueuePrompt(
+        prompt.text,
+        prompt.images,
+        undefined,
+        prompt.inputAnnotations,
+      );
+    }
+  }, [streamingState, enqueuePrompt]);
+
   return {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    insertQueuedPromptImmediately,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,

@@ -407,7 +407,7 @@ export interface DaemonSessionActions {
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; immediate?: boolean },
   ): Promise<DaemonMidTurnMessageResult>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,

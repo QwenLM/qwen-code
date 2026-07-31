@@ -531,6 +531,7 @@ const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+const MID_TURN_MODEL_INTERRUPT_REASON = 'mid_turn_model_interrupt';
 // fs codes that let a `dynamic` (self-paced) loop treat a THROWN loop.md
 // sentinel-resolution as transient — degrade to a no-op re-arm tick so the loop
 // survives — instead of re-throwing (which ends it: the firing wakeup is already
@@ -1225,6 +1226,8 @@ export async function buildAvailableCommandsSnapshot(
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  private activeModelCallAbort: AbortController | null = null;
+  private immediateMidTurnDrainRequested = false;
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -2262,6 +2265,37 @@ export class Session implements SessionContext {
     }
   }
 
+  interruptActiveModelForMidTurn(): boolean {
+    if (!this.pendingPrompt || this.pendingPrompt.signal.aborted) return false;
+    this.immediateMidTurnDrainRequested = true;
+    const active = this.activeModelCallAbort;
+    if (!active || active.signal.aborted) return false;
+    active.abort(MID_TURN_MODEL_INTERRUPT_REASON);
+    return true;
+  }
+
+  #beginInterruptibleModelCall(turnSignal: AbortSignal): {
+    signal: AbortSignal;
+    interrupted: () => boolean;
+    release: () => void;
+  } {
+    const controller = new AbortController();
+    if (!turnSignal.aborted) {
+      this.activeModelCallAbort = controller;
+    }
+    return {
+      signal: AbortSignal.any([turnSignal, controller.signal]),
+      interrupted: () =>
+        !turnSignal.aborted &&
+        controller.signal.reason === MID_TURN_MODEL_INTERRUPT_REASON,
+      release: () => {
+        if (this.activeModelCallAbort === controller) {
+          this.activeModelCallAbort = null;
+        }
+      },
+    };
+  }
+
   async prompt(
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
@@ -2417,6 +2451,7 @@ export class Session implements SessionContext {
         this.todoStopGuardQueuedPromptPriority;
       if (stillOwnsPendingPrompt) {
         this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+        this.immediateMidTurnDrainRequested = false;
       }
       if (shouldDrainAutomaticQueues) {
         void this.#drainCronQueue();
@@ -2995,187 +3030,228 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
-                const messageDisplay = this.#createMessageDisplayDispatcher(
+                const modelCall = this.#beginInterruptibleModelCall(
                   pendingSend.signal,
                 );
+                const messageDisplay = this.#createMessageDisplayDispatcher(
+                  modelCall.signal,
+                );
                 let channelDeliveryResponseBlock: string[] | undefined;
+                let midTurnModelInterrupted = false;
 
                 try {
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
                       nextMessage?.parts ?? [],
-                      pendingSend.signal,
+                      modelCall.signal,
                       { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
-                    this.todoStopGuard.suspend();
-                    // Preserve the full message (not just functionResponse
-                    // parts) for a continuation: its content was stripped from
-                    // history before the send, so dropping it here on a
-                    // non-cancelled failure would lose the orphaned turn the
-                    // user never got an answer to.
-                    this.#preserveUnsentMessageHistory(
-                      nextMessage,
-                      isContinue || sendResult.stopReason === 'cancelled',
-                    );
-                    return { stopReason: sendResult.stopReason };
-                  }
-                  const responseStream = sendResult.responseStream;
-                  nextMessage = null;
-                  channelDeliveryResponseBlock =
-                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
-                  const channelDeliveryCheckpoint =
-                    channelDeliveryResponseBlock?.length ?? 0;
-
-                  let streamFailed = false;
-                  try {
-                    for await (const resp of responseStream) {
-                      if (pendingSend.signal.aborted) {
-                        this.todoStopGuard.suspend();
-                        return { stopReason: 'cancelled' };
-                      }
-
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.candidates &&
-                        resp.value.candidates.length > 0
-                      ) {
-                        const candidate = resp.value.candidates[0];
-                        for (const part of candidate.content?.parts ?? []) {
-                          if (!part.text) {
-                            continue;
-                          }
-
-                          this.messageEmitter.emitMessage(
-                            part.text,
-                            'assistant',
-                            part.thought,
-                          );
-                          if (!part.thought) {
-                            channelDeliveryResponseBlock?.push(part.text);
-                            messageDisplay?.addChunk(part.text);
-                          }
-                        }
-                      }
-
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.usageMetadata
-                      ) {
-                        usageMetadata = resp.value.usageMetadata;
-                      }
-
-                      if (resp.type === StreamEventType.CHUNK) {
-                        await preparationTracker.observe(resp.value);
-                        if (resp.value.functionCalls) {
-                          preparationTracker.resolve(resp.value.functionCalls);
-                          functionCalls.push(...resp.value.functionCalls);
-                        }
-                      }
-                      if (
-                        resp.type === StreamEventType.RETRY ||
-                        resp.type === StreamEventType.MODEL_FALLBACK
-                      ) {
-                        if (
-                          resp.type === StreamEventType.MODEL_FALLBACK ||
-                          !resp.isContinuation
-                        ) {
-                          if (channelDeliveryResponseBlock) {
-                            channelDeliveryResponseBlock.length =
-                              channelDeliveryCheckpoint;
-                          }
-                        }
-                        await finalizeToolCallPreparations(
-                          preparationTracker,
-                          true,
-                          `main prompt ${resp.type}`,
-                        );
-                        functionCalls.length = 0;
-                      }
+                    if (modelCall.interrupted()) {
+                      midTurnModelInterrupted = true;
+                    } else {
+                      this.todoStopGuard.suspend();
+                      // Preserve the full message (not just functionResponse
+                      // parts) for a continuation: its content was stripped from
+                      // history before the send, so dropping it here on a
+                      // non-cancelled failure would lose the orphaned turn the
+                      // user never got an answer to.
+                      this.#preserveUnsentMessageHistory(
+                        nextMessage,
+                        isContinue || sendResult.stopReason === 'cancelled',
+                      );
+                      return { stopReason: sendResult.stopReason };
                     }
-                  } catch (error) {
-                    streamFailed = true;
-                    throw error;
-                  } finally {
-                    await finalizeToolCallPreparations(
-                      preparationTracker,
-                      streamFailed || pendingSend.signal.aborted,
-                      'main prompt',
-                    );
+                  } else {
+                    const responseStream = sendResult.responseStream;
+                    nextMessage = null;
+                    channelDeliveryResponseBlock =
+                      beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                    const channelDeliveryCheckpoint =
+                      channelDeliveryResponseBlock?.length ?? 0;
+
+                    let streamFailed = false;
+                    try {
+                      for await (const resp of responseStream) {
+                        if (pendingSend.signal.aborted) {
+                          this.todoStopGuard.suspend();
+                          return { stopReason: 'cancelled' };
+                        }
+
+                        if (
+                          resp.type === StreamEventType.CHUNK &&
+                          resp.value.candidates &&
+                          resp.value.candidates.length > 0
+                        ) {
+                          const candidate = resp.value.candidates[0];
+                          for (const part of candidate.content?.parts ?? []) {
+                            if (!part.text) {
+                              continue;
+                            }
+
+                            this.messageEmitter.emitMessage(
+                              part.text,
+                              'assistant',
+                              part.thought,
+                            );
+                            if (!part.thought) {
+                              channelDeliveryResponseBlock?.push(part.text);
+                              messageDisplay?.addChunk(part.text);
+                            }
+                          }
+                        }
+
+                        if (
+                          resp.type === StreamEventType.CHUNK &&
+                          resp.value.usageMetadata
+                        ) {
+                          usageMetadata = resp.value.usageMetadata;
+                        }
+
+                        if (resp.type === StreamEventType.CHUNK) {
+                          await preparationTracker.observe(resp.value);
+                          if (resp.value.functionCalls) {
+                            preparationTracker.resolve(
+                              resp.value.functionCalls,
+                            );
+                            functionCalls.push(...resp.value.functionCalls);
+                          }
+                        }
+                        if (
+                          resp.type === StreamEventType.RETRY ||
+                          resp.type === StreamEventType.MODEL_FALLBACK
+                        ) {
+                          if (
+                            resp.type === StreamEventType.MODEL_FALLBACK ||
+                            !resp.isContinuation
+                          ) {
+                            if (channelDeliveryResponseBlock) {
+                              channelDeliveryResponseBlock.length =
+                                channelDeliveryCheckpoint;
+                            }
+                          }
+                          await finalizeToolCallPreparations(
+                            preparationTracker,
+                            true,
+                            `main prompt ${resp.type}`,
+                          );
+                          functionCalls.length = 0;
+                        }
+                      }
+                    } catch (error) {
+                      streamFailed = true;
+                      if (modelCall.interrupted()) {
+                        midTurnModelInterrupted = true;
+                      } else {
+                        throw error;
+                      }
+                    } finally {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        streamFailed || modelCall.signal.aborted,
+                        'main prompt',
+                      );
+                    }
                   }
                 } catch (error) {
-                  // Restore the stripped orphan if the send threw before
-                  // re-pushing it (the null-stream path above already preserves;
-                  // an exception bypasses it). Gate on the push counter — like
-                  // the core Retry restore in client.ts — so we only restore
-                  // when the content never landed (a later tool-loop send
-                  // throwing leaves the counter advanced → no double-restore).
-                  if (
-                    strippedOrphanEntries &&
-                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
-                      orphanPushCountSnapshot
-                  ) {
-                    for (const entry of strippedOrphanEntries) {
-                      this.#getCurrentChat().addHistory(entry);
+                  if (modelCall.interrupted()) {
+                    midTurnModelInterrupted = true;
+                  } else {
+                    // Restore the stripped orphan if the send threw before
+                    // re-pushing it (the null-stream path above already preserves;
+                    // an exception bypasses it). Gate on the push counter — like
+                    // the core Retry restore in client.ts — so we only restore
+                    // when the content never landed (a later tool-loop send
+                    // throwing leaves the counter advanced → no double-restore).
+                    if (
+                      strippedOrphanEntries &&
+                      (this.#getCurrentChat().getUserContentPushCount?.() ??
+                        0) <= orphanPushCountSnapshot
+                    ) {
+                      for (const entry of strippedOrphanEntries) {
+                        this.#getCurrentChat().addHistory(entry);
+                      }
+                      strippedOrphanEntries = null;
                     }
-                    strippedOrphanEntries = null;
+
+                    // Explicit user cancellation and session disposal are
+                    // controlled aborts. Other AbortErrors still surface so
+                    // infrastructure failures are not hidden as cancellations.
+                    const isControlledCancellation =
+                      pendingSend.signal.aborted &&
+                      (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
+                        pendingSend.signal.reason ===
+                          SESSION_DISPOSE_ABORT_REASON);
+                    if (isControlledCancellation) {
+                      this.todoStopGuard.suspend();
+                      return { stopReason: 'cancelled' };
+                    }
+
+                    this.todoStopGuard.pauseForTrustedRetry();
+
+                    // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+                    // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                    const errorStatus = getErrorStatus(error);
+                    const errorMessage =
+                      error instanceof Error ? error.message : String(error);
+                    const errorType = classifyApiError({
+                      message: errorMessage,
+                      status: errorStatus,
+                    });
+
+                    const hookSystem = this.config.getHookSystem?.();
+                    const hooksEnabledForStopFailure =
+                      !this.config.getDisableAllHooks?.();
+                    if (
+                      hooksEnabledForStopFailure &&
+                      hookSystem &&
+                      this.config.hasHooksForEvent?.('StopFailure')
+                    ) {
+                      // Fire-and-forget: don't wait for hook to complete
+                      hookSystem
+                        .fireStopFailureEvent(errorType, errorMessage)
+                        .catch((err) => {
+                          debugLogger.warn(`StopFailure hook failed: ${err}`);
+                        });
+                    }
+
+                    if (errorStatus === 429) {
+                      throw new RequestError(
+                        429,
+                        'Rate limit exceeded. Try again later.',
+                      );
+                    }
+
+                    throw error;
                   }
-
-                  // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
-                  // infrastructure failures are not hidden as cancellations.
-                  const isControlledCancellation =
-                    pendingSend.signal.aborted &&
-                    (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-                      pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
-                  if (isControlledCancellation) {
-                    this.todoStopGuard.suspend();
-                    return { stopReason: 'cancelled' };
-                  }
-
-                  this.todoStopGuard.pauseForTrustedRetry();
-
-                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
-                  const errorStatus = getErrorStatus(error);
-                  const errorMessage =
-                    error instanceof Error ? error.message : String(error);
-                  const errorType = classifyApiError({
-                    message: errorMessage,
-                    status: errorStatus,
-                  });
-
-                  const hookSystem = this.config.getHookSystem?.();
-                  const hooksEnabledForStopFailure =
-                    !this.config.getDisableAllHooks?.();
-                  if (
-                    hooksEnabledForStopFailure &&
-                    hookSystem &&
-                    this.config.hasHooksForEvent?.('StopFailure')
-                  ) {
-                    // Fire-and-forget: don't wait for hook to complete
-                    hookSystem
-                      .fireStopFailureEvent(errorType, errorMessage)
-                      .catch((err) => {
-                        debugLogger.warn(`StopFailure hook failed: ${err}`);
-                      });
-                  }
-
-                  if (errorStatus === 429) {
-                    throw new RequestError(
-                      429,
-                      'Rate limit exceeded. Try again later.',
-                    );
-                  }
-
-                  throw error;
                 } finally {
                   // Deliver is_final (skipped on abort) and drain before the
                   // turn proceeds, on every exit: normal end-of-stream,
                   // cancellation returns, and thrown stream errors alike.
                   await messageDisplay?.finish();
+                  modelCall.release();
+                }
+
+                if (
+                  midTurnModelInterrupted ||
+                  this.immediateMidTurnDrainRequested
+                ) {
+                  functionCalls.length = 0;
+                  const drained = await this.#drainMidTurnInput(
+                    pendingSend.signal,
+                    { onFullTurnModel },
+                  );
+                  if (drained.parts.length > 0) {
+                    commitChannelDeliveryResponseBlock(
+                      channelDeliveryCapture,
+                      channelDeliveryResponseBlock,
+                      false,
+                    );
+                    this.todoStopGuard.acceptMidTurnUserInput();
+                    nextMessage = { role: 'user', parts: drained.parts };
+                    continue;
+                  }
                 }
 
                 commitChannelDeliveryResponseBlock(
@@ -3333,7 +3409,10 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
-      if (this.todoStopGuard.needsStopInspection) {
+      if (
+        this.immediateMidTurnDrainRequested ||
+        this.todoStopGuard.needsStopInspection
+      ) {
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
           watchQueuedPromptForTodoStopGuard: true,
           onFullTurnModel,
@@ -3432,7 +3511,10 @@ export class Session implements SessionContext {
           return { stopReason: 'cancelled' };
         }
 
-        if (this.todoStopGuard.needsStopInspection) {
+        if (
+          this.immediateMidTurnDrainRequested ||
+          this.todoStopGuard.needsStopInspection
+        ) {
           const drained = await this.#drainMidTurnInput(pendingSend.signal, {
             watchQueuedPromptForTodoStopGuard: true,
             onFullTurnModel,
@@ -3665,6 +3747,7 @@ export class Session implements SessionContext {
       let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
+      let midTurnModelInterrupted = false;
       let guardForThisSend = nextGuardContinuation;
       let preserveGuardOnSkippedSend = false;
       let messageForPreservation = nextMessage;
@@ -3680,18 +3763,21 @@ export class Session implements SessionContext {
         guardForThisSend.attempt !== options.guardContinuation?.attempt
           ? toolPromptId + '_todo_stop_guard_' + guardForThisSend.attempt
           : streamPromptId;
+      const modelCall = this.#beginInterruptibleModelCall(pendingSend.signal);
       const messageDisplay = this.#createMessageDisplayDispatcher(
-        pendingSend.signal,
+        modelCall.signal,
       );
       let channelDeliveryResponseBlock: string[] | undefined;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      let preCompressionConsumedParts: Part[] = [];
+      let interruptedUnsentParts: Part[] = [];
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
           promptIdForSend,
           nextMessage.parts ?? [],
-          pendingSend.signal,
+          modelCall.signal,
           {
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
@@ -3706,6 +3792,19 @@ export class Session implements SessionContext {
                     },
                   );
                   if (drained.parts.length > 0) {
+                    const preparedDrainedParts = initialSend
+                      ? drained.parts
+                      : [
+                          ...(nextMessage?.parts ?? []).filter(
+                            (part) =>
+                              !(
+                                'text' in part &&
+                                isTodoStopGuardPromptText(part.text)
+                              ),
+                          ),
+                          ...drained.parts,
+                        ];
+                    preCompressionConsumedParts = preparedDrainedParts;
                     if (drained.hasQueuedPrompt) {
                       const claim = await this.#claimTodoStopGuardContinuation(
                         pendingSend.signal,
@@ -3735,18 +3834,7 @@ export class Session implements SessionContext {
                     if (initialSend) {
                       supersededAutomaticContinuation = true;
                     }
-                    preparedMessage = initialSend
-                      ? drained.parts
-                      : [
-                          ...(nextMessage?.parts ?? []).filter(
-                            (part) =>
-                              !(
-                                'text' in part &&
-                                isTodoStopGuardPromptText(part.text)
-                              ),
-                          ),
-                          ...drained.parts,
-                        ];
+                    preparedMessage = preparedDrainedParts;
                     messageForPreservation = {
                       role: 'user',
                       parts: preparedMessage,
@@ -3949,58 +4037,152 @@ export class Session implements SessionContext {
           },
         );
         if (!sendResult.responseStream) {
-          if (
-            !automaticContinuationValidated &&
-            !supersededAutomaticContinuation &&
-            options.onAutomaticContinuationValidated
-          ) {
-            await options.onAutomaticContinuationValidated();
-            automaticContinuationValidated = true;
+          if (modelCall.interrupted()) {
+            midTurnModelInterrupted = true;
+            interruptedUnsentParts = preCompressionConsumedParts;
+          } else {
+            if (
+              !automaticContinuationValidated &&
+              !supersededAutomaticContinuation &&
+              options.onAutomaticContinuationValidated
+            ) {
+              await options.onAutomaticContinuationValidated();
+              automaticContinuationValidated = true;
+            }
+            if (!preserveGuardOnSkippedSend) {
+              this.todoStopGuard.suspend();
+            }
+            const preservedParts = (messageForPreservation.parts ?? []).filter(
+              (part) =>
+                !('text' in part && isTodoStopGuardPromptText(part.text)),
+            );
+            this.#preserveUnsentMessageHistory(
+              preservedParts.length > 0
+                ? { ...messageForPreservation, parts: preservedParts }
+                : null,
+              sendResult.stopReason === 'cancelled' ||
+                preservePreparedMessageOnSkippedSend,
+            );
+            return {
+              kind: 'terminal',
+              stopReason: sendResult.stopReason,
+              ...(supersededAutomaticContinuation
+                ? { supersededAutomaticContinuation: true }
+                : {}),
+            };
           }
-          if (!preserveGuardOnSkippedSend) {
-            this.todoStopGuard.suspend();
+        } else {
+          const responseStream = sendResult.responseStream;
+          nextMessage = null;
+          channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
+            options.channelDeliveryCapture,
+          );
+          const channelDeliveryCheckpoint =
+            channelDeliveryResponseBlock?.length ?? 0;
+          initialSend = false;
+          if (guardForThisSend) {
+            const guardCommitted = this.todoStopGuard.commitContinuation(
+              guardForThisSend.attempt,
+            );
+            if (guardCommitted) {
+              await this.#emitTodoStopGuardContinuation(guardForThisSend);
+            }
+            if (!guardCommitted && options.externalParts) {
+              guardForThisSend = undefined;
+            }
           }
+
+          for await (const response of responseStream) {
+            if (pendingSend.signal.aborted) {
+              this.todoStopGuard.suspend();
+              return {
+                kind: 'terminal',
+                stopReason: 'cancelled',
+                ...(supersededAutomaticContinuation
+                  ? { supersededAutomaticContinuation: true }
+                  : {}),
+              };
+            }
+
+            if (
+              response.type === StreamEventType.CHUNK &&
+              response.value.candidates &&
+              response.value.candidates.length > 0
+            ) {
+              const candidate = response.value.candidates[0];
+              for (const part of candidate.content?.parts ?? []) {
+                if (!part.text) continue;
+                this.messageEmitter.emitMessage(
+                  part.text,
+                  'assistant',
+                  part.thought,
+                );
+                if (!part.thought) {
+                  channelDeliveryResponseBlock?.push(part.text);
+                  messageDisplay?.addChunk(part.text);
+                }
+              }
+            }
+
+            if (
+              response.type === StreamEventType.CHUNK &&
+              response.value.usageMetadata
+            ) {
+              usageMetadata = response.value.usageMetadata;
+            }
+            if (response.type === StreamEventType.CHUNK) {
+              await preparationTracker.observe(response.value);
+              if (response.value.functionCalls) {
+                preparationTracker.resolve(response.value.functionCalls);
+                functionCalls.push(...response.value.functionCalls);
+              }
+            }
+            if (
+              response.type === StreamEventType.RETRY ||
+              response.type === StreamEventType.MODEL_FALLBACK
+            ) {
+              if (
+                response.type === StreamEventType.MODEL_FALLBACK ||
+                !response.isContinuation
+              ) {
+                if (channelDeliveryResponseBlock) {
+                  channelDeliveryResponseBlock.length =
+                    channelDeliveryCheckpoint;
+                }
+              }
+              await finalizeToolCallPreparations(
+                preparationTracker,
+                true,
+                `daemon continuation ${response.type}`,
+              );
+              functionCalls.length = 0;
+            }
+          }
+        }
+      } catch (error) {
+        streamFailed = true;
+        if (modelCall.interrupted()) {
+          midTurnModelInterrupted = true;
+        } else {
           const preservedParts = (messageForPreservation.parts ?? []).filter(
             (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
           );
-          this.#preserveUnsentMessageHistory(
-            preservedParts.length > 0
-              ? { ...messageForPreservation, parts: preservedParts }
-              : null,
-            sendResult.stopReason === 'cancelled' ||
-              preservePreparedMessageOnSkippedSend,
-          );
-          return {
-            kind: 'terminal',
-            stopReason: sendResult.stopReason,
-            ...(supersededAutomaticContinuation
-              ? { supersededAutomaticContinuation: true }
-              : {}),
-          };
-        }
-
-        const responseStream = sendResult.responseStream;
-        nextMessage = null;
-        channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
-          options.channelDeliveryCapture,
-        );
-        const channelDeliveryCheckpoint =
-          channelDeliveryResponseBlock?.length ?? 0;
-        initialSend = false;
-        if (guardForThisSend) {
-          const guardCommitted = this.todoStopGuard.commitContinuation(
-            guardForThisSend.attempt,
-          );
-          if (guardCommitted) {
-            await this.#emitTodoStopGuardContinuation(guardForThisSend);
+          if (
+            preservedParts.length > 0 &&
+            (!providerSendChat ||
+              (providerSendChat.getUserContentPushCount?.() ?? 0) <=
+                userContentPushCountBeforeSend)
+          ) {
+            this.#preserveUnsentMessageHistory(
+              { ...messageForPreservation, parts: preservedParts },
+              true,
+            );
           }
-          if (!guardCommitted && options.externalParts) {
-            guardForThisSend = undefined;
-          }
-        }
-
-        for await (const response of responseStream) {
-          if (pendingSend.signal.aborted) {
+          const isControlledCancellation =
+            pendingSend.signal.aborted &&
+            (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
+              pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+          if (isControlledCancellation) {
             this.todoStopGuard.suspend();
             return {
               kind: 'terminal',
@@ -4010,114 +4192,34 @@ export class Session implements SessionContext {
                 : {}),
             };
           }
-
+          this.todoStopGuard.pauseForTrustedRetry();
+          const errorStatus = getErrorStatus(error);
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          const errorType = classifyApiError({
+            message: errorMessage,
+            status: errorStatus,
+          });
+          const hookSystem = this.config.getHookSystem?.();
           if (
-            response.type === StreamEventType.CHUNK &&
-            response.value.candidates &&
-            response.value.candidates.length > 0
+            !this.config.getDisableAllHooks?.() &&
+            hookSystem &&
+            this.config.hasHooksForEvent?.('StopFailure')
           ) {
-            const candidate = response.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) continue;
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
-              );
-              if (!part.thought) {
-                channelDeliveryResponseBlock?.push(part.text);
-                messageDisplay?.addChunk(part.text);
-              }
-            }
+            hookSystem
+              .fireStopFailureEvent(errorType, errorMessage)
+              .catch((err) => {
+                debugLogger.warn(`StopFailure hook failed: ${err}`);
+              });
           }
-
-          if (
-            response.type === StreamEventType.CHUNK &&
-            response.value.usageMetadata
-          ) {
-            usageMetadata = response.value.usageMetadata;
-          }
-          if (response.type === StreamEventType.CHUNK) {
-            await preparationTracker.observe(response.value);
-            if (response.value.functionCalls) {
-              preparationTracker.resolve(response.value.functionCalls);
-              functionCalls.push(...response.value.functionCalls);
-            }
-          }
-          if (
-            response.type === StreamEventType.RETRY ||
-            response.type === StreamEventType.MODEL_FALLBACK
-          ) {
-            if (
-              response.type === StreamEventType.MODEL_FALLBACK ||
-              !response.isContinuation
-            ) {
-              if (channelDeliveryResponseBlock) {
-                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
-              }
-            }
-            await finalizeToolCallPreparations(
-              preparationTracker,
-              true,
-              `daemon continuation ${response.type}`,
+          if (errorStatus === 429) {
+            throw new RequestError(
+              429,
+              'Rate limit exceeded. Try again later.',
             );
-            functionCalls.length = 0;
           }
+          throw error;
         }
-      } catch (error) {
-        streamFailed = true;
-        const preservedParts = (messageForPreservation.parts ?? []).filter(
-          (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
-        );
-        if (
-          preservedParts.length > 0 &&
-          (!providerSendChat ||
-            (providerSendChat.getUserContentPushCount?.() ?? 0) <=
-              userContentPushCountBeforeSend)
-        ) {
-          this.#preserveUnsentMessageHistory(
-            { ...messageForPreservation, parts: preservedParts },
-            true,
-          );
-        }
-        const isControlledCancellation =
-          pendingSend.signal.aborted &&
-          (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
-        if (isControlledCancellation) {
-          this.todoStopGuard.suspend();
-          return {
-            kind: 'terminal',
-            stopReason: 'cancelled',
-            ...(supersededAutomaticContinuation
-              ? { supersededAutomaticContinuation: true }
-              : {}),
-          };
-        }
-        this.todoStopGuard.pauseForTrustedRetry();
-        const errorStatus = getErrorStatus(error);
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
-        const hookSystem = this.config.getHookSystem?.();
-        if (
-          !this.config.getDisableAllHooks?.() &&
-          hookSystem &&
-          this.config.hasHooksForEvent?.('StopFailure')
-        ) {
-          hookSystem
-            .fireStopFailureEvent(errorType, errorMessage)
-            .catch((err) => {
-              debugLogger.warn(`StopFailure hook failed: ${err}`);
-            });
-        }
-        if (errorStatus === 429) {
-          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
-        }
-        throw error;
       } finally {
         try {
           await finalizeToolCallPreparations(
@@ -4127,6 +4229,26 @@ export class Session implements SessionContext {
           );
         } finally {
           await messageDisplay?.finish();
+          modelCall.release();
+        }
+      }
+
+      if (midTurnModelInterrupted || this.immediateMidTurnDrainRequested) {
+        functionCalls.length = 0;
+        const drained = await this.#drainMidTurnInput(pendingSend.signal, {
+          onFullTurnModel: options.onFullTurnModel,
+        });
+        const continuationParts = [...interruptedUnsentParts, ...drained.parts];
+        if (continuationParts.length > 0) {
+          commitChannelDeliveryResponseBlock(
+            options.channelDeliveryCapture,
+            channelDeliveryResponseBlock,
+            false,
+          );
+          this.todoStopGuard.acceptMidTurnUserInput();
+          nextGuardContinuation = undefined;
+          nextMessage = { role: 'user', parts: continuationParts };
+          continue;
         }
       }
 
@@ -4730,6 +4852,8 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
     } = {},
   ): Promise<MidTurnDrainResult> {
+    const immediateDrain = this.immediateMidTurnDrainRequested;
+    this.immediateMidTurnDrainRequested = false;
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -4807,7 +4931,11 @@ export class Session implements SessionContext {
         // of discarding it (which would lose the messages from both queues —
         // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
         // rejection.
-        if (drainPromise) void this.#recoverLateDrain(drainPromise);
+        if (drainPromise) {
+          const recovery = this.#recoverLateDrain(drainPromise);
+          if (immediateDrain) await recovery;
+          else void recovery;
+        }
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -4831,7 +4959,13 @@ export class Session implements SessionContext {
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
       return {
-        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
+        parts: await this.#buildMidTurnParts(
+          immediateDrain
+            ? [...recovered, ...this.#takeRecoveredMidTurnMessages()]
+            : recovered,
+          abortSignal,
+          options,
+        ),
         hasQueuedPrompt: false,
         reliable: false,
       };

@@ -14,12 +14,14 @@ interface Item {
   id: number;
   text: string;
   images?: unknown[];
+  midTurnState?: 'submitting' | 'queued';
 }
 
 let nextId = 1;
 const q = (text: string, images?: unknown[]): Item => ({
   id: nextId++,
   text,
+  midTurnState: 'queued',
   ...(images ? { images } : {}),
 });
 const batch = (
@@ -73,6 +75,25 @@ describe('removeInjectedFromQueue', () => {
         's',
       )?.map((p) => p.text),
     ).toEqual(['other']);
+  });
+
+  it('removes the inserted duplicate instead of an identical next-turn prompt', () => {
+    const nextTurn = { id: nextId++, text: 'dup' };
+    const inserted = q('dup');
+    const next = removeInjectedFromQueue(
+      [nextTurn, inserted],
+      [batch('s', 'dup')],
+      's',
+    );
+
+    expect(next?.map((prompt) => prompt.id)).toEqual([nextTurn.id]);
+  });
+
+  it('does not remove a matching prompt that was not submitted mid-turn', () => {
+    const prompt = { id: nextId++, text: 'not inserted' };
+    expect(
+      removeInjectedFromQueue([prompt], [batch('s', 'not inserted')], 's'),
+    ).toBeNull();
   });
 
   it('never matches an image-bearing entry (images are not pushed mid-turn)', () => {

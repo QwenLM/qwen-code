@@ -336,6 +336,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_mid_turn_message',
   'session_cancel',
   'session_events',
   'session_artifacts',
@@ -1990,6 +1991,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context);
+    },
+    async enqueueImmediateMidTurnMessage(sessionId, message, context) {
+      enqueueMidTurnCalls.push({
+        sessionId,
+        message,
+        ...(context ? { context } : {}),
+      });
+      const result = enqueueMidTurnImpl(sessionId, message, context);
+      return {
+        ...result,
+        ...(result.accepted ? { interruptStatus: 'interrupted' as const } : {}),
+      };
     },
     getPendingPrompts(sessionId) {
       getPendingPromptsCalls.push(sessionId);
@@ -8186,6 +8199,26 @@ describe('createServeApp', () => {
       });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ accepted: false });
+    });
+
+    it('requests immediate same-turn insertion', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'apply now',
+        immediate: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        interruptStatus: 'interrupted',
+      });
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'apply now',
+        },
+      ]);
     });
 
     it('400 when `message` is missing', async () => {

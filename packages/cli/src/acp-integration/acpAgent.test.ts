@@ -867,6 +867,7 @@ import { buildAuthMethods } from './authMethods.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  MID_TURN_MODEL_INTERRUPT_METHOD,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -1824,6 +1825,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        interruptActiveModelForMidTurn: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
@@ -3314,6 +3316,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+        interruptActiveModelForMidTurn: vi.fn().mockReturnValue(true),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),
@@ -3552,6 +3555,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     finishPrompt?.({ stopReason: 'cancelled' });
     await expect(cancellation).resolves.toEqual({ cancelled: true });
     await prompt;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('routes immediate mid-turn interruption without cancelling the prompt', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(MID_TURN_MODEL_INTERRUPT_METHOD, { sessionId }),
+    ).resolves.toEqual({ interrupted: true });
+    expect(
+      lastSessionMock?.interruptActiveModelForMidTurn,
+    ).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

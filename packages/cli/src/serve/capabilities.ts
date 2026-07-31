@@ -51,6 +51,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_mid_turn_message: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },

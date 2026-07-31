@@ -2912,7 +2912,7 @@ export class DaemonClient {
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: { signal?: AbortSignal; clientId?: string; immediate?: boolean },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
@@ -2926,7 +2926,10 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          ...(opts?.immediate === true ? { immediate: true } : {}),
+        }),
         signal: opts?.signal,
       },
       async (res) => {

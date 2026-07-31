@@ -2746,6 +2746,8 @@ export interface DaemonSessionBtwResult {
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
+  /** Whether interruption happened, is deferred to a boundary, or was unavailable. */
+  interruptStatus?: 'interrupted' | 'deferred' | 'unavailable';
 }
 
 /**
