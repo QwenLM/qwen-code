@@ -14,6 +14,7 @@ import {
 import {
   getProjectSummaryPrompt,
   isSubpath,
+  resolvePath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
@@ -173,9 +174,9 @@ export const summaryCommand: SlashCommand = {
         };
       }
 
-      const resolved = path.isAbsolute(customPath)
-        ? customPath
-        : path.resolve(projectRoot, customPath);
+      // resolvePath expands a leading ~ so the path is honest before the
+      // containment check rejects it, instead of creating a literal "~" dir.
+      const resolved = resolvePath(projectRoot, customPath);
 
       if (!isSubpath(projectRoot, resolved)) {
         throw new Error(t('Summary path must be within the project root.'));
@@ -221,6 +222,24 @@ export const summaryCommand: SlashCommand = {
           ? summaryPath
           : path.relative(projectRoot, summaryPath)
       ).replaceAll(path.sep, '/');
+
+      // Refuse to clobber a pre-existing file that is not a generated summary
+      // (e.g. a mistyped path such as `package.json`). A generated summary
+      // carries a `## Summary Metadata` footer, so regenerating one is allowed.
+      const existingStat = await fsPromises.stat(summaryPath).catch(() => null);
+      if (existingStat?.isFile()) {
+        const existing = await fsPromises
+          .readFile(summaryPath, 'utf8')
+          .catch(() => '');
+        if (!existing.includes('## Summary Metadata')) {
+          throw new Error(
+            t(
+              'Summary path already exists and is not a generated summary: {{path}}',
+              { path: filePathForDisplay },
+            ),
+          );
+        }
+      }
 
       return { summaryPath, filePathForDisplay };
     };

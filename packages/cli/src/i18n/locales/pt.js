@@ -1000,6 +1000,8 @@ export default {
     'Já gerando resumo, aguarde a conclusão da solicitação anterior',
   'No conversation found to summarize.':
     'Nenhuma conversa encontrada para resumir.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'O caminho do resumo já existe e não é um resumo gerado: {{path}}',
   'Summary path must be within the project root.':
     'O caminho do resumo deve estar dentro da raiz do projeto.',
   'Failed to generate project context summary: {{error}}':

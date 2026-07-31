@@ -995,6 +995,8 @@ export default {
     'Zusammenfassung wird bereits generiert, warten Sie auf Abschluss der vorherigen Anfrage',
   'No conversation found to summarize.':
     'Kein Gespräch zum Zusammenfassen gefunden.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Der Zusammenfassungspfad existiert bereits und ist keine generierte Zusammenfassung: {{path}}',
   'Summary path must be within the project root.':
     'Der Zusammenfassungspfad muss sich im Projektstammverzeichnis befinden.',
   'Failed to generate project context summary: {{error}}':

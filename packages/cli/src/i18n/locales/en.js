@@ -1472,6 +1472,8 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'Already generating summary, wait for previous request to complete',
   'No conversation found to summarize.': 'No conversation found to summarize.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Summary path already exists and is not a generated summary: {{path}}',
   'Summary path must be within the project root.':
     'Summary path must be within the project root.',
   'Failed to generate project context summary: {{error}}':

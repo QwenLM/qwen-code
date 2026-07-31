@@ -1412,6 +1412,8 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，请等待上一个请求完成',
   'No conversation found to summarize.': '未找到要总结的对话',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路径已存在且不是生成的摘要：{{path}}',
   'Summary path must be within the project root.': '摘要路径必须在项目根目录内',
   'Failed to generate project context summary: {{error}}':
     '生成项目上下文摘要失败：{{error}}',

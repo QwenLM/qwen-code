@@ -196,4 +196,37 @@ describe('summaryCommand custom export path', () => {
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(await dirExists(path.join(projectRoot, 'reports'))).toBe(false);
   });
+
+  it('expands a leading ~ and rejects it when outside the project root', async () => {
+    const result = await run('~/summary-tilde-leak.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('within the project root');
+    expect(runSideQuery).not.toHaveBeenCalled();
+    // The unexpanded argument must not create a literal "~" directory.
+    expect(await dirExists(path.join(projectRoot, '~'))).toBe(false);
+  });
+
+  it('refuses to overwrite an existing file that is not a generated summary', async () => {
+    const target = path.join(projectRoot, 'IMPORTANT.md');
+    await fs.writeFile(target, 'precious content', 'utf8');
+    const result = await run('IMPORTANT.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('already exists');
+    expect(await fs.readFile(target, 'utf8')).toBe('precious content');
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('overwrites a previously generated summary', async () => {
+    const target = path.join(projectRoot, 'summary.md');
+    await fs.writeFile(
+      target,
+      'old body\n\n---\n\n## Summary Metadata\n**Update time**: old\n',
+      'utf8',
+    );
+    const result = await run('summary.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(target, 'utf8');
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).not.toContain('old body');
+  });
 });
