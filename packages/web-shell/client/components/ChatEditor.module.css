@@ -103,7 +103,7 @@
 }
 
 :global([data-web-shell-toolbar-popover]) {
-  width: min(18rem, var(--radix-popover-content-available-width));
+  width: min(max-content, var(--radix-popover-content-available-width));
   max-height: var(--radix-popover-content-available-height);
   overflow: hidden;
 }
