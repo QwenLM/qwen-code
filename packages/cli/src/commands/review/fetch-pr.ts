@@ -106,6 +106,21 @@ type FetchPrResult = PlanReport & {
   headRefName: string;
   isCrossRepository: boolean;
   diffStat: { files: number; additions: number; deletions: number };
+  /**
+   * The merge-base diff is EMPTY: the branch tree is byte-identical to its
+   * base — the work already landed (a merge resolved everything away, or the
+   * PR was superseded). Reviewing it would review nothing; the skill stops and
+   * says so instead of fanning out agents over zero hunks.
+   */
+  emptyDiff?: boolean;
+  /**
+   * The recomputed merge-base diff is far smaller than the PR's advertised
+   * GitHub stat — overlapping PRs merged since the author's last rebase have
+   * collapsed this one to a residual, and the description likely narrates work
+   * that is already on the base branch. The review scope is the RECOMPUTED
+   * diff; the body's claims about the rest are description-of-history.
+   */
+  collapsedFromUpstream?: boolean;
   /** Merge-base of the PR head and its base branch — the diff's left side. */
   mergeBaseSha: string | null;
   /** True when the base branch could not be fetched; `mergeBaseSha` may be stale. */
@@ -368,6 +383,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
     isCrossRepository: meta.isCrossRepository,
+    ...(diffText.trim() === '' && mergeBaseSha ? { emptyDiff: true } : {}),
+    // Collapse detection compares recomputed reality against GitHub's
+    // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
+    // signature, not rounding. Both thresholds are deliberately coarse — this
+    // is a disclosure, never a gate.
+    ...(diffText.trim() !== '' &&
+    meta.additions + meta.deletions >= 200 &&
+    countDiffChangedLines(diffText) * 4 <= meta.additions + meta.deletions
+      ? { collapsedFromUpstream: true }
+      : {}),
     diffStat: {
       files: meta.changedFiles,
       additions: meta.additions,
@@ -405,6 +430,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         .join(', ')}`,
     );
   }
+}
+
+/** Changed (+/-) lines in a unified diff — headers excluded. */
+export function countDiffChangedLines(diffText: string): number {
+  let n = 0;
+  for (const line of diffText.split('\n')) {
+    if (
+      (line.startsWith('+') && !line.startsWith('+++')) ||
+      (line.startsWith('-') && !line.startsWith('---'))
+    ) {
+      n++;
+    }
+  }
+  return n;
 }
 
 export const fetchPrCommand: CommandModule = {

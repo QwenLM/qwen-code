@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
-import { fetchPrCommand } from './fetch-pr.js';
+import { fetchPrCommand, countDiffChangedLines } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
@@ -447,5 +447,21 @@ describe('fetch-pr report assembly', () => {
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
     });
+  });
+});
+
+describe('countDiffChangedLines', () => {
+  it('counts +/- body lines and excludes file headers', () => {
+    const d = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1,2 +1,2 @@',
+      '-old',
+      '+new',
+      ' ctx',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(2);
+    expect(countDiffChangedLines('')).toBe(0);
   });
 });

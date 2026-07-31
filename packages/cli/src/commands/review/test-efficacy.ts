@@ -1337,6 +1337,41 @@ export function runOneHunkProbe(
   }
 }
 
+/**
+ * The positive control: append one always-failing test to a GREEN probe file,
+ * run that file, restore. Red = the harness demonstrably executes assertions
+ * (true), green = it does not (false). Restore is by content in finally, the
+ * same discipline as every other probe edit in this file.
+ */
+export function runControlMutant(
+  probeTree: string,
+  probeFile: string,
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): boolean {
+  const abs = join(probeTree, probeFile);
+  let original: string;
+  try {
+    original = readFileSync(abs, 'utf8');
+  } catch {
+    return false; // cannot even read the probe file — nothing is validated
+  }
+  try {
+    writeFileSync(
+      abs,
+      `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
+      'utf8',
+    );
+    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
+    // `gated` is the runner's "went red" verdict; anything else — still green,
+    // collected nothing, crashed — means the control did NOT demonstrate a
+    // working kill path.
+    return perFile.some((r) => r.verdict === 'gated');
+  } finally {
+    writeFileSync(abs, original, 'utf8');
+  }
+}
+
 export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
@@ -1490,6 +1525,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let hunksSkippedForBudget = 0;
   let hunksSkippedForCap = 0;
   let hunksSkippedForBaseline = 0;
+  /** Null until the positive control ran; false = dead runner, survivors lie. */
+  let harnessValidated: boolean | null = null;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1656,6 +1693,27 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           );
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
+          // POSITIVE CONTROL, before any real mutant spends the window: inject
+          // one test that must fail into a green probe file and confirm the
+          // runner actually goes red. A runner that stays green while executing
+          // a false assertion is not running assertions at all — and against a
+          // dead runner every real mutant "survives", which is precisely the
+          // false gap-report this command exists to prevent. Control green →
+          // every survivor this run would report is re-classed inconclusive.
+          // (A live review measured the cost of lacking this: four survivors
+          // reported off a runner whose collected suite never covered them.)
+          const controlOk = runControlMutant(
+            probeTree,
+            greenProbes[0],
+            mutantDeadline,
+            now,
+          );
+          harnessValidated = controlOk;
+          if (!controlOk) {
+            noteMutants(
+              'positive control FAILED: an injected always-failing test left the runner green, so this harness cannot kill anything — every would-be survivor is reported inconclusive',
+            );
+          }
           for (const c of candidates) {
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
@@ -1831,6 +1889,26 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       }),
   ];
 
+  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
+  // them before findings are derived, keeping the control's verdict upstream
+  // of everything a reader acts on.
+  if (harnessValidated === false) {
+    const detail =
+      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
+    for (const m of mutantResults) {
+      if (m.verdict === 'survived') {
+        m.verdict = 'inconclusive';
+        m.detail = detail;
+      }
+    }
+    for (const h of hunkResults) {
+      if (h.verdict === 'survived') {
+        h.verdict = 'inconclusive';
+        h.detail = detail;
+      }
+    }
+  }
+
   const count = (v: MutantVerdict) =>
     mutantResults.filter((m) => m.verdict === v).length;
   const result = {
@@ -1847,6 +1925,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBaseline: mutantsSkippedForBaseline,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
+    /** Null: control never ran (no green baseline / no candidates). */
+    harnessValidated,
     hunks: {
       probed: hunkResults,
       killed: hunkResults.filter((h) => h.verdict === 'killed').length,

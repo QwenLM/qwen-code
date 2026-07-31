@@ -143,7 +143,7 @@ const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: f.includes('skip') ? 'skipped' : 'passed' }],
+    assertionResults: [{ status: require('fs').readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL') ? 'failed' : f.includes('skip') ? 'skipped' : 'passed' }],
   })),
 }));
 `,
@@ -171,14 +171,29 @@ beforeEach(() => {
     bin,
     `#!/usr/bin/env node
 const path = require('path');
+const fs = require('fs');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+// Like the real runner, the injected positive control FAILS: a fake that
+// stayed green under it would (correctly) be ruled a dead harness and every
+// survivor scenario in this suite would re-class to inconclusive.
+const status = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
+      ? 'failed'
+      : 'passed';
+  } catch {
+    return 'passed';
+  }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: status(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: files.length,
-  numFailedTests: 0,
-  testResults: files.map((f) => ({
-    name: path.resolve(f),
-    assertionResults: [{ status: 'passed' }],
-  })),
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
 }));
 `,
   );
@@ -804,13 +819,20 @@ const fs = require('fs');
 const path = require('path');
 fs.appendFileSync(${JSON.stringify(runsLog)}, 'run\\n');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const status = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL') ? 'failed' : 'passed';
+  } catch { return 'passed'; }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: status(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: files.length,
-  numFailedTests: 0,
-  testResults: files.map((f) => ({
-    name: path.resolve(f),
-    assertionResults: [{ status: 'passed' }],
-  })),
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
 }));
 `,
     );
@@ -834,13 +856,16 @@ process.stdout.write(JSON.stringify({
         worktree: wt,
         base,
         out: join(repo, 'out.json'),
-        now: () => suiteRuns() * 100_000,
+        // 60 s per suite run: baseline + POSITIVE CONTROL = 120 s, estimated
+        // run 75 s, one mutant fits (→180 s), the remaining 60 s does not.
+        now: () => suiteRuns() * 60_000,
       });
     } finally {
       stdoutSpy.mockRestore();
     }
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(true); // the control spent its run and passed
     expect(out.mutants.probed.length).toBe(1);
     expect(out.mutants.skippedForBudget).toBe(2);
     expect(out.mutants.skippedForBaseline).toBe(0);
