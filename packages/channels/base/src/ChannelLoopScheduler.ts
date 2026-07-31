@@ -226,12 +226,23 @@ export class ChannelLoopScheduler {
         await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
-      if (
-        this.generation !== generation ||
-        recoveryEpoch !== this.recoveryEpoch ||
-        !currentJob?.enabled
-      ) {
+      if (this.generation !== generation || !currentJob?.enabled) {
         await this.clearRunningSince(latestJob.id, runningSince);
+        return;
+      }
+      if (recoveryEpoch !== this.recoveryEpoch) {
+        try {
+          await this.store.update(latestJob.id, {
+            lastFinishedAt: this.now().toISOString(),
+            lastStatus: 'error',
+            lastError: truncateError(
+              err instanceof Error ? err.message : String(err),
+            ),
+            runningSince: undefined,
+          });
+        } catch {
+          await this.clearRunningSince(latestJob.id, runningSince);
+        }
         return;
       }
       await this.recordFailure(

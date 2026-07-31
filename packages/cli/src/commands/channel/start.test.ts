@@ -829,6 +829,7 @@ describe('startCommand.handler', () => {
 
       expect(mockChannelConnect).toHaveBeenCalledTimes(1);
       expect(mockChannelDisconnect).not.toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerMarkRecovery).toHaveBeenCalled();
       expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
     } finally {
       processOnSpy.mockRestore();

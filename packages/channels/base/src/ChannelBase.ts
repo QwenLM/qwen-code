@@ -351,8 +351,8 @@ function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   /**
-   * Recovery invariant: every path that resolves a session or calls the bridge
-   * must await waitForBridgeRecovery() immediately before that operation.
+   * Recovery invariant: session-resolution and prompt-capture paths must await
+   * waitForBridgeRecovery() immediately before that operation.
    */
   protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;

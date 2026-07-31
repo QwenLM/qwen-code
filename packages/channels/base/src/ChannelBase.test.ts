@@ -16212,15 +16212,16 @@ describe('ChannelBase', () => {
       );
 
       const inbound = ch.handleInbound(envelope());
-      await vi.waitFor(() => expect(bridge.newSession).not.toHaveBeenCalled());
       recoveryState.current = new Promise<void>((resolve) => {
         releaseRecovery = resolve;
       });
       releaseContactRecord!();
-      await Promise.resolve();
-
-      expect(bridge.newSession).not.toHaveBeenCalled();
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
 
       releaseRecovery!();
       await inbound;

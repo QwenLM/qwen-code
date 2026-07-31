@@ -338,6 +338,32 @@ describe('startEventLoopLagMonitor', () => {
 
     monitor.dispose();
   });
+  it('suppresses a suspension gap whose histogram max lands one tick late', async () => {
+    const onNewMaxStall = vi.fn();
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 10_000,
+      onNewMaxStall,
+    });
+
+    vi.setSystemTime(Date.now() + 10_000);
+    // Tick 1: our interval sees the 10 s gap but the histogram has not
+    // published the matching max yet.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(histogram.reset).not.toHaveBeenCalled();
+
+    // The histogram publishes the gap between ticks.
+    histogram.max = 10_000_000_000;
+    // Tick 2: the carried gap qualifies the late histogram max.
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).toHaveBeenCalledTimes(1);
+    expect(onNewMaxStall).not.toHaveBeenCalled();
+
+    monitor.dispose();
+  });
+
   it('enables and disables the underlying histogram', () => {
     const monitor = startEventLoopLagMonitor();
 

@@ -385,16 +385,23 @@ describe('ChannelLoopScheduler', () => {
     await scheduler.tick();
 
     await vi.waitFor(() => {
-      expect(store.update).toHaveBeenCalledWith('job-1', {
-        runningSince: undefined,
-      });
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({
+          lastStatus: 'error',
+          lastError: 'bridge replaced during prompt',
+          runningSince: undefined,
+        }),
+      );
     });
-    const failureWrites = (
+    const failureCountWrites = (
       store.update as ReturnType<typeof vi.fn>
     ).mock.calls.filter(
-      ([, patch]) => (patch as { lastStatus?: string }).lastStatus === 'error',
+      ([, patch]) =>
+        (patch as { consecutiveFailures?: number }).consecutiveFailures !==
+        undefined,
     );
-    expect(failureWrites).toHaveLength(0);
+    expect(failureCountWrites).toHaveLength(0);
     expect(jobs[0]?.consecutiveFailures).toBe(4);
     expect(jobs[0]?.enabled).toBe(true);
   });

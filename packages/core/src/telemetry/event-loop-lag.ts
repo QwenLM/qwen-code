@@ -70,6 +70,7 @@ export function startEventLoopLagMonitor(
   let lastObservedMaxMs = 0;
   let lastCheckTimeMs = Date.now();
   let lastCpuUsage = safeCpuUsage();
+  let pendingSuspendGapMs = 0;
   const readMaxMs = () => nsToMs(histogram.max);
   const checkHistogram = () => {
     if (disposed) return;
@@ -82,15 +83,23 @@ export function startEventLoopLagMonitor(
     lastCheckTimeMs = nowMs;
     if (cpuUsage) lastCpuUsage = cpuUsage;
     lastObservedMaxMs = maxMs;
-    if (
-      newMaxMs >= suspendThresholdMs &&
+    const isLowCpuGap =
       elapsedMs >= suspendThresholdMs &&
       cpuRatio !== undefined &&
-      cpuRatio <= suspendCpuRatio
+      cpuRatio <= suspendCpuRatio;
+    // The histogram's own libuv timer can land the gap one tick after ours,
+    // so a low-CPU gap stays eligible for one further check.
+    const suspendGapMs = isLowCpuGap ? elapsedMs : pendingSuspendGapMs;
+    pendingSuspendGapMs = isLowCpuGap ? elapsedMs : 0;
+    if (
+      newMaxMs >= suspendThresholdMs &&
+      suspendGapMs >= suspendThresholdMs &&
+      newMaxMs <= suspendGapMs * 1.5
     ) {
       histogram.reset();
       lastObservedMaxMs = 0;
       lastReportedMaxMs = 0;
+      pendingSuspendGapMs = 0;
       return;
     }
     if (
