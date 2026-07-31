@@ -885,12 +885,15 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
  * earlier fragments. Both functions live in this file precisely so the
  * coupling is reviewable in a single window.
  *
- * Return-value shape. The returned array preserves the *shape convention* of
- * `processStreamResponse` output: `[thoughtPart?, ...consolidatedTextParts,
- * ...nonTextParts]`. {@link GeminiChat.coalesceRecoveryPairs} relies on this
- * by feeding the merged result back as `previousParts` on the next recovery
- * iteration; if the shape ever diverges, multi-iteration recovery dedup would
- * fail silently against the wrong part.
+ * Return-value shape. The returned array preserves whatever ordering
+ * `processStreamResponse` produced: zero or more thought episodes (each its
+ * own `Part`) freely interleaved with functionCall/text parts in original
+ * stream order -- not just a single leading thought ahead of everything
+ * else. {@link GeminiChat.coalesceRecoveryPairs} relies on this by feeding
+ * the merged result back as `previousParts` on the next recovery iteration;
+ * the mechanics below scan for the plain-text anchor rather than assuming a
+ * fixed shape, so they tolerate any number and arrangement of non-text
+ * parts (thought episodes, tool calls, or both) ahead of that anchor.
  */
 function appendRecoveryContinuationParts(
   previousParts: Part[] | undefined,
@@ -899,14 +902,14 @@ function appendRecoveryContinuationParts(
   const mergedParts = [...(previousParts ?? [])];
   const nextParts = [...(continuationParts ?? [])];
 
-  // `processStreamResponse` orders parts as
-  // `[thoughtPart?, ...consolidatedHistoryParts]`, so for thinking models the
-  // first element of `nextParts` is the recovery turn's thought, not its
-  // plain-text continuation. Similarly the previous truncated turn may end
-  // with a non-text part. Scan both sides for the dedup-relevant plain-text
-  // anchor instead of locking onto the boundary indices, otherwise thinking
-  // models leak duplicated text into durable history because the dedup block
-  // gets skipped wholesale.
+  // `processStreamResponse` can place one or more thought episodes (and/or
+  // tool calls) ahead of a turn's plain-text continuation, so for thinking
+  // models the first element of `nextParts` is not reliably the recovery
+  // turn's plain-text continuation. Similarly the previous truncated turn
+  // may end with a non-text part. Scan both sides for the dedup-relevant
+  // plain-text anchor instead of locking onto the boundary indices,
+  // otherwise thinking models leak duplicated text into durable history
+  // because the dedup block gets skipped wholesale.
   const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
   const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
 
@@ -4233,30 +4236,74 @@ export class GeminiChat {
       streamError = e;
     }
 
-    let thoughtContentPart: Part | undefined;
-    const thoughtText = allModelParts
-      .filter((part) => part.thought)
-      .map((part) => part.text)
-      .join('')
-      .trim();
-
-    if (thoughtText !== '') {
-      thoughtContentPart = {
-        text: thoughtText,
-        thought: true,
-      };
-
-      const thoughtSignature = allModelParts.filter(
-        (part) => part.thoughtSignature && part.thought,
-      )?.[0]?.thoughtSignature;
-      if (thoughtContentPart && thoughtSignature) {
-        thoughtContentPart.thoughtSignature = thoughtSignature;
-      }
-    }
-
-    let contentParts = allModelParts.filter((part) => !part.thought);
+    // A turn can legitimately contain multiple distinct reasoning episodes
+    // separated by tool calls (Anthropic interleaved thinking, OpenAI
+    // Responses reasoning items on parallel function calls). Each episode
+    // must keep its own signature and its own position relative to the
+    // tool calls it preceded -- merging every thought-flagged part into one
+    // blob and keeping only the first signature silently discards every
+    // other episode's replayable payload and destroys the interleaving.
+    //
+    // Both wires terminate an episode with a text-less, signature-only
+    // chunk (anthropicContentGenerator.ts's signature_delta handling;
+    // responses-converter.ts's output_item.done for a reasoning item), so a
+    // thought part carrying fresh non-empty text while the open episode
+    // already has both accumulated text and a signature can only be the
+    // start of a new episode -- no legitimate continuation of the same
+    // episode reintroduces text after its signature is set. The
+    // `openEpisodeText.length > 0` guard additionally protects against a
+    // non-compliant proxy emitting a signature before any thinking text for
+    // its episode. Signature fragments are concatenated (not "first seen")
+    // because a long signature can legitimately arrive split across
+    // multiple signature_delta events.
+    //
+    // Known limitation: two back-to-back thought parts with NO signature at
+    // all and no intervening non-thought part still merge into one episode
+    // -- neither boundary condition above can fire without a signature to
+    // test. This is consistent with both wires' documented invariant that
+    // every episode ends in a signature-only chunk; it is not reachable via
+    // Anthropic interleaved thinking or OpenAI Responses reasoning items as
+    // implemented, but would misattribute text across episodes if a
+    // non-compliant proxy ever dropped a signature entirely.
     const consolidatedHistoryParts: Part[] = [];
-    for (const part of contentParts) {
+    let openEpisodeText = '';
+    let openEpisodeSignature = '';
+    let hasOpenEpisode = false;
+
+    const flushThoughtEpisode = () => {
+      if (!hasOpenEpisode) return;
+      const text = openEpisodeText.trim();
+      if (text !== '' || openEpisodeSignature !== '') {
+        const episodePart: Part = { text, thought: true };
+        if (openEpisodeSignature) {
+          episodePart.thoughtSignature = openEpisodeSignature;
+        }
+        consolidatedHistoryParts.push(episodePart);
+      }
+      openEpisodeText = '';
+      openEpisodeSignature = '';
+      hasOpenEpisode = false;
+    };
+
+    for (const part of allModelParts) {
+      if (part.thought) {
+        const partText = typeof part.text === 'string' ? part.text : '';
+        if (
+          hasOpenEpisode &&
+          partText !== '' &&
+          openEpisodeText.length > 0 &&
+          openEpisodeSignature !== ''
+        ) {
+          flushThoughtEpisode();
+        }
+        hasOpenEpisode = true;
+        openEpisodeText += partText;
+        if (part.thoughtSignature) {
+          openEpisodeSignature += part.thoughtSignature;
+        }
+        continue;
+      }
+      flushThoughtEpisode();
       const lastPart =
         consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
       if (
@@ -4269,9 +4316,16 @@ export class GeminiChat {
         consolidatedHistoryParts.push(part);
       }
     }
+    flushThoughtEpisode();
+
+    const thoughtText = consolidatedHistoryParts
+      .filter((part) => part.thought)
+      .map((part) => part.text)
+      .join('')
+      .trim();
 
     let contentText = consolidatedHistoryParts
-      .filter((part) => part.text)
+      .filter((part) => part.text && !part.thought)
       .map((part) => part.text)
       .join('')
       .trim();
@@ -4295,14 +4349,21 @@ export class GeminiChat {
       const recovery = tryRecoverXmlToolCalls(contentText);
       if (recovery.recovered) {
         hasToolCall = true;
-        // recovery.remainingText is derived from the join of ALL text
-        // parts, so every text part is consumed. Remove them, reinsert
-        // remainingText at the first text position so non-text parts
-        // (inlineData/fileData) keep their original relative order, and
-        // append functionCallParts at the end.
+        // recovery.remainingText is derived from the join of ALL
+        // non-thought text parts (contentText excludes thought parts), so
+        // only those are consumed here. Remove them, reinsert remainingText
+        // at the first text position so non-text parts (inlineData/fileData)
+        // keep their original relative order, and append functionCallParts
+        // at the end. Must use isValidNonThoughtTextPart rather than a bare
+        // `.text !== undefined` check: flushThoughtEpisode always sets
+        // `episodePart.text` (even '' for a signature-only episode), so a
+        // reasoning episode Part satisfies a bare text check exactly like a
+        // plain-text Part -- a raw check here would delete the turn's
+        // reasoning episode (text and thoughtSignature) whenever XML
+        // recovery fires on the same turn.
         const textIndices: number[] = [];
         for (let i = 0; i < consolidatedHistoryParts.length; i++) {
-          if (consolidatedHistoryParts[i]!.text !== undefined)
+          if (isValidNonThoughtTextPart(consolidatedHistoryParts[i]!))
             textIndices.push(i);
         }
         for (let j = textIndices.length - 1; j >= 0; j--) {
@@ -4318,14 +4379,13 @@ export class GeminiChat {
           });
         }
         consolidatedHistoryParts.push(...recovery.functionCallParts);
-        // Recompute contentText and contentParts so the JSONL recording
-        // below stays aligned with in-memory history (--resume fidelity).
+        // Recompute contentText so the JSONL recording below stays
+        // aligned with in-memory history (--resume fidelity).
         contentText = consolidatedHistoryParts
-          .filter((part) => part.text)
+          .filter((part) => part.text && !part.thought)
           .map((part) => part.text)
           .join('')
           .trim();
-        contentParts = consolidatedHistoryParts;
         // Build a synthetic chunk so the agent loop (turn.ts) actually
         // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
@@ -4403,30 +4463,22 @@ export class GeminiChat {
     // conversation or surface as duplicate output).
     const willPersistToHistory =
       streamError === null ||
-      (hasToolCall &&
-        (thoughtContentPart || consolidatedHistoryParts.length > 0));
+      (hasToolCall && consolidatedHistoryParts.length > 0);
     if (
       willPersistToHistory &&
-      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+      (consolidatedHistoryParts.length > 0 || usageMetadata)
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       const recordArgs = {
         model,
-        message: [
-          ...(thoughtContentPart ? [thoughtContentPart] : []),
-          ...(contentText ? [{ text: contentText }] : []),
-          ...(hasToolCall
-            ? contentParts
-                .map(redactStructuredOutputArgsForRecording)
-                .filter(
-                  (
-                    p,
-                  ): p is { functionCall: NonNullable<Part['functionCall']> } =>
-                    p !== null,
-                )
-            : []),
-        ],
+        message: consolidatedHistoryParts
+          .map((part) =>
+            part.functionCall
+              ? redactStructuredOutputArgsForRecording(part)
+              : part,
+          )
+          .filter((part): part is NonNullable<typeof part> => part !== null),
         tokens: coercedUsage
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
@@ -4468,17 +4520,14 @@ export class GeminiChat {
       // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
       // block above instead of re-deriving it. When `streamError !== null`,
       // `willPersistToHistory` reduces to exactly the original expression
-      // `hasToolCall && (thoughtContentPart || consolidatedHistoryParts.length > 0)`;
-      // sharing the single binding eliminates drift risk if one gate is
-      // tightened without the other and the JSONL recording silently
-      // desyncs from in-memory history.
+      // `hasToolCall && consolidatedHistoryParts.length > 0`; sharing the
+      // single binding eliminates drift risk if one gate is tightened
+      // without the other and the JSONL recording silently desyncs from
+      // in-memory history.
       if (willPersistToHistory) {
         this.history.push({
           role: 'model',
-          parts: [
-            ...(thoughtContentPart ? [thoughtContentPart] : []),
-            ...consolidatedHistoryParts,
-          ],
+          parts: consolidatedHistoryParts,
         });
         // Track the pushed turn so the outer sendMessageStream retry loop
         // can roll it back if it decides to retry the same send. Without
@@ -4514,10 +4563,7 @@ export class GeminiChat {
 
     this.history.push({
       role: 'model',
-      parts: [
-        ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...consolidatedHistoryParts,
-      ],
+      parts: consolidatedHistoryParts,
     });
     if (deferredFinishReason) {
       yield {
