@@ -173,6 +173,23 @@ describe('summaryCommand custom export path', () => {
     }
   });
 
+  it('rejects a broken symlink whose target is outside the project root', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const outsideTarget = path.join(
+      os.tmpdir(),
+      `summary-broken-${Date.now()}`,
+      'leak.md',
+    );
+    await fs.symlink(outsideTarget, path.join(projectRoot, 'broken-link'));
+    const result = await run('broken-link');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('within the project root');
+    expect(await fileExists(outsideTarget)).toBe(false);
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
   it('does not create the target directory when generation fails', async () => {
     vi.mocked(runSideQuery).mockRejectedValueOnce(new Error('rate limit'));
     const result = await run('reports/2026/summary.md');

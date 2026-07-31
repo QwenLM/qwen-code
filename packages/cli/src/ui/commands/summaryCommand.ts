@@ -184,6 +184,21 @@ export const summaryCommand: SlashCommand = {
       // A lexical check cannot see through symlinks: a link inside the project
       // root may point outside it. Re-check containment on the real paths.
       const realProjectRoot = await fsPromises.realpath(projectRoot);
+
+      // A broken symlink (target absent) makes realpathNearestExisting walk up
+      // to the parent and miss the escape — detect symlinks at the leaf.
+      const leafStat = await fsPromises.lstat(resolved).catch(() => null);
+      if (leafStat?.isSymbolicLink()) {
+        const linkTarget = await fsPromises.readlink(resolved);
+        const resolvedTarget = path.isAbsolute(linkTarget)
+          ? linkTarget
+          : path.resolve(path.dirname(resolved), linkTarget);
+        const realTarget = await realpathNearestExisting(resolvedTarget);
+        if (!isSubpath(realProjectRoot, realTarget)) {
+          throw new Error(t('Summary path must be within the project root.'));
+        }
+      }
+
       const realResolved = await realpathNearestExisting(resolved);
       if (!isSubpath(realProjectRoot, realResolved)) {
         throw new Error(t('Summary path must be within the project root.'));
