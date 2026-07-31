@@ -1253,11 +1253,25 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
+    // Omni experiment: when active, local video files are delivered via the
+    // DashScope upload channel instead of inline base64, with a 1 GiB
+    // per-file ceiling replacing the 10MB inline cap below. Dynamic import
+    // keeps the omni module (which reaches into the provider layer) out of
+    // fileUtils' static dependency graph.
+    let omniModule: typeof import('../omni/index.js') | undefined;
+    if (fileType === 'video') {
+      const omni = await import('../omni/index.js');
+      if (omni.isOmniVideoDeliveryActive(config)) {
+        omniModule = omni;
+      }
+    }
+
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
-      !shouldRenderImageOverview
+      !shouldRenderImageOverview &&
+      omniModule === undefined
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1520,6 +1534,37 @@ export async function processSingleFileContent(
       }
       case 'audio':
       case 'video': {
+        if (fileType === 'video' && omniModule) {
+          try {
+            const delivery = await omniModule.processVideoForOmniDelivery(
+              filePath,
+              config,
+              signal,
+            );
+            return {
+              llmContent: {
+                fileData: {
+                  fileUri: delivery.fileUri,
+                  mimeType: delivery.mimeType,
+                  displayName,
+                },
+              },
+              returnDisplay: `Read video file (omni upload): ${relativePathForDisplay}`,
+            };
+          } catch (err) {
+            if (isAbortError(err)) throw err;
+            // Fail closed: no silent fallback to inline base64 — a fallback
+            // would resurrect the 10MB cap surprise and mislead the user
+            // into thinking the model saw the original video.
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              llmContent: `[Omni video delivery failed for ${displayName}: ${message}]`,
+              returnDisplay: `Failed to deliver video via omni upload: ${relativePathForDisplay}`,
+              error: `Omni video delivery failed: ${filePath}: ${message}`,
+              errorType: ToolErrorType.READ_CONTENT_FAILURE,
+            };
+          }
+        }
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);

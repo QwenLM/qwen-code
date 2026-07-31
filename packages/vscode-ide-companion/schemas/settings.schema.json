@@ -3259,6 +3259,29 @@
         }
       }
     },
+    "omni": {
+      "description": "Omni multimodal experiment (omni-experiment branch): upload-based media delivery via the DashScope temporary upload channel. Requires ffmpeg/ffprobe on PATH when enabled.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable the omni media pipeline. Local video files referenced with @ are recognized (ffprobe), stored content-addressed under .qwen/omni/objects/, uploaded through the DashScope temporary upload channel, and delivered as oss:// URLs instead of inline base64. Only active for DashScope-compatible endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.",
+          "type": "boolean",
+          "default": false
+        },
+        "upload": {
+          "description": "Upload-channel limits for omni media delivery.",
+          "type": "object",
+          "properties": {
+            "maxFileBytes": {
+              "type": "number",
+              "minimum": 1,
+              "default": 1073741824,
+              "description": "Per-file byte ceiling for omni media uploads. Defaults to 1 GiB, the DashScope temporary-upload per-file cap. Inputs above the limit fail closed with an explanatory error."
+            }
+          }
+        }
+      }
+    },
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",

@@ -135,12 +135,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
-    const defaultHeaders = {
+    const defaultHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
     };
+    // Omni experiment: oss:// media URLs from the temporary-upload channel
+    // are only resolved server-side when this header is present. Static
+    // injection (vs per-request threading) is deliberate — the header is
+    // harmless on requests without oss:// parts.
+    if (this.cliConfig.isOmniEnabled?.()) {
+      defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
+    }
 
     return customHeaders
       ? { ...defaultHeaders, ...customHeaders }

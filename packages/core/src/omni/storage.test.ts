@@ -1,0 +1,117 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { OmniObjectStore } from './storage.js';
+
+describe('OmniObjectStore', () => {
+  let qwenDir: string;
+  let store: OmniObjectStore;
+
+  beforeEach(async () => {
+    qwenDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-store-'));
+    store = new OmniObjectStore(qwenDir);
+  });
+
+  afterEach(async () => {
+    await fs.rm(qwenDir, { recursive: true, force: true });
+  });
+
+  async function makeSource(content: string): Promise<{
+    sourcePath: string;
+    sha256: string;
+  }> {
+    const sourcePath = path.join(qwenDir, `src-${Math.random()}.mp4`);
+    await fs.writeFile(sourcePath, content);
+    return {
+      sourcePath,
+      sha256: createHash('sha256').update(content).digest('hex'),
+    };
+  }
+
+  it('stores a file under its content hash', async () => {
+    const { sourcePath, sha256 } = await makeSource('video-bytes');
+    const result = await store.putFile(sourcePath, sha256, '.mp4');
+    expect(result.deduped).toBe(false);
+    expect(result.objectPath).toBe(
+      path.join(
+        qwenDir,
+        'omni',
+        'objects',
+        'sha256',
+        sha256.slice(0, 2),
+        `${sha256}.mp4`,
+      ),
+    );
+    await expect(fs.readFile(result.objectPath, 'utf8')).resolves.toBe(
+      'video-bytes',
+    );
+  });
+
+  it('dedups identical content from different sources', async () => {
+    const a = await makeSource('same-bytes');
+    const b = await makeSource('same-bytes');
+    expect(a.sha256).toBe(b.sha256);
+
+    const first = await store.putFile(a.sourcePath, a.sha256, '.mp4');
+    const second = await store.putFile(b.sourcePath, b.sha256, '.mp4');
+    expect(first.deduped).toBe(false);
+    expect(second.deduped).toBe(true);
+    expect(second.objectPath).toBe(first.objectPath);
+
+    const objectFiles = await fs.readdir(path.dirname(first.objectPath));
+    expect(objectFiles).toEqual([path.basename(first.objectPath)]);
+  });
+
+  it('writes a self-ignoring .gitignore once', async () => {
+    const { sourcePath, sha256 } = await makeSource('x');
+    await store.putFile(sourcePath, sha256, '.mp4');
+    const gitignorePath = path.join(qwenDir, 'omni', '.gitignore');
+    await expect(fs.readFile(gitignorePath, 'utf8')).resolves.toBe('*\n');
+    // Second put must not fail on the existing .gitignore.
+    const other = await makeSource('y');
+    await expect(
+      store.putFile(other.sourcePath, other.sha256, '.mp4'),
+    ).resolves.toBeDefined();
+  });
+
+  it('leaves no .tmp files behind after a successful put', async () => {
+    const { sourcePath, sha256 } = await makeSource('clean');
+    const { objectPath } = await store.putFile(sourcePath, sha256, '.mp4');
+    const entries = await fs.readdir(path.dirname(objectPath));
+    expect(entries.filter((e) => e.startsWith('.tmp-'))).toEqual([]);
+  });
+
+  it('rejects malformed sha256 keys', async () => {
+    const { sourcePath } = await makeSource('z');
+    await expect(
+      store.putFile(sourcePath, '../../escape', '.mp4'),
+    ).rejects.toThrow(/Invalid sha256/);
+    await expect(store.putFile(sourcePath, 'ABCDEF', '.mp4')).rejects.toThrow(
+      /Invalid sha256/,
+    );
+  });
+
+  it('propagates copy failures without leaving temp files', async () => {
+    const missing = path.join(qwenDir, 'does-not-exist.mp4');
+    const sha256 = createHash('sha256').update('missing').digest('hex');
+    await expect(store.putFile(missing, sha256, '.mp4')).rejects.toThrow();
+    const shard = path.join(
+      qwenDir,
+      'omni',
+      'objects',
+      'sha256',
+      sha256.slice(0, 2),
+    );
+    // Shard dir may exist, but must contain no .tmp remnants.
+    const entries = await fs.readdir(shard).catch(() => []);
+    expect(entries.filter((e) => e.startsWith('.tmp-'))).toEqual([]);
+  });
+});

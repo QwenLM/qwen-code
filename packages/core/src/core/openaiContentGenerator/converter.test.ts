@@ -2347,6 +2347,45 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should pass oss:// video fileData in a user message through to video_url unchanged (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Describe this video' },
+              {
+                fileData: {
+                  mimeType: 'video/mp4',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+                  displayName: 'video.mp4',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeDefined();
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        video_url?: { url: string };
+      }>;
+      const videoPart = contentArray.find((p) => p.type === 'video_url');
+      expect(videoPart?.video_url?.url).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+      );
+    });
+
     it('should render unsupported inlineData file types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
