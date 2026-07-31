@@ -117,6 +117,28 @@ describe('runBaseTree', () => {
     expect(r.build).toBe(okBuild);
   });
 
+  it('REUSES an already-built base tree instead of sweeping it (concurrent shards)', () => {
+    // Reviewed live on this PR: N verifier shards run in parallel and all
+    // resolve the same path; without the fast path, shard B's opening sweep
+    // destroys the tree shard A is mid-A/B in, and A's base side reads as
+    // empty output — a fabricated difference with a deterministic source tag.
+    const builds: string[] = [];
+    const build = (w: string) => {
+      builds.push(w);
+      return okBuild;
+    };
+    const first = run({}, build);
+    expect(first.available).toBe(true);
+    const second = run({}, build);
+    expect(second.available).toBe(true);
+    expect(second.path).toBe(first.path);
+    expect(second.note).toContain('reusing');
+    expect(builds).toHaveLength(1); // one install+build, not two
+    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut.
+    writeFileSync(join(first.path!, '.qwen-review-base-ok'), 'f'.repeat(40));
+    expect(run({}, build).note).not.toContain('reusing');
+  });
+
   it('recovers from a stale base tree left by a crashed run', () => {
     const stale = baseWorktreePath(worktree);
     mkdirSync(stale, { recursive: true });

@@ -36,15 +36,15 @@
 // entirely on the claim under test, and a fixed scenario would fit almost none
 // of them. So the report hands back a path and gets out of the way.
 //
-// Cost is why this is on demand rather than part of every review: a second build
-// is a second build. It is worth it for one claim that turns on it and wasted on
+// Cost is why this is on demand rather than part of every review: the base
+// worktree is a cold checkout, so this is an install AND a build. It is worth it for one claim that turns on it and wasted on
 // a review with none, which is why the verifier's brief offers it per finding
 // instead of the pipeline spending it up front.
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
@@ -80,6 +80,15 @@ export interface BaseTreeArgs {
   install: boolean;
   /** Test seam: the build step. Production runs the real `runBuildTest`. */
   build?: (worktree: string) => BuildTestReport;
+}
+
+function gitOut(cwd: string, ...args: string[]): string {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
+  }
+  return (r.stdout ?? '').trim();
 }
 
 function git(cwd: string, ...args: string[]): void {
@@ -133,6 +142,35 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   }
 
   const tree = baseWorktreePath(worktree);
+  // Idempotent fast path — and the CONCURRENCY guard. Step 4 launches its
+  // verifier shards together, the brief offers every one of them this command,
+  // and they all resolve the same path; without this, shard B's opening sweep
+  // destroys the tree shard A is mid-A/B in, and A's base side silently reads
+  // as empty output — a fabricated difference with a deterministic source tag.
+  // A tree that exists, holds the right commit, and carries the marker a
+  // successful build wrote is returned as-is: same answer, no clobber, and the
+  // duplicate install+build cost gone with it. (Not a lock: two shards racing
+  // the FIRST build can still collide — the window is narrow and the failure
+  // is a build error, not a wrong verdict. A marker of the wrong SHA — a
+  // rebase between runs — falls through to the rebuild below.)
+  const marker = () => join(tree, '.qwen-review-base-ok');
+  try {
+    if (
+      existsSync(tree) &&
+      readFileSync(marker(), 'utf8').trim() === baseSha &&
+      gitOut(tree, 'rev-parse', 'HEAD') === baseSha
+    ) {
+      return {
+        available: true,
+        path: tree,
+        baseSha,
+        build: null,
+        note: `base tree already built at ${baseSha.slice(0, 9)} in ${tree} (reusing it — a concurrent or earlier probe built it)`,
+      };
+    }
+  } catch {
+    // No marker, unreadable marker, or a tree git cannot answer for: rebuild.
+  }
   let sweep: SweepResult | undefined;
   try {
     // Clear a stale base tree left by a crashed run — it would fail `add`. Its
@@ -174,6 +212,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     };
   }
 
+  // The marker is what the fast path above trusts, so it is written only after
+  // a build that succeeded, and it records the SHA it vouches for.
+  writeFileSync(marker(), `${baseSha}\n`);
   return {
     available: true,
     path: tree,

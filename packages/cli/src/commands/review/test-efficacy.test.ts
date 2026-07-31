@@ -1211,6 +1211,30 @@ describe('splitDiffIntoHunks', () => {
     expect(hunks[0].patch).toContain('-@@ old marker');
   });
 
+  it('gives each hunk ITS OWN file header on a multi-file diff', () => {
+    const d = [
+      'diff --git a/one.ts b/one.ts',
+      '--- a/one.ts',
+      '+++ b/one.ts',
+      '@@ -1,1 +1,1 @@',
+      '-const a = 1;',
+      '+const a = 2;',
+      'diff --git a/two.ts b/two.ts',
+      '--- a/two.ts',
+      '+++ b/two.ts',
+      '@@ -5,1 +5,1 @@',
+      '-const b = 1;',
+      '+const b = 2;',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(2);
+    // The second patch must name the second file, or git applies it to the wrong one.
+    expect(hunks[1].patch).toContain('diff --git a/two.ts b/two.ts');
+    expect(hunks[1].patch).not.toContain('one.ts');
+    expect(hunks[0].patch).not.toContain('two.ts');
+  });
+
   it('returns nothing for a diff with no hunks (a binary file)', () => {
     expect(
       splitDiffIntoHunks(

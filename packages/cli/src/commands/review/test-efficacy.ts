@@ -1028,10 +1028,20 @@ export function splitDiffIntoHunks(
   const lines = diffText.split('\n');
   const first = lines.findIndex((l) => l.startsWith('@@'));
   if (first < 0) return [];
-  const fileHeader = lines.slice(0, first);
+  // Re-captured at every `diff --git` boundary: a hunk's patch must carry ITS
+  // file's header, or a multi-file diff hands git a patch naming the wrong
+  // file. (Latent while hunkProbeInputs diffs one path at a time — but this is
+  // exported and reads as general-purpose, so it behaves as one.)
+  let fileHeader = lines.slice(0, first);
   const out: Array<{ header: string; patch: string; startLine: number }> = [];
   let i = first;
   while (i < lines.length) {
+    if (lines[i].startsWith('diff --git ')) {
+      const start = i;
+      while (i < lines.length && !lines[i].startsWith('@@')) i++;
+      fileHeader = lines.slice(start, i);
+      continue;
+    }
     if (!lines[i].startsWith('@@')) {
       i++;
       continue;
@@ -1178,7 +1188,11 @@ export function runOneHunkProbe(
     // Restore by content, not by re-applying the patch forward: a forward apply
     // can fail on its own and would leave the tree neutralised for every later
     // probe, turning one bad restore into a run of false survivors. Writing the
-    // saved bytes back also recreates a file the reverse patch deleted.
+    // saved bytes back also recreates a file the reverse patch deleted — and
+    // the parent directory first: reverse-applying a `new file` hunk removes
+    // the directories it emptied, and a restore that throws ENOENT from this
+    // finally loses the verdict AND marks every remaining hunk inconclusive.
+    mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, original, 'utf8');
   }
 }
@@ -1322,6 +1336,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   const hunkResults: HunkResult[] = [];
   let hunksSkippedForBudget = 0;
   let hunksSkippedForCap = 0;
+  let hunksSkippedForBaseline = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1480,7 +1495,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           .map((r) => r.file);
         if (greenProbes.length === 0) {
           mutantsSkippedForBaseline = candidates.length;
-          hunksSkippedForBudget = hunkCandidates.length;
+          // Their own reason, not the budget's: the mutants ran zero suites in
+          // this branch, and "the mutants used the window" would be a false note.
+          hunksSkippedForBaseline = hunkCandidates.length;
           noteMutants(
             'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing',
           );
@@ -1624,7 +1641,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       .map((h) => ({
         file: h.file,
         kind: 'hunk-survived' as const,
-        message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. Nothing in this diff's tests fails when this particular change is undone, so it ships unprotected — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.)`,
+        message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. Nothing in this diff's tests fails when this particular change is undone, so it ships unprotected — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
+          results.some((r) => r.verdict === 'inert')
+            ? ' A file-level revert probe also came back inert, so this restates that gap at hunk granularity — read the two as one finding, not two.'
+            : ''
+        })`,
       })),
   ];
 
@@ -1652,6 +1673,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         .length,
       skippedForBudget: hunksSkippedForBudget,
       skippedForCap: hunksSkippedForCap,
+      skippedForBaseline: hunksSkippedForBaseline,
     },
     findings,
     cleanupFailure,
@@ -1689,6 +1711,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   if (hunksSkippedForBudget > 0) {
     writeStdoutLine(
       `  ${hunksSkippedForBudget} hunk probe(s) skipped: the mutants used the window`,
+    );
+  }
+  if (hunksSkippedForBaseline > 0) {
+    writeStdoutLine(
+      `  ${hunksSkippedForBaseline} hunk probe(s) skipped: no probe file was green in the unmutated baseline`,
     );
   }
   if (mutantsNote) {

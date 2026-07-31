@@ -116,7 +116,12 @@ const PLAN_NAME_RE =
 const HEADING_LINE_RE = /^(#{1,6})\s*(\S.*?)\s*$/;
 
 /** A standalone bold line: `**Test Plan**`, the same heading in another shape. */
-const BOLD_LINE_RE = /^\*\*\s*([^*\n]+?)\s*\*\*:?\s*$/;
+// No `\s*` on either side of the capture and no lazy quantifier: with all
+// three able to match a space, a line opening `**` that never closes made the
+// engine walk every split of a whitespace run — measured 3.2s at 3,000 spaces,
+// unbounded at GitHub's 65,536-char body cap, on a line an untrusted PR body
+// controls. The capture is trimmed at the use site instead.
+const BOLD_LINE_RE = /^\*\*([^*\n]+)\*\*:?\s*$/;
 
 /**
  * Pull the Test Plan section out of a PR body.
@@ -149,7 +154,7 @@ export function extractTestPlanSection(
     if (fenced[i]) continue;
     const hash = HEADING_LINE_RE.exec(lines[i]);
     const bold = BOLD_LINE_RE.exec(lines[i]);
-    const name = hash?.[2] ?? bold?.[1];
+    const name = hash?.[2] ?? bold?.[1]?.trim();
     if (!name || !PLAN_NAME_RE.test(name)) continue;
     // The bold form has no level, so nothing deeper can nest under it; `Infinity`
     // makes every `#` heading close it, which is the only sound reading.
@@ -368,6 +373,11 @@ export function npmScriptOf(command: string): string | null {
   const m = /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?([\w:.-]+)/.exec(command);
   if (!m) return null;
   const name = m[1];
+  // A leading flag (`npm --workspace=x run build`, `npm -w x run test`) lands
+  // in the capture because `-` is word-adjacent in the class. Biased toward
+  // silence: a claim this cannot parse is `unchecked`, never a false
+  // `no package defines this script` on a correct Test Plan.
+  if (name.startsWith('-')) return null;
   // `npm test` / `npm start` are npm's own aliases and need no `run`.
   if (
     name === 'run' ||

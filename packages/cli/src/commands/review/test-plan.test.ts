@@ -89,6 +89,15 @@ describe('extractTestPlanSection', () => {
     ).toBe('ran it');
   });
 
+  it('scans a hostile unclosed-bold line in linear time', () => {
+    // Reviewed live on this PR: the old bold pattern backtracked
+    // catastrophically (3.2s at 3,000 spaces) on `**` + whitespace with no
+    // closer — a line an untrusted PR body controls. A regression here does
+    // not fail an assertion; it hangs the test into vitest's timeout.
+    const hostile = `## Summary\n\n**${' '.repeat(50_000)}\nplain text`;
+    expect(extractTestPlanSection(hostile)).toBeNull();
+  });
+
   it('returns null when there is no Test Plan section', () => {
     expect(extractTestPlanSection('## Summary\n\njust a change')).toBeNull();
   });
@@ -253,6 +262,14 @@ describe('npmScriptOf', () => {
     expect(npmScriptOf('npm run build')).toBe('build');
     expect(npmScriptOf('npm test --workspace=packages/cli')).toBe('test');
     expect(npmScriptOf('npm run test:unit')).toBe('test:unit');
+  });
+
+  it('is null when a FLAG precedes the script — never a false script name', () => {
+    // `--workspace` used to be the capture, and end-to-end that posted
+    // `no package defines this script` on a correct Test Plan.
+    expect(npmScriptOf('npm --workspace=packages/cli run build')).toBeNull();
+    expect(npmScriptOf('npm -w packages/cli run test')).toBeNull();
+    expect(npmScriptOf('yarn --cwd packages/cli build')).toBeNull();
   });
 
   it('is null for npm verbs that are not scripts, and for non-npm runners', () => {

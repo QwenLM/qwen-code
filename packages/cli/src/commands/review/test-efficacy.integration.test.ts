@@ -1274,6 +1274,41 @@ describe('per-hunk probes against real git', () => {
     expect(reverted).toContain('line2_CHANGED;');
   });
 
+  it('restores a hunk-ADDED file whose parent directory the reverse apply removed', () => {
+    // Reviewed live on this PR: reverse-applying a `new file` hunk deletes the
+    // directories it emptied, and the old restore threw ENOENT from finally —
+    // losing the verdict and marking every remaining hunk inconclusive.
+    write('src/newdir/added.ts', 'export const fresh = 1;\n');
+    commitAll('adds a file in a new dir');
+    const diff = git(
+      repo,
+      'diff',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      'HEAD~1',
+      'HEAD',
+      '--',
+      'src/newdir/added.ts',
+    );
+    const [h] = splitDiffIntoHunks(diff);
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: 'src/newdir/added.ts',
+        index: 0,
+        header: h.header,
+        startLine: h.startLine,
+        patch: h.patch,
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive'); // no probe files collected — honest
+    expect(readFileSync(join(repo, 'src/newdir/added.ts'), 'utf8')).toBe(
+      'export const fresh = 1;\n',
+    );
+  });
+
   it('restores the file after the run, verdict notwithstanding', () => {
     const [first] = hunkPatches();
     const before = contents();
