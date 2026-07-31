@@ -6,7 +6,29 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { normalizeForkTurns, selectForkHistory } from './fork-subagent.js';
+import { ToolNames } from '../tool-names.js';
+import {
+  buildForkExecutionAllowlist,
+  normalizeForkTurns,
+  selectForkHistory,
+} from './fork-subagent.js';
+
+describe('buildForkExecutionAllowlist', () => {
+  it('distinguishes an explicit deny-all list from an omitted list', () => {
+    expect(
+      buildForkExecutionAllowlist(
+        [],
+        [ToolNames.READ_FILE, ToolNames.ASK_USER_QUESTION],
+      ),
+    ).toEqual([]);
+    expect(
+      buildForkExecutionAllowlist(undefined, [
+        ToolNames.READ_FILE,
+        ToolNames.ASK_USER_QUESTION,
+      ]),
+    ).toEqual([ToolNames.READ_FILE]);
+  });
+});
 
 describe('selectForkHistory', () => {
   const startup: Content = {
