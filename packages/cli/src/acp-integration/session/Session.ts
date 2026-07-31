@@ -187,10 +187,7 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from '../extension-skills.js';
-import {
-  isAutofixCronJob,
-  resolveAutofixCronPrompt,
-} from '../../utils/autofix.js';
+import { resolveAutofixCronPrompt } from '../../utils/autofix.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -5007,10 +5004,6 @@ export class Session implements SessionContext {
         });
         void this.#drainCronQueue();
       };
-      if (!isAutofixCronJob(job)) {
-        enqueue(null);
-        return;
-      }
       void resolveAutofixCronPrompt(this.config, {
         id: job.id ?? '',
         prompt: job.prompt,

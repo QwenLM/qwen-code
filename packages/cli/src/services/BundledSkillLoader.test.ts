@@ -579,6 +579,7 @@ describe('BundledSkillLoader', () => {
           'Usage: /autofix status | on [propose-only|auto-commit|auto-push] | off',
       });
       expect(scheduler.create).not.toHaveBeenCalled();
+      expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
     });
 
     it('reports GitHub resolution failures without touching the scheduler', async () => {
@@ -640,6 +641,25 @@ describe('BundledSkillLoader', () => {
       );
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('cron_create');
     });
+
+    it.each(['auto-commit', 'auto-push'] as const)(
+      'pins the selected mode for %s watchers',
+      async (mode) => {
+        resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+
+        const result = await invokeAutofix(`on ${mode}`);
+
+        expect(scheduler.create).toHaveBeenCalledWith(
+          '*/10 * * * *',
+          `autofix tick repo=QwenLM/qwen-code pr=4362 mode=${mode} rounds=0 infra-reruns=0`,
+          true,
+        );
+        expect(result).toHaveProperty(
+          'content.0.text',
+          expect.stringContaining(`mode="${mode}"`),
+        );
+      },
+    );
 
     it('rejects enabling Autofix before resolving GitHub when scheduled tasks are disabled', async () => {
       scheduler.disabled = true;

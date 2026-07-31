@@ -23990,51 +23990,71 @@ describe('Session', () => {
       ).toBe(false);
     });
 
-    it('fails closed for noncanonical Autofix-prefixed cron prompts', async () => {
-      const malformedWatcher = {
-        id: 'malformed-autofix',
-        prompt: 'autofix tick report',
-        cronExpr: '*/10 * * * *',
-        recurring: true,
-        createdAt: 1,
-        expiresAt: 2,
-        jitterMs: 0,
-      };
-      const deleteJob = vi.fn().mockResolvedValue(true);
-      const scheduler = {
-        hasPendingWork: true,
-        enableDurable: vi.fn().mockResolvedValue(undefined),
-        start: vi.fn((callback: (job: typeof malformedWatcher) => void) =>
-          callback(malformedWatcher),
-        ),
-        stop: vi.fn(),
-        list: vi.fn().mockReturnValue([malformedWatcher]),
-        delete: deleteJob,
-        getExitSummary: vi.fn().mockReturnValue(undefined),
-      };
-      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-      mockConfig.getDisabledSkillNames = vi.fn().mockReturnValue(new Set());
-      rebuildSessionWithGuard();
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(createEmptyStream())
-        .mockResolvedValue(createEmptyStream());
+    it.each([
+      [
+        'noncanonical',
+        {
+          id: 'malformed-autofix',
+          prompt: 'autofix tick report',
+          cronExpr: '*/10 * * * *',
+          recurring: true,
+          createdAt: 1,
+          expiresAt: 2,
+          jitterMs: 0,
+        },
+      ],
+      [
+        'off-cadence',
+        {
+          id: 'off-cadence-autofix',
+          prompt:
+            'autofix tick repo=QwenLM/qwen-code pr=4362 mode=auto-push rounds=0 infra-reruns=0',
+          cronExpr: '0 * * * *',
+          recurring: false,
+          createdAt: 1,
+          expiresAt: 2,
+          jitterMs: 0,
+        },
+      ],
+    ] as const)(
+      'fails closed for %s Autofix-prefixed cron prompts',
+      async (_name, malformedWatcher) => {
+        const deleteJob = vi.fn().mockResolvedValue(true);
+        const scheduler = {
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn((callback: (job: typeof malformedWatcher) => void) =>
+            callback(malformedWatcher),
+          ),
+          stop: vi.fn(),
+          list: vi.fn().mockReturnValue([malformedWatcher]),
+          delete: deleteJob,
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getDisabledSkillNames = vi.fn().mockReturnValue(new Set());
+        rebuildSessionWithGuard();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValue(createEmptyStream());
 
-      await runGuardPrompt();
+        await runGuardPrompt();
 
-      await vi.waitFor(() => {
-        expect(deleteJob).toHaveBeenCalledWith('malformed-autofix');
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-      });
-      const cronCall = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[1]?.[1] as {
-        message: Part[];
-      };
-      const cronText = textParts(cronCall.message).join('\n');
-      expect(cronText).toContain('No maintenance action was authorized');
-      expect(cronText).not.toBe('autofix tick report');
-    });
+        await vi.waitFor(() => {
+          expect(deleteJob).toHaveBeenCalledWith(malformedWatcher.id);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        const cronCall = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as {
+          message: Part[];
+        };
+        const cronText = textParts(cronCall.message).join('\n');
+        expect(cronText).toContain('No maintenance action was authorized');
+        expect(cronText).not.toBe(malformedWatcher.prompt);
+      },
+    );
 
     it('suspends an armed guard when a cron stream aborts', async () => {
       const scheduler = {
