@@ -40,13 +40,33 @@ describe('toChromeManifestVersion', () => {
     );
   });
 
-  it('maps nightly dates monotonically below previews', () => {
-    expect(toChromeManifestVersion('0.20.0-nightly.20260712.abc')).toBe(
-      '0.20.0.2384',
+  it('uses an explicit monotonic build number for nightly releases', () => {
+    const nightly1 = toChromeManifestVersion(
+      '0.20.0-nightly.20260712.abc',
+      1234,
     );
-    expect(toChromeManifestVersion('0.20.0-nightly.20260713.def')).toBe(
-      '0.20.0.2385',
+    const nightly2 = toChromeManifestVersion(
+      '0.20.0-nightly.20260712.def',
+      1235,
     );
+    const preview = toChromeManifestVersion('0.20.0-preview.0');
+    expect(nightly1).toBe('0.20.0.1234');
+    expect(nightly2).toBe('0.20.0.1235');
+    expect(nightly1.localeCompare(nightly2, undefined, { numeric: true })).toBe(
+      -1,
+    );
+    expect(nightly2.localeCompare(preview, undefined, { numeric: true })).toBe(
+      -1,
+    );
+  });
+
+  it('rejects nightly releases without a valid monotonic build number', () => {
+    expect(() =>
+      toChromeManifestVersion('0.20.0-nightly.20260712.abc'),
+    ).toThrow('Nightly extension build number is required');
+    expect(() =>
+      toChromeManifestVersion('0.20.0-nightly.20260712.abc', 60000),
+    ).toThrow('Invalid nightly extension build number');
   });
 
   it('rejects non-numeric version components', () => {

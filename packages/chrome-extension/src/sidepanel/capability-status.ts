@@ -12,7 +12,8 @@ export type CapabilityStatusState =
   | 'automation-configured'
   | 'automation-connected'
   | 'automation-pending'
-  | 'automation-shadowed';
+  | 'automation-shadowed'
+  | 'automation-unavailable';
 
 export interface CapabilityStatus {
   state: CapabilityStatusState;
@@ -31,7 +32,7 @@ export interface WorkspaceMcpSnapshot {
 export function deriveCapabilityStatus(
   daemonReachable: boolean,
   features: readonly string[],
-  mcpSnapshot?: WorkspaceMcpSnapshot,
+  mcpSnapshot?: WorkspaceMcpSnapshot | null,
 ): CapabilityStatus {
   if (!daemonReachable) {
     return { state: 'down', shellReady: false, warning: null };
@@ -58,6 +59,14 @@ export function deriveCapabilityStatus(
         'Browser tools are unavailable. They require QWEN_CDP_MCP_COMMAND and an auth-free loopback daemon.',
     };
   }
+  if (mcpSnapshot === null) {
+    return {
+      state: 'automation-unavailable',
+      shellReady: true,
+      warning: 'Browser tools status could not be verified.',
+    };
+  }
+
   if (mcpSnapshot) {
     const server = mcpSnapshot.servers?.find(
       (candidate) => candidate.name === 'chrome-devtools',

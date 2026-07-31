@@ -84,16 +84,16 @@ It warns when the adapter has not connected or when an existing user-defined
 
 The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 
-| State                   | Meaning                                 | Shown                            |
-| ----------------------- | --------------------------------------- | -------------------------------- |
-| `down`                  | no daemon reachable                     | "Start qwen serve" + command     |
-| `needs-allow-origin`    | daemon up but `--allow-origin` not set  | "Allow this extension" + command |
-| `chat-only`             | Web Shell ready, CDP tunnel disabled    | chat + bridge warning            |
-| `tunnel-only`           | CDP tunnel ready, adapter missing       | chat + adapter warning           |
-| `automation-configured` | adapter configured; status unavailable  | the Web Shell                    |
-| `automation-pending`    | adapter not connected                   | chat + connection warning        |
-| `automation-shadowed`   | an existing MCP config takes precedence | chat + migration warning         |
-| `automation-connected`  | extension-backed MCP connected          | the Web Shell                    |
+| State                    | Meaning                                 | Shown                            |
+| ------------------------ | --------------------------------------- | -------------------------------- |
+| `down`                   | no daemon reachable                     | "Start qwen serve" + command     |
+| `needs-allow-origin`     | daemon up but `--allow-origin` not set  | "Allow this extension" + command |
+| `chat-only`              | Web Shell ready, CDP tunnel disabled    | chat + bridge warning            |
+| `tunnel-only`            | CDP tunnel ready, adapter missing       | chat + adapter warning           |
+| `automation-unavailable` | adapter status could not be read        | chat + status warning            |
+| `automation-pending`     | adapter not connected                   | chat + connection warning        |
+| `automation-shadowed`    | an existing MCP config takes precedence | chat + migration warning         |
+| `automation-connected`   | extension-backed MCP connected          | the Web Shell                    |
 
 ## Automated real-Chrome acceptance
 

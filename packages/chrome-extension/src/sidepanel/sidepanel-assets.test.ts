@@ -44,6 +44,14 @@ describe('side panel capability status assets', () => {
     expect(html).toContain('role="status"');
   });
 
+  it('requests only permissions used by the extension', () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(packageRoot, 'public/manifest.json'), 'utf8'),
+    ) as { permissions?: string[] };
+
+    expect(manifest.permissions).not.toContain('activeTab');
+  });
+
   it('derives shell and warning state from the full capability response', () => {
     const script = readFileSync(
       path.join(packageRoot, 'public/sidepanel.js'),
@@ -131,6 +139,109 @@ describe('side panel capability status assets', () => {
     expect(
       document.getElementById('welcome')?.classList.contains('hidden'),
     ).toBe(false);
+    expect(
+      document
+        .getElementById('capability-warning')
+        ?.classList.contains('hidden'),
+    ).toBe(true);
+  });
+  it('renders runtime MCP diagnostics from the live status endpoint', async () => {
+    document.body.innerHTML = `
+      <iframe id="ui" class="hidden"></iframe>
+      <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
+      <code id="cmd"></code><button id="cmd-row"></button>
+      <button id="copy"></button><span id="copy-label"></span>
+      <div id="capability-warning" class="hidden"></div>
+    `;
+    vi.stubGlobal('chrome', {
+      runtime: { id: 'test-extension' },
+      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+    });
+    vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
+
+    let mcpResponse:
+      | { ok: false }
+      | { ok: true; value: Record<string, unknown> } = { ok: false };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/capabilities')) {
+          return {
+            ok: true,
+            json: async () => ({
+              features: [
+                'allow_origin',
+                'cdp_tunnel_over_ws',
+                'browser_automation_mcp',
+              ],
+            }),
+          };
+        }
+        if (url.endsWith('/workspace/mcp')) {
+          return {
+            ok: mcpResponse.ok,
+            json: async () =>
+              mcpResponse.ok ? mcpResponse.value : { error: 'unavailable' },
+          };
+        }
+        return { ok: true, json: async () => ({ status: 'ok' }) };
+      }),
+    );
+    let poll: (() => void | Promise<void>) | undefined;
+    vi.stubGlobal('setInterval', (handler: () => void | Promise<void>) => {
+      poll = handler;
+      return 1;
+    });
+
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+    Function(script)();
+
+    await vi.waitFor(() =>
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'Browser tools status could not be verified.',
+      ),
+    );
+
+    mcpResponse = { ok: true, value: { servers: [] } };
+    await poll?.();
+    expect(document.getElementById('capability-warning')?.textContent).toBe(
+      'Browser tools are configured but the adapter is not connected.',
+    );
+
+    mcpResponse = {
+      ok: true,
+      value: {
+        servers: [
+          {
+            name: 'chrome-devtools',
+            mcpStatus: 'connected',
+            config: { args: ['--autoConnect'] },
+          },
+        ],
+      },
+    };
+    await poll?.();
+    expect(document.getElementById('capability-warning')?.textContent).toBe(
+      'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    );
+
+    mcpResponse = {
+      ok: true,
+      value: {
+        servers: [
+          {
+            name: 'chrome-devtools',
+            mcpStatus: 'connected',
+            config: { args: ['--wsEndpoint', 'ws://127.0.0.1:4170/cdp'] },
+          },
+        ],
+      },
+    };
+    await poll?.();
     expect(
       document
         .getElementById('capability-warning')

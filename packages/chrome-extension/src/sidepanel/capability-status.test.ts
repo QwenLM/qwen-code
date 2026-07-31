@@ -57,6 +57,20 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
+  it('warns when runtime MCP status cannot be read', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        null,
+      ),
+    ).toEqual({
+      state: 'automation-unavailable',
+      shellReady: true,
+      warning: 'Browser tools status could not be verified.',
+    });
+  });
+
   it('reports a connected runtime MCP that targets the extension tunnel', () => {
     expect(
       deriveCapabilityStatus(

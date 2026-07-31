@@ -3,13 +3,12 @@ import semver from 'semver';
 const CHROME_COMPONENT_MAX = 65535;
 const STABLE_BUILD = CHROME_COMPONENT_MAX;
 const PREVIEW_BUILD_START = 60000;
-const NIGHTLY_EPOCH = Date.UTC(2020, 0, 1);
 
 /**
  * Convert an npm package version into Chrome's numeric manifest format.
  * Chrome rejects prerelease labels such as `-alpha.1`.
  */
-export function toChromeManifestVersion(packageVersion) {
+export function toChromeManifestVersion(packageVersion, nightlyBuildNumber) {
   const parsed = semver.parse(packageVersion);
   if (!parsed) {
     throw new Error(`Invalid extension package version: ${packageVersion}`);
@@ -35,17 +34,25 @@ export function toChromeManifestVersion(packageVersion) {
       const year = Math.floor(value / 10000);
       const month = Math.floor((value % 10000) / 100);
       const day = value % 100;
-      const timestamp = Date.UTC(year, month - 1, day);
-      const date = new Date(timestamp);
+      const date = new Date(Date.UTC(year, month - 1, day));
       const validDate =
         date.getUTCFullYear() === year &&
         date.getUTCMonth() === month - 1 &&
         date.getUTCDate() === day;
-      const days = Math.floor((timestamp - NIGHTLY_EPOCH) / 86_400_000);
-      if (!validDate || days < 0 || days >= PREVIEW_BUILD_START) {
+      if (!validDate) {
         throw new Error(`Invalid extension package version: ${packageVersion}`);
       }
-      build = days;
+      if (nightlyBuildNumber === undefined) {
+        throw new Error('Nightly extension build number is required');
+      }
+      if (
+        !Number.isInteger(nightlyBuildNumber) ||
+        nightlyBuildNumber <= 0 ||
+        nightlyBuildNumber >= PREVIEW_BUILD_START
+      ) {
+        throw new Error('Invalid nightly extension build number');
+      }
+      build = nightlyBuildNumber;
     } else {
       throw new Error(`Unsupported extension prerelease: ${packageVersion}`);
     }
