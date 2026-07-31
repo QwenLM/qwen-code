@@ -89,6 +89,10 @@
   box-sizing: border-box;
 }
 
+.bash-toolcall-output-subtle .bash-toolcall-pre {
+  overflow: visible;
+}
+
 .bash-toolcall-error-content {
   color: #c74e39;
 }
@@ -178,6 +182,10 @@
   min-width: 0;
   width: 100%;
   box-sizing: border-box;
+}
+
+.execute-toolcall-output-subtle .execute-toolcall-pre {
+  overflow: visible;
 }
 
 .execute-toolcall-error-content {
