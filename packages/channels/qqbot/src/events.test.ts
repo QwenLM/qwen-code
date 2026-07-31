@@ -167,8 +167,8 @@ function makeGroupEvent(
   return {
     id: 'msg-group-001',
     author: {
-      member_openid: 'ABCDEF012345',
-      user_openid: 'ABCDEF012345',
+      member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+      user_openid: 'ABCDEF0123456789ABCDEF0123456789',
       username: 'Bob',
     },
     content: '<@OPENID_BOT> 你好',
@@ -183,7 +183,7 @@ function makeGroupAllEvent(
   return {
     id: 'msg-groupall-001',
     author: {
-      member_openid: 'FEDCBA987654',
+      member_openid: 'FEDCBA9876543210FEDCBA9876543210',
       username: 'Charlie',
     },
     content: '大家早上好',
@@ -408,7 +408,7 @@ describe('handleGroup', () => {
     expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true
     expect(env['text']).toBe(
-      '[atMention=true] [Bob(ABCDEF012345)]: <@OPENID_BOT> 你好',
+      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: <@OPENID_BOT> 你好',
     );
   });
 
@@ -429,10 +429,8 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    // allowMention=false; senderOpenId still displayed
-    expect(env['text']).toBe(
-      '[atMention=true] [Bob(ABCDEF012345)]: 帮我翻译这段',
-    );
+    // allowMention=false → openid suffix suppressed entirely
+    expect(env['text']).toBe('[atMention=true] [Bob]: 帮我翻译这段');
   });
 
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
@@ -722,7 +720,7 @@ describe('handleGroupAll', () => {
         content: '<@OPENID_BOT> 你好',
         mentions: [
           {
-            member_openid: 'ABCDEF012345',
+            member_openid: 'ABCDEF0123456789ABCDEF0123456789',
             is_you: true,
             scope: 'single' as const,
           },
@@ -755,7 +753,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     // isAtBot=false → no botOpenId, no suffix, but senderOpenId displayed
     expect(env['text']).toBe(
-      '[atMention=false] [Charlie(FEDCBA987654)]: hello world',
+      '[atMention=false] [Charlie(FEDCBA9876543210FEDCBA9876543210)]: hello world',
     );
   });
 

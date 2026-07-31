@@ -550,6 +550,7 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+          '消息前缀 [昵称(OPENID)] 中的 OPENID 是该发送者的标识，可用 <@OPENID> 回复时 @他。',
           '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
@@ -2342,7 +2343,7 @@ export class QQChannel extends ChannelBase {
         : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId})` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${this.qqConfig.allowMention !== false && senderOpenId && /^[A-F0-9]{32}$/i.test(senderOpenId) ? `(${senderOpenId})` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
