@@ -345,6 +345,9 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+// Match the parent channel bridge's restart threshold. Low-CPU gaps at this
+// boundary are host suspension; active stalls still reach the parent watchdog.
+const ACP_EVENT_LOOP_SUSPEND_THRESHOLD_MS = 5 * 60 * 1000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -2876,6 +2879,7 @@ export async function runAcpAgent(
     process.stderr.write(`${warning}\n`);
   }
   const eventLoopMonitor = startEventLoopLagMonitor({
+    suspendThresholdMs: ACP_EVENT_LOOP_SUSPEND_THRESHOLD_MS,
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
     },

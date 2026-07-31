@@ -1398,6 +1398,10 @@ describe('runAcpAgent shutdown cleanup', () => {
     });
     expect(snapshot).toHaveBeenCalledTimes(1);
 
+    expect(startEventLoopLagMonitor).toHaveBeenCalledWith(
+      expect.objectContaining({ suspendThresholdMs: 5 * 60 * 1000 }),
+    );
+
     mockConnectionState.resolve();
     await agentPromise;
 

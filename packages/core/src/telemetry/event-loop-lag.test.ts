@@ -74,6 +74,29 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
 
+  it('reads snapshots without advancing suspension detection state', async () => {
+    const onNewMaxStall = vi.fn();
+    histogram.max = 300_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 300_000,
+      onNewMaxStall,
+    });
+
+    vi.setSystemTime(Date.now() + 300_000);
+    expect(monitor.snapshot().maxMs).toBe(300_000);
+    expect(cpuUsage).toHaveBeenCalledOnce();
+    expect(histogram.reset).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(histogram.reset).toHaveBeenCalledOnce();
+    expect(onNewMaxStall).not.toHaveBeenCalled();
+
+    monitor.dispose();
+  });
+
   it('actively reports only new max stalls above threshold', async () => {
     const onNewMaxStall = vi.fn();
     histogram.max = 15_000_000;
@@ -126,6 +149,7 @@ describe('startEventLoopLagMonitor', () => {
       onNewMaxStall,
     });
 
+    vi.setSystemTime(Date.now() + 10_000);
     await vi.advanceTimersByTimeAsync(10);
 
     expect(histogram.reset).toHaveBeenCalledTimes(1);
@@ -134,7 +158,7 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
 
-  it('resets suspended samples without a stall callback', () => {
+  it('keeps snapshots pure while suspension filtering runs on the interval', async () => {
     histogram.mean = 15_000_000_000;
     histogram.max = 15_000_000_000;
     histogram.percentile.mockReturnValue(15_000_000_000);
@@ -150,12 +174,21 @@ describe('startEventLoopLagMonitor', () => {
 
     vi.setSystemTime(Date.now() + 10_000);
     expect(monitor.snapshot()).toEqual({
+      meanMs: 15_000,
+      p50Ms: 15_000,
+      p99Ms: 15_000,
+      maxMs: 15_000,
+    });
+    expect(histogram.reset).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(histogram.reset).toHaveBeenCalledOnce();
+    expect(monitor.snapshot()).toEqual({
       meanMs: 0,
       p50Ms: 0,
       p99Ms: 0,
       maxMs: 0,
     });
-    expect(histogram.reset).toHaveBeenCalledTimes(1);
 
     monitor.dispose();
   });
@@ -173,6 +206,7 @@ describe('startEventLoopLagMonitor', () => {
       onNewMaxStall,
     });
 
+    vi.setSystemTime(Date.now() + 10_000);
     await vi.advanceTimersByTimeAsync(10);
     histogram.max = 5_000_000_000;
     await vi.advanceTimersByTimeAsync(10);
@@ -202,15 +236,17 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
 
-  it('reports a stall just below the default suspend threshold', async () => {
+  it('resets a low-CPU gap at the configured suspend threshold', async () => {
     const onNewMaxStall = vi.fn();
     histogram.max = 299_000_000_000;
     const monitor = startEventLoopLagMonitor({
       resolutionMs: 10,
       stallThresholdMs: 1_000,
+      suspendThresholdMs: 300_000,
       onNewMaxStall,
     });
 
+    vi.setSystemTime(Date.now() + 300_000);
     await vi.advanceTimersByTimeAsync(10);
 
     expect(histogram.reset).not.toHaveBeenCalled();
@@ -228,6 +264,7 @@ describe('startEventLoopLagMonitor', () => {
       onNewMaxStall,
     });
 
+    vi.setSystemTime(Date.now() + 600_000);
     await vi.advanceTimersByTimeAsync(10);
 
     expect(histogram.reset).toHaveBeenCalledTimes(1);
@@ -277,6 +314,30 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
 
+  it('does not suppress an old histogram max after a short idle check', async () => {
+    const onNewMaxStall = vi.fn();
+    cpuUsage
+      .mockReset()
+      .mockReturnValueOnce({ user: 0, system: 0 })
+      .mockReturnValueOnce({ user: 20_000_000, system: 0 })
+      .mockReturnValue({ user: 20_000_000, system: 0 });
+    histogram.max = 600_000_000_000;
+    const monitor = startEventLoopLagMonitor({
+      resolutionMs: 10,
+      stallThresholdMs: 1_000,
+      suspendThresholdMs: 300_000,
+      onNewMaxStall,
+    });
+
+    vi.setSystemTime(Date.now() + 600_000);
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onNewMaxStall).toHaveBeenCalledOnce();
+    expect(histogram.reset).not.toHaveBeenCalled();
+
+    monitor.dispose();
+  });
   it('enables and disables the underlying histogram', () => {
     const monitor = startEventLoopLagMonitor();
 

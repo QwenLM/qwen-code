@@ -67,6 +67,7 @@ export function startEventLoopLagMonitor(
 
   let disposed = false;
   let lastReportedMaxMs = 0;
+  let lastObservedMaxMs = 0;
   let lastCheckTimeMs = Date.now();
   let lastCpuUsage = safeCpuUsage();
   const readMaxMs = () => nsToMs(histogram.max);
@@ -76,15 +77,19 @@ export function startEventLoopLagMonitor(
     const cpuUsage = safeCpuUsage();
     const elapsedMs = Math.max(0, nowMs - lastCheckTimeMs);
     const maxMs = readMaxMs();
+    const newMaxMs = maxMs > lastObservedMaxMs ? maxMs : 0;
     const cpuRatio = calculateCpuRatio(lastCpuUsage, cpuUsage, elapsedMs);
     lastCheckTimeMs = nowMs;
     if (cpuUsage) lastCpuUsage = cpuUsage;
+    lastObservedMaxMs = maxMs;
     if (
-      maxMs >= suspendThresholdMs &&
+      newMaxMs >= suspendThresholdMs &&
+      elapsedMs >= suspendThresholdMs &&
       cpuRatio !== undefined &&
       cpuRatio <= suspendCpuRatio
     ) {
       histogram.reset();
+      lastObservedMaxMs = 0;
       lastReportedMaxMs = 0;
       return;
     }
@@ -106,7 +111,6 @@ export function startEventLoopLagMonitor(
 
   return {
     snapshot(): EventLoopLagSnapshot {
-      checkHistogram();
       return {
         meanMs: nsToMs(histogram.mean),
         p50Ms: nsToMs(histogram.percentile(50)),

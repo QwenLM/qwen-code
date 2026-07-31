@@ -350,6 +350,10 @@ function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
+  /**
+   * Recovery invariant: every path that resolves a session or calls the bridge
+   * must await waitForBridgeRecovery() immediately before that operation.
+   */
   protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
@@ -4914,8 +4918,13 @@ export abstract class ChannelBase {
 
   /** Wait until the currently active bridge recovery, if any, has completed. */
   private async waitForBridgeRecovery(): Promise<void> {
-    const bridgeRecovery = this.bridgeRecovery?.();
-    if (bridgeRecovery) await bridgeRecovery;
+    let completedRecovery: Promise<void> | undefined;
+    while (true) {
+      const bridgeRecovery = this.bridgeRecovery?.();
+      if (!bridgeRecovery || bridgeRecovery === completedRecovery) return;
+      await bridgeRecovery;
+      completedRecovery = bridgeRecovery;
+    }
   }
 
   /**

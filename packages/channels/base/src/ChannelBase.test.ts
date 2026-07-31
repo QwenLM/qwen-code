@@ -16145,6 +16145,37 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
+    it('waits for recovery barriers that replace one another', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let releaseSecond: (() => void) | undefined;
+      const recoveryState: { current?: Promise<void> } = {
+        current: new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        }),
+      };
+      const ch = createChannel(
+        {},
+        { bridgeRecovery: () => recoveryState.current },
+      );
+
+      const inbound = ch.handleInbound(envelope());
+      await Promise.resolve();
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      releaseFirst!();
+      await Promise.resolve();
+
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      recoveryState.current = undefined;
+      releaseSecond!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+    });
+
     it('rechecks bridge recovery after inbound preprocessing has started', async () => {
       const recoveryState: { current?: Promise<void> } = {};
       let releaseRecovery: (() => void) | undefined;
