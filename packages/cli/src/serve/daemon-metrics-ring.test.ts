@@ -227,6 +227,10 @@ describe('computeCpuPercent', () => {
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), -5, 1)).toBe(0);
   });
 
+  it('returns 0 for a non-positive core count', () => {
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 0)).toBe(0);
+  });
+
   it('computes a normalized, clamped windowed percent', () => {
     // 1s of CPU (1e6 µs user) over a 1000ms wall window on 1 core = 100%.
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 1)).toBe(100);
