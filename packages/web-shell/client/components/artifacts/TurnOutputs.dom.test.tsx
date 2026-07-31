@@ -214,4 +214,132 @@ describe('TurnOutputs artifact downloads', () => {
 
     act(() => root.unmount());
   });
+
+  it('does not show Download for managed, pending, or pathless artifacts', () => {
+    const artifacts = [
+      {
+        id: 'workspace-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'available',
+        title: 'workspace artifact',
+        workspacePath: 'output/file.txt',
+      },
+      {
+        id: 'managed-1',
+        kind: 'file',
+        storage: 'managed',
+        status: 'available',
+        title: 'managed artifact',
+        workspacePath: 'output/managed.txt',
+      },
+      {
+        id: 'pending-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'pending',
+        title: 'pending artifact',
+        workspacePath: 'output/pending.txt',
+      },
+      {
+        id: 'pathless-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'available',
+        title: 'pathless artifact',
+      },
+    ] as DaemonSessionArtifact[];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            changes={[]}
+            artifacts={artifacts}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+  });
+
+  it('cancels the read and skips the save when the card unmounts mid-download', async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    let resolveRead: ((value: unknown) => void) | undefined;
+    readFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'artifact-1',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(readFileBytes).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+
+    await act(async () => {
+      resolveRead?.({
+        contentBase64: btoa('abc'),
+        offset: 0,
+        returnedBytes: 3,
+        sizeBytes: 3,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(click).not.toHaveBeenCalled();
+  });
 });

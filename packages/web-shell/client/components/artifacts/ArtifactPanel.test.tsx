@@ -542,6 +542,57 @@ describe('ArtifactPanel review downloads', () => {
       'Download failed: read denied',
     );
   });
+
+  it('keeps other rows downloadable while one review file downloads', () => {
+    const changes = ['a.html', 'b.md'].map((path) => ({
+      path,
+      status: 'modified' as const,
+      toolCallId: `tool-${path}`,
+      isArtifact: false,
+      diffs: [],
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const downloads = Array.from(container.querySelectorAll('button')).filter(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(downloads).toHaveLength(2);
+
+    act(() => downloads[0]?.click());
+    expect(downloads[0]?.disabled).toBe(true);
+    expect(downloads[0]?.textContent).toContain('Downloading');
+    expect(downloads[1]?.disabled).toBe(false);
+    expect(downloads[1]?.textContent?.trim()).toBe('Download');
+  });
 });
 
 describe('ArtifactPanel monitor tab', () => {

@@ -573,11 +573,12 @@ export function ArtifactPanel({
                 activeTab.workspaceCwd ?? workspaceCwd,
               )
             }
-            onDownloadFile={(change) =>
+            onDownloadFile={(change, isCancelled) =>
               downloadWorkspaceFile(
                 activeWorkspaceActions,
                 change.path,
                 getReviewDownloadMimeType(change.path),
+                isCancelled,
               )
             }
             onDownloadError={(downloadError) => {
@@ -585,7 +586,7 @@ export function ArtifactPanel({
                 message: extractErrorDetail(downloadError),
               });
               if (onError) {
-                onError(new Error(message), message);
+                onError(new Error(message, { cause: downloadError }), message);
               } else {
                 console.error(message, downloadError);
               }
@@ -1322,7 +1323,10 @@ function ReviewChanges({
   selectedPath: string | null;
   workspaceCwd?: string;
   onOpenFilePreview: (change: TurnOutputFileChange) => void;
-  onDownloadFile: (change: TurnOutputFileChange) => Promise<void>;
+  onDownloadFile: (
+    change: TurnOutputFileChange,
+    isCancelled: () => boolean,
+  ) => Promise<void>;
   onDownloadError: (error: unknown) => void;
 }) {
   const { t } = useI18n();
@@ -1334,7 +1338,16 @@ function ReviewChanges({
   const reviewContentRef = useRef<HTMLDivElement | null>(null);
   const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
-  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  const [downloadingPaths, setDownloadingPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   const showTree = isTreeOpen;
   const fileTree = useMemo(
     () => buildFileTree(changes, workspaceCwd),
@@ -1430,14 +1443,18 @@ function ReviewChanges({
     setExpandedPath((current) => (current === path ? null : path));
   };
   const downloadFile = async (change: TurnOutputFileChange) => {
-    if (downloadingPath) return;
-    setDownloadingPath(change.path);
+    if (downloadingPaths.has(change.path)) return;
+    setDownloadingPaths((current) => new Set(current).add(change.path));
     try {
-      await onDownloadFile(change);
+      await onDownloadFile(change, () => !mountedRef.current);
     } catch (error) {
-      onDownloadError(error);
+      if (mountedRef.current) onDownloadError(error);
     } finally {
-      setDownloadingPath(null);
+      setDownloadingPaths((current) => {
+        const next = new Set(current);
+        next.delete(change.path);
+        return next;
+      });
     }
   };
 
@@ -1571,10 +1588,10 @@ function ReviewChanges({
                           className={styles.reviewOpenButton}
                           onClick={() => void downloadFile(change)}
                           title={`${t('common.download')} ${change.path}`}
-                          disabled={downloadingPath !== null}
+                          disabled={downloadingPaths.has(change.path)}
                         >
                           {t(
-                            downloadingPath === change.path
+                            downloadingPaths.has(change.path)
                               ? 'common.downloading'
                               : 'common.download',
                           )}

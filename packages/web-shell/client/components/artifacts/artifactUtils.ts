@@ -140,6 +140,7 @@ export async function downloadWorkspaceFile(
   workspaceActions: Pick<DaemonWorkspaceActions, 'readFileBytes' | 'stat'>,
   workspacePath: string,
   mimeType = 'application/octet-stream',
+  isCancelled?: () => boolean,
 ): Promise<void> {
   const blob = await readWorkspaceFileAsBlob(
     (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
@@ -147,6 +148,7 @@ export async function downloadWorkspaceFile(
     mimeType,
     {
       statFile: (filePath) => workspaceActions.stat(filePath),
+      isCancelled,
     },
   );
   const url = URL.createObjectURL(blob);

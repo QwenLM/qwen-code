@@ -14,7 +14,7 @@ import {
   NotebookTabsIcon,
   type LucideIcon,
 } from 'lucide-react';
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
@@ -24,6 +24,7 @@ import {
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
+  normalizePath,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -323,11 +324,12 @@ function TurnOutputsComponent({
           onError={onError}
           onDownload={
             canDownloadArtifact(artifact)
-              ? () =>
+              ? (isCancelled) =>
                   downloadWorkspaceFile(
                     workspaceActions,
                     artifact.workspacePath,
                     artifact.mimeType,
+                    isCancelled,
                   )
               : undefined
           }
@@ -354,23 +356,35 @@ function ArtifactCard({
 }: {
   artifact: DaemonSessionArtifact;
   onOpen: () => void;
-  onDownload?: () => Promise<void>;
+  onDownload?: (isCancelled: () => boolean) => Promise<void>;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const downloadName =
+    (artifact.workspacePath &&
+      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
+    artifact.title;
   const handleDownload = async () => {
     if (!onDownload || downloading) return;
     setDownloading(true);
     try {
-      await onDownload();
+      await onDownload(() => !mountedRef.current);
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = t('common.downloadFailed', {
         message: extractErrorDetail(error),
       });
-      if (onError) onError(new Error(message), message);
+      if (onError) onError(new Error(message, { cause: error }), message);
       else console.error(message, error);
     } finally {
       setDownloading(false);
@@ -398,7 +412,7 @@ function ArtifactCard({
               type="button"
               className={styles.reviewButton}
               onClick={() => void handleDownload()}
-              title={`${t('common.download')} ${artifact.title}`}
+              title={`${t('common.download')} ${downloadName}`}
               disabled={downloading}
             >
               <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
