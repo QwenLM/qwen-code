@@ -4318,6 +4318,9 @@ export class Config {
         config.enableCacheControl;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
+      this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
+      this.contentGeneratorConfig.cacheRetentionByBlock =
+        config.cacheRetentionByBlock;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -4344,6 +4347,14 @@ export class Config {
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
           sources['forceGlobalCacheScope'];
+      }
+      if ('cacheRetention' in sources) {
+        this.contentGeneratorConfigSources['cacheRetention'] =
+          sources['cacheRetention'];
+      }
+      if ('cacheRetentionByBlock' in sources) {
+        this.contentGeneratorConfigSources['cacheRetentionByBlock'] =
+          sources['cacheRetentionByBlock'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =

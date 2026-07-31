@@ -97,6 +97,22 @@ export type ContentGeneratorConfig = {
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
   // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
   forceGlobalCacheScope?: boolean;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier (`ttl: '1h'`).
+   */
+  cacheRetention?: 'ephemeral' | '1h';
+  /**
+   * Per-anchor override of {@link cacheRetention}. Keys are the three
+   * cache anchors the Anthropic converter places `cache_control` on;
+   * missing keys inherit the top-level `cacheRetention`.
+   */
+  cacheRetentionByBlock?: Partial<
+    Record<'system' | 'tool' | 'user.last', 'ephemeral' | '1h'>
+  >;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
