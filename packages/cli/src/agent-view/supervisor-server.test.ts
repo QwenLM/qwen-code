@@ -301,6 +301,42 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('rejects incompatible protocol versions on streaming ops', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      subscribe: vi.fn(),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+
+    await server.listen();
+    try {
+      const socket = net.createConnection(socketPath);
+      socket.setEncoding('utf8');
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.write(
+        `${JSON.stringify({
+          id: 'bad-protocol-stream',
+          protocolVersion: 999,
+          op: 'subscribe',
+        })}\n`,
+      );
+
+      const line = await readLine(socket);
+      expect(JSON.parse(line)).toMatchObject({
+        ok: false,
+        error: { code: 'incompatible_protocol' },
+      });
+      expect(handler.subscribe).not.toHaveBeenCalled();
+      socket.destroy();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('serves peek requests through the JSON IPC client', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);

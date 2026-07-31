@@ -167,7 +167,7 @@ export async function writeAgentViewSessionState(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(state.sessionId, options);
-  const existing = await readJsonRecord(paths.statePath);
+  const existing = await readJsonRecordForWrite(paths.statePath);
   await writeJsonFile(paths.statePath, {
     ...existing,
     ...state,
@@ -204,7 +204,7 @@ export async function listAgentViewSessionSnapshots(
   const states = await listAgentViewSessionStates(options);
   const roster = await readAgentViewRoster(options);
   const rosterEntries = new Map(
-    roster.sessions.map((entry) => [entry.sessionId, entry]),
+    roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
   );
   const snapshots = await Promise.all(
     states.map(async (state) => ({
@@ -235,7 +235,7 @@ export async function writeAgentViewLaunch(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(launch.sessionId, options);
-  const existing = await readJsonRecord(paths.launchPath);
+  const existing = await readJsonRecordForWrite(paths.launchPath);
   await writeJsonFile(paths.launchPath, {
     ...existing,
     ...launch,
@@ -259,7 +259,7 @@ export async function writeAgentViewActivity(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecord(paths.activityPath);
+  const existing = await readJsonRecordForWrite(paths.activityPath);
   await writeJsonFile(paths.activityPath, {
     ...existing,
     ...activity,
@@ -283,7 +283,7 @@ export async function writeAgentViewWorker(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecord(paths.workerPath);
+  const existing = await readJsonRecordForWrite(paths.workerPath);
   await writeJsonFile(paths.workerPath, {
     ...existing,
     ...worker,
@@ -305,7 +305,7 @@ export async function writeAgentViewSupervisor(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewStorePaths(options);
-  const existing = await readJsonRecord(paths.supervisorPath);
+  const existing = await readJsonRecordForWrite(paths.supervisorPath);
   await writeJsonFile(paths.supervisorPath, {
     ...existing,
     ...supervisor,
@@ -344,6 +344,30 @@ async function readJsonRecord(
     // Fail soft on any read or parse error: one corrupt or odd entry under
     // jobs/ must not poison a full listing, which the supervisor would
     // misread as "unreachable" and then answer with a duplicate spawn.
+    return undefined;
+  }
+}
+
+async function readJsonRecordForWrite(
+  filePath: string,
+): Promise<JsonRecord | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    // A missing file means there is nothing to merge. Any other read failure
+    // (EMFILE, EIO) must surface: treating it as empty would silently drop
+    // fields a previous or newer writer populated.
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    // Corrupt contents have no fields worth preserving; overwriting recovers.
     return undefined;
   }
 }
@@ -449,7 +473,9 @@ function normalizeLaunch(
   expectedSessionId: string,
 ): AgentViewLaunchFile | undefined {
   if (!raw) return undefined;
-  const sessionId = stringValue(raw['sessionId']) ?? expectedSessionId;
+  // Mirror normalizeSessionState: the sanitized directory name is the source
+  // of truth, so a tampered launch.json cannot impersonate another session.
+  const sessionId = expectedSessionId || stringValue(raw['sessionId']);
   const entrypoint = stringValue(raw['entrypoint']);
   const projectCwd = stringValue(raw['projectCwd']);
   const activeCwd = stringValue(raw['activeCwd']);

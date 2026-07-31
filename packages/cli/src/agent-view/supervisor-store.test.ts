@@ -357,6 +357,48 @@ describe('agent view supervisor store', () => {
       getAgentViewSessionPaths('abc123', { globalDir: tempDir }),
     );
   });
+
+  it('sanitizes a dot-only session id instead of escaping the jobs dir', () => {
+    expect(
+      getAgentViewSessionPaths('..', { globalDir: tempDir }).sessionDir,
+    ).toBe(path.join(tempDir, 'jobs', '_'));
+  });
+
+  it('joins roster entries to snapshots case-insensitively', async () => {
+    await writeAgentViewSessionState(sessionState('ABC123'), {
+      globalDir: tempDir,
+    });
+    await upsertAgentViewRosterEntry(
+      rosterEntry('ABC123', { displayName: 'Upper', pinned: true }),
+      { globalDir: tempDir },
+    );
+
+    const snapshots = await listAgentViewSessionSnapshots({
+      globalDir: tempDir,
+    });
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      sessionId: 'abc123',
+      rosterEntry: { sessionId: 'ABC123', displayName: 'Upper', pinned: true },
+    });
+  });
+
+  it('preserves unknown fields from a prior writer when merging a write', async () => {
+    const paths = getAgentViewSessionPaths('session-1', { globalDir: tempDir });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(
+      paths.statePath,
+      JSON.stringify({ ...sessionState('session-1'), futureField: 'keep' }),
+    );
+
+    await writeAgentViewSessionState(sessionState('session-1'), {
+      globalDir: tempDir,
+    });
+
+    const raw = JSON.parse(fs.readFileSync(paths.statePath, 'utf8'));
+    expect(raw.futureField).toBe('keep');
+  });
 });
 
 function rosterEntry(

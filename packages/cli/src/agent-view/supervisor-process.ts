@@ -77,9 +77,11 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
-  // Fall back to a per-uid directory (created 0700 by prepareSocketPath) so a
-  // predictable socket in a shared tmpdir cannot be squatted or read by
-  // another local user.
+  // Fall back to a per-uid directory under the runtime dir. prepareSocketPath
+  // creates it 0700 when missing and the socket file is 0600, but the directory
+  // name is predictable: on a shared multi-user tmpdir a pre-existing directory
+  // is reused with its current owner and mode. Callers that need a hardened
+  // path should pass a private 0700 runtimeDir (e.g. XDG_RUNTIME_DIR).
   const uid = process.getuid?.();
   const fallbackDir =
     uid === undefined ? `qwen-agent-view-${digest}` : `qwen-agent-view-${uid}`;

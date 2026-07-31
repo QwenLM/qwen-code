@@ -5,7 +5,7 @@
  */
 
 import { Readable, Writable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   bridgeAgentViewTerminal,
   type AgentViewTerminalBytes,
@@ -113,6 +113,40 @@ describe('bridgeAgentViewTerminal', () => {
     await done;
 
     expect(pty.resizes).toEqual([{ columns: 120, rows: 40 }]);
+  });
+
+  it('swallows a rejecting pty.resize without an unhandled rejection', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      let resize: ((size: AgentViewTerminalSize) => void) | undefined;
+      let releaseInput: (() => void) | undefined;
+      const pty: AgentViewTerminalPty = {
+        write: () => {},
+        onData: () => ({ dispose: () => {} }),
+        resize: () => Promise.reject(new Error('pty gone')),
+      };
+      const done = bridgeAgentViewTerminal({
+        stdin: delayedInput((release) => {
+          releaseInput = release;
+        }),
+        stdout: new MemoryWritable(),
+        pty,
+        onResize: (callback) => {
+          resize = callback;
+        },
+      });
+
+      resize?.({ columns: 120, rows: 40 });
+      // Let the rejected resize promise settle before ending the bridge.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      releaseInput?.();
+
+      await expect(done).resolves.toEqual({ reason: 'stdin-ended' });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.removeListener('unhandledRejection', unhandled);
+    }
   });
 
   it('disposes listeners and resolves when detached', async () => {

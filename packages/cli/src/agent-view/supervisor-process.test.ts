@@ -265,6 +265,23 @@ describe('createAgentViewSupervisorHandler', () => {
     expect(onShutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('requests shutdown when only-exited managed sessions pass the grace period', async () => {
+    const globalDir = await makeGlobalDir();
+    await writeSession(globalDir, { processState: 'exited' });
+    const onShutdown = vi.fn();
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      hibernationPolicy: { autoExitGraceMs: 0 },
+      onShutdown,
+    });
+
+    await expect(handler.tickIdleHibernation()).resolves.toEqual({
+      hibernated: [],
+      shutdownRequested: true,
+    });
+    expect(onShutdown).toHaveBeenCalledTimes(1);
+  });
+
   it('waits for the grace period to elapse before requesting shutdown', async () => {
     const globalDir = await makeGlobalDir();
     await writeSession(globalDir);
