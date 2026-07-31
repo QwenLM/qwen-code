@@ -1338,19 +1338,22 @@ export function registerSessionRoutes(
       }
       requestedSessionId = rawSessionId.toLowerCase();
       const sessionIdToCheck = requestedSessionId;
-      // Reject an id that is already LIVE on this daemon. The disk check below
-      // cannot see these: the transcript JSONL is only written on a session's
-      // first message, so a session that was created and never prompted leaves
-      // no file behind — for its whole lifetime, not just a brief window.
-      // Without this, a sequential retry with the same id falls through to the
-      // agent's own `Session <id> is already active.` guard, which is a bare
-      // Error and surfaces as an opaque `500 / -32603` instead of the 409 this
-      // route documents. `inFlightSessionIds` below only covers requests that
+      // Reject an id that is already LIVE on this workspace's bridge.
+      // The disk check below cannot see these: the transcript JSONL is
+      // only written on a session's first message, so a session that was
+      // created and never prompted leaves no file behind — for its whole
+      // lifetime, not just a brief window. Without this, a sequential retry
+      // with the same id falls through to the agent's own
+      // `Session <id> is already active.` guard, which is a bare Error and
+      // surfaces as an opaque `500 / -32603` instead of the 409 this route
+      // documents. `inFlightSessionIds` below only covers requests that
       // overlap in time; this covers a first request that already returned.
       //
-      // Deliberately daemon-wide rather than per-workspace: session routing
-      // (`requireSessionRuntime`) resolves a runtime from the id alone, so two
-      // live sessions sharing an id break lookups regardless of workspace.
+      // Per-workspace scope: checks only the current workspace's bridge.
+      // The daemon-wide `inFlightSessionIds` guard covers concurrent
+      // cross-workspace reuse; sequential cross-workspace reuse of the same
+      // id can still produce two live sessions sharing an id (routing then
+      // fails as `ambiguous_session_owner`).
       if (isSessionLive(runtime.bridge, sessionIdToCheck)) {
         res.status(409).json({
           error: `Session "${requestedSessionId}" already exists`,
