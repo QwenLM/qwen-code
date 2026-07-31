@@ -23,6 +23,12 @@ import {
   type ToolUseBlock,
   type ContentBlock,
 } from '@qwen-code/sdk';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 import {
   SDKTestHelper,
   createSharedTestOptions,
@@ -36,6 +42,25 @@ import {
 
 const TEST_TIMEOUT = 60000;
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
 
 /**
  * Factory function that creates a streaming input with a control point.
@@ -1156,17 +1181,31 @@ describe('Permission Control (E2E)', () => {
       it(
         'should not invoke canUseTool callback for write/edit tools',
         async () => {
-          const callbackToolNames: string[] = [];
+          let callbackInvoked = false;
+          const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall('write_file', {
+                    file_path: `${testDir}/test-auto-edit-no-callback.txt`,
+                    content: 'auto-edit callback test',
+                  }),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          }, FAKE_SERVER_OPTIONS);
 
           const q = query({
-            prompt:
-              'Use the write_file tool to create a file named test-auto-edit-no-callback.txt',
+            prompt: 'Create test-auto-edit-no-callback.txt.',
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'auto-edit',
               cwd: testDir,
+              coreTools: ['write_file'],
               canUseTool: async (toolName, input) => {
-                callbackToolNames.push(toolName);
+                callbackInvoked = true;
                 return {
                   behavior: 'allow',
                   updatedInput: input,
@@ -1181,24 +1220,12 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // auto-edit auto-approves write/edit tools without invoking the
-            // callback, but the model may still issue a non-edit tool (e.g.
-            // run_shell_command) that legitimately routes through canUseTool.
-            // Assert a write/edit tool actually ran (so this test exercises the
-            // bypass it is named for) and that none gated on the callback.
+            // auto-edit mode should auto-approve write/edit tools without invoking callback
             expect(hasSuccessfulToolResults(messages)).toBe(true);
-            const WRITE_EDIT_TOOLS = ['write_file', 'edit'];
-            const writeEditToolCalls = findToolCalls(messages).filter((tc) =>
-              WRITE_EDIT_TOOLS.includes(tc.toolUse.name),
-            );
-            expect(writeEditToolCalls.length).toBeGreaterThan(0);
-            expect(
-              callbackToolNames.filter((name) =>
-                WRITE_EDIT_TOOLS.includes(name),
-              ),
-            ).toEqual([]);
+            expect(callbackInvoked).toBe(false);
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
