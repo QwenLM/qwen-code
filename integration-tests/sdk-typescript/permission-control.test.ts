@@ -23,6 +23,12 @@ import {
   type ToolUseBlock,
   type ContentBlock,
 } from '@qwen-code/sdk';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 import {
   SDKTestHelper,
   createSharedTestOptions,
@@ -36,6 +42,25 @@ import {
 
 const TEST_TIMEOUT = 60000;
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
 
 /**
  * Factory function that creates a streaming input with a control point.
@@ -1157,13 +1182,28 @@ describe('Permission Control (E2E)', () => {
         'should not invoke canUseTool callback for write/edit tools',
         async () => {
           let callbackInvoked = false;
+          const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall('write_file', {
+                    file_path: `${testDir}/test-auto-edit-no-callback.txt`,
+                    content: 'auto-edit callback test',
+                  }),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          }, FAKE_SERVER_OPTIONS);
 
           const q = query({
-            prompt: 'Create a file named test-auto-edit-no-callback.txt',
+            prompt: 'Create test-auto-edit-no-callback.txt.',
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'auto-edit',
               cwd: testDir,
+              coreTools: ['write_file'],
               canUseTool: async (toolName, input) => {
                 callbackInvoked = true;
                 return {
@@ -1185,6 +1225,7 @@ describe('Permission Control (E2E)', () => {
             expect(callbackInvoked).toBe(false);
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
