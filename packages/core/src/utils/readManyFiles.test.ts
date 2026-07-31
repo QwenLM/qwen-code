@@ -299,6 +299,39 @@ describe('readManyFiles', () => {
       }
     });
 
+    it('reads validated text through a handle when truncation is disabled', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFileFromHandleSpy = vi.spyOn(
+        fileSystemService,
+        'readTextFileFromHandle',
+      );
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+      });
+
+      expect(contentToString(result.contentParts)).toContain(
+        'Content of approved.txt',
+      );
+      expect(readTextFileFromHandleSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxOutputBytes: Number.MAX_SAFE_INTEGER,
+          maxScanBytes: Number.MAX_SAFE_INTEGER,
+        }),
+      );
+    });
+
     it('keeps validated text reads on custom file systems on the original path', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');

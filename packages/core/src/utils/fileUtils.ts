@@ -1901,7 +1901,7 @@ export async function processSingleFileContent(
 export function getRangeReadByteLimit(config: Config): number {
   const charLimit = config.getTruncateToolOutputThreshold();
   if (charLimit === Number.POSITIVE_INFINITY) {
-    return Number.POSITIVE_INFINITY;
+    return Number.MAX_SAFE_INTEGER;
   }
   if (!Number.isFinite(charLimit)) {
     return DEFAULT_RANGE_READ_BYTES;
