@@ -122,6 +122,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -8805,6 +8806,71 @@ describe('createServeApp', () => {
       const secondRes = await makeReq();
       expect(secondRes.status).toBe(200);
       expect(spawnCallCount).toBe(2);
+    });
+
+    it('409 when the sessionId is live on the daemon but not yet on disk', async () => {
+      // A session's transcript JSONL is only written on its first message, so
+      // a created-but-never-prompted session is invisible to the disk check.
+      // Without the bridge liveness check the request falls through to the
+      // agent's own guard and surfaces as an opaque 500 / -32603.
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // Disk lookup explicitly reports "absent" so the 409 can only come from
+      // the liveness check.
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue(undefined);
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('session_id_conflict');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('400 for UUID shapes the CLI isValidSessionId rejects', async () => {
+      // The HTTP gate must stay a strict subset of config.ts's
+      // isValidSessionId — an id the daemon accepts but the CLI rejects
+      // yields a session `/resume <id>` can never address.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const bad = [
+        '01930000-0000-7000-a000-000000000001', // UUIDv7 (version nibble 7)
+        '00000000-0000-0000-0000-000000000000', // nil UUID (version nibble 0)
+        '550e8400-e29b-41d4-c716-446655440000', // variant nibble c
+      ];
+      for (const sessionId of bad) {
+        expect(isValidSessionId(sessionId)).toBe(false);
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_id');
+      }
+      expect(bridge.calls).toHaveLength(0);
     });
 
     it('400 when sessionId is not a UUID (path traversal guard)', async () => {

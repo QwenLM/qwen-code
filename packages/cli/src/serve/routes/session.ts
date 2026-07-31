@@ -140,10 +140,19 @@ const GIT_RESERVED_BRANCH = 'HEAD';
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
-// Stricter than config.ts's isValidSessionId: no `-agent-{suffix}` because
-// SessionService.SESSION_FILE_PATTERN only accepts 32-36 hex/hyphen chars.
+// A strict SUBSET of config.ts's isValidSessionId: same v4 version/variant
+// nibbles, minus the `-agent-{suffix}` form (SessionService.SESSION_FILE_PATTERN
+// only matches 32-36 hex/hyphen chars, so a suffixed id would write a transcript
+// the session list can never see).
+//
+// Keeping it a subset in BOTH directions matters: every id the daemon accepts
+// must also be a valid `--session-id` and `/resume <id>` argument, otherwise a
+// session created over HTTP is unreachable from the CLI (resumeCommand.ts gates
+// on isValidSessionId and falls through to title matching when it fails). That
+// rules out UUIDv7, the nil UUID, and non-RFC-4122 variants even though they are
+// harmless as filenames.
 const HTTP_SESSION_ID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -382,6 +391,23 @@ function shouldPreserveTranscriptResolutionError(err: unknown): boolean {
     err instanceof SessionConflictError ||
     err instanceof SessionNotFoundError
   );
+}
+
+/**
+ * Whether a session with this id is currently live on the daemon.
+ * `getSessionSummary` is a `byId` lookup that signals absence by throwing
+ * `SessionNotFoundError`. Anything else is treated as "assume live" rather
+ * than "not live" — for a uniqueness guard, failing closed on an unreadable
+ * bridge is the safe direction, and it matches how
+ * `SessionService.sessionExistsInAnyState` handles its own read errors.
+ */
+function isSessionLive(bridge: AcpSessionBridge, sessionId: string): boolean {
+  try {
+    bridge.getSessionSummary(sessionId);
+    return true;
+  } catch (err) {
+    return !(err instanceof SessionNotFoundError);
+  }
 }
 
 function parseOptionalApprovalMode(
@@ -1312,9 +1338,30 @@ export function registerSessionRoutes(
       }
       requestedSessionId = rawSessionId.toLowerCase();
       const sessionIdToCheck = requestedSessionId;
-      // Reject an id that already exists (active or archived) at the route
-      // boundary: loadCliConfig calls process.exit(1) on a duplicate, which
-      // would terminate the shared ACP child and every session on its channel.
+      // Reject an id that is already LIVE on this daemon. The disk check below
+      // cannot see these: the transcript JSONL is only written on a session's
+      // first message, so a session that was created and never prompted leaves
+      // no file behind — for its whole lifetime, not just a brief window.
+      // Without this, a sequential retry with the same id falls through to the
+      // agent's own `Session <id> is already active.` guard, which is a bare
+      // Error and surfaces as an opaque `500 / -32603` instead of the 409 this
+      // route documents. `inFlightSessionIds` below only covers requests that
+      // overlap in time; this covers a first request that already returned.
+      //
+      // Deliberately daemon-wide rather than per-workspace: session routing
+      // (`requireSessionRuntime`) resolves a runtime from the id alone, so two
+      // live sessions sharing an id break lookups regardless of workspace.
+      if (isSessionLive(runtime.bridge, sessionIdToCheck)) {
+        res.status(409).json({
+          error: `Session "${requestedSessionId}" already exists`,
+          code: 'session_id_conflict',
+        });
+        return;
+      }
+      // Reject an id that already exists on disk (active or archived) at the
+      // route boundary: loadCliConfig calls process.exit(1) on a duplicate,
+      // which would terminate the shared ACP child and every session on its
+      // channel.
       const runtimeOutputDir =
         loadSettingsCached(workspaceCwd).merged.advanced?.runtimeOutputDir;
       if (
