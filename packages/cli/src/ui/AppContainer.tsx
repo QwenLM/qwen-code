@@ -707,6 +707,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
+  const footerRef = useRef<DOMElement>(null);
   const lastTitleRef = useRef<string | null>(null);
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
@@ -4288,6 +4289,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      footerRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,
@@ -4431,6 +4433,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      footerRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,
