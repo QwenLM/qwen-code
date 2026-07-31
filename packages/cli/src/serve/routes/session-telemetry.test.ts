@@ -53,6 +53,7 @@ function runtime(opts: {
 }): WorkspaceRuntime {
   return {
     ...opts,
+    sessionRuntimeBaseDir: path.join(opts.workspaceCwd, '.runtime'),
     trusted: opts.trusted !== false,
   } as WorkspaceRuntime;
 }
@@ -220,6 +221,7 @@ describe('special session resolver telemetry publication', () => {
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       secondaryCwd,
       'secondary-session',
+      path.join(secondaryCwd, '.runtime'),
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
@@ -230,8 +232,15 @@ describe('special session resolver telemetry publication', () => {
 
   it('publishes the sole active transcript runtime after storage lookup', async () => {
     archiveMocks.assertSessionLoadable.mockImplementation(
-      async (workspaceCwd: string) =>
-        workspaceCwd === secondaryCwd ? 'active' : undefined,
+      async (
+        workspaceCwd: string,
+        _sessionId: string,
+        runtimeBaseDir: string,
+      ) =>
+        runtimeBaseDir === path.join(secondaryCwd, '.runtime') &&
+        workspaceCwd === secondaryCwd
+          ? 'active'
+          : undefined,
     );
     const primary = runtime({
       workspaceId: 'primary',
@@ -255,10 +264,12 @@ describe('special session resolver telemetry publication', () => {
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       primaryCwd,
       'stored-secondary',
+      path.join(primaryCwd, '.runtime'),
     );
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       secondaryCwd,
       'stored-secondary',
+      path.join(secondaryCwd, '.runtime'),
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
