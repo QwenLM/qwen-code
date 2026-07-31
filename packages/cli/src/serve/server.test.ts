@@ -334,6 +334,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_list',
   'session_info',
   'session_source_metadata',
+  'session_side_task',
   'session_prompt',
   'session_cancel',
   'session_events',
@@ -393,6 +394,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Issue #4175 PR 20. Always-on. Daemon exposes raw byte windows and
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
+  'workspace_file_read_cursor',
   'workspace_file_write',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
@@ -2178,12 +2180,15 @@ function makeWorkspaceRuntimeForTest(input: {
   workspaceCwd: string;
   primary: boolean;
   bridge: AcpSessionBridge;
+  sessionRuntimeBaseDir?: string;
   trusted?: boolean;
   generationGuard?: WorkspaceGenerationGuard;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.workspaceId,
     workspaceCwd: input.workspaceCwd,
+    sessionRuntimeBaseDir:
+      input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     primary: input.primary,
     trusted: input.trusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -11798,6 +11803,55 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('rejects singular session-group mutations when the selected runtime is unavailable', async () => {
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([runtime]);
+      const app = createServeApp(baseOpts, undefined, {
+        workspaceRegistry,
+      });
+      workspaceRegistry.beginReplacement(
+        workspaceRegistry.primaryEntry,
+        'policy-2',
+      );
+      workspaceRegistry.blockReplacement(
+        workspaceRegistry.primaryEntry,
+        'runtime build failed',
+      );
+
+      const responses = await Promise.all([
+        request(app)
+          .post(`/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'Frontend', color: 'blue' }),
+        request(app)
+          .patch(
+            `/workspace/${encodeURIComponent(
+              WS_BOUND,
+            )}/session-groups/missing-group`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'Frontend' }),
+        request(app)
+          .delete(
+            `/workspace/${encodeURIComponent(
+              WS_BOUND,
+            )}/session-groups/missing-group`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+      ]);
+
+      for (const response of responses) {
+        expect(response.status).toBe(503);
+        expect(response.headers['retry-after']).toBe('1');
+        expect(response.body.code).toBe('workspace_runtime_unavailable');
+      }
+    });
+
     it('returns session organization errors for invalid REST inputs', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000';
       await writeStoredSession({
@@ -14209,12 +14263,34 @@ describe('createServeApp', () => {
     ])(
       '%s the persisted branch when generation cleanup kills=%s',
       async (_label, killed, expectedRemovals) => {
+        const runtimeDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
+        );
+        const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
+        const chatsDir = path.join(
+          new Storage(WS_BOUND, runtimeDir).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, `${staleBranchId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${staleBranchId}-user-1`,
+            parentUuid: null,
+            sessionId: staleBranchId,
+            timestamp: '2026-07-29T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'hello' }] },
+            cwd: WS_BOUND,
+          })}\n`,
+          'utf8',
+        );
         const generationGuard = createWorkspaceGenerationGuard();
         const bridge = fakeBridge();
         bridge.branchSession = vi.fn(async (sessionId) => {
           generationGuard.close();
           return {
-            sessionId: 'stale-branch',
+            sessionId: staleBranchId,
             workspaceCwd: WS_BOUND,
             attached: false,
             clientId: 'stale-client',
@@ -14232,6 +14308,7 @@ describe('createServeApp', () => {
         const runtime = makeWorkspaceRuntimeForTest({
           workspaceId: 'branch-primary',
           workspaceCwd: WS_BOUND,
+          sessionRuntimeBaseDir: runtimeDir,
           primary: true,
           bridge,
           generationGuard,
@@ -14250,16 +14327,17 @@ describe('createServeApp', () => {
 
           expect(res.status).toBe(503);
           expect(res.body.code).toBe('workspace_runtime_unavailable');
-          expect(killSpy).toHaveBeenCalledWith('stale-branch', {
+          expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
             requireZeroAttaches: true,
           });
           expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
           if (killed) {
-            expect(removeSpy).toHaveBeenCalledWith('stale-branch');
+            expect(removeSpy).toHaveBeenCalledWith(staleBranchId);
           }
         } finally {
           killSpy.mockRestore();
           removeSpy.mockRestore();
+          await fsp.rm(runtimeDir, { recursive: true, force: true });
         }
       },
     );
@@ -17688,7 +17766,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('keeps archive blocked while a legacy export is in flight', async () => {
+    it('reports an archive conflict while a legacy export is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
       await writeExportSession(sid);
       let loadStarted!: () => void;
@@ -17722,10 +17800,15 @@ describe('createServeApp', () => {
           .post('/sessions/archive')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionIds: [sid] });
-        expect(archive.status).toBe(409);
+        expect(archive.status).toBe(200);
         expect(archive.body).toMatchObject({
-          code: 'session_archiving',
-          sessionId: sid,
+          archived: [],
+          errors: [
+            {
+              sessionId: sid,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         });
 
         releaseLoad();
@@ -18836,6 +18919,8 @@ describe('createServeApp', () => {
     });
 
     it('returns per-id errors when removeSession throws unexpectedly', async () => {
+      const sessionId = 'aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sessionId);
       const spy = vi
         .spyOn(SessionService.prototype, 'removeSession')
         .mockRejectedValueOnce(new Error('disk on fire'));
@@ -18847,11 +18932,11 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/sessions/delete')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ sessionIds: ['aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee'] });
+        .send({ sessionIds: [sessionId] });
       expect(res.status).toBe(200);
       expect(res.body.errors).toEqual([
         {
-          sessionId: 'aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee',
+          sessionId,
           error: 'disk on fire',
         },
       ]);
@@ -19037,7 +19122,7 @@ describe('createServeApp', () => {
       ).rejects.toThrow();
     });
 
-    it('does not close a live session when no active JSONL exists', async () => {
+    it('returns notFound after closing a live session with no active JSONL', async () => {
       const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
       const bridge = fakeBridge();
       const app = createArchiveApp(bridge);
@@ -19054,7 +19139,13 @@ describe('createServeApp', () => {
         notFound: [sid],
         errors: [],
       });
-      expect(bridge.closeCalls).toHaveLength(0);
+      expect(bridge.closeCalls).toEqual([
+        {
+          sessionId: sid,
+          clientId: undefined,
+          closeOpts: { requireAgentClose: true },
+        },
+      ]);
     });
 
     it('unarchives by moving JSONL back into active chats', async () => {
@@ -19246,7 +19337,7 @@ describe('createServeApp', () => {
       expect(archiveRes.body.archived).toEqual([sid]);
     });
 
-    it('returns session_archiving for archive while load is in flight', async () => {
+    it('reports an archive conflict while load is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);
       let loadStarted!: () => void;
@@ -19284,12 +19375,16 @@ describe('createServeApp', () => {
         .post('/sessions/archive')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ sessionIds: [sid] });
-      expect(archiveRes.status).toBe(409);
+      expect(archiveRes.status).toBe(200);
       expect(archiveRes.body).toMatchObject({
-        code: 'session_archiving',
-        sessionId: sid,
+        archived: [],
+        errors: [
+          {
+            sessionId: sid,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ],
       });
-      expect(archiveRes.body.error).toContain('being archived or unarchived');
 
       releaseLoad();
       const loadRes = await loadPromise;

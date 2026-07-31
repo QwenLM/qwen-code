@@ -35,7 +35,6 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
-  InfoIcon,
   EllipsisVerticalIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -75,15 +74,14 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsSubmenu } from './SessionDetailsSubmenu';
+import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import {
   isPrimaryCollapsedSectionId,
   readCollapsedSessionSectionIds,
@@ -92,6 +90,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
@@ -563,6 +562,9 @@ export function WebShellSidebar({
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const sourceMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_source_metadata'),
+  );
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -604,6 +606,9 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -624,6 +629,9 @@ export function WebShellSidebar({
       enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
+      ...(sourceMetadataEnabled
+        ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+        : {}),
       view: 'organized',
       group: 'pinned',
     });
@@ -647,6 +655,9 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -760,6 +771,7 @@ export function WebShellSidebar({
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
   const previousRunningRef = useRef<Map<string, boolean> | null>(null);
@@ -1053,6 +1065,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'active',
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             view: 'organized',
             group: 'pinned',
           });
@@ -1075,6 +1090,7 @@ export function WebShellSidebar({
   }, [
     displayedWorkspaces,
     organizationEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceSessionsReloadToken,
   ]);
@@ -1126,6 +1142,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
               : {}),
@@ -1166,6 +1185,7 @@ export function WebShellSidebar({
     organizationEnabled,
     secondaryArchivedReloadToken,
     sessionArchiveEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceQualifiedRestCoreEnabled,
     workspaceSessionsReloadToken,
@@ -2668,6 +2688,11 @@ export function WebShellSidebar({
     });
   }, []);
 
+  const getSessionDetailsCollisionBoundary = useCallback(
+    () => resolveSessionDetailsCollisionBoundary(sidebarRef.current),
+    [],
+  );
+
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (collapsed) return;
@@ -2804,27 +2829,6 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const details = (
-        <div className={styles.tooltipContent}>
-          <div className={styles.tooltipTitle}>{label}</div>
-          <div className={styles.tooltipTags}>
-            {session.hasActivePrompt && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagRunning)}>
-                {t('sidebar.running')}
-              </span>
-            )}
-            {completedUnread && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagNew)}>
-                {t('sidebar.completedUnread')}
-              </span>
-            )}
-            <span className={styles.tooltipTag}>
-              {t('sidebar.clients', { count: session.clientCount ?? 0 })}
-            </span>
-          </div>
-          <div className={styles.tooltipMeta}>{session.sessionId}</div>
-        </div>
-      );
       if (isArchived) {
         const archivedExportWorkspaceCwd =
           getArchivedExportWorkspaceCwd(session);
@@ -2884,15 +2888,15 @@ export function WebShellSidebar({
                     >
                       <DropdownMenuGroup>
                         {showArchivedDetails && (
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <InfoIcon />
-                              {t('sidebar.details')}
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent className="min-w-64 p-3">
-                              {details}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
+                          <SessionDetailsSubmenu
+                            session={session}
+                            label={label}
+                            completedUnread={completedUnread}
+                            onError={onError}
+                            getCollisionBoundary={
+                              getSessionDetailsCollisionBoundary
+                            }
+                          />
                         )}
                         {showArchivedExport && (
                           <DropdownMenuItem
@@ -3280,15 +3284,15 @@ export function WebShellSidebar({
                                     </DropdownMenuItem>
                                   )}
                                 {sessionActionItems.has('details') && (
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger>
-                                      <InfoIcon />
-                                      {t('sidebar.details')}
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent className="min-w-64 p-3">
-                                      {details}
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
+                                  <SessionDetailsSubmenu
+                                    session={session}
+                                    label={label}
+                                    completedUnread={completedUnread}
+                                    onError={onError}
+                                    getCollisionBoundary={
+                                      getSessionDetailsCollisionBoundary
+                                    }
+                                  />
                                 )}
                                 {showRename &&
                                   !inlineActionItems.has('rename') && (
@@ -3382,6 +3386,8 @@ export function WebShellSidebar({
       getArchivedExportWorkspaceCwd,
       getActiveExportScope,
       getIdentityForSession,
+      getSessionDetailsCollisionBoundary,
+      onError,
       handleArchive,
       handleDeleteSession,
       handleExportSession,
@@ -3562,6 +3568,7 @@ export function WebShellSidebar({
   return (
     <>
       <aside
+        ref={sidebarRef}
         className={cx(
           styles.sidebar,
           collapsed && styles.collapsed,
@@ -4175,6 +4182,7 @@ export function WebShellSidebar({
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
+                            sourceMetadataEnabled={sourceMetadataEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)
