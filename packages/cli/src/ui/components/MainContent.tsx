@@ -26,11 +26,6 @@ import {
   SCROLL_TO_ITEM_END,
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
-import {
-  extractHyperlinkRegions,
-  findUrlAtColumn,
-  openUrl,
-} from '../utils/hyperlink-click.js';
 import { TextSelectionController } from '../selection/use-text-selection.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
@@ -358,22 +353,6 @@ export const MainContent = () => {
   // static-history source-copy offsets).
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
-  // Handle left-click on content area: detect hyperlinks and open URLs.
-  // This compensates for SGR mouse tracking (?1002h) which prevents the
-  // terminal from handling hyperlink clicks natively.
-  const handleContentClick = useCallback(
-    (row: number, col: number) => {
-      const item = allVirtualItems[row];
-      if (!item || !('text' in item) || typeof item.text !== 'string') return;
-      const regions = extractHyperlinkRegions(item.text);
-      const url = findUrlAtColumn(regions, col);
-      if (url) {
-        openUrl(url);
-      }
-    },
-    [allVirtualItems],
-  );
-
   const renderVirtualItem = useCallback(
     ({ item }: { item: VpItem }) => {
       if (item.type === 'vp-banner') {
@@ -453,7 +432,6 @@ export const MainContent = () => {
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
           showScrollbar={showScrollbar}
-          onContentClick={handleContentClick}
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}

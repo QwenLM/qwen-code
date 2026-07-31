@@ -24,8 +24,6 @@ interface ScrollableListProps<T> extends VirtualizedListProps<T> {
   width?: string | number;
   targetScrollIndex?: number;
   containerHeight?: number;
-  /** Called when the user left-clicks on a non-scrollbar area. */
-  onContentClick?: (row: number, col: number) => void;
 }
 
 export type ScrollableListRef<T> = VirtualizedListRef<T>;
@@ -38,7 +36,7 @@ function ScrollableList<T>(
   // VirtualizedList. Spreading the full props would silently forward
   // `hasFocus` (which VirtualizedList does not declare) and create a
   // latent name collision if VirtualizedList ever adds the same prop.
-  const { hasFocus, onContentClick, ...virtualizedListProps } = props;
+  const { hasFocus, ...virtualizedListProps } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
 
@@ -165,10 +163,6 @@ function ScrollableList<T>(
           // earlier can't yank the view off the clicked row.
           cancelPendingScroll();
           virtualizedListRef.current.scrollToScrollbarRow(event.row);
-        } else if (onContentClick) {
-          // Click on content area (not scrollbar) — let the parent handle
-          // hyperlink clicks or other content interactions.
-          onContentClick(event.row, event.col);
         }
         return;
       }
@@ -185,7 +179,7 @@ function ScrollableList<T>(
         scheduleScrollFlush();
       }
     },
-    [scheduleScrollFlush, cancelPendingScroll, onContentClick],
+    [scheduleScrollFlush, cancelPendingScroll],
   );
 
   // The VP viewport owns the wheel (this IS the in-app scroller), so opt out
