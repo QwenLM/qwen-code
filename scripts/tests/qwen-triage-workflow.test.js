@@ -1647,6 +1647,39 @@ describe('qwen-triage verify hardening', () => {
       const inflated = emit(dense, 45000);
       expect(inflated).toContain('<pre><code>');
       expect(inflated).toContain('Verification report (report.md, truncated)');
+
+      // The fold-counting greps carry `|| true` because grep exits 1 on zero
+      // matches, which under the step's real `set -euo pipefail` would abort
+      // the whole composer for a fold-free report. `emit` spawns without
+      // pipefail, so exercise that path explicitly: a zero-fold report under
+      // pipefail must still exit 0 and render.
+      const nofolds = join(dir, 'nofolds.md');
+      writeFileSync(nofolds, '## heading\nbody text\n');
+      const pf = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set -o pipefail\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          nofolds,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(pf.status).toBe(0);
+      expect(pf.stdout).toContain('### Verification report');
+      expect(pf.stdout).toContain('## heading');
+
+      // The balancing loop appends `opens - closes` closers AFTER the size
+      // gate passes, so a report dense in unbalanced <details> opens must
+      // fall back to the capped pre dump once the closer overhead would
+      // exceed the budget — rather than shipping a section over the cap.
+      // 100 opens: raw ~1000 B and sanitized ~1000 B both clear max=2000,
+      // but 1000 + 100*11 + 30 > 2000 forces the fallback.
+      const folds = join(dir, 'folds.md');
+      writeFileSync(folds, '<details>\n'.repeat(100));
+      const over = emit(folds, 2000);
+      expect(over).toContain('<pre><code>');
+      expect(over).toContain('Verification report (report.md, truncated)');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

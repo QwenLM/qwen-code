@@ -3375,6 +3375,19 @@ jobs:
             # whole composer for a report with no folds at all.
             opens="$(grep -o '<details>' "$san_file" | wc -l || true)"
             closes="$(grep -o '</details>' "$san_file" | wc -l || true)"
+            # The balancing loop below appends `opens - closes` closers
+            # (11 bytes each) AFTER this size gate has already passed, so a
+            # report dense in unbalanced <details> opens could be pushed past
+            # the cap — and past GitHub's 65,536-char comment limit — by the
+            # closers alone. Budget for that overhead before committing to
+            # the markdown path; otherwise fall back to the capped pre dump.
+            local deficit=$(( opens - closes ))
+            if [ "$deficit" -gt 0 ] && \
+               [ $(( $(wc -c < "$san_file") + deficit * 11 + 30 )) -gt "$max" ]; then
+              rm -f "$san_file"
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
             printf '### Verification report\n\n'
             cat "$san_file"
             rm -f "$san_file"
