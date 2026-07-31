@@ -653,5 +653,32 @@ describe('useDeleteCommand', () => {
         expect.any(Number),
       );
     });
+
+    it('reports deletion success when the SessionDelete hook rejects with undefined', async () => {
+      const { config, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(undefined),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionDelete hook failed for deleted-id: undefined',
+      );
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
+    });
   });
 });

@@ -5,9 +5,10 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import type { Config, DebugLogger } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
+import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 
 export interface UseDeleteCommandOptions {
   config: Config | null;
@@ -20,21 +21,6 @@ export interface UseDeleteCommandResult {
   closeDeleteDialog: () => void;
   handleDelete: (sessionId: string) => void;
   handleDeleteMany: (sessionIds: string[]) => void;
-}
-
-export function fireSessionDeleteHook(
-  config: Config,
-  sessionId: string,
-  logger: DebugLogger = config.getDebugLogger(),
-): void {
-  void config
-    .getHookSystem()
-    ?.fireSessionDeleteEvent(sessionId)
-    .catch((error) => {
-      logger.warn(
-        `SessionDelete hook failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
 }
 
 export function useDeleteCommand(

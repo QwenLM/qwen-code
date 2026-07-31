@@ -323,7 +323,7 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
-import { fireSessionDeleteHook } from '../ui/hooks/useDeleteCommand.js';
+import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
