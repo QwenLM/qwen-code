@@ -147,6 +147,68 @@ By default, HTTP hooks cannot target private or link-local IP ranges. In platfor
 }
 ```
 
+**Example: External Judgment Service Adapter**
+
+The `remote-security-check` config above expects `http://127.0.0.1:8080/hooks/pre-tool-use` to
+already be running a service that speaks this contract (POST `{tool_name, tool_input, ...}` in,
+`hookSpecificOutput.permissionDecision` out). A minimal, stdlib-only adapter, using
+[invinoveritas](https://api.babyblueviper.com)'s `/review` endpoint (an independent, signed
+verdict on the specific call — free registration, 3 calls included, no payment required to try
+it) as the judgment source:
+
+```python
+#!/usr/bin/env python3
+# qwen_review_hook.py -- run: IVV_API_KEY=... python3 qwen_review_hook.py
+import json, os, urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+IVV_API_KEY = os.environ["IVV_API_KEY"]
+
+def review(tool_name, tool_input):
+    body = json.dumps({
+        "artifact": json.dumps({"tool_name": tool_name, "tool_input": tool_input}),
+        "artifact_type": "shell_command" if tool_name in ("run_shell_command", "shell") else "general",
+        "context": f"qwen-code PreToolUse: {tool_name}",
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.babyblueviper.com/review", data=body,
+        headers={"Authorization": f"Bearer {IVV_API_KEY}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        tool_name, tool_input = payload.get("tool_name", "unknown"), payload.get("tool_input", {})
+        try:
+            verdict = review(tool_name, tool_input)
+            decision = "deny" if verdict.get("verdict") == "reject" else "allow"
+            reason = verdict.get("summary", f"invinoveritas verdict: {verdict.get('verdict')}")
+        except Exception:
+            decision, reason = "allow", "invinoveritas /review unavailable, failing open"  # never block on a review-side outage
+        out = {"continue": True, "decision": decision, "hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason,
+        }}
+        body = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+```
+
+Verified live against the real production API: a genuinely destructive input
+(`{"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /important_data"}}`)
+returns `permissionDecision: "deny"` with a real explanation; a benign one (`ls -la`) returns
+`"allow"`. Fails open on any network/timeout/malformed-response issue from the judgment
+service, so a third-party outage never blocks legitimate tool calls — same discipline the
+`command`-hook examples above apply with their own exit codes.
+
 ### Function Hooks
 
 Function hooks directly call registered JavaScript/TypeScript functions. They are used internally by the Skill system and are not currently exposed as a public API for end users.
