@@ -84,7 +84,7 @@ function runQwen(options, prompt) {
   let killTimer;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
+    const child = spawn(options.qwenBin, ['--approval-mode', 'auto-edit', '--prompt', prompt], {
       stdio: ['inherit', 'pipe', 'pipe'],
       detached: true,
     });
