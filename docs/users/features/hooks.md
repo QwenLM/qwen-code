@@ -151,20 +151,30 @@ By default, HTTP hooks cannot target private or link-local IP ranges. In platfor
 
 The `remote-security-check` config above expects `http://127.0.0.1:8080/hooks/pre-tool-use` to
 already be running a service that speaks this contract (POST `{tool_name, tool_input, ...}` in,
-`hookSpecificOutput.permissionDecision` out). A minimal, stdlib-only adapter, using
-[invinoveritas](https://api.babyblueviper.com)'s `/review` endpoint (an independent, signed
-verdict on the specific call — free registration, 3 calls included, no payment required to try
-it) as the judgment source:
+`hookSpecificOutput.permissionDecision` out). Here is a minimal, stdlib-only adapter that fills
+in that missing half, wired to one concrete judgment backend so the whole thing is runnable and
+testable end to end rather than a stub. Only the `review()` function is backend-specific — swap
+its body and request/response shape for whichever service you use; everything else (the server,
+the fail-open handling, the hook response shape) stays the same regardless of backend.
+
+_Disclosure: the backend used below, [invinoveritas](https://api.babyblueviper.com), is a
+service the author is affiliated with — used here because it was the one that could be
+verified end to end for this example, not an endorsement. Any HTTP service that returns a
+JSON verdict works equally well; only `review()` needs to change._
 
 ```python
 #!/usr/bin/env python3
-# qwen_review_hook.py -- run: IVV_API_KEY=... python3 qwen_review_hook.py
+# judgment_hook.py -- run: JUDGMENT_API_KEY=... python3 judgment_hook.py
 import json, os, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-IVV_API_KEY = os.environ["IVV_API_KEY"]
+JUDGMENT_API_KEY = os.environ["JUDGMENT_API_KEY"]
 
 def review(tool_name, tool_input):
+    """POST the call to the judgment backend and return its verdict. This is the
+    one function to change for a different backend -- request/response shape
+    below matches invinoveritas's /review; adapt both to your own backend's
+    contract if you swap it out."""
     body = json.dumps({
         "artifact": json.dumps({"tool_name": tool_name, "tool_input": tool_input}),
         "artifact_type": "shell_command" if tool_name in ("run_shell_command", "shell") else "general",
@@ -172,10 +182,10 @@ def review(tool_name, tool_input):
     }).encode()
     req = urllib.request.Request(
         "https://api.babyblueviper.com/review", data=body,
-        headers={"Authorization": f"Bearer {IVV_API_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {JUDGMENT_API_KEY}", "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
+        return json.loads(resp.read())  # response includes a "verdict" field: "reject" denies, anything else allows
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -184,9 +194,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             verdict = review(tool_name, tool_input)
             decision = "deny" if verdict.get("verdict") == "reject" else "allow"
-            reason = verdict.get("summary", f"invinoveritas verdict: {verdict.get('verdict')}")
+            reason = verdict.get("summary", f"judgment verdict: {verdict.get('verdict')}")
         except Exception:
-            decision, reason = "allow", "invinoveritas /review unavailable, failing open"  # never block on a review-side outage
+            decision, reason = "allow", "judgment backend unavailable, failing open"  # never block on a review-side outage
         out = {"continue": True, "decision": decision, "hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason,
         }}
@@ -202,12 +212,12 @@ if __name__ == "__main__":
     HTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
 ```
 
-Verified live against the real production API: a genuinely destructive input
+Tested live end to end against the real production API above: a genuinely destructive input
 (`{"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /important_data"}}`)
-returns `permissionDecision: "deny"` with a real explanation; a benign one (`ls -la`) returns
+returned `permissionDecision: "deny"` with a real explanation; a benign one (`ls -la`) returned
 `"allow"`. Fails open on any network/timeout/malformed-response issue from the judgment
-service, so a third-party outage never blocks legitimate tool calls — same discipline the
-`command`-hook examples above apply with their own exit codes.
+backend, so an outage never blocks legitimate tool calls — same discipline the `command`-hook
+examples above apply with their own exit codes.
 
 ### Function Hooks
 
