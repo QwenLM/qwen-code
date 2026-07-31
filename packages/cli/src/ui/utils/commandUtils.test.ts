@@ -5,7 +5,7 @@
  */
 
 import type { Mock } from 'vitest';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterAll } from 'vitest';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
@@ -23,16 +23,24 @@ import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 // Mock child_process
 vi.mock('child_process');
 
-// Mock process.platform for platform-specific tests
+// Mock process.platform for platform-specific tests.
+// Use Object.defineProperty instead of vi.stubGlobal to preserve the
+// full process object (EventEmitter methods like listeners/emit/on).
 const mockProcess = vi.hoisted(() => ({
   platform: 'darwin',
 }));
 
-vi.stubGlobal('process', {
-  ...process,
-  get platform() {
-    return mockProcess.platform;
-  },
+const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+
+Object.defineProperty(process, 'platform', {
+  get: () => mockProcess.platform,
+  configurable: true,
+});
+
+afterAll(() => {
+  if (originalPlatform) {
+    Object.defineProperty(process, 'platform', originalPlatform);
+  }
 });
 
 interface MockChildProcess extends EventEmitter {
@@ -158,7 +166,7 @@ describe('commandUtils', () => {
 
         // Simulate command failure
         setTimeout(() => {
-          mockChild.stderr.emit('data', 'Command not found');
+          mockChild.stderr.emit('data', Buffer.from('Command not found'));
           mockChild.emit('close', 1);
         }, 0);
 
@@ -430,11 +438,11 @@ describe('commandUtils', () => {
           setTimeout(() => {
             // e.g., cannot connect to X server
             if (callCount === 0) {
-              child.stderr.emit('data', errorMsg);
+              child.stderr.emit('data', Buffer.from(errorMsg));
               child.emit('close', exitCode);
               callCount++;
             } else {
-              child.stderr.emit('data', errorMsg);
+              child.stderr.emit('data', Buffer.from(errorMsg));
               child.emit('close', exitCode);
             }
           }, 0);
@@ -494,11 +502,11 @@ describe('commandUtils', () => {
           setTimeout(() => {
             // e.g., cannot connect to X server
             if (callCount === 0) {
-              child.stderr.emit('data', errorMsg);
+              child.stderr.emit('data', Buffer.from(errorMsg));
               child.emit('close', exitCode);
               callCount++;
             } else {
-              child.stderr.emit('data', errorMsg);
+              child.stderr.emit('data', Buffer.from(errorMsg));
               child.emit('close', exitCode);
             }
           }, 0);
