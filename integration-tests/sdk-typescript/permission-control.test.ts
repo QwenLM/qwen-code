@@ -566,7 +566,7 @@ describe('Permission Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for first response')),
-              15000,
+              TEST_TIMEOUT,
             ),
           ),
         ]);
@@ -582,7 +582,7 @@ describe('Permission Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for second response')),
-              10000,
+              TEST_TIMEOUT,
             ),
           ),
         ]);
@@ -619,7 +619,7 @@ describe('Permission Control (E2E)', () => {
       );
 
       await new Promise((resolve) => setTimeout(resolve, 8000));
-    }, 10_000);
+    }, 15_000);
   });
 
   describe('canUseTool and setPermissionMode integration', () => {

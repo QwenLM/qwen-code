@@ -1742,7 +1742,9 @@ export function ExtensionsManagerPage({
       >
         <AlertDialogContent size="middle">
           <AlertDialogHeader className="place-items-start text-left">
-            <AlertDialogTitle>{t('extensions.manage.add')}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t('extensions.manage.installTitle')}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {t('extensions.manage.installDescription')}
             </AlertDialogDescription>
