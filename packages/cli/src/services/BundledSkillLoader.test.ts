@@ -641,6 +641,21 @@ describe('BundledSkillLoader', () => {
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('cron_create');
     });
 
+    it('rejects enabling Autofix when scheduled tasks are disabled', async () => {
+      resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+      scheduler.disabled = true;
+
+      const result = await invokeAutofix('on');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Autofix cannot start because scheduled tasks are disabled for this session. Restart Qwen Code and try again.',
+      });
+      expect(scheduler.create).not.toHaveBeenCalled();
+    });
+
     it('does not create a duplicate watcher for the same pull request', async () => {
       resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
       schedulerJobs.push({

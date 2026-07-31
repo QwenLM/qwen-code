@@ -4922,6 +4922,137 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('expands Autofix watcher ticks before headless cron delivery', async () => {
+    setupMetricsMock();
+    const watcher = {
+      id: 'autofix-job',
+      prompt:
+        'autofix tick repo=QwenLM/qwen-code pr=4362 mode=propose-only rounds=0 infra-reruns=0',
+      cronExpr: '*/10 * * * *',
+      recurring: true,
+      createdAt: 1,
+      expiresAt: Infinity,
+      jitterMs: 0,
+    } satisfies CronJob;
+    const scheduler = new CronScheduler();
+    vi.spyOn(scheduler, 'start').mockImplementation((callback) => {
+      callback(watcher);
+    });
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    Object.assign(mockConfig, {
+      getDisabledSkillNames: () => new Set<string>(),
+      getSkillManager: () => ({
+        loadSkillForRuntime: vi.fn().mockResolvedValue({
+          name: 'autofix',
+          description: 'Maintain the current PR',
+          level: 'bundled',
+          filePath: '/bundled/autofix/SKILL.md',
+          body: 'Autofix contract',
+          allowedTools: [],
+        }),
+      }),
+      getPermissionManager: () => null,
+    });
+    vi.spyOn(scheduler, 'list').mockReturnValue([watcher]);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-autofix-cron');
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const scheduledPrompt = String(
+      (mockGeminiClient.sendMessageStream.mock.calls[1]?.[0] as Part[])[0]
+        ?.text,
+    );
+    expect(scheduledPrompt).toContain('Autofix contract');
+    expect(scheduledPrompt).toContain(
+      '<autofix-authority source="cron" repo="QwenLM/qwen-code" pr="4362" mode="propose-only" rounds="0" infra-reruns="0" job="autofix-job" />',
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Array),
+      expect.any(AbortSignal),
+      'p-autofix-cron/automatic/2',
+      expect.objectContaining({
+        type: SendMessageType.Cron,
+        notificationDisplayText: 'Cron: Autofix: QwenLM/qwen-code#4362',
+      }),
+    );
+  });
+
+  it('delivers a fail-closed prompt when headless Autofix expansion throws', async () => {
+    setupMetricsMock();
+    const watcher = {
+      id: 'autofix-job',
+      prompt:
+        'autofix tick repo=QwenLM/qwen-code pr=4362 mode=propose-only rounds=0 infra-reruns=0',
+      cronExpr: '*/10 * * * *',
+      recurring: true,
+      createdAt: 1,
+      expiresAt: Infinity,
+      jitterMs: 0,
+    } satisfies CronJob;
+    const scheduler = new CronScheduler();
+    vi.spyOn(scheduler, 'start').mockImplementation((callback) => {
+      callback(watcher);
+    });
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    Object.assign(mockConfig, {
+      getDisabledSkillNames: () => new Set<string>(),
+      getSkillManager: () => ({
+        loadSkillForRuntime: vi.fn().mockRejectedValue(new Error('broken')),
+      }),
+      getPermissionManager: () => null,
+    });
+    vi.spyOn(scheduler, 'list').mockReturnValue([watcher]);
+    vi.spyOn(scheduler, 'delete').mockRejectedValue(new Error('delete failed'));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'test',
+      'p-autofix-rejected',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const scheduledPrompt = String(
+      (mockGeminiClient.sendMessageStream.mock.calls[1]?.[0] as Part[])[0]
+        ?.text,
+    );
+    expect(scheduledPrompt).toContain(
+      'watcher expansion failed: broken. No maintenance action was authorized.',
+    );
+    expect(scheduledPrompt).not.toContain('<autofix-authority');
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Array),
+      expect.any(AbortSignal),
+      'p-autofix-rejected/automatic/2',
+      expect.objectContaining({
+        type: SendMessageType.Cron,
+        notificationDisplayText: 'Cron: Autofix rejected: autofix-job',
+      }),
+    );
+  });
+
   it('installs a skipDurableFire predicate that classifies loop.md sentinels in headless mode', async () => {
     // Locks the wiring at the scheduler-enable site: runNonInteractive must
     // hand the scheduler a predicate that skips durable loop.md sentinels
