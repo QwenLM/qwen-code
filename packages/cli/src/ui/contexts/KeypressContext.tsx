@@ -1189,7 +1189,12 @@ export function KeypressProvider({
       // the shortcut fires; the meta flag also stops the glyph from being
       // inserted into the input buffer (the text buffer skips printable input
       // when meta/ctrl is set), so it looks exactly like Alt was pressed.
-      const composedKeyName = OPTION_COMPOSED_GLYPHS[key.sequence];
+      const composedKeyName = Object.hasOwn(
+        OPTION_COMPOSED_GLYPHS,
+        key.sequence,
+      )
+        ? OPTION_COMPOSED_GLYPHS[key.sequence]
+        : undefined;
       if (process.platform === 'darwin' && !isPaste && composedKeyName) {
         key.name = composedKeyName;
         key.meta = true;
