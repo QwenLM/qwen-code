@@ -12,6 +12,7 @@ import request from 'supertest';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import { createServeApp } from './server.js';
 import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
@@ -1420,6 +1421,8 @@ describe('workspace-qualified core REST', () => {
       expect(res.status).toBe(404);
       expect(res.body.code).toBe('remember_task_not_found');
       expect(lateBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+      const acpHandle = h.app.locals['acpHandle'] as AcpHttpHandle | undefined;
+      expect(acpHandle?.getWorkspaceRememberLane(lateId)).toBeUndefined();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
