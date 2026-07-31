@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import type {
   Settings,
   SettingScope,
@@ -12,18 +13,21 @@ import type {
 import type {
   SettingDefinition,
   SettingsSchema,
+  SettingsType,
+  SettingsValue,
 } from '../config/settingsSchema.js';
-import { SETTINGS_SCHEMA } from '../config/settingsSchema.js';
+import { getSettingsSchema } from '../config/settingsSchema.js';
+import { t } from '../i18n/index.js';
+import { isAutoLanguage } from './languageUtils.js';
 
 // The schema is now nested, but many parts of the UI and logic work better
 // with a flattened structure and dot-notation keys. This section flattens the
 // schema into a map for easier lookups.
 
-function flattenSchema(
-  schema: SettingsSchema,
-  prefix = '',
-): Record<string, SettingDefinition & { key: string }> {
-  let result: Record<string, SettingDefinition & { key: string }> = {};
+type FlattenedSchema = Record<string, SettingDefinition & { key: string }>;
+
+function flattenSchema(schema: SettingsSchema, prefix = ''): FlattenedSchema {
+  let result: FlattenedSchema = {};
   for (const key in schema) {
     const newKey = prefix ? `${prefix}.${key}` : key;
     const definition = schema[key];
@@ -35,7 +39,19 @@ function flattenSchema(
   return result;
 }
 
-const FLATTENED_SCHEMA = flattenSchema(SETTINGS_SCHEMA);
+let _FLATTENED_SCHEMA: FlattenedSchema | undefined;
+
+/** Returns a flattened schema, the first call is memoized for future requests. */
+export function getFlattenedSchema() {
+  return (
+    _FLATTENED_SCHEMA ??
+    (_FLATTENED_SCHEMA = flattenSchema(getSettingsSchema()))
+  );
+}
+
+function clearFlattenedSchema() {
+  _FLATTENED_SCHEMA = undefined;
+}
 
 /**
  * Get all settings grouped by category
@@ -49,7 +65,7 @@ export function getSettingsByCategory(): Record<
     Array<SettingDefinition & { key: string }>
   > = {};
 
-  Object.values(FLATTENED_SCHEMA).forEach((definition) => {
+  Object.values(getFlattenedSchema()).forEach((definition) => {
     const category = definition.category;
     if (!categories[category]) {
       categories[category] = [];
@@ -66,28 +82,28 @@ export function getSettingsByCategory(): Record<
 export function getSettingDefinition(
   key: string,
 ): (SettingDefinition & { key: string }) | undefined {
-  return FLATTENED_SCHEMA[key];
+  return getFlattenedSchema()[key];
 }
 
 /**
  * Check if a setting requires restart
  */
 export function requiresRestart(key: string): boolean {
-  return FLATTENED_SCHEMA[key]?.requiresRestart ?? false;
+  return getFlattenedSchema()[key]?.requiresRestart ?? false;
 }
 
 /**
  * Get the default value for a setting
  */
-export function getDefaultValue(key: string): SettingDefinition['default'] {
-  return FLATTENED_SCHEMA[key]?.default;
+export function getDefaultValue(key: string): SettingsValue {
+  return getFlattenedSchema()[key]?.default;
 }
 
 /**
  * Get all setting keys that require restart
  */
 export function getRestartRequiredSettings(): string[] {
-  return Object.values(FLATTENED_SCHEMA)
+  return Object.values(getFlattenedSchema())
     .filter((definition) => definition.requiresRestart)
     .map((definition) => definition.key);
 }
@@ -113,6 +129,13 @@ export function getNestedValue(
   return undefined;
 }
 
+export function getNestedProperty(
+  obj: Record<string, unknown>,
+  path: string,
+): unknown {
+  return getNestedValue(obj, path.split('.'));
+}
+
 /**
  * Get the effective value for a setting, considering inheritance from higher scopes
  * Always returns a value (never undefined) - falls back to default if not set anywhere
@@ -121,7 +144,7 @@ export function getEffectiveValue(
   key: string,
   settings: Settings,
   mergedSettings: Settings,
-): SettingDefinition['default'] {
+): SettingsValue {
   const definition = getSettingDefinition(key);
   if (!definition) {
     return undefined;
@@ -132,13 +155,13 @@ export function getEffectiveValue(
   // Check the current scope's settings first
   let value = getNestedValue(settings as Record<string, unknown>, path);
   if (value !== undefined) {
-    return value as SettingDefinition['default'];
+    return value as SettingsValue;
   }
 
   // Check the merged settings for an inherited value
   value = getNestedValue(mergedSettings as Record<string, unknown>, path);
   if (value !== undefined) {
-    return value as SettingDefinition['default'];
+    return value as SettingsValue;
   }
 
   // Return default value if no value is set anywhere
@@ -149,16 +172,16 @@ export function getEffectiveValue(
  * Get all setting keys from the schema
  */
 export function getAllSettingKeys(): string[] {
-  return Object.keys(FLATTENED_SCHEMA);
+  return Object.keys(getFlattenedSchema());
 }
 
 /**
  * Get settings by type
  */
 export function getSettingsByType(
-  type: SettingDefinition['type'],
+  type: SettingsType,
 ): Array<SettingDefinition & { key: string }> {
-  return Object.values(FLATTENED_SCHEMA).filter(
+  return Object.values(getFlattenedSchema()).filter(
     (definition) => definition.type === type,
   );
 }
@@ -171,7 +194,7 @@ export function getSettingsRequiringRestart(): Array<
     key: string;
   }
 > {
-  return Object.values(FLATTENED_SCHEMA).filter(
+  return Object.values(getFlattenedSchema()).filter(
     (definition) => definition.requiresRestart,
   );
 }
@@ -180,21 +203,21 @@ export function getSettingsRequiringRestart(): Array<
  * Validate if a setting key exists in the schema
  */
 export function isValidSettingKey(key: string): boolean {
-  return key in FLATTENED_SCHEMA;
+  return key in getFlattenedSchema();
 }
 
 /**
  * Get the category for a setting
  */
 export function getSettingCategory(key: string): string | undefined {
-  return FLATTENED_SCHEMA[key]?.category;
+  return getFlattenedSchema()[key]?.category;
 }
 
 /**
  * Check if a setting should be shown in the settings dialog
  */
 export function shouldShowInDialog(key: string): boolean {
-  return FLATTENED_SCHEMA[key]?.showInDialog ?? true; // Default to true for backward compatibility
+  return getFlattenedSchema()[key]?.showInDialog ?? true; // Default to true for backward compatibility
 }
 
 /**
@@ -209,7 +232,7 @@ export function getDialogSettingsByCategory(): Record<
     Array<SettingDefinition & { key: string }>
   > = {};
 
-  Object.values(FLATTENED_SCHEMA)
+  Object.values(getFlattenedSchema())
     .filter((definition) => definition.showInDialog !== false)
     .forEach((definition) => {
       const category = definition.category;
@@ -226,21 +249,138 @@ export function getDialogSettingsByCategory(): Record<
  * Get settings by type that should be shown in the dialog
  */
 export function getDialogSettingsByType(
-  type: SettingDefinition['type'],
+  type: SettingsType,
 ): Array<SettingDefinition & { key: string }> {
-  return Object.values(FLATTENED_SCHEMA).filter(
+  return Object.values(getFlattenedSchema()).filter(
     (definition) =>
       definition.type === type && definition.showInDialog !== false,
   );
 }
 
 /**
- * Get all setting keys that should be shown in the dialog
+ * Explicit display order for settings shown in the Settings Dialog.
+ * Settings are ordered by importance and logical grouping:
+ * 1. Workflow control (most impactful)
+ * 2. Localization
+ * 3. Editor/Shell experience
+ * 4. Display preferences
+ * 5. Git behavior
+ * 6. File filtering
+ * 7. System settings (rarely changed)
+ *
+ * New settings with showInDialog: true that are not listed here
+ * will appear at the end of the list.
+ */
+const SETTINGS_DIALOG_ORDER: readonly string[] = [
+  // Workflow Control - most impactful setting
+  'tools.approvalMode',
+
+  // Localization - users often set this first
+  'general.language',
+  'general.outputLanguage',
+
+  // Theme
+  'ui.theme',
+
+  // Editor/Shell Experience
+  'general.vimMode',
+  'tools.shell.enableInteractiveShell',
+
+  // Display Preferences
+  'general.preferredEditor',
+  'ide.enabled',
+  'ui.showLineNumbers',
+  'ui.hideTips',
+  'general.terminalBell',
+  'ui.enableWelcomeBack',
+
+  // Git Behavior
+  'general.gitCoAuthor.commit',
+  'general.gitCoAuthor.pr',
+
+  // File Filtering
+  'context.fileFiltering.respectGitIgnore',
+  'context.fileFiltering.respectQwenIgnore',
+
+  // System Settings - rarely changed
+  'general.disableAutoUpdate',
+
+  // Privacy
+  'privacy.usageStatisticsEnabled',
+] as const;
+
+export const MAX_SETTING_STRING_VALUE_LENGTH = 1024;
+
+export function validateSettingValue(
+  def: SettingDefinition,
+  value: unknown,
+): string | undefined {
+  switch (def.type) {
+    case 'boolean':
+      if (typeof value !== 'boolean') return 'Value must be a boolean';
+      break;
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return 'Value must be a finite number';
+      if (def.minimum !== undefined && value < def.minimum)
+        return `Value must be >= ${def.minimum}`;
+      if (def.maximum !== undefined && value > def.maximum)
+        return `Value must be <= ${def.maximum}`;
+      break;
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return 'Value must be a finite integer';
+      if (!Number.isInteger(value)) return 'Value must be an integer';
+      if (def.minimum !== undefined && value < def.minimum)
+        return `Value must be >= ${def.minimum}`;
+      if (def.maximum !== undefined && value > def.maximum)
+        return `Value must be <= ${def.maximum}`;
+      break;
+    case 'string':
+      if (typeof value !== 'string') return 'Value must be a string';
+      if (value.length > MAX_SETTING_STRING_VALUE_LENGTH)
+        return `Value exceeds ${MAX_SETTING_STRING_VALUE_LENGTH}-character limit`;
+      break;
+    case 'enum':
+      if (!def.options?.some((opt) => opt.value === value)) {
+        const allowed = def.options?.map((o) => o.value).join(', ') ?? '';
+        return `Value must be one of: ${allowed}`;
+      }
+      break;
+    case 'object':
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return 'Value must be an object';
+      }
+      break;
+    default:
+      return `Settings of type '${def.type}' cannot be modified via this API`;
+  }
+  return undefined;
+}
+
+/**
+ * Get all setting keys that should be shown in the dialog, sorted by display order
  */
 export function getDialogSettingKeys(): string[] {
-  return Object.values(FLATTENED_SCHEMA)
-    .filter((definition) => definition.showInDialog !== false)
+  const dialogSettings = Object.values(getFlattenedSchema())
+    .filter((definition) => definition.showInDialog === true)
     .map((definition) => definition.key);
+
+  // Sort by explicit order; settings not in the order array appear at the end
+  return dialogSettings.sort((a, b) => {
+    const indexA = SETTINGS_DIALOG_ORDER.indexOf(a);
+    const indexB = SETTINGS_DIALOG_ORDER.indexOf(b);
+
+    // If both are in the order array, sort by their position
+    if (indexA !== -1 && indexB !== -1) {
+      return indexA - indexB;
+    }
+    // If only one is in the array, prioritize the one in the array
+    if (indexA !== -1) return -1;
+    if (indexB !== -1) return 1;
+    // If neither is in the array, maintain original order
+    return 0;
+  });
 }
 
 // ============================================================================
@@ -300,29 +440,92 @@ export function settingExistsInScope(
 }
 
 /**
- * Recursively sets a value in a nested object using a key path array.
+ * True if any dotted-path segment would let a write climb into the prototype
+ * chain. Defense in depth at the utility level: callers like
+ * migrateProviderMetadata feed `field` names straight from Object.entries on
+ * user-editable settings.json, and JSON.parse preserves `__proto__` as an own
+ * property — a crafted file could otherwise pollute Object.prototype here.
+ * Inline literal === comparisons (not Set.has) so CodeQL recognises this as a
+ * prototype-pollution sanitiser.
  */
-function setNestedValue(
+function pathHasUnsafeSegment(keys: string[]): boolean {
+  for (const key of keys) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function setNestedPropertyForce(
   obj: Record<string, unknown>,
-  path: string[],
+  path: string,
   value: unknown,
-): Record<string, unknown> {
-  const [first, ...rest] = path;
-  if (!first) {
-    return obj;
+): void {
+  const keys = path.split('.');
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment). Silent skip
+  // rather than throw: callers iterate user data and a poisoned key should
+  // be ignored, not crash the operation.
+  if (pathHasUnsafeSegment(keys)) return;
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    if (!current[key] || typeof current[key] !== 'object') {
+      current[key] = {};
+    }
+    current = current[key] as Record<string, unknown>;
   }
 
-  if (rest.length === 0) {
-    obj[first] = value;
-    return obj;
+  current[lastKey] = value;
+}
+
+export function setNestedPropertySafe(
+  obj: Record<string, unknown>,
+  path: string,
+  value: unknown,
+): void {
+  const keys = path.split('.');
+  // Refuse prototype-chain segments (see pathHasUnsafeSegment).
+  if (pathHasUnsafeSegment(keys)) return;
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    if (current[key] === undefined) {
+      current[key] = {};
+    }
+    const next = current[key];
+    if (typeof next === 'object' && next !== null) {
+      current = next as Record<string, unknown>;
+    } else {
+      return;
+    }
   }
 
-  if (!obj[first] || typeof obj[first] !== 'object') {
-    obj[first] = {};
+  current[lastKey] = value;
+}
+
+export function deleteNestedPropertySafe(
+  obj: Record<string, unknown>,
+  path: string,
+): void {
+  const keys = path.split('.');
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    const next = current[key];
+    if (typeof next !== 'object' || next === null) {
+      return;
+    }
+    current = next as Record<string, unknown>;
   }
 
-  setNestedValue(obj[first] as Record<string, unknown>, rest, value);
-  return obj;
+  delete current[lastKey];
 }
 
 /**
@@ -333,9 +536,8 @@ export function setPendingSettingValue(
   value: boolean,
   pendingSettings: Settings,
 ): Settings {
-  const path = key.split('.');
   const newSettings = JSON.parse(JSON.stringify(pendingSettings));
-  setNestedValue(newSettings, path, value);
+  setNestedPropertyForce(newSettings, key, value);
   return newSettings;
 }
 
@@ -344,12 +546,11 @@ export function setPendingSettingValue(
  */
 export function setPendingSettingValueAny(
   key: string,
-  value: unknown,
+  value: SettingsValue,
   pendingSettings: Settings,
 ): Settings {
-  const path = key.split('.');
   const newSettings = structuredClone(pendingSettings);
-  setNestedValue(newSettings, path, value);
+  setNestedPropertyForce(newSettings, key, value);
   return newSettings;
 }
 
@@ -387,14 +588,20 @@ export function saveModifiedSettings(
       path,
     );
 
-    if (value === undefined) {
-      return;
-    }
-
     const existsInOriginalFile = settingExistsInScope(
       settingKey,
       loadedSettings.forScope(scope).settings,
     );
+
+    if (value === undefined) {
+      // Treat `undefined` as "unset" when the key exists in the scope file.
+      // LoadedSettings.setValue(..., undefined) is used elsewhere in the codebase
+      // to remove optional settings from disk.
+      if (existsInOriginalFile) {
+        loadedSettings.setValue(scope, settingKey, undefined);
+      }
+      return;
+    }
 
     const isDefaultValue = value === getDefaultValue(settingKey);
 
@@ -415,25 +622,37 @@ export function getDisplayValue(
   pendingSettings?: Settings,
 ): string {
   // Prioritize pending changes if user has modified this setting
-  let value: boolean;
+  const definition = getSettingDefinition(key);
+
+  let value: SettingsValue;
   if (pendingSettings && settingExistsInScope(key, pendingSettings)) {
     // Show the value from the pending (unsaved) edits when it exists
-    value = getSettingValue(key, pendingSettings, {});
+    value = getEffectiveValue(key, pendingSettings, {});
   } else if (settingExistsInScope(key, settings)) {
     // Show the value defined at the current scope if present
-    value = getSettingValue(key, settings, {});
+    value = getEffectiveValue(key, settings, {});
   } else {
     // Fall back to the schema default when the key is unset in this scope
-    const defaultValue = getDefaultValue(key);
-    value = typeof defaultValue === 'boolean' ? defaultValue : false;
+    value = getDefaultValue(key);
   }
 
-  const valueString = String(value);
+  let valueString = String(value);
+
+  // Special handling for outputLanguage 'auto' value
+  if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
+    valueString = t('Auto (follow user input)');
+  } else if (definition?.type === 'enum' && definition.options) {
+    const option = definition.options?.find((option) => option.value === value);
+    if (option?.label) {
+      valueString = t(option.label) || option.label;
+    } else {
+      valueString = `${value}`;
+    }
+  }
 
   // Check if value is different from default OR if it's in modified settings OR if there are pending changes
   const defaultValue = getDefaultValue(key);
-  const isChangedFromDefault =
-    typeof defaultValue === 'boolean' ? value !== defaultValue : value === true;
+  const isChangedFromDefault = value !== defaultValue;
   const isInModifiedSettings = modifiedSettings.has(key);
 
   // Mark as modified if setting exists in current scope OR is in modified settings
@@ -476,3 +695,66 @@ export function getEffectiveDisplayValue(
 ): boolean {
   return getSettingValue(key, settings, mergedSettings);
 }
+
+/**
+ * Backup a settings file before modification.
+ * Always creates a fresh backup with `.orig` suffix (overwrites any stale backup).
+ * @param filePath - Path to the settings file to backup
+ * @returns boolean indicating whether a backup was created
+ */
+export function backupSettingsFile(filePath: string): boolean {
+  try {
+    if (fs.existsSync(filePath)) {
+      const backupPath = `${filePath}.orig`;
+      fs.copyFileSync(filePath, backupPath);
+      return true;
+    }
+  } catch (_e) {
+    // Ignore backup errors, proceed without backup
+  }
+  return false;
+}
+
+/**
+ * Restore a settings file from its `.orig` backup created by {@link backupSettingsFile}.
+ * Removes the backup file after a successful restore.
+ * @param filePath - Path to the settings file to restore
+ * @returns boolean indicating whether the restore succeeded
+ */
+export function restoreSettingsFromBackup(filePath: string): boolean {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.copyFileSync(backupPath, filePath);
+      fs.unlinkSync(backupPath);
+      return true;
+    }
+  } catch (err) {
+    // Caller handles the boolean failure, but log the underlying cause so
+    // EACCES / disk full / file-locked don't all look identical from
+    // upstream — the adapter's own warning then has something to point at.
+    // eslint-disable-next-line no-console -- best-effort rollback path
+    console.error(
+      `[settingsUtils] restoreSettingsFromBackup(${filePath}) failed:`,
+      err,
+    );
+  }
+  return false;
+}
+
+/**
+ * Remove the `.orig` backup after a successful operation.
+ * @param filePath - Path to the settings file whose backup should be removed
+ */
+export function cleanupSettingsBackup(filePath: string): void {
+  try {
+    const backupPath = `${filePath}.orig`;
+    if (fs.existsSync(backupPath)) {
+      fs.unlinkSync(backupPath);
+    }
+  } catch (_e) {
+    // Ignore cleanup errors — non-critical
+  }
+}
+
+export const TEST_ONLY = { clearFlattenedSchema };

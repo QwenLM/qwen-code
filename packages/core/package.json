@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.0.11",
+  "version": "0.21.2",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -8,21 +8,46 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./transcriptRecords": {
+      "types": "./dist/src/utils/transcript-records.d.ts",
+      "import": "./dist/src/utils/transcript-records.js"
+    },
+    "./goalWire": {
+      "types": "./dist/src/goals/goal-wire.d.ts",
+      "import": "./dist/src/goals/goal-wire.js"
+    },
+    "./userPromptSubmitContext": {
+      "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
+      "import": "./dist/src/hooks/user-prompt-submit-context.js"
+    },
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*",
+    "./src/*": "./src/*"
+  },
   "scripts": {
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:ci": "vitest run --coverage",
-    "typecheck": "tsc --noEmit"
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "vendor",
+    "scripts/postinstall.js"
   ],
   "dependencies": {
-    "@google/genai": "1.13.0",
-    "@lvce-editor/ripgrep": "^1.6.0",
-    "@modelcontextprotocol/sdk": "^1.11.0",
+    "@anthropic-ai/sdk": "^0.36.1",
+    "@google/genai": "2.6.0",
+    "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
@@ -31,59 +56,71 @@
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
     "@opentelemetry/instrumentation-http": "^0.203.0",
+    "@opentelemetry/instrumentation-undici": "^0.14.0",
     "@opentelemetry/sdk-node": "^0.203.0",
-    "@types/glob": "^8.1.0",
-    "@types/html-to-text": "^9.0.4",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
+    "async-mutex": "^0.5.0",
     "chardet": "^2.1.0",
+    "chokidar": "^4.0.3",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
     "fast-levenshtein": "^2.0.6",
     "fast-uri": "^3.0.6",
     "fdir": "^6.4.6",
     "fzf": "^0.5.2",
-    "glob": "^10.4.5",
-    "google-auth-library": "^9.11.0",
-    "html-to-text": "^9.0.5",
+    "glob": "^10.5.0",
+    "google-auth-library": "^10.5.0",
     "https-proxy-agent": "^7.0.6",
+    "iconv-lite": "^0.6.3",
     "ignore": "^7.0.0",
     "jsonrepair": "^3.13.0",
     "marked": "^15.0.12",
+    "mime": "4.0.7",
     "mnemonist": "^0.40.3",
-    "open": "^10.1.2",
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
-    "shell-quote": "^1.8.3",
-    "simple-git": "^3.28.0",
+    "prompts": "^2.4.2",
+    "proper-lockfile": "^4.1.2",
+    "sharp": "^0.34.5",
+    "shell-quote": "^1.9.0",
+    "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",
-    "tiktoken": "^1.0.21",
-    "undici": "^7.10.0",
+    "tar": "^7.5.19",
+    "turndown": "^7.2.4",
+    "undici": "^7.28.0",
     "uuid": "^9.0.1",
-    "ws": "^8.18.0"
+    "web-tree-sitter": "^0.24.7",
+    "ws": "^8.18.0",
+    "yaml": "^2.8.1",
+    "yauzl": "^2.10.0"
   },
   "optionalDependencies": {
-    "@lydell/node-pty": "1.1.0",
-    "@lydell/node-pty-darwin-arm64": "1.1.0",
-    "@lydell/node-pty-darwin-x64": "1.1.0",
-    "@lydell/node-pty-linux-x64": "1.1.0",
-    "@lydell/node-pty-win32-arm64": "1.1.0",
-    "@lydell/node-pty-win32-x64": "1.1.0",
-    "node-pty": "^1.0.0"
+    "@lydell/node-pty": "1.2.0-beta.10",
+    "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
-    "@qwen-code/qwen-code-test-utils": "file:../test-utils",
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
     "@types/minimatch": "^5.1.2",
     "@types/picomatch": "^4.0.1",
+    "@types/prompts": "^2.4.9",
+    "@types/tar": "^6.1.13",
+    "@types/turndown": "^5.0.6",
     "@types/ws": "^8.5.10",
+    "@types/yauzl": "^2.9.1",
+    "msw": "^2.3.4",
+    "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

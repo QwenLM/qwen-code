@@ -6,20 +6,33 @@
 
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  ApprovalMode,
+  ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
+import type { ArenaDialogType } from './useArenaCommand.js';
 
 export interface DialogCloseOptions {
   // Theme dialog
   isThemeDialogOpen: boolean;
   handleThemeSelect: (theme: string | undefined, scope: SettingScope) => void;
 
+  // Approval mode dialog
+  isApprovalModeDialogOpen: boolean;
+  handleApprovalModeSelect: (
+    mode: ApprovalMode | undefined,
+    scope: SettingScope,
+  ) => void;
+
+  // Reasoning effort dialog
+  isEffortDialogOpen: boolean;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
+
   // Auth dialog
   isAuthDialogOpen: boolean;
-  handleAuthSelect: (
-    authType: AuthType | undefined,
-    scope: SettingScope,
-  ) => Promise<void>;
-  selectedAuthType: AuthType | undefined;
+  closeAuthDialog: () => void;
+  pendingAuthType: AuthType | undefined;
 
   // Editor dialog
   isEditorDialogOpen: boolean;
@@ -29,21 +42,47 @@ export interface DialogCloseOptions {
   isSettingsDialogOpen: boolean;
   closeSettingsDialog: () => void;
 
+  // Status line dialog
+  isStatusLineDialogOpen: boolean;
+  closeStatusLineDialog: () => void;
+
+  // Memory dialog
+  isMemoryDialogOpen: boolean;
+  closeMemoryDialog: () => void;
+
+  // Arena dialogs
+  activeArenaDialog: ArenaDialogType;
+  closeArenaDialog: () => void;
+
   // Folder trust dialog
   isFolderTrustDialogOpen: boolean;
-
-  // Privacy notice
-  showPrivacyNotice: boolean;
-  setShowPrivacyNotice: (show: boolean) => void;
 
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   handleWelcomeBackClose: () => void;
 
-  // Quit confirmation dialog
-  quitConfirmationRequest: {
-    onConfirm: (shouldQuit: boolean, action?: string) => void;
-  } | null;
+  // Help dialog
+  isHelpDialogOpen?: boolean;
+  closeHelpDialog?: () => void;
+
+  // Skill review dialog
+  isSkillReviewDialogOpen: boolean;
+  dismissSkillReviewDialog: () => void;
+
+  // Background tasks dialog
+  isBackgroundTasksDialogOpen: boolean;
+  closeBackgroundTasksDialog: () => void;
+
+  // Diff dialog
+  isDiffDialogOpen?: boolean;
+  closeDiffDialog?: () => void;
+
+  isStatsDialogOpen?: boolean;
+  closeStatsDialog?: () => void;
+
+  // Worktree exit dialog (Phase C)
+  showWorktreeExitDialog?: boolean;
+  closeWorktreeExitDialog?: () => void;
 }
 
 /**
@@ -61,13 +100,15 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
-    if (options.isAuthDialogOpen) {
-      // Mimic ESC behavior: only close if already authenticated (same as AuthDialog ESC logic)
-      if (options.selectedAuthType !== undefined) {
-        // Note: We don't await this since we want non-blocking behavior like ESC
-        void options.handleAuthSelect(undefined, SettingScope.User);
-      }
-      // Note: AuthDialog prevents ESC exit if not authenticated, we follow same logic
+    if (options.isApprovalModeDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current mode
+      options.handleApprovalModeSelect(undefined, SettingScope.User);
+      return true;
+    }
+
+    if (options.isEffortDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined) - keeps the current effort.
+      options.handleEffortSelect(undefined);
       return true;
     }
 
@@ -83,15 +124,29 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
-    if (options.isFolderTrustDialogOpen) {
-      // FolderTrustDialog doesn't expose close function, but ESC would prevent exit
-      // We follow the same pattern - prevent exit behavior
+    if (options.isStatusLineDialogOpen) {
+      options.closeStatusLineDialog();
       return true;
     }
 
-    if (options.showPrivacyNotice) {
-      // PrivacyNotice uses onExit callback
-      options.setShowPrivacyNotice(false);
+    if (options.isHelpDialogOpen && options.closeHelpDialog) {
+      options.closeHelpDialog();
+      return true;
+    }
+
+    if (options.isMemoryDialogOpen) {
+      options.closeMemoryDialog();
+      return true;
+    }
+
+    if (options.activeArenaDialog !== null) {
+      options.closeArenaDialog();
+      return true;
+    }
+
+    if (options.isFolderTrustDialogOpen) {
+      // FolderTrustDialog doesn't expose close function, but ESC would prevent exit
+      // We follow the same pattern - prevent exit behavior
       return true;
     }
 
@@ -101,8 +156,52 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
-    // Note: quitConfirmationRequest is NOT handled here anymore
-    // It's handled specially in handleExit - ctrl+c in quit-confirm should exit immediately
+    // Scoped invariant: the diff-dialog branch MUST sit above the
+    // background-tasks branch because `DialogManager` renders the diff
+    // dialog over `BackgroundTasksDialog` when both flags are true (see
+    // `DialogManager.tsx` — diff block at the `BackgroundTasksDialog`
+    // fall-through). The rest of this hook's ordering is **not** a
+    // mirror of `DialogManager` and isn't intended to be: most higher-
+    // priority dialogs in `DialogManager` (theme, auth, settings, …)
+    // already appear above this block in their own priority order. Only
+    // the diff-vs-background pair previously matched the wrong way.
+    if (options.isStatsDialogOpen && options.closeStatsDialog) {
+      options.closeStatsDialog();
+      return true;
+    }
+
+    if (options.isDiffDialogOpen && options.closeDiffDialog) {
+      // /diff dialog — same rationale as the background-tasks dialog:
+      // Ctrl+C should dismiss the dialog rather than fall through to the
+      // exit-prompt path or cancel the (non-existent) request.
+      options.closeDiffDialog();
+      return true;
+    }
+
+    if (options.isSkillReviewDialogOpen) {
+      // Skill-review dialog: Ctrl+C defers it (same as Esc "decide later").
+      // Must call dismiss (not close) so the batch is recorded in the dismissed
+      // set — otherwise the idle effect immediately reopens it.
+      options.dismissSkillReviewDialog();
+      return true;
+    }
+
+    if (options.isBackgroundTasksDialogOpen) {
+      // Background tasks dialog — routed through closeAnyOpenDialog so
+      // Ctrl+C and the global escape path dismiss it without escalating
+      // to exit prompts.
+      options.closeBackgroundTasksDialog();
+      return true;
+    }
+
+    if (options.showWorktreeExitDialog && options.closeWorktreeExitDialog) {
+      // WorktreeExitDialog: Ctrl+C / global escape dismisses it (same
+      // semantics as picking Cancel in the dialog). Without this entry
+      // the dialog was only escapable via the Escape key, inconsistent
+      // with the rest of the dialog surface. (PR #4174 review.)
+      options.closeWorktreeExitDialog();
+      return true;
+    }
 
     // No dialog was open
     return false;

@@ -6,28 +6,37 @@
 
 import { type CommandModule } from 'yargs';
 import { FatalConfigError, getErrorMessage } from '@qwen-code/qwen-code-core';
-import { enableExtension } from '../../config/extension.js';
-import { SettingScope } from '../../config/settings.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 interface EnableArgs {
   name: string;
-  scope?: SettingScope;
+  scope?: string;
 }
 
 export async function handleEnable(args: EnableArgs) {
+  const extensionManager = await getExtensionManager();
+
   try {
-    const scopes = args.scope
-      ? [args.scope]
-      : [SettingScope.User, SettingScope.Workspace];
-    enableExtension(args.name, scopes);
+    const scope = resolveExtensionCommandScope(args.scope);
+    const result = await extensionManager.enableExtension(args.name, scope);
     if (args.scope) {
-      console.log(
-        `Extension "${args.name}" successfully enabled for scope "${args.scope}".`,
+      writeStdoutLine(
+        t('Extension "{{name}}" successfully enabled for scope "{{scope}}".', {
+          name: args.name,
+          scope: args.scope,
+        }),
       );
     } else {
-      console.log(
-        `Extension "${args.name}" successfully enabled in all scopes.`,
+      writeStdoutLine(
+        t('Extension "{{name}}" successfully enabled in all scopes.', {
+          name: args.name,
+        }),
       );
+    }
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
     }
   } catch (error) {
     throw new FatalConfigError(getErrorMessage(error));
@@ -35,25 +44,28 @@ export async function handleEnable(args: EnableArgs) {
 }
 
 export const enableCommand: CommandModule = {
-  command: 'disable [--scope] <name>',
-  describe: 'Enables an extension.',
+  command: 'enable [--scope] <name>',
+  describe: t('Enables an extension.'),
   builder: (yargs) =>
     yargs
       .positional('name', {
-        describe: 'The name of the extension to enable.',
+        describe: t('The name of the extension to enable.'),
         type: 'string',
       })
       .option('scope', {
-        describe:
-          'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+        describe: t(
+          'The scope to enable the extension in. If not set, will be enabled in all scopes.',
+        ),
         type: 'string',
-        choices: [SettingScope.User, SettingScope.Workspace],
       })
-      .check((_argv) => true),
+      .check((argv) => {
+        resolveExtensionCommandScope(argv.scope as string | undefined);
+        return true;
+      }),
   handler: async (argv) => {
     await handleEnable({
       name: argv['name'] as string,
-      scope: argv['scope'] as SettingScope,
+      scope: argv['scope'] as string,
     });
   },
 };

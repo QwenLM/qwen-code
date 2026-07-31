@@ -12,6 +12,7 @@ export interface SemanticColors {
     secondary: string;
     link: string;
     accent: string;
+    code: string;
   };
   background: {
     primary: string;
@@ -33,6 +34,9 @@ export interface SemanticColors {
     error: string;
     success: string;
     warning: string;
+    // Dim variants for less intense UI elements
+    errorDim: string;
+    warningDim: string;
   };
 }
 
@@ -42,6 +46,7 @@ export const lightSemanticColors: SemanticColors = {
     secondary: lightTheme.Gray,
     link: lightTheme.AccentBlue,
     accent: lightTheme.AccentPurple,
+    code: lightTheme.LightBlue,
   },
   background: {
     primary: lightTheme.Background,
@@ -63,6 +68,8 @@ export const lightSemanticColors: SemanticColors = {
     error: lightTheme.AccentRed,
     success: lightTheme.AccentGreen,
     warning: lightTheme.AccentYellow,
+    errorDim: lightTheme.AccentRedDim,
+    warningDim: lightTheme.AccentYellowDim,
   },
 };
 
@@ -72,6 +79,7 @@ export const darkSemanticColors: SemanticColors = {
     secondary: darkTheme.Gray,
     link: darkTheme.AccentBlue,
     accent: darkTheme.AccentPurple,
+    code: darkTheme.LightBlue,
   },
   background: {
     primary: darkTheme.Background,
@@ -93,6 +101,8 @@ export const darkSemanticColors: SemanticColors = {
     error: darkTheme.AccentRed,
     success: darkTheme.AccentGreen,
     warning: darkTheme.AccentYellow,
+    errorDim: darkTheme.AccentRedDim,
+    warningDim: darkTheme.AccentYellowDim,
   },
 };
 
@@ -102,6 +112,7 @@ export const ansiSemanticColors: SemanticColors = {
     secondary: ansiTheme.Gray,
     link: ansiTheme.AccentBlue,
     accent: ansiTheme.AccentPurple,
+    code: ansiTheme.LightBlue,
   },
   background: {
     primary: ansiTheme.Background,
@@ -123,5 +134,7 @@ export const ansiSemanticColors: SemanticColors = {
     error: ansiTheme.AccentRed,
     success: ansiTheme.AccentGreen,
     warning: ansiTheme.AccentYellow,
+    errorDim: ansiTheme.AccentRedDim,
+    warningDim: ansiTheme.AccentYellowDim,
   },
 };

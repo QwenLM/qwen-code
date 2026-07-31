@@ -7,51 +7,244 @@
 export enum TelemetryTarget {
   GCP = 'gcp',
   LOCAL = 'local',
-  QWEN = 'qwen',
 }
 
 const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
 const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
-export { SpanStatusCode, ValueType } from '@opentelemetry/api';
-export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
+export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
-  logApiError,
-  logApiRequest,
-  logApiResponse,
-  logChatCompression,
-  logCliConfiguration,
-  logConversationFinishedEvent,
-  logFlashFallback,
-  logKittySequenceOverflow,
-  logSlashCommand,
-  logToolCall,
-  logUserPrompt,
-} from './loggers.js';
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './constants.js';
 export {
   initializeTelemetry,
-  isTelemetrySdkInitialized,
   shutdownTelemetry,
+  forceFlushMetrics,
+  refreshSessionContext,
+  isTelemetrySdkInitialized,
 } from './sdk.js';
 export {
-  ApiErrorEvent,
-  ApiRequestEvent,
-  ApiResponseEvent,
-  ConversationFinishedEvent,
-  EndSessionEvent,
-  FlashFallbackEvent,
-  KittySequenceOverflowEvent,
-  makeChatCompressionEvent,
-  makeSlashCommandEvent,
+  resolveTelemetrySettings,
+  parseBooleanEnvFlag,
+  parseTelemetryTargetValue,
+} from './config.js';
+export {
+  logStartSession,
+  logUserPrompt,
+  logUserRetry,
+  logToolCall,
+  logApiRequest,
+  logApiError,
+  logApiCancel,
+  logApiResponse,
+  logFlashFallback,
+  logSlashCommand,
+  logConversationFinishedEvent,
+  logKittySequenceOverflow,
+  logChatCompression,
+  logToolOutputTruncated,
+  logExtensionEnable,
+  logExtensionInstallEvent,
+  logExtensionUninstall,
+  logExtensionDisable,
+  logExtensionUpdateEvent,
+  logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
+  logNextSpeakerCheck,
+  logAuth,
+  logSkillLaunch,
+  recordSkillInvocation,
+  logUserFeedback,
+  logArenaSessionStarted,
+  logArenaAgentCompleted,
+  logArenaSessionEnded,
+  logMemoryExtract,
+  logMemoryDream,
+  logMemoryRecall,
+  logMemoryRecallDelivery,
+} from './loggers.js';
+export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
+export {
   SlashCommandStatus,
+  EndSessionEvent,
+  UserPromptEvent,
+  UserRetryEvent,
+  ApiRequestEvent,
+  ApiErrorEvent,
+  ApiResponseEvent,
+  ApiCancelEvent,
+  FlashFallbackEvent,
   StartSessionEvent,
   ToolCallEvent,
-  UserPromptEvent,
+  ConversationFinishedEvent,
+  KittySequenceOverflowEvent,
+  ToolOutputTruncatedEvent,
+  RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
+  NextSpeakerCheckEvent,
+  AuthEvent,
+  SkillLaunchEvent,
+  UserFeedbackEvent,
+  UserFeedbackRating,
+  makeArenaSessionStartedEvent,
+  makeArenaAgentCompletedEvent,
+  makeArenaSessionEndedEvent,
+  MemoryExtractEvent,
+  MemoryDreamEvent,
+  MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
+export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
-  ChatCompressionEvent,
-  SlashCommandEvent,
-  TelemetryEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  ArenaSessionEndedStatus,
+  ArenaAgentCompletedStatus,
 } from './types.js';
+export type { TelemetryEvent } from './types.js';
+export { SpanStatusCode, ValueType } from '@opentelemetry/api';
+export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 export * from './uiTelemetry.js';
-export { DEFAULT_OTLP_ENDPOINT, DEFAULT_TELEMETRY_TARGET };
+export * from './api-activity-tracker.js';
+export {
+  // Core metrics functions
+  recordToolCallMetrics,
+  recordTokenUsageMetrics,
+  recordApiResponseMetrics,
+  recordApiErrorMetrics,
+  recordFileOperationMetric,
+  recordInvalidChunk,
+  recordContentRetry,
+  recordContentRetryFailure,
+  recordApiRetry,
+  // Performance monitoring functions
+  recordStartupPerformance,
+  recordMemoryUsage,
+  recordCpuUsage,
+  recordToolQueueDepth,
+  recordToolExecutionBreakdown,
+  recordTokenEfficiency,
+  recordApiRequestBreakdown,
+  recordPerformanceScore,
+  recordPerformanceRegression,
+  recordBaselineComparison,
+  isPerformanceMonitoringActive,
+  // Arena metrics functions
+  recordArenaSessionStartedMetrics,
+  recordArenaAgentCompletedMetrics,
+  recordArenaSessionEndedMetrics,
+  // Auto-Memory metrics functions
+  recordMemoryExtractMetrics,
+  recordMemoryDreamMetrics,
+  recordMemoryRecallMetrics,
+  recordChannelMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
+  // Performance monitoring types
+  PerformanceMetricType,
+  MemoryMetricType,
+  ToolExecutionPhase,
+  ApiRequestPhase,
+  FileOperation,
+} from './metrics.js';
+export { QwenLogger } from './qwen-logger/qwen-logger.js';
+export { sanitizeHookName } from './sanitize.js';
+export {
+  startInteractionSpan,
+  endInteractionSpan,
+  withInteractionSpan,
+  startLLMRequestSpan,
+  endLLMRequestSpan,
+  startToolSpan,
+  endToolSpan,
+  runInToolSpanContext,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  startToolBlockedOnUserSpan,
+  endToolBlockedOnUserSpan,
+  startHookSpan,
+  endHookSpan,
+  startSubagentSpan,
+  endSubagentSpan,
+  runInSubagentSpanContext,
+  getActiveInteractionSpan,
+  truncateSpanError,
+} from './session-tracing.js';
+export type {
+  StartInteractionOptions,
+  StartLLMRequestSpanOptions,
+  EndInteractionOptions,
+  InteractionSpanResultStatus,
+  LLMRequestMetadata,
+  ToolSpanMetadata,
+  ToolBlockedDecision,
+  ToolBlockedSource,
+  HookEvent,
+  StartHookSpanOptions,
+  HookSpanMetadata,
+  SubagentInvocationKind,
+  SubagentStatus,
+  StartSubagentSpanOptions,
+  SubagentSpanMetadata,
+} from './session-tracing.js';
+export type { TelemetryRuntimeConfig } from './runtime-config.js';
+export {
+  DAEMON_TRACEPARENT_META_KEY,
+  DAEMON_TRACESTATE_META_KEY,
+  addDaemonRequestAttribute,
+  captureDaemonTelemetryContext,
+  createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  extractDaemonTraceContext,
+  hashDaemonWorkspace,
+  injectDaemonTraceContext,
+  recordDaemonError,
+  recordDaemonHttpResponse,
+  runWithDaemonTelemetryContext,
+  withDaemonBridgeSpan,
+  withDaemonRequestSpan,
+  withDaemonSpan,
+  type DaemonBridgeTelemetryMetrics,
+} from './daemon-tracing.js';
+export {
+  initializeDaemonMetrics,
+  registerDaemonGaugeCallbacks,
+  recordDaemonHttpRequest,
+  recordDaemonSessionLifecycle,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptQueueWait,
+  recordDaemonPromptDuration,
+  recordDaemonBridgeError,
+  recordDaemonCancel,
+  recordDaemonPipeMessage,
+} from './daemon-metrics.js';
+export type {
+  DaemonGaugeCallbacks,
+  DaemonPipeDirection,
+} from './daemon-metrics.js';
+export {
+  startEventLoopLagMonitor,
+  type EventLoopLagMonitor,
+  type EventLoopLagMonitorOptions,
+  type EventLoopLagSnapshot,
+} from './event-loop-lag.js';
+export {
+  registerDaemonEventLoopLagGauge,
+  registerAcpEventLoopLagGauge,
+} from './event-loop-lag-metrics.js';
+export {
+  addUserPromptAttributes,
+  addSystemPromptAttributes,
+  addToolSchemaAttributes,
+  addModelOutputAttributes,
+  addToolInputAttributes,
+  addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
+  areSensitiveSpanAttributesEnabled,
+  truncateContent,
+} from './detailed-span-attributes.js';
+export { getTraceContext, formatTraceparent } from './trace-context.js';
+export type { TraceContext } from './trace-context.js';

@@ -18,6 +18,8 @@ const qwenLightColors: ColorsTheme = {
   AccentGreen: '#86b300',
   AccentYellow: '#f2ae49',
   AccentRed: '#f07171',
+  AccentYellowDim: '#8B7000',
+  AccentRedDim: '#993333',
   DiffAdded: '#86b300',
   DiffRemoved: '#f07171',
   Comment: '#ABADB1',

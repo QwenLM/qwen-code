@@ -5,36 +5,63 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { uninstallExtension } from '../../config/extension.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { ExtensionManager } from '@qwen-code/qwen-code-core';
+import {
+  requestConsentNonInteractive,
+  requestConsentOrFail,
+} from './consent.js';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { loadSettings } from '../../config/settings.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface UninstallArgs {
-  name: string;
+  name: string; // can be extension name or source URL.
 }
 
 export async function handleUninstall(args: UninstallArgs) {
   try {
-    await uninstallExtension(args.name);
-    console.log(`Extension "${args.name}" successfully uninstalled.`);
+    const workspaceDir = process.cwd();
+    const extensionManager = new ExtensionManager({
+      workspaceDir,
+      locale: getCurrentLanguage(),
+      requestConsent: requestConsentOrFail.bind(
+        null,
+        requestConsentNonInteractive,
+      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+    });
+    await extensionManager.refreshCache();
+    const result = await extensionManager.uninstallExtension(args.name, false);
+    writeStdoutLine(
+      t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
+    );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }
 
 export const uninstallCommand: CommandModule = {
   command: 'uninstall <name>',
-  describe: 'Uninstalls an extension.',
+  describe: t('Uninstalls an extension.'),
   builder: (yargs) =>
     yargs
       .positional('name', {
-        describe: 'The name of the extension to uninstall.',
+        describe: t('The name or source path of the extension to uninstall.'),
         type: 'string',
       })
       .check((argv) => {
         if (!argv.name) {
           throw new Error(
-            'Please include the name of the extension to uninstall as a positional argument.',
+            t(
+              'Please include the name of the extension to uninstall as a positional argument.',
+            ),
           );
         }
         return true;

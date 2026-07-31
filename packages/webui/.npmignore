@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build outputs (already included in files array)
+# dist is included via package.json files array
+
+# Development files
+*.test.*
+*.spec.*
+.storybook/
+.storybook-static/
+.storybook-build/
+storybook-static/
+docs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Editor files
+.DS_Store
+Thumbs.db
+
+# Git files
+.git/
+.gitignore
+
+# Temporary files
+tmp/
+temp/
+.nyc_output/
+coverage/
+
+# Logs
+*.log
+
+# Configs
+.vite/
+.eslintrc*
+.prettierrc*
+.editorconfig
+
+# Examples (not needed in npm package)
+examples/
+
+# Scripts
+scripts/
+
+# Local development
+demo/
+dist-dev/
+dist-dev/**
+!dist/**

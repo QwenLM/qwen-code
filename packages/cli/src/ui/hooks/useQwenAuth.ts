@@ -5,23 +5,15 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
-import type { LoadedSettings } from '../../config/settings.js';
 import {
   AuthType,
   qwenOAuth2Events,
   QwenOAuth2Event,
+  type DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
 
-export interface DeviceAuthorizationInfo {
-  verification_uri: string;
-  verification_uri_complete: string;
-  user_code: string;
-  expires_in: number;
-}
-
-interface QwenAuthState {
-  isQwenAuthenticating: boolean;
-  deviceAuth: DeviceAuthorizationInfo | null;
+export interface QwenAuthState {
+  deviceAuth: DeviceAuthorizationData | null;
   authStatus:
     | 'idle'
     | 'polling'
@@ -32,26 +24,29 @@ interface QwenAuthState {
   authMessage: string | null;
 }
 
+export interface ExternalAuthState {
+  title: string;
+  message: string;
+  detail?: string;
+}
+
 export const useQwenAuth = (
-  settings: LoadedSettings,
+  pendingAuthType: AuthType | undefined,
   isAuthenticating: boolean,
 ) => {
   const [qwenAuthState, setQwenAuthState] = useState<QwenAuthState>({
-    isQwenAuthenticating: false,
     deviceAuth: null,
     authStatus: 'idle',
     authMessage: null,
   });
 
-  const isQwenAuth =
-    settings.merged.security?.auth?.selectedType === AuthType.QWEN_OAUTH;
+  const isQwenAuth = pendingAuthType === AuthType.QWEN_OAUTH;
 
   // Set up event listeners when authentication starts
   useEffect(() => {
     if (!isQwenAuth || !isAuthenticating) {
       // Reset state when not authenticating or not Qwen auth
       setQwenAuthState({
-        isQwenAuthenticating: false,
         deviceAuth: null,
         authStatus: 'idle',
         authMessage: null,
@@ -61,12 +56,11 @@ export const useQwenAuth = (
 
     setQwenAuthState((prev) => ({
       ...prev,
-      isQwenAuthenticating: true,
       authStatus: 'idle',
     }));
 
     // Set up event listeners
-    const handleDeviceAuth = (deviceAuth: DeviceAuthorizationInfo) => {
+    const handleDeviceAuth = (deviceAuth: DeviceAuthorizationData) => {
       setQwenAuthState((prev) => ({
         ...prev,
         deviceAuth: {
@@ -74,6 +68,7 @@ export const useQwenAuth = (
           verification_uri_complete: deviceAuth.verification_uri_complete,
           user_code: deviceAuth.user_code,
           expires_in: deviceAuth.expires_in,
+          device_code: deviceAuth.device_code,
         },
         authStatus: 'polling',
       }));
@@ -106,7 +101,6 @@ export const useQwenAuth = (
     qwenOAuth2Events.emit(QwenOAuth2Event.AuthCancel);
 
     setQwenAuthState({
-      isQwenAuthenticating: false,
       deviceAuth: null,
       authStatus: 'idle',
       authMessage: null,
@@ -114,8 +108,7 @@ export const useQwenAuth = (
   }, []);
 
   return {
-    ...qwenAuthState,
-    isQwenAuth,
+    qwenAuthState,
     cancelQwenAuth,
   };
 };

@@ -9,6 +9,7 @@ import { Box } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { MANAGEMENT_STEPS } from '../types.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
+import { t } from '../../../../i18n/index.js';
 
 interface ActionSelectionStepProps {
   selectedAgent: SubagentConfig | null;
@@ -27,13 +28,41 @@ export const ActionSelectionStep = ({
 
   // Filter actions based on whether the agent is built-in
   const allActions = [
-    { label: 'View Agent', value: 'view' as const },
-    { label: 'Edit Agent', value: 'edit' as const },
-    { label: 'Delete Agent', value: 'delete' as const },
-    { label: 'Back', value: 'back' as const },
+    {
+      key: 'view',
+      get label() {
+        return t('View Agent');
+      },
+      value: 'view' as const,
+    },
+    {
+      key: 'edit',
+      get label() {
+        return t('Edit Agent');
+      },
+      value: 'edit' as const,
+    },
+    {
+      key: 'delete',
+      get label() {
+        return t('Delete Agent');
+      },
+      value: 'delete' as const,
+    },
+    {
+      key: 'back',
+      get label() {
+        return t('Back');
+      },
+      value: 'back' as const,
+    },
   ];
 
-  const actions = selectedAgent?.isBuiltin
+  // Extension-level agents are also read-only (like builtin)
+  const isReadOnly =
+    selectedAgent?.isBuiltin || selectedAgent?.level === 'extension';
+
+  const actions = isReadOnly
     ? allActions.filter(
         (action) => action.value === 'view' || action.value === 'back',
       )

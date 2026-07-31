@@ -401,11 +401,9 @@ describe('QwenContentGenerator', () => {
       expect(mockQwenClient.getAccessToken).toHaveBeenCalled();
     });
 
-    it('should count tokens with valid token', async () => {
-      vi.mocked(mockQwenClient.getAccessToken).mockResolvedValue({
-        token: 'valid-token',
-      });
-      vi.mocked(mockQwenClient.getCredentials).mockReturnValue(mockCredentials);
+    it('should count tokens without requiring authentication', async () => {
+      // Clear any previous mock calls
+      vi.clearAllMocks();
 
       const request: CountTokensParameters = {
         model: 'qwen-turbo',
@@ -415,7 +413,8 @@ describe('QwenContentGenerator', () => {
       const result = await qwenContentGenerator.countTokens(request);
 
       expect(result.totalTokens).toBe(15);
-      expect(mockQwenClient.getAccessToken).toHaveBeenCalled();
+      // countTokens is a local operation and should not require OAuth credentials
+      expect(mockQwenClient.getAccessToken).not.toHaveBeenCalled();
     });
 
     it('should embed content with valid token', async () => {
@@ -1227,6 +1226,14 @@ describe('QwenContentGenerator', () => {
           expected: 'https://api.example.com:443/v1',
         },
         {
+          input: 'HTTPS://api.example.com',
+          expected: 'HTTPS://api.example.com/v1',
+        },
+        {
+          input: 'HtTp://localhost:8080',
+          expected: 'HtTp://localhost:8080/v1',
+        },
+        {
           input: 'api.example.com:9000/api',
           expected: 'https://api.example.com:9000/api/v1',
         },
@@ -1615,8 +1622,6 @@ describe('QwenContentGenerator', () => {
 
   describe('Edge Cases and Error Conditions', () => {
     it('should handle token retrieval with warning when SharedTokenManager fails', async () => {
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const mockTokenManager = {
         getValidCredentials: vi
           .fn()
@@ -1642,17 +1647,10 @@ describe('QwenContentGenerator', () => {
       await expect(
         newGenerator.generateContent(request, 'test-prompt-id'),
       ).rejects.toThrow('Failed to obtain valid Qwen access token');
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to get token from shared manager:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
       SharedTokenManager.getInstance = originalGetInstance;
     });
 
-    it('should handle all method types with token failure', async () => {
+    it('should handle method types with token failure (except countTokens)', async () => {
       const mockTokenManager = {
         getValidCredentials: vi
           .fn()
@@ -1685,7 +1683,7 @@ describe('QwenContentGenerator', () => {
         contents: [{ parts: [{ text: 'Embed' }] }],
       };
 
-      // All methods should fail with the same error
+      // Methods requiring authentication should fail
       await expect(
         newGenerator.generateContent(generateRequest, 'test-id'),
       ).rejects.toThrow('Failed to obtain valid Qwen access token');
@@ -1694,13 +1692,13 @@ describe('QwenContentGenerator', () => {
         newGenerator.generateContentStream(generateRequest, 'test-id'),
       ).rejects.toThrow('Failed to obtain valid Qwen access token');
 
-      await expect(newGenerator.countTokens(countRequest)).rejects.toThrow(
-        'Failed to obtain valid Qwen access token',
-      );
-
       await expect(newGenerator.embedContent(embedRequest)).rejects.toThrow(
         'Failed to obtain valid Qwen access token',
       );
+
+      // countTokens should succeed as it's a local operation
+      const countResult = await newGenerator.countTokens(countRequest);
+      expect(countResult.totalTokens).toBe(15);
 
       SharedTokenManager.getInstance = originalGetInstance;
     });

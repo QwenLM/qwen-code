@@ -7,7 +7,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import {
   useReactToolScheduler,
   mapToDisplay,
@@ -22,18 +22,18 @@ import type {
   ToolCallResponseInfo,
   ToolCall, // Import from core
   Status as ToolCallStatusType,
-  ToolInvocation,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
-  ToolConfirmationOutcome,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ApprovalMode,
-  Kind,
-  BaseDeclarativeTool,
-  BaseToolInvocation,
+  CoreToolScheduler,
+  getRuntimeContentGenerator,
+  MockTool,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
 // Mocks
@@ -48,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 
 const mockToolRegistry = {
   getTool: vi.fn(),
+  ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
   getAllToolNames: vi.fn(() => ['mockTool', 'anotherTool']),
 };
 
@@ -57,103 +58,45 @@ const mockConfig = {
   getSessionId: () => 'test-session-id',
   getUsageStatisticsEnabled: () => true,
   getDebugMode: () => false,
-  getAllowedTools: vi.fn(() => []),
+  storage: {
+    getProjectTempDir: () => '/tmp',
+  },
+  getTruncateToolOutputThreshold: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  getPermissionsAllow: vi.fn(() => []),
   getContentGeneratorConfig: () => ({
     model: 'test-model',
-    authType: 'oauth-personal',
+    authType: 'gemini',
+  }),
+  getBaseLlmClient: vi.fn(),
+  getUseModelRouter: () => false,
+  getGeminiClient: () => null, // No client needed for these tests
+  getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
+  getChatRecordingService: vi.fn(() => undefined),
+  getMessageBus: vi.fn().mockReturnValue(undefined),
+  getDisableAllHooks: vi.fn().mockReturnValue(true),
+  getHookSystem: vi.fn().mockReturnValue(undefined),
+  getDebugLogger: vi.fn().mockReturnValue({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
   }),
 } as unknown as Config;
 
-class MockToolInvocation extends BaseToolInvocation<object, ToolResult> {
-  constructor(
-    private readonly tool: MockTool,
-    params: object,
-  ) {
-    super(params);
-  }
-
-  getDescription(): string {
-    return JSON.stringify(this.params);
-  }
-
-  override shouldConfirmExecute(
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    return this.tool.shouldConfirmExecute(this.params, abortSignal);
-  }
-
-  execute(
-    signal: AbortSignal,
-    updateOutput?: (output: string) => void,
-    terminalColumns?: number,
-    terminalRows?: number,
-  ): Promise<ToolResult> {
-    return this.tool.execute(
-      this.params,
-      signal,
-      updateOutput,
-      terminalColumns,
-      terminalRows,
-    );
-  }
-}
-
-class MockTool extends BaseDeclarativeTool<object, ToolResult> {
-  constructor(
-    name: string,
-    displayName: string,
-    canUpdateOutput = false,
-    shouldConfirm = false,
-    isOutputMarkdown = false,
-  ) {
-    super(
-      name,
-      displayName,
-      'A mock tool for testing',
-      Kind.Other,
-      {},
-      isOutputMarkdown,
-      canUpdateOutput,
-    );
-    if (shouldConfirm) {
-      this.shouldConfirmExecute.mockImplementation(
-        async (): Promise<ToolCallConfirmationDetails | false> => ({
-          type: 'edit',
-          title: 'Mock Tool Requires Confirmation',
-          onConfirm: mockOnUserConfirmForToolConfirmation,
-          filePath: 'mock',
-          fileName: 'mockToolRequiresConfirmation.ts',
-          fileDiff: 'Mock tool requires confirmation',
-          originalContent: 'Original content',
-          newContent: 'New content',
-        }),
-      );
-    }
-  }
-
-  execute = vi.fn();
-  shouldConfirmExecute = vi.fn();
-
-  protected createInvocation(
-    params: object,
-  ): ToolInvocation<object, ToolResult> {
-    return new MockToolInvocation(this, params);
-  }
-}
-
-const mockTool = new MockTool('mockTool', 'Mock Tool');
-const mockToolWithLiveOutput = new MockTool(
-  'mockToolWithLiveOutput',
-  'Mock Tool With Live Output',
-  true,
-);
+const mockTool = new MockTool({
+  name: 'mockTool',
+  displayName: 'Mock Tool',
+  execute: vi.fn(),
+});
 let mockOnUserConfirmForToolConfirmation: Mock;
-const mockToolRequiresConfirmation = new MockTool(
-  'mockToolRequiresConfirmation',
-  'Mock Tool Requires Confirmation',
-  false,
-  true,
-);
+const mockToolRequiresConfirmation = new MockTool({
+  name: 'mockToolRequiresConfirmation',
+  displayName: 'Mock Tool Requires Confirmation',
+  execute: vi.fn(),
+  getDefaultPermission: () => Promise.resolve('ask' as any),
+  getConfirmationDetails: vi.fn(),
+});
 
 describe('useReactToolScheduler in YOLO Mode', () => {
   let onComplete: Mock;
@@ -163,8 +106,11 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     onComplete = vi.fn();
     setPendingHistoryItem = vi.fn();
     mockToolRegistry.getTool.mockClear();
+    mockToolRegistry.ensureTool.mockClear();
+    (mockConfig.getBaseLlmClient as Mock).mockReset();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
-    (mockToolRequiresConfirmation.shouldConfirmExecute as Mock).mockClear();
+    (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
     // IMPORTANT: Enable YOLO mode for this test suite
     (mockConfig.getApprovalMode as Mock).mockReturnValue(ApprovalMode.YOLO);
@@ -185,7 +131,6 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         onComplete,
         mockConfig as unknown as Config,
         setPendingHistoryItem,
-        () => undefined,
         () => {},
       ),
     );
@@ -223,10 +168,6 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     // Check that execute WAS called
     expect(mockToolRequiresConfirmation.execute).toHaveBeenCalledWith(
       request.args,
-      expect.any(AbortSignal),
-      undefined,
-      undefined,
-      undefined,
     );
 
     // Check that onComplete was called with success
@@ -257,6 +198,66 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     });
     expect(confirmationCall).toBeUndefined();
   });
+
+  it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
+    let resolveExecute: (result: ToolResult) => void;
+    let emitUpdate: ((output: unknown) => void) | undefined;
+    const streamingTool = new MockTool({
+      name: 'streamingTool',
+      displayName: 'Streaming Tool',
+      canUpdateOutput: true,
+      execute: vi.fn(
+        (_params: unknown, _signal?: AbortSignal, updateOutput?: unknown) => {
+          emitUpdate = updateOutput as (output: unknown) => void;
+          return new Promise<ToolResult>((resolve) => {
+            resolveExecute = resolve;
+          });
+        },
+      ) as any,
+    });
+    mockToolRegistry.getTool.mockReturnValue(streamingTool);
+
+    const { result } = renderSchedulerInYoloMode();
+    const schedule = result.current[1];
+
+    act(() => {
+      schedule(
+        {
+          callId: 'hbCall',
+          name: 'streamingTool',
+          args: {},
+        } as any,
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    act(() => {
+      emitUpdate!('streamed text');
+      emitUpdate!({ type: 'shell_progress', elapsedMs: 10_000 });
+    });
+
+    const executing = result.current[0].find(
+      (tc) => tc.request.callId === 'hbCall',
+    ) as { liveOutput?: unknown };
+    // The display chunk is retained; the later heartbeat did not replace it.
+    expect(executing?.liveOutput).toBe('streamed text');
+
+    act(() => {
+      resolveExecute!({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      } as ToolResult);
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+  });
 });
 
 describe('useReactToolScheduler', () => {
@@ -268,50 +269,23 @@ describe('useReactToolScheduler', () => {
   // to find a robust way to test these scenarios.
   let onComplete: Mock;
   let setPendingHistoryItem: Mock;
-  let capturedOnConfirmForTest:
-    | ((outcome: ToolConfirmationOutcome) => void | Promise<void>)
-    | undefined;
 
   beforeEach(() => {
     onComplete = vi.fn();
-    capturedOnConfirmForTest = undefined;
-    setPendingHistoryItem = vi.fn((updaterOrValue) => {
-      let pendingItem: HistoryItemWithoutId | null = null;
-      if (typeof updaterOrValue === 'function') {
-        // Loosen the type for prevState to allow for more flexible updates in tests
-        const prevState: Partial<HistoryItemToolGroup> = {
-          type: 'tool_group', // Still default to tool_group for most cases
-          tools: [],
-        };
-
-        pendingItem = updaterOrValue(prevState as any); // Allow any for more flexibility
-      } else {
-        pendingItem = updaterOrValue;
-      }
-      // Capture onConfirm if it exists, regardless of the exact type of pendingItem
-      // This is a common pattern in these tests.
-      if (
-        (pendingItem as HistoryItemToolGroup)?.tools?.[0]?.confirmationDetails
-          ?.onConfirm
-      ) {
-        capturedOnConfirmForTest = (pendingItem as HistoryItemToolGroup)
-          .tools[0].confirmationDetails?.onConfirm;
-      }
-    });
+    setPendingHistoryItem = vi.fn();
 
     mockToolRegistry.getTool.mockClear();
+    mockToolRegistry.ensureTool.mockClear();
     (mockTool.execute as Mock).mockClear();
-    (mockTool.shouldConfirmExecute as Mock).mockClear();
-    (mockToolWithLiveOutput.execute as Mock).mockClear();
-    (mockToolWithLiveOutput.shouldConfirmExecute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
-    (mockToolRequiresConfirmation.shouldConfirmExecute as Mock).mockClear();
+    (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
 
     mockOnUserConfirmForToolConfirmation = vi.fn();
     (
-      mockToolRequiresConfirmation.shouldConfirmExecute as Mock
+      mockToolRequiresConfirmation.getConfirmationDetails as Mock
     ).mockImplementation(
-      async (): Promise<ToolCallConfirmationDetails | null> =>
+      async (): Promise<ToolCallConfirmationDetails> =>
         ({
           onConfirm: mockOnUserConfirmForToolConfirmation,
           fileName: 'mockToolRequiresConfirmation.ts',
@@ -335,7 +309,6 @@ describe('useReactToolScheduler', () => {
         onComplete,
         mockConfig as unknown as Config,
         setPendingHistoryItem,
-        () => undefined,
         () => {},
       ),
     );
@@ -351,7 +324,6 @@ describe('useReactToolScheduler', () => {
       llmContent: 'Tool output',
       returnDisplay: 'Formatted tool output',
     } as ToolResult);
-    (mockTool.shouldConfirmExecute as Mock).mockResolvedValue(null);
 
     const { result } = renderScheduler();
     const schedule = result.current[1];
@@ -374,13 +346,7 @@ describe('useReactToolScheduler', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(mockTool.execute).toHaveBeenCalledWith(
-      request.args,
-      expect.any(AbortSignal),
-      undefined,
-      undefined,
-      undefined,
-    );
+    expect(mockTool.execute).toHaveBeenCalledWith(request.args);
     expect(onComplete).toHaveBeenCalledWith([
       expect.objectContaining({
         status: 'success',
@@ -400,6 +366,143 @@ describe('useReactToolScheduler', () => {
       }),
     ]);
     expect(result.current[0]).toEqual([]);
+  });
+
+  it('resolves full-turn tool calls against the exact model runtime', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockTool.execute as Mock).mockImplementation(async () => {
+      expect(getRuntimeContentGenerator()).toBe(runtimeView);
+      return {
+        llmContent: 'Tool output',
+        returnDisplay: 'Tool output',
+      } as ToolResult;
+    });
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel,
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'openai:vision-agent\0https://vision.example.com/v1\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'openai:vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(mockTool.execute).toHaveBeenCalled();
+  });
+
+  it('fails closed when the full-turn tool runtime cannot be resolved', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const recordToolResult = vi.fn();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue({
+      recordToolResult,
+    });
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockRejectedValue(new Error('missing route')),
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'unresolved-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it('fails closed when full-turn tool scheduling rejects', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'rejected-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
   });
 
   it('should handle tool not found', async () => {
@@ -442,10 +545,11 @@ describe('useReactToolScheduler', () => {
     expect(result.current[0]).toEqual([]);
   });
 
-  it('should handle error during shouldConfirmExecute', async () => {
+  it('should handle error during getDefaultPermission', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
     const confirmError = new Error('Confirmation check failed');
-    (mockTool.shouldConfirmExecute as Mock).mockRejectedValue(confirmError);
+    const originalGetDefaultPermission = mockTool.getDefaultPermission;
+    mockTool.getDefaultPermission = () => Promise.reject(confirmError);
 
     const { result } = renderScheduler();
     const schedule = result.current[1];
@@ -475,11 +579,11 @@ describe('useReactToolScheduler', () => {
       }),
     ]);
     expect(result.current[0]).toEqual([]);
+    mockTool.getDefaultPermission = originalGetDefaultPermission;
   });
 
   it('should handle error during execute', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
-    (mockTool.shouldConfirmExecute as Mock).mockResolvedValue(null);
     const execError = new Error('Execution failed');
     (mockTool.execute as Mock).mockRejectedValue(execError);
 
@@ -516,220 +620,24 @@ describe('useReactToolScheduler', () => {
     expect(result.current[0]).toEqual([]);
   });
 
-  it.skip('should handle tool requiring confirmation - approved', async () => {
-    mockToolRegistry.getTool.mockReturnValue(mockToolRequiresConfirmation);
-    const expectedOutput = 'Confirmed output';
-    (mockToolRequiresConfirmation.execute as Mock).mockResolvedValue({
-      llmContent: expectedOutput,
-      returnDisplay: 'Confirmed display',
-    } as ToolResult);
-
-    const { result } = renderScheduler();
-    const schedule = result.current[1];
-    const request: ToolCallRequestInfo = {
-      callId: 'callConfirm',
-      name: 'mockToolRequiresConfirmation',
-      args: { data: 'sensitive' },
-    } as any;
-
-    act(() => {
-      schedule(request, new AbortController().signal);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(setPendingHistoryItem).toHaveBeenCalled();
-    expect(capturedOnConfirmForTest).toBeDefined();
-
-    await act(async () => {
-      await capturedOnConfirmForTest?.(ToolConfirmationOutcome.ProceedOnce);
-    });
-
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(mockOnUserConfirmForToolConfirmation).toHaveBeenCalledWith(
-      ToolConfirmationOutcome.ProceedOnce,
-    );
-    expect(mockToolRequiresConfirmation.execute).toHaveBeenCalled();
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'success',
-        request,
-        response: expect.objectContaining({
-          resultDisplay: 'Confirmed display',
-          responseParts: expect.arrayContaining([
-            expect.objectContaining({
-              functionResponse: expect.objectContaining({
-                response: { output: expectedOutput },
-              }),
-            }),
-          ]),
-        }),
-      }),
-    ]);
-  });
-
-  it.skip('should handle tool requiring confirmation - cancelled by user', async () => {
-    mockToolRegistry.getTool.mockReturnValue(mockToolRequiresConfirmation);
-    const { result } = renderScheduler();
-    const schedule = result.current[1];
-    const request: ToolCallRequestInfo = {
-      callId: 'callConfirmCancel',
-      name: 'mockToolRequiresConfirmation',
-      args: {},
-    } as any;
-
-    act(() => {
-      schedule(request, new AbortController().signal);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(setPendingHistoryItem).toHaveBeenCalled();
-    expect(capturedOnConfirmForTest).toBeDefined();
-
-    await act(async () => {
-      await capturedOnConfirmForTest?.(ToolConfirmationOutcome.Cancel);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(mockOnUserConfirmForToolConfirmation).toHaveBeenCalledWith(
-      ToolConfirmationOutcome.Cancel,
-    );
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'cancelled',
-        request,
-        response: expect.objectContaining({
-          responseParts: expect.arrayContaining([
-            expect.objectContaining({
-              functionResponse: expect.objectContaining({
-                response: expect.objectContaining({
-                  error: `User did not allow tool call ${request.name}. Reason: User cancelled.`,
-                }),
-              }),
-            }),
-          ]),
-        }),
-      }),
-    ]);
-  });
-
-  it.skip('should handle live output updates', async () => {
-    mockToolRegistry.getTool.mockReturnValue(mockToolWithLiveOutput);
-    let liveUpdateFn: ((output: string) => void) | undefined;
-    let resolveExecutePromise: (value: ToolResult) => void;
-    const executePromise = new Promise<ToolResult>((resolve) => {
-      resolveExecutePromise = resolve;
-    });
-
-    (mockToolWithLiveOutput.execute as Mock).mockImplementation(
-      async (
-        _args: Record<string, unknown>,
-        _signal: AbortSignal,
-        updateFn: ((output: string) => void) | undefined,
-      ) => {
-        liveUpdateFn = updateFn;
-        return executePromise;
-      },
-    );
-    (mockToolWithLiveOutput.shouldConfirmExecute as Mock).mockResolvedValue(
-      null,
-    );
-
-    const { result } = renderScheduler();
-    const schedule = result.current[1];
-    const request: ToolCallRequestInfo = {
-      callId: 'liveCall',
-      name: 'mockToolWithLiveOutput',
-      args: {},
-    } as any;
-
-    act(() => {
-      schedule(request, new AbortController().signal);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(liveUpdateFn).toBeDefined();
-    expect(setPendingHistoryItem).toHaveBeenCalled();
-
-    await act(async () => {
-      liveUpdateFn?.('Live output 1');
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    await act(async () => {
-      liveUpdateFn?.('Live output 2');
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    act(() => {
-      resolveExecutePromise({
-        llmContent: 'Final output',
-        returnDisplay: 'Final display',
-      } as ToolResult);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'success',
-        request,
-        response: expect.objectContaining({
-          resultDisplay: 'Final display',
-          responseParts: expect.arrayContaining([
-            expect.objectContaining({
-              functionResponse: expect.objectContaining({
-                response: { output: 'Final output' },
-              }),
-            }),
-          ]),
-        }),
-      }),
-    ]);
-    expect(result.current[0]).toEqual([]);
-  });
-
   it('should schedule and execute multiple tool calls', async () => {
-    const tool1 = new MockTool('tool1', 'Tool 1');
-    tool1.execute.mockResolvedValue({
-      llmContent: 'Output 1',
-      returnDisplay: 'Display 1',
-    } as ToolResult);
-    tool1.shouldConfirmExecute.mockResolvedValue(null);
+    const tool1 = new MockTool({
+      name: 'tool1',
+      displayName: 'Tool 1',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Output 1',
+        returnDisplay: 'Display 1',
+      } as ToolResult),
+    });
 
-    const tool2 = new MockTool('tool2', 'Tool 2');
-    tool2.execute.mockResolvedValue({
-      llmContent: 'Output 2',
-      returnDisplay: 'Display 2',
-    } as ToolResult);
-    tool2.shouldConfirmExecute.mockResolvedValue(null);
+    const tool2 = new MockTool({
+      name: 'tool2',
+      displayName: 'Tool 2',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Output 2',
+        returnDisplay: 'Display 2',
+      } as ToolResult),
+    });
 
     mockToolRegistry.getTool.mockImplementation((name) => {
       if (name === 'tool1') return tool1;
@@ -806,60 +714,64 @@ describe('useReactToolScheduler', () => {
     expect(result.current[0]).toEqual([]);
   });
 
-  it.skip('should throw error if scheduling while already running', async () => {
-    mockToolRegistry.getTool.mockReturnValue(mockTool);
-    const longExecutePromise = new Promise<ToolResult>((resolve) =>
-      setTimeout(
-        () =>
-          resolve({
-            llmContent: 'done',
-            returnDisplay: 'done display',
-          }),
-        50,
-      ),
-    );
-    (mockTool.execute as Mock).mockReturnValue(longExecutePromise);
-    (mockTool.shouldConfirmExecute as Mock).mockResolvedValue(null);
+  it('compacts live output before storing it in React state', async () => {
+    vi.useRealTimers();
+    const longOutput = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+    let resolveExecution!: (result: ToolResult) => void;
+    const streamingTool = new MockTool({
+      name: 'streamTool',
+      displayName: 'Stream Tool',
+      canUpdateOutput: true,
+      execute: vi.fn((_params, _signal, updateOutput) => {
+        updateOutput?.(longOutput);
+        return new Promise<ToolResult>((resolve) => {
+          resolveExecution = resolve;
+        });
+      }),
+    });
+
+    mockToolRegistry.getTool.mockReturnValue(streamingTool);
 
     const { result } = renderScheduler();
-    const schedule = result.current[1];
-    const request1: ToolCallRequestInfo = {
-      callId: 'run1',
-      name: 'mockTool',
-      args: {},
-    } as any;
-    const request2: ToolCallRequestInfo = {
-      callId: 'run2',
-      name: 'mockTool',
-      args: {},
+    const request: ToolCallRequestInfo = {
+      callId: 'stream-call',
+      name: 'streamTool',
+      args: { param: 'value' },
     } as any;
 
     act(() => {
-      schedule(request1, new AbortController().signal);
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
+      result.current[1](request, new AbortController().signal);
     });
 
-    expect(() => schedule(request2, new AbortController().signal)).toThrow(
-      'Cannot schedule tool calls while other tool calls are running',
+    await waitFor(() => {
+      expect(
+        result.current[0].some((call) => call.status === 'executing'),
+      ).toBe(true);
+    });
+
+    const executingCall = result.current[0].find(
+      (call) => call.status === 'executing',
+    ) as { liveOutput?: string } | undefined;
+    expect(executingCall?.liveOutput).not.toBe(longOutput);
+    expect(executingCall?.liveOutput?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
     );
+    expect(executingCall?.liveOutput).toContain('head-');
+    expect(executingCall?.liveOutput).toContain('-tail');
+    expect(executingCall?.liveOutput).toContain('truncated from');
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(50);
-      await vi.runAllTimersAsync();
-      await act(async () => {
-        await vi.runAllTimersAsync();
-      });
+      resolveExecution({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      } as ToolResult);
     });
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'success',
-        request: request1,
-        response: expect.objectContaining({ resultDisplay: 'done display' }),
-      }),
-    ]);
-    expect(result.current[0]).toEqual([]);
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
   });
 });
 
@@ -870,7 +782,11 @@ describe('mapToDisplay', () => {
     args: { foo: 'bar' },
   } as any;
 
-  const baseTool = new MockTool('testTool', 'Test Tool Display');
+  const baseTool = new MockTool({
+    name: 'testTool',
+    displayName: 'Test Tool Display',
+    execute: vi.fn(),
+  });
 
   const baseResponse: ToolCallResponseInfo = {
     callId: 'testCallId',
@@ -1028,7 +944,7 @@ describe('mapToDisplay', () => {
       expectedStatus: ToolCallStatus.Error,
       expectedResultDisplay: 'Execution failed display',
       expectedName: baseTool.displayName, // Changed from baseTool.name
-      expectedDescription: baseInvocation.getDescription(),
+      expectedDescription: JSON.stringify(baseRequest.args),
     },
     {
       name: 'cancelled',
@@ -1099,19 +1015,20 @@ describe('mapToDisplay', () => {
       invocation: baseTool.build(baseRequest.args),
       response: { ...baseResponse, callId: 'call1' },
     } as ToolCall;
-    const toolForCall2 = new MockTool(
-      baseTool.name,
-      baseTool.displayName,
-      false,
-      false,
-      true,
-    );
+    const toolForCall2 = new MockTool({
+      name: baseTool.name,
+      displayName: baseTool.displayName,
+      isOutputMarkdown: true,
+      execute: vi.fn(),
+    });
     const toolCall2: ToolCall = {
       request: { ...baseRequest, callId: 'call2' },
       status: 'executing',
       tool: toolForCall2,
       invocation: toolForCall2.build(baseRequest.args),
       liveOutput: 'markdown output',
+      startTime: 1000000000,
+      executionStartTime: 1234567890,
     } as ToolCall;
 
     const display = mapToDisplay([toolCall1, toolCall2]);
@@ -1123,5 +1040,35 @@ describe('mapToDisplay', () => {
     expect(display.tools[1].status).toBe(ToolCallStatus.Executing);
     expect(display.tools[1].resultDisplay).toBe('markdown output');
     expect(display.tools[1].renderOutputAsMarkdown).toBe(true);
+    expect(display.tools[1].executionStartTime).toBe(1234567890);
+    expect(display.tools[0].executionStartTime).toBeUndefined();
+  });
+
+  it('compacts large resultDisplay values before storing display history', () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+    const toolCall: ToolCall = {
+      request: { ...baseRequest, callId: 'large-output-call' },
+      status: 'success',
+      tool: baseTool,
+      invocation: baseTool.build(baseRequest.args),
+      response: {
+        ...baseResponse,
+        callId: 'large-output-call',
+        resultDisplay: longDisplay,
+      },
+    } as ToolCall;
+
+    const display = mapToDisplay(toolCall);
+    const resultDisplay = display.tools[0].resultDisplay;
+
+    expect(typeof resultDisplay).toBe('string');
+    expect((resultDisplay as string).length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(resultDisplay).toContain('head-');
+    expect(resultDisplay).toContain('-tail');
+    expect(resultDisplay).toContain('truncated from');
   });
 });

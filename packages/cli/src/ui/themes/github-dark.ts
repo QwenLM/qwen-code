@@ -9,7 +9,7 @@ import { type ColorsTheme, Theme } from './theme.js';
 const githubDarkColors: ColorsTheme = {
   type: 'dark',
   Background: '#24292e',
-  Foreground: '#d1d5da',
+  Foreground: '#c0c4c8',
   LightBlue: '#79B8FF',
   AccentBlue: '#79B8FF',
   AccentPurple: '#B392F0',
@@ -17,6 +17,8 @@ const githubDarkColors: ColorsTheme = {
   AccentGreen: '#85E89D',
   AccentYellow: '#FFAB70',
   AccentRed: '#F97583',
+  AccentYellowDim: '#8B7530',
+  AccentRedDim: '#8B3A4A',
   DiffAdded: '#3C4636',
   DiffRemoved: '#502125',
   Comment: '#6A737D',

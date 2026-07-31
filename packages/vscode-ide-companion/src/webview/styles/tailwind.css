@@ -1,0 +1,27 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * VSCode IDE Companion - Tailwind CSS
+ * 
+ * Only Tailwind directives and minimal VSCode-specific utilities.
+ * Component styles are in @qwen-code/webui package.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================
+   VSCode-specific Utilities
+   =========================== */
+@layer utilities {
+  /* Multi-line clamp with ellipsis (Chromium-based webview supported) */
+  .q-line-clamp-3 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+  }
+}

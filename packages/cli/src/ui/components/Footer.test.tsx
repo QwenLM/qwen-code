@@ -5,155 +5,430 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
-import { tildeifyPath } from '@qwen-code/qwen-code-core';
-import path from 'node:path';
+import * as useStatusLineModule from '../hooks/useStatusLine.js';
+import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { VimModeProvider } from '../contexts/VimModeContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import { StreamingState } from '../types.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
+vi.mock('../hooks/useStatusLine.js');
+const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const original =
+  const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const registry = {
+    list: vi.fn(() => []),
+    subscribe: vi.fn(() => () => {}),
+  };
   return {
-    ...original,
-    shortenPath: (p: string, len: number) => {
-      if (p.length > len) {
-        return '...' + p.slice(p.length - len + 3);
-      }
-      return p;
-    },
+    ...actual,
+    getManagedAutoMemoryDreamTaskRegistry: vi.fn(() => registry),
   };
 });
 
 const defaultProps = {
   model: 'gemini-pro',
-  targetDir:
-    '/Users/test/project/foo/bar/and/some/more/directories/to/make/it/long',
-  branchName: 'main',
-  debugMode: false,
-  debugMessage: '',
-  corgiMode: false,
-  errorCount: 0,
-  showErrorDetails: false,
-  showMemoryUsage: false,
-  promptTokenCount: 100,
-  nightly: false,
 };
 
-const renderWithWidth = (width: number, props = defaultProps) => {
+const createMockMemoryManager = () => ({
+  subscribe: vi.fn(() => () => {}),
+  listTasksByType: vi.fn(() => []),
+});
+
+const createMockConfig = (overrides = {}) => ({
+  getModel: vi.fn(() => defaultProps.model),
+  getDebugMode: vi.fn(() => false),
+  getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
+  getMcpServers: vi.fn(() => ({})),
+  getBlockedMcpServers: vi.fn(() => []),
+  getProjectRoot: vi.fn(() => '/test/project'),
+  getSessionId: vi.fn(() => 'test-session'),
+  getMemoryManager: vi.fn(createMockMemoryManager),
+  isSafeMode: vi.fn(() => false),
+  ...overrides,
+});
+
+const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
+  ({
+    sessionStats: {
+      lastPromptTokenCount: 100,
+      sessionId: 'test-session',
+      metrics: {
+        models: {},
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+    },
+    currentModel: 'gemini-pro',
+    branchName: undefined,
+    geminiMdFileCount: 0,
+    contextFileNames: [],
+    showToolDescriptions: false,
+    ideContextState: undefined,
+    startupIdeConnectionStatus: { state: 'idle' },
+    isConfigInitialized: true,
+    ...overrides,
+  }) as UIState;
+
+const createMockSettings = (): LoadedSettings =>
+  ({
+    merged: {
+      general: {
+        vimMode: false,
+      },
+    },
+  }) as LoadedSettings;
+
+const renderWithWidth = (
+  width: number,
+  uiState: UIState,
+  configOverrides = {},
+) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
-  return render(<Footer {...props} />);
+  const mockSettings = createMockSettings();
+  return render(
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider
+        value={createMockConfig(configOverrides) as never}
+      >
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VimModeProvider settings={mockSettings}>
+            <UIStateContext.Provider value={uiState}>
+              <Footer />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </KeypressProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
+  );
 };
 
 describe('<Footer />', () => {
+  beforeEach(() => {
+    useStatusLineMock.mockReturnValue({
+      lines: [],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    });
+  });
+
   it('renders the component', () => {
-    const { lastFrame } = renderWithWidth(120);
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).toBeDefined();
   });
 
-  describe('path display', () => {
-    it('should display shortened path on a wide terminal', () => {
-      const { lastFrame } = renderWithWidth(120);
-      const tildePath = tildeifyPath(defaultProps.targetDir);
-      const expectedPath = '...' + tildePath.slice(tildePath.length - 48 + 3);
-      expect(lastFrame()).toContain(expectedPath);
+  it('shows the "workflow active" indicator when the keyword trigger is armed', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ workflowKeywordActive: true }),
+    );
+    expect(lastFrame()).toContain('▷ workflow active');
+  });
+
+  it('hides the "workflow active" indicator by default', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows steer and queue shortcuts while the model is responding', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+
+    expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
+  });
+
+  it('shows mode indicator alongside steering hint during streaming', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+
+    const frame = lastFrame()!;
+    expect(frame).toContain('Enter to steer · Ctrl+Q to queue');
+    expect(frame).toContain('YOLO mode');
+  });
+
+  it('shows deferred IDE connection progress', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connecting' },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connecting... context may be unavailable',
+    );
+  });
+
+  it('shows deferred IDE connection failures', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: {
+          state: 'failed',
+          message: 'ide_connect timed out after 10000ms',
+        },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connection unavailable: ide_connect timed out after 10000ms',
+    );
+  });
+
+  it('hides the deferred IDE status after connection succeeds', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connected' },
+      }),
+    );
+
+    expect(lastFrame()).not.toContain('IDE connecting');
+    expect(lastFrame()).not.toContain('IDE connection unavailable');
+    expect(lastFrame()).toContain('? for shortcuts');
+  });
+
+  it('shows the active scheduled task count', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState(), {
+      isCronEnabled: vi.fn(() => true),
+      getCronScheduler: vi.fn(() => ({ size: 2 })),
+    });
+    expect(lastFrame()).toContain('◎\uFE0E 2 scheduled tasks');
+  });
+
+  it('refreshes the scheduled task count after mount', async () => {
+    vi.useFakeTimers();
+    let schedulerSize = 0;
+    let unmount: (() => void) | undefined;
+    const scheduler = {
+      get size() {
+        return schedulerSize;
+      },
+    };
+    try {
+      const renderResult = renderWithWidth(120, createMockUIState(), {
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      });
+      unmount = renderResult.unmount;
+      const { lastFrame } = renderResult;
+      expect(lastFrame()).not.toContain('scheduled task');
+
+      schedulerSize = 1;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).toContain('◎\uFE0E 1 scheduled task');
+
+      schedulerSize = 0;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).not.toContain('scheduled task');
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the default approval mode badge when in DEFAULT mode', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('⏸');
+    expect(frame).toContain('Ask permissions');
+    expect(frame).not.toContain('? for shortcuts');
+  });
+
+  it('does not display the working directory or branch name', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).not.toMatch(/\(.*\*\)/);
+  });
+
+  it('displays the context percentage', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).toMatch(/\d+(\.\d+)?% context used/);
+  });
+
+  it('displays the abbreviated context percentage on narrow terminal', () => {
+    const { lastFrame } = renderWithWidth(99, createMockUIState());
+    expect(lastFrame()).toMatch(/\d+%/);
+  });
+
+  describe('status line rendering', () => {
+    it('renders multi-line status line output', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name (main) ctx:34%');
+      expect(frame).toContain('████░░░░ 34% context');
     });
 
-    it('should display only the base directory name on a narrow terminal', () => {
-      const { lastFrame } = renderWithWidth(79);
-      const expectedPath = path.basename(defaultProps.targetDir);
-      expect(lastFrame()).toContain(expectedPath);
+    it('wraps long status line output without growing past two lines', () => {
+      const longLine = [
+        'visible-start',
+        ...Array.from({ length: 40 }, (_, index) => `chunk-${index}`),
+        'hidden-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('visible-start');
+      expect(frame).toContain('chunk-10');
+      expect(frame).not.toContain('hidden-tail');
+      expect(frame).not.toContain('? for shortcuts');
     });
 
-    it('should use wide layout at 80 columns', () => {
-      const { lastFrame } = renderWithWidth(80);
-      const tildePath = tildeifyPath(defaultProps.targetDir);
-      const expectedPath = '...' + tildePath.slice(tildePath.length - 32 + 3);
-      expect(lastFrame()).toContain(expectedPath);
+    it('clips later status line entries after wrapped output reaches two lines', () => {
+      const longLine = [
+        'first-line-start',
+        ...Array.from({ length: 40 }, (_, index) => `part-${index}`),
+        'first-line-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine, 'second-status-line'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('first-line-start');
+      expect(frame).not.toContain('first-line-tail');
+      expect(frame).not.toContain('second-status-line');
+      expect(frame).not.toContain('? for shortcuts');
     });
 
-    it('should use narrow layout at 79 columns', () => {
-      const { lastFrame } = renderWithWidth(79);
-      const expectedPath = path.basename(defaultProps.targetDir);
-      expect(lastFrame()).toContain(expectedPath);
-      const tildePath = tildeifyPath(defaultProps.targetDir);
-      const unexpectedPath = '...' + tildePath.slice(tildePath.length - 31 + 3);
-      expect(lastFrame()).not.toContain(unexpectedPath);
+    it('suppresses hint when status line is active', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['status info'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toContain('? for shortcuts');
+    });
+
+    it('renders status line with respectUserColors enabled', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['\x1b[38;2;99;102;241m🤖 qwen\x1b[0m'],
+        useThemeColors: false,
+        respectUserColors: true,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('🤖 qwen');
+    });
+
+    it('hides context indicator when hideContextIndicator is true', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: [],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: true,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toMatch(/\d+(\.\d+)?% context used/);
     });
   });
 
-  it('displays the branch name when provided', () => {
-    const { lastFrame } = renderWithWidth(120);
-    expect(lastFrame()).toContain(`(${defaultProps.branchName}*)`);
+  describe('config init message', () => {
+    it('shows init status in place of the hint while config is initializing', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('Initializing...');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('falls back to the hint once config is initialized', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: true }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).not.toContain('Initializing...');
+      expect(frame).toContain('? for shortcuts');
+    });
+
+    // Init progress is more useful than zero layout shift: we show it even
+    // when a custom status line is active, accepting that the row shrinks
+    // by one line once init completes. Still strictly better than the
+    // original bug (a 2-row residual above the input in the default case).
+    it('shows init status even when a custom status line is active', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name ctx:34%'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name ctx:34%');
+      expect(frame).toContain('Initializing...');
+    });
   });
 
-  it('does not display the branch name when not provided', () => {
-    const { lastFrame } = renderWithWidth(120, {
-      ...defaultProps,
-      branchName: undefined,
-    });
-    expect(lastFrame()).not.toContain(`(${defaultProps.branchName}*)`);
-  });
-
-  it('displays the model name and context percentage', () => {
-    const { lastFrame } = renderWithWidth(120);
-    expect(lastFrame()).toContain(defaultProps.model);
-    expect(lastFrame()).toMatch(/\(\d+% context[\s\S]*left\)/);
-  });
-
-  describe('sandbox and trust info', () => {
-    it('should display untrusted when isTrustedFolder is false', () => {
-      const { lastFrame } = renderWithWidth(120, {
-        ...defaultProps,
-        isTrustedFolder: false,
-      });
-      expect(lastFrame()).toContain('untrusted');
+  describe('footer rendering (golden snapshots)', () => {
+    it('renders complete footer on wide terminal', () => {
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).toMatchSnapshot('complete-footer-wide');
     });
 
-    it('should display custom sandbox info when SANDBOX env is set', () => {
-      vi.stubEnv('SANDBOX', 'gemini-cli-test-sandbox');
-      const { lastFrame } = renderWithWidth(120, {
-        ...defaultProps,
-        isTrustedFolder: undefined,
-      });
-      expect(lastFrame()).toContain('test');
-      vi.unstubAllEnvs();
-    });
-
-    it('should display macOS Seatbelt info when SANDBOX is sandbox-exec', () => {
-      vi.stubEnv('SANDBOX', 'sandbox-exec');
-      vi.stubEnv('SEATBELT_PROFILE', 'test-profile');
-      const { lastFrame } = renderWithWidth(120, {
-        ...defaultProps,
-        isTrustedFolder: true,
-      });
-      expect(lastFrame()).toMatch(/macOS Seatbelt.*\(test-profile\)/s);
-      vi.unstubAllEnvs();
-    });
-
-    it('should display "no sandbox" when SANDBOX is not set and folder is trusted', () => {
-      // Clear any SANDBOX env var that might be set.
-      vi.stubEnv('SANDBOX', '');
-      const { lastFrame } = renderWithWidth(120, {
-        ...defaultProps,
-        isTrustedFolder: true,
-      });
-      expect(lastFrame()).toContain('no sandbox');
-      vi.unstubAllEnvs();
-    });
-
-    it('should prioritize untrusted message over sandbox info', () => {
-      vi.stubEnv('SANDBOX', 'gemini-cli-test-sandbox');
-      const { lastFrame } = renderWithWidth(120, {
-        ...defaultProps,
-        isTrustedFolder: false,
-      });
-      expect(lastFrame()).toContain('untrusted');
-      expect(lastFrame()).not.toMatch(/test-sandbox/s);
-      vi.unstubAllEnvs();
+    it('renders complete footer on narrow terminal', () => {
+      const { lastFrame } = renderWithWidth(79, createMockUIState());
+      expect(lastFrame()).toMatchSnapshot('complete-footer-narrow');
     });
   });
 });

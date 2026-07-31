@@ -10,17 +10,87 @@ import type {
   ToolInvocation,
   ToolMcpConfirmationDetails,
   ToolResult,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
+  ToolResultDisplay,
+  ToolConfirmationPayload,
+  McpToolProgressData,
   ToolConfirmationOutcome,
 } from './tools.js';
-import type { CallableTool, FunctionCall, Part } from '@google/genai';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type {
+  CallableTool,
+  FunctionCall,
+  Part,
+  PartListUnion,
+} from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
+import type { Config } from '../config/config.js';
+import { truncateToolOutput } from '../utils/truncation.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage, isAbortError } from '../utils/errors.js';
+import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
+import {
+  getInvocationContext,
+  INVOCATION_CONTEXT_META_KEY,
+} from '../utils/invocation-context.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { isImagePart } from '../services/visionBridge/image-part-utils.js';
+
+const debugLogger = createDebugLogger('MCP_TOOL');
+
+const MCP_CONNECTION_ERROR_PATTERNS = [
+  /ECONNREFUSED/i,
+  /ENOTFOUND/i,
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /connection (closed|lost)/i,
+  /not connected/i,
+  /disconnected/i,
+  /transport closed/i,
+];
 
 type ToolParams = Record<string, unknown>;
+
+/**
+ * Minimal interface for the raw MCP Client's callTool method.
+ * This avoids a direct import of @modelcontextprotocol/sdk in this file,
+ * keeping the dependency contained in mcp-client.ts.
+ */
+export interface McpDirectClient {
+  callTool(
+    params: {
+      name: string;
+      arguments?: Record<string, unknown>;
+      _meta?: Record<string, unknown>;
+    },
+    resultSchema?: unknown,
+    options?: {
+      onprogress?: (progress: {
+        progress: number;
+        total?: number;
+        message?: string;
+      }) => void;
+      timeout?: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<McpCallToolResult>;
+}
+
+/** The result shape returned by MCP SDK Client.callTool(). */
+interface McpCallToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  [key: string]: unknown;
+}
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
 type McpTextBlock = {
@@ -56,60 +126,84 @@ type McpContentBlock =
   | McpResourceBlock
   | McpResourceLinkBlock;
 
+/**
+ * MCP Tool Annotations as defined in the MCP specification.
+ * These provide hints about a tool's behavior to help clients make decisions
+ * about tool approval and safety.
+ */
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
-  private static readonly allowlist: Set<string> = new Set();
+  private static readonly MAX_RECONNECT_RETRIES = 3;
 
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
     readonly serverToolName: string,
     readonly displayName: string,
-    readonly timeout?: number,
+    readonly registeredToolName: string,
+    readonly permissionAliases: readonly string[],
     readonly trust?: boolean,
     params: ToolParams = {},
+    private readonly cliConfig?: Config,
+    private readonly mcpClient?: McpDirectClient,
+    private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
+    private readonly annotations?: McpToolAnnotations,
+    private readonly allowInvocationContext: boolean = false,
+    private readonly retryCount: number = 0,
   ) {
     super(params);
   }
 
-  override async shouldConfirmExecute(
+  /**
+   * MCP tool default permission based on trust:
+   * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
+   * - All other MCP tools → 'ask'
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    // MCP servers explicitly marked as trusted bypass confirmation,
+    // but only when the workspace folder is also trusted (security gate).
+    if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
+  /**
+   * Constructs confirmation dialog details for an MCP tool call.
+   */
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    const serverAllowListKey = this.serverName;
-    const toolAllowListKey = `${this.serverName}.${this.serverToolName}`;
-
-    if (this.trust) {
-      return false; // server is trusted, no confirmation needed
-    }
-
-    if (
-      DiscoveredMCPToolInvocation.allowlist.has(serverAllowListKey) ||
-      DiscoveredMCPToolInvocation.allowlist.has(toolAllowListKey)
-    ) {
-      return false; // server and/or tool already allowlisted
-    }
+  ): Promise<ToolCallConfirmationDetails> {
+    const permissionRule = this.registeredToolName;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
       type: 'mcp',
       title: 'Confirm MCP Tool Execution',
       serverName: this.serverName,
-      toolName: this.serverToolName, // Display original tool name in confirmation
-      toolDisplayName: this.displayName, // Display global registry name exposed to model and user
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlwaysServer) {
-          DiscoveredMCPToolInvocation.allowlist.add(serverAllowListKey);
-        } else if (outcome === ToolConfirmationOutcome.ProceedAlwaysTool) {
-          DiscoveredMCPToolInvocation.allowlist.add(toolAllowListKey);
-        }
+      toolName: this.serverToolName,
+      toolDisplayName: this.displayName,
+      permissionRules: [permissionRule],
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
   }
 
-  // Determine if the response contains tool errors
-  // This is needed because CallToolResults should return errors inside the response.
+  // MCP spec: errors are returned inside the CallToolResult, not as exceptions.
   // ref: https://modelcontextprotocol.io/specification/2025-06-18/schema#calltoolresult
   isMCPToolError(rawResponseParts: Part[]): boolean {
     const functionResponse = rawResponseParts?.[0]?.functionResponse;
@@ -130,7 +224,228 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return false;
   }
 
-  async execute(): Promise<ToolResult> {
+  private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
+    if (!this.cliConfig) {
+      return null;
+    }
+
+    try {
+      debugLogger.info(
+        `Attempting to reconnect MCP server '${this.serverName}'...`,
+      );
+      const toolRegistry = this.cliConfig.getToolRegistry();
+      await toolRegistry.discoverToolsForServer(this.serverName);
+
+      const newTool = await toolRegistry.ensureTool(this.registeredToolName);
+      if (newTool instanceof DiscoveredMCPTool) {
+        debugLogger.info(
+          `Successfully reconnected to MCP server '${this.serverName}'`,
+        );
+        return newTool;
+      }
+      return null;
+    } catch (error) {
+      debugLogger.error(
+        `Failed to reconnect MCP server '${this.serverName}': ${error}`,
+      );
+      return null;
+    }
+  }
+
+  private async handleReconnectOnError(
+    error: unknown,
+    signal: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ): Promise<ToolResult> {
+    debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
+
+    if (!this.shouldAttemptReconnect(error)) {
+      throw error;
+    }
+
+    if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
+      debugLogger.info(
+        `Reconnection attempt ${this.retryCount + 1}/${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES} for MCP server '${this.serverName}'`,
+      );
+      const newTool = await this.attemptReconnect();
+      if (newTool) {
+        const newInvocation = new DiscoveredMCPToolInvocation(
+          newTool['mcpTool'],
+          this.serverName,
+          this.serverToolName,
+          this.displayName,
+          newTool.name,
+          newTool.permissionAliases,
+          this.trust,
+          this.params,
+          this.cliConfig,
+          newTool['mcpClient'],
+          this.mcpTimeout,
+          this.mcpToolIdleTimeoutMs,
+          this.annotations,
+          newTool['allowInvocationContext'] === true,
+          this.retryCount + 1,
+        );
+        return newInvocation.execute(signal, updateOutput);
+      }
+    } else if (
+      this.retryCount >= DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES
+    ) {
+      debugLogger.error(
+        `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
+      );
+    }
+
+    throw error;
+  }
+
+  private shouldAttemptReconnect(error: unknown): boolean {
+    if (isAbortError(error)) {
+      return false;
+    }
+
+    if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+      return true;
+    }
+
+    const message = getErrorMessage(error);
+    return MCP_CONNECTION_ERROR_PATTERNS.some((pattern) =>
+      pattern.test(message),
+    );
+  }
+
+  async execute(
+    signal: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ): Promise<ToolResult> {
+    // Use direct MCP client if available (supports progress notifications),
+    // otherwise fall back to the @google/genai mcpToTool wrapper.
+    if (this.mcpClient) {
+      return this.executeWithDirectClient(signal, updateOutput);
+    }
+    return this.executeWithCallableTool(signal);
+  }
+
+  /**
+   * Execute using the raw MCP SDK Client, which supports progress
+   * notifications via the onprogress callback. This enables real-time
+   * streaming of progress updates to the user during long-running
+   * MCP tool calls (e.g., browser automation).
+   */
+  private async executeWithDirectClient(
+    signal: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ): Promise<ToolResult> {
+    // Create an AbortController for idle timeout
+    const idleTimeoutController = new AbortController();
+    let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    // Combine the external signal with our idle timeout controller
+    const combinedSignal = AbortSignal.any([
+      signal,
+      idleTimeoutController.signal,
+    ]);
+
+    const resetIdleTimeout = () => {
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
+      if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
+        const timer = setTimeout(() => {
+          const error = new Error(
+            `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
+              `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
+          );
+          error.name = 'AbortError';
+          idleTimeoutController.abort(error);
+        }, this.mcpToolIdleTimeoutMs);
+        timer.unref();
+        idleTimeoutId = timer;
+      }
+    };
+
+    try {
+      // Start the idle timeout
+      resetIdleTimeout();
+
+      const invocationContext = this.allowInvocationContext
+        ? getInvocationContext()
+        : undefined;
+      const callToolResult = await this.mcpClient!.callTool(
+        {
+          name: this.serverToolName,
+          arguments: this.params as Record<string, unknown>,
+          ...(invocationContext
+            ? {
+                _meta: {
+                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+                },
+              }
+            : {}),
+        },
+        undefined,
+        {
+          onprogress: (progress) => {
+            // Reset idle timeout on progress
+            resetIdleTimeout();
+
+            if (updateOutput) {
+              const progressData: McpToolProgressData = {
+                type: 'mcp_tool_progress',
+                progress: progress.progress,
+                ...(progress.total != null && { total: progress.total }),
+                ...(progress.message != null && { message: progress.message }),
+              };
+              updateOutput(progressData);
+            }
+          },
+          timeout: this.mcpTimeout,
+          signal: combinedSignal,
+        },
+      );
+
+      // Wrap the raw CallToolResult into the Part[] format that the
+      // existing transform/display functions expect.
+      const rawResponseParts = wrapMcpCallToolResultAsParts(
+        this.serverToolName,
+        callToolResult,
+      );
+
+      if (this.isMCPToolError(rawResponseParts)) {
+        return await this.buildMcpToolError(rawResponseParts, {
+          name: this.serverToolName,
+          args: this.params,
+        });
+      }
+
+      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const truncated = await this.truncateTextParts(transformedParts);
+
+      return {
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
+      };
+    } catch (error) {
+      return this.handleReconnectOnError(error, signal, updateOutput);
+    } finally {
+      // Clear the idle timeout in all cases
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
+    }
+  }
+
+  /**
+   * Fallback: execute using the @google/genai CallableTool wrapper.
+   * This path does NOT support progress notifications.
+   */
+  private async executeWithCallableTool(
+    signal: AbortSignal,
+  ): Promise<ToolResult> {
     const functionCalls: FunctionCall[] = [
       {
         name: this.serverToolName,
@@ -138,30 +453,140 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
     ];
 
-    const rawResponseParts = await this.mcpTool.callTool(functionCalls);
+    // Race MCP tool call with abort signal to respect cancellation
+    try {
+      const rawResponseParts = await new Promise<Part[]>((resolve, reject) => {
+        if (signal.aborted) {
+          const error = new Error('Tool call aborted');
+          error.name = 'AbortError';
+          reject(error);
+          return;
+        }
+        const onAbort = () => {
+          cleanup();
+          const error = new Error('Tool call aborted');
+          error.name = 'AbortError';
+          reject(error);
+        };
+        const cleanup = () => {
+          signal.removeEventListener('abort', onAbort);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
 
-    // Ensure the response is not an error
-    if (this.isMCPToolError(rawResponseParts)) {
-      const errorMessage = `MCP tool '${
+        this.mcpTool
+          .callTool(functionCalls)
+          .then((res) => {
+            cleanup();
+            resolve(res);
+          })
+          .catch((err) => {
+            cleanup();
+            reject(err);
+          });
+      });
+
+      if (this.isMCPToolError(rawResponseParts)) {
+        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
+      }
+
+      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const truncated = await this.truncateTextParts(transformedParts);
+
+      return {
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
+      };
+    } catch (error) {
+      return this.handleReconnectOnError(error, signal);
+    }
+  }
+
+  private async buildMcpToolError(
+    rawResponseParts: Part[],
+    functionCall: FunctionCall,
+  ): Promise<ToolResult> {
+    const imageContent = getMcpErrorImageContent(rawResponseParts);
+    let llmContent: PartListUnion;
+    let errorMessage: string;
+    let persistedOutputFiles: string[] | undefined;
+    if (imageContent) {
+      const truncatedContent = await this.truncateTextParts(imageContent);
+      llmContent = truncatedContent.parts;
+      persistedOutputFiles = truncatedContent.persistedOutputFiles;
+      errorMessage = `MCP tool '${
         this.serverToolName
       }' reported tool error for function call: ${safeJsonStringify(
-        functionCalls[0],
+        functionCall,
+      )} with response: ${getDisplayFromParts(truncatedContent.parts)}`;
+    } else {
+      errorMessage = `MCP tool '${
+        this.serverToolName
+      }' reported tool error for function call: ${safeJsonStringify(
+        functionCall,
       )} with response: ${safeJsonStringify(rawResponseParts)}`;
-      return {
-        llmContent: errorMessage,
-        returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-        error: {
-          message: errorMessage,
-          type: ToolErrorType.MCP_TOOL_ERROR,
-        },
-      };
+      llmContent = errorMessage;
     }
 
-    const transformedParts = transformMcpContentToParts(rawResponseParts);
-
     return {
-      llmContent: transformedParts,
-      returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+      llmContent,
+      returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+      error: {
+        message: errorMessage,
+        type: ToolErrorType.MCP_TOOL_ERROR,
+      },
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+    };
+  }
+
+  /**
+   * Truncates text parts in the transformed result if they exceed the
+   * configured threshold. Non-text parts (images, audio, etc.) are preserved.
+   */
+  private async truncateTextParts(parts: Part[]): Promise<{
+    parts: Part[];
+    persistedOutputFiles?: string[];
+  }> {
+    if (!this.cliConfig) {
+      return { parts };
+    }
+
+    const result: Part[] = [];
+    const persistedOutputFiles: string[] = [];
+    let persistenceAttempted = false;
+    for (const part of parts) {
+      if (part.text && !part.inlineData) {
+        const truncated = await truncateToolOutput(
+          this.cliConfig,
+          this.registeredToolName,
+          part.text,
+          // Per-tool char budget; mirrors DiscoveredMCPTool.maxOutputChars
+          // (10x the global default, since MCP servers return large structured
+          // output). char-only (lines: Infinity) so the global line cap can't
+          // undercut the 500k char budget — many short lines (structured JSON,
+          // tables) would otherwise truncate while chars remain. Consistent
+          // with the shell tool's in-tool truncation.
+          {
+            threshold: 500_000,
+            previewChars: 2000,
+            lines: Number.POSITIVE_INFINITY,
+          },
+        );
+        result.push({ text: truncated.content });
+        persistenceAttempted ||= truncated.content !== part.text;
+        if (truncated.outputFile) {
+          persistedOutputFiles.push(truncated.outputFile);
+        }
+      } else {
+        result.push(part);
+      }
+    }
+    return {
+      parts: result,
+      ...(persistenceAttempted ? { persistedOutputFiles } : {}),
     };
   }
 
@@ -174,24 +599,52 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   ToolParams,
   ToolResult
 > {
+  // MCP servers often return large structured payloads; allow 10x the global
+  // budget (mirrors Claude Code's MCP `maxResultSizeChars`) before the
+  // scheduler offloads. truncateTextParts uses the same ceiling per text part.
+  override get maxOutputChars(): number {
+    return 500_000;
+  }
+
+  /** Keeps pre-normalization permission and disabled-tool entries effective. */
+  get permissionAliases(): readonly string[] {
+    const legacyName = generateLegacyMcpToolName(
+      `mcp__${this.serverName}__${this.serverToolName}`,
+    );
+    return legacyName === this.name ? [] : [legacyName];
+  }
+
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
     readonly serverToolName: string,
     description: string,
     override readonly parameterSchema: unknown,
-    readonly timeout?: number,
     readonly trust?: boolean,
     nameOverride?: string,
+    private readonly cliConfig?: Config,
+    private readonly mcpClient?: McpDirectClient,
+    private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
+    readonly annotations?: McpToolAnnotations,
+    alwaysLoad = false,
+    private readonly allowInvocationContext: boolean = false,
   ) {
     super(
-      nameOverride ?? generateValidName(serverToolName),
+      nameOverride ??
+        generateValidName(`mcp__${serverName}__${serverToolName}`),
       `${serverToolName} (${serverName} MCP Server)`,
       description,
-      Kind.Other,
+      annotations?.readOnlyHint === true ? Kind.Read : Kind.Other,
       parameterSchema,
       true, // isOutputMarkdown
-      false, // canUpdateOutput
+      true, // canUpdateOutput — enables streaming progress for MCP tools
+      true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
+      //   initial tool-declaration list small when many MCP servers are attached.
+      alwaysLoad,
+      // searchHint: server name boosts fuzzy matching when the user references
+      // the server in their query ("send a slack message").
+      `mcp ${serverName}`,
     );
   }
 
@@ -202,9 +655,53 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.serverToolName,
       this.description,
       this.parameterSchema,
-      this.timeout,
       this.trust,
-      `${this.serverName}__${this.serverToolName}`,
+      generateValidName(`mcp__${this.serverName}__${this.serverToolName}`),
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
+      this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
+    );
+  }
+
+  /**
+   * Return a clone of this tool with a different `trust` value while
+   * keeping every other field (including the shared underlying
+   * `CallableTool` / MCP transport) identical.
+   *
+   * pool path: a single shared pool entry produces one
+   * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
+   * its own per-session trust before registering into its session's
+   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
+   * instance would cross-contaminate sessions.
+   *
+   * Trust is the only field that legitimately varies per session;
+   * everything else (transport, schema, name) is transport-level.
+   */
+  withTrust(trust: boolean | undefined): DiscoveredMCPTool {
+    if (trust === this.trust) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      trust,
+      // Preserve the original name (do NOT re-call generateValidName)
+      // — equal-by-name is the registry's deduplication key, and a
+      // different name would race-register two tools in the same
+      // session.
+      this.name,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
+      this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -216,11 +713,43 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.serverName,
       this.serverToolName,
       this.displayName,
-      this.timeout,
+      this.name,
+      this.permissionAliases,
       this.trust,
       params,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
+      this.annotations,
+      this.allowInvocationContext,
     );
   }
+}
+
+/**
+ * Wraps a raw MCP CallToolResult into the Part[] format that the
+ * existing transform/display functions expect. This bridges the gap
+ * between the raw MCP SDK response and the @google/genai Part format.
+ */
+function wrapMcpCallToolResultAsParts(
+  toolName: string,
+  result: {
+    content?: Array<{ [key: string]: unknown }>;
+    isError?: boolean;
+  },
+): Part[] {
+  const response = result.isError
+    ? { error: result, content: result.content }
+    : result;
+  return [
+    {
+      functionResponse: {
+        name: toolName,
+        response,
+      },
+    },
+  ];
 }
 
 function transformTextBlock(block: McpTextBlock): Part {
@@ -313,58 +842,44 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
   return transformed.filter((part): part is Part => part !== null);
 }
 
-/**
- * Processes the raw response from the MCP tool to generate a clean,
- * human-readable string for display in the CLI. It summarizes non-text
- * content and presents text directly.
- *
- * @param rawResponse The raw Part[] array from the GenAI SDK.
- * @returns A formatted string representing the tool's output.
- */
-function getStringifiedResultForDisplay(rawResponse: Part[]): string {
-  const mcpContent = rawResponse?.[0]?.functionResponse?.response?.[
-    'content'
-  ] as McpContentBlock[];
+function getMcpErrorImageContent(rawResponseParts: Part[]): Part[] | undefined {
+  const transformedParts = transformMcpContentToParts(rawResponseParts);
+  return transformedParts.some(isImagePart) ? transformedParts : undefined;
+}
 
-  if (!Array.isArray(mcpContent)) {
-    return '```json\n' + JSON.stringify(rawResponse, null, 2) + '\n```';
+/**
+ * Builds a human-readable display string from transformed Part[].
+ * Text parts are shown directly; inline data is summarized by mime type.
+ */
+function getDisplayFromParts(parts: Part[]): string {
+  if (parts.length === 0) {
+    return '';
   }
 
-  const displayParts = mcpContent.map((block: McpContentBlock): string => {
-    switch (block.type) {
-      case 'text':
-        return block.text;
-      case 'image':
-        return `[Image: ${block.mimeType}]`;
-      case 'audio':
-        return `[Audio: ${block.mimeType}]`;
-      case 'resource_link':
-        return `[Link to ${block.title || block.name}: ${block.uri}]`;
-      case 'resource':
-        if (block.resource?.text) {
-          return block.resource.text;
-        }
-        return `[Embedded Resource: ${
-          block.resource?.mimeType || 'unknown type'
-        }]`;
-      default:
-        return `[Unknown content type: ${(block as { type: string }).type}]`;
+  const displayParts: string[] = [];
+  for (const part of parts) {
+    if (part.text !== undefined) {
+      displayParts.push(part.text);
+    } else if (part.inlineData) {
+      displayParts.push(`[${part.inlineData.mimeType}]`);
     }
-  });
+  }
 
   return displayParts.join('\n');
 }
 
+function getDisplayFromPartsWithPersistedOutput(
+  parts: Part[],
+  persistedOutputFiles: string[] | undefined,
+): string {
+  const display = getDisplayFromParts(parts);
+  if (!persistedOutputFiles?.length) return display;
+
+  const paths = persistedOutputFiles.map((file) => `- ${file}`).join('\n');
+  return `${display}\nOutput too long and was saved to:\n${paths}`;
+}
+
 /** Visible for testing */
 export function generateValidName(name: string) {
-  // Replace invalid characters (based on 400 error message from Gemini API) with underscores
-  let validToolname = name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-
-  // If longer than 63 characters, replace middle with '___'
-  // (Gemini API says max length 64, but actual limit seems to be 63)
-  if (validToolname.length > 63) {
-    validToolname =
-      validToolname.slice(0, 28) + '___' + validToolname.slice(-32);
-  }
-  return validToolname;
+  return normalizeToolNameForProvider(name);
 }

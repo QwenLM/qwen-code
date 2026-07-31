@@ -19,6 +19,8 @@ const noColorColorsTheme: ColorsTheme = {
   AccentGreen: '',
   AccentYellow: '',
   AccentRed: '',
+  AccentYellowDim: '',
+  AccentRedDim: '',
   DiffAdded: '',
   DiffRemoved: '',
   Comment: '',
@@ -31,6 +33,7 @@ const noColorSemanticColors: SemanticColors = {
     secondary: '',
     link: '',
     accent: '',
+    code: '',
   },
   background: {
     primary: '',
@@ -52,6 +55,8 @@ const noColorSemanticColors: SemanticColors = {
     error: '',
     success: '',
     warning: '',
+    errorDim: '',
+    warningDim: '',
   },
 };
 

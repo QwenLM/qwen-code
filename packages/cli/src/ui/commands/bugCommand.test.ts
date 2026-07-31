@@ -5,35 +5,47 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import open from 'open';
 import { bugCommand } from './bugCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { getCliVersion } from '../../utils/version.js';
 import { GIT_COMMIT_INFO } from '../../generated/git-commit.js';
-import { formatMemoryUsage } from '../utils/formatters.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import * as systemInfoUtils from '../../utils/systemInfo.js';
+
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 
 // Mock dependencies
-vi.mock('open');
-vi.mock('../../utils/version.js');
-vi.mock('../utils/formatters.js');
-vi.mock('@qwen-code/qwen-code-core');
-vi.mock('node:process', () => ({
-  default: {
-    platform: 'test-platform',
-    version: 'v20.0.0',
-    // Keep other necessary process properties if needed by other parts of the code
-    env: process.env,
-    memoryUsage: () => ({ rss: 0 }),
-  },
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
+  };
+});
+vi.mock('../../utils/systemInfo.js');
 
 describe('bugCommand', () => {
   beforeEach(() => {
-    vi.mocked(getCliVersion).mockResolvedValue('0.1.0');
-    vi.mocked(formatMemoryUsage).mockReturnValue('100 MB');
-    vi.mock('@qwen-code/qwen-code-core', () => ({
+    vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+      cliVersion: '0.1.0',
+      osPlatform: 'test-platform',
+      osArch: 'x64',
+      osRelease: '22.0.0',
+      nodeVersion: 'v20.0.0',
+      npmVersion: '10.0.0',
+      sandboxEnv: 'test',
+      modelVersion: 'qwen3-coder-plus',
+      selectedAuthType: '',
+      ideClient: 'VSCode',
       sessionId: 'test-session-id',
-    }));
+      memoryUsage: '100 MB',
+      gitCommit:
+        GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
+          ? GIT_COMMIT_INFO
+          : undefined,
+    });
+    mockOpenBrowserSecurely.mockClear();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
     vi.stubEnv('SANDBOX', 'qwen-test');
   });
 
@@ -46,12 +58,7 @@ describe('bugCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => undefined,
-          getIdeClient: () => ({
-            getDetectedIdeDisplayName: () => 'VSCode',
-          }),
-          getIdeMode: () => true,
         },
       },
     });
@@ -59,21 +66,35 @@ describe('bugCommand', () => {
     if (!bugCommand.action) throw new Error('Action is not defined');
     await bugCommand.action(mockContext, 'A test bug');
 
-    const expectedInfo = `
-* **CLI Version:** 0.1.0
-* **Git Commit:** ${GIT_COMMIT_INFO}
-* **Session ID:** test-session-id
-* **Operating System:** test-platform v20.0.0
-* **Sandbox Environment:** test
-* **Model Version:** qwen3-coder-plus
-* **Memory Usage:** 100 MB
-* **IDE Client:** VSCode
-`;
+    const qwenCodeLine =
+      GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=' +
-      encodeURIComponent(expectedInfo);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
-    expect(open).toHaveBeenCalledWith(expectedUrl);
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
   });
 
   it('should use a custom URL template from config if provided', async () => {
@@ -82,12 +103,7 @@ describe('bugCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => ({ urlTemplate: customTemplate }),
-          getIdeClient: () => ({
-            getDetectedIdeDisplayName: () => 'VSCode',
-          }),
-          getIdeMode: () => true,
         },
       },
     });
@@ -95,20 +111,120 @@ describe('bugCommand', () => {
     if (!bugCommand.action) throw new Error('Action is not defined');
     await bugCommand.action(mockContext, 'A custom bug');
 
-    const expectedInfo = `
-* **CLI Version:** 0.1.0
-* **Git Commit:** ${GIT_COMMIT_INFO}
-* **Session ID:** test-session-id
-* **Operating System:** test-platform v20.0.0
-* **Sandbox Environment:** test
-* **Model Version:** qwen3-coder-plus
-* **Memory Usage:** 100 MB
-* **IDE Client:** VSCode
-`;
+    const qwenCodeLine =
+      GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
     const expectedUrl = customTemplate
       .replace('{title}', encodeURIComponent('A custom bug'))
-      .replace('{info}', encodeURIComponent(expectedInfo));
+      .replace('{info}', encodeURIComponent(`\n${expectedInfo}\n`));
 
-    expect(open).toHaveBeenCalledWith(expectedUrl);
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
+  });
+
+  it('should include Base URL when auth type is OpenAI', async () => {
+    vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+      cliVersion: '0.1.0',
+      osPlatform: 'test-platform',
+      osArch: 'x64',
+      osRelease: '22.0.0',
+      nodeVersion: 'v20.0.0',
+      npmVersion: '10.0.0',
+      sandboxEnv: 'test',
+      modelVersion: 'qwen3-coder-plus',
+      selectedAuthType: AuthType.USE_OPENAI,
+      ideClient: 'VSCode',
+      sessionId: 'test-session-id',
+      memoryUsage: '100 MB',
+      baseUrl: 'https://api.openai.com/v1',
+      gitCommit:
+        GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
+          ? GIT_COMMIT_INFO
+          : undefined,
+    });
+
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getBugCommand: () => undefined,
+        },
+      },
+    });
+
+    if (!bugCommand.action) throw new Error('Action is not defined');
+    await bugCommand.action(mockContext, 'OpenAI bug');
+
+    const qwenCodeLine =
+      GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Auth: API Key - ${AuthType.USE_OPENAI}
+Base URL: https://api.openai.com/v1
+Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
+    const expectedUrl =
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
+  });
+
+  it('should report browser launch failures without failing the command', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('browser failed'));
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getBugCommand: () => undefined,
+        },
+      },
+    });
+
+    if (!bugCommand.action) throw new Error('Action is not defined');
+    await bugCommand.action(mockContext, 'Browser failure');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: 'Could not open URL in browser: browser failed',
+      }),
+      expect.any(Number),
+    );
   });
 });

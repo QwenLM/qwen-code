@@ -4,10 +4,96 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { formatDuration, formatMemoryUsage } from './formatters.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  formatDuration,
+  formatMemoryUsage,
+  formatRelativeTime,
+  formatTokenCount,
+} from './formatters.js';
 
 describe('formatters', () => {
+  describe('formatRelativeTime', () => {
+    const NOW = 1700000000000; // Fixed timestamp for testing
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should return "just now" for timestamps less than a minute ago', () => {
+      expect(formatRelativeTime(NOW - 30 * 1000)).toBe('just now');
+      expect(formatRelativeTime(NOW - 59 * 1000)).toBe('just now');
+    });
+
+    it('should return "1 minute ago" for exactly one minute', () => {
+      expect(formatRelativeTime(NOW - 60 * 1000)).toBe('1 minute ago');
+    });
+
+    it('should return plural minutes for multiple minutes', () => {
+      expect(formatRelativeTime(NOW - 5 * 60 * 1000)).toBe('5 minutes ago');
+      expect(formatRelativeTime(NOW - 30 * 60 * 1000)).toBe('30 minutes ago');
+    });
+
+    it('should return "1 hour ago" for exactly one hour', () => {
+      expect(formatRelativeTime(NOW - 60 * 60 * 1000)).toBe('1 hour ago');
+    });
+
+    it('should return plural hours for multiple hours', () => {
+      expect(formatRelativeTime(NOW - 3 * 60 * 60 * 1000)).toBe('3 hours ago');
+      expect(formatRelativeTime(NOW - 23 * 60 * 60 * 1000)).toBe(
+        '23 hours ago',
+      );
+    });
+
+    it('should return "1 day ago" for exactly one day', () => {
+      expect(formatRelativeTime(NOW - 24 * 60 * 60 * 1000)).toBe('1 day ago');
+    });
+
+    it('should return plural days for multiple days', () => {
+      expect(formatRelativeTime(NOW - 3 * 24 * 60 * 60 * 1000)).toBe(
+        '3 days ago',
+      );
+      expect(formatRelativeTime(NOW - 6 * 24 * 60 * 60 * 1000)).toBe(
+        '6 days ago',
+      );
+    });
+
+    it('should return "1 week ago" for exactly one week', () => {
+      expect(formatRelativeTime(NOW - 7 * 24 * 60 * 60 * 1000)).toBe(
+        '1 week ago',
+      );
+    });
+
+    it('should return plural weeks for multiple weeks', () => {
+      expect(formatRelativeTime(NOW - 14 * 24 * 60 * 60 * 1000)).toBe(
+        '2 weeks ago',
+      );
+      expect(formatRelativeTime(NOW - 21 * 24 * 60 * 60 * 1000)).toBe(
+        '3 weeks ago',
+      );
+    });
+
+    it('should return "1 month ago" for exactly one month (30 days)', () => {
+      expect(formatRelativeTime(NOW - 30 * 24 * 60 * 60 * 1000)).toBe(
+        '1 month ago',
+      );
+    });
+
+    it('should return plural months for multiple months', () => {
+      expect(formatRelativeTime(NOW - 60 * 24 * 60 * 60 * 1000)).toBe(
+        '2 months ago',
+      );
+      expect(formatRelativeTime(NOW - 90 * 24 * 60 * 60 * 1000)).toBe(
+        '3 months ago',
+      );
+    });
+  });
+
   describe('formatMemoryUsage', () => {
     it('should format bytes into KB', () => {
       expect(formatMemoryUsage(12345)).toBe('12.1 KB');
@@ -67,6 +153,63 @@ describe('formatters', () => {
 
     it('should handle negative durations', () => {
       expect(formatDuration(-100)).toBe('0s');
+    });
+
+    it('should roll a sub-minute value up to "1m" when it rounds to 60s', () => {
+      // 59.95s and up round to "60.0" at one decimal, which is not a valid
+      // sub-minute reading; it should render as the minute it rounds to,
+      // matching formatDuration(60000) === '1m'.
+      expect(formatDuration(59949)).toBe('59.9s');
+      expect(formatDuration(59950)).toBe('1m');
+      expect(formatDuration(59999)).toBe('1m');
+      expect(formatDuration(59950, { hideTrailingZeros: true })).toBe('1m');
+    });
+
+    describe('with hideTrailingZeros', () => {
+      it('drops .0 suffix for whole seconds under a minute', () => {
+        expect(formatDuration(5000, { hideTrailingZeros: true })).toBe('5s');
+        expect(formatDuration(10000, { hideTrailingZeros: true })).toBe('10s');
+        expect(formatDuration(30000, { hideTrailingZeros: true })).toBe('30s');
+      });
+
+      it('keeps fractional seconds under a minute', () => {
+        expect(formatDuration(5500, { hideTrailingZeros: true })).toBe('5.5s');
+        expect(formatDuration(12345, { hideTrailingZeros: true })).toBe(
+          '12.3s',
+        );
+      });
+
+      it('does not affect ms-range output', () => {
+        expect(formatDuration(500, { hideTrailingZeros: true })).toBe('500ms');
+      });
+
+      it('does not affect multi-unit output', () => {
+        expect(formatDuration(123000, { hideTrailingZeros: true })).toBe(
+          '2m 3s',
+        );
+        expect(formatDuration(3600000, { hideTrailingZeros: true })).toBe('1h');
+      });
+    });
+  });
+
+  describe('formatTokenCount', () => {
+    it('should display exact number for counts less than 1000', () => {
+      expect(formatTokenCount(0)).toBe('0');
+      expect(formatTokenCount(100)).toBe('100');
+      expect(formatTokenCount(847)).toBe('847');
+      expect(formatTokenCount(999)).toBe('999');
+    });
+
+    it('should display with k suffix and one decimal for counts 1000-9999', () => {
+      expect(formatTokenCount(1000)).toBe('1.0k');
+      expect(formatTokenCount(5400)).toBe('5.4k');
+      expect(formatTokenCount(9999)).toBe('10.0k');
+    });
+
+    it('should display with k suffix without decimal for counts 10000 and above', () => {
+      expect(formatTokenCount(10000)).toBe('10k');
+      expect(formatTokenCount(15000)).toBe('15k');
+      expect(formatTokenCount(100000)).toBe('100k');
     });
   });
 });

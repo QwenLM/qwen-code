@@ -7,7 +7,7 @@
 import { useCallback } from 'react';
 import { Box, Text } from 'ink';
 import type { WizardStepProps } from '../types.js';
-import { Colors } from '../../../colors.js';
+import { theme } from '../../../semantic-colors.js';
 import { TextInput } from '../../shared/TextInput.js';
 
 interface TextEntryStepProps
@@ -60,7 +60,7 @@ export function TextEntryStep({
     <Box flexDirection="column" gap={1}>
       {description && (
         <Box>
-          <Text color={Colors.Gray}>{description}</Text>
+          <Text color={theme.text.secondary}>{description}</Text>
         </Box>
       )}
 

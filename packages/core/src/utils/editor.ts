@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('EDITOR');
 
 export type EditorType =
   | 'vscode'
@@ -14,9 +20,10 @@ export type EditorType =
   | 'vim'
   | 'neovim'
   | 'zed'
-  | 'emacs';
+  | 'emacs'
+  | 'trae';
 
-function isValidEditorType(editor: string): editor is EditorType {
+export function isValidEditorType(editor: string): editor is EditorType {
   return [
     'vscode',
     'vscodium',
@@ -26,6 +33,7 @@ function isValidEditorType(editor: string): editor is EditorType {
     'neovim',
     'zed',
     'emacs',
+    'trae',
   ].includes(editor);
 }
 
@@ -34,7 +42,7 @@ interface DiffCommand {
   args: string[];
 }
 
-function commandExists(cmd: string): boolean {
+export function commandExists(cmd: string): boolean {
   try {
     execSync(
       process.platform === 'win32' ? `where.exe ${cmd}` : `command -v ${cmd}`,
@@ -47,10 +55,19 @@ function commandExists(cmd: string): boolean {
 }
 
 /**
+ * Get possible paths for Zed.app on macOS.
+ * Returns paths lazily to avoid calling os.homedir() at module initialization time,
+ * which would break tests that mock node:os without providing a homedir mock.
+ */
+function getZedAppPaths(): string[] {
+  return ['/Applications/Zed.app', join(homedir(), 'Applications/Zed.app')];
+}
+
+/**
  * Editor command configurations for different platforms.
  * Each editor can have multiple possible command names, listed in order of preference.
  */
-const editorCommands: Record<
+export const editorCommands: Record<
   EditorType,
   { win32: string[]; default: string[] }
 > = {
@@ -62,18 +79,134 @@ const editorCommands: Record<
   neovim: { win32: ['nvim'], default: ['nvim'] },
   zed: { win32: ['zed'], default: ['zed', 'zeditor'] },
   emacs: { win32: ['emacs.exe'], default: ['emacs'] },
+  trae: { win32: ['trae'], default: ['trae'] },
 };
 
-export function checkHasEditorType(editor: EditorType): boolean {
-  const commandConfig = editorCommands[editor];
+/**
+ * Get the Zed command to use for opening files/diffs.
+ * On macOS, if the CLI is not in PATH, fall back to using the app bundle's CLI.
+ */
+function getZedCommand(): string | null {
+  // Check CLI commands first
+  const commands = editorCommands.zed.default;
+  for (const cmd of commands) {
+    if (commandExists(cmd)) {
+      return cmd;
+    }
+  }
+
+  // On macOS, check for app bundle CLI
+  if (process.platform === 'darwin') {
+    for (const appPath of getZedAppPaths()) {
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
+      if (existsSync(cliPath)) {
+        return cliPath;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the executable command for a given editor type.
+ * Resolves both CLI commands and platform-specific fallbacks (e.g., macOS app bundles).
+ * This is the shared function used by both getDiffCommand and useLaunchEditor.
+ * Returns null if no editor command is found.
+ */
+export function getEditorExecutable(editorType: EditorType): string | null {
+  const commandConfig = editorCommands[editorType];
   const commands =
     process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
-  return commands.some((cmd) => commandExists(cmd));
+
+  // Check if any of the CLI commands exist
+  const found = commands.find((cmd) => commandExists(cmd));
+  if (found) {
+    return found;
+  }
+
+  // Special handling for Zed on macOS: check app bundle CLI as fallback
+  if (editorType === 'zed' && process.platform === 'darwin') {
+    for (const appPath of getZedAppPaths()) {
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
+      if (existsSync(cliPath)) {
+        return cliPath;
+      }
+    }
+  }
+
+  // No command found
+  return null;
+}
+
+export function isTerminalEditor(editor: EditorType): boolean {
+  return ['vim', 'neovim', 'emacs'].includes(editor);
+}
+
+export interface ExternalEditorCommand {
+  command: string;
+  args: string[];
+  needsShell: boolean;
+}
+
+/**
+ * Get the command + args to open a single file in an editor for editing.
+ * GUI editors get a `--wait` flag so the calling process blocks until close.
+ * Returns null if the editor type is invalid or the executable is not found.
+ */
+export function getExternalEditorCommand(
+  editorType: EditorType,
+  filePath: string,
+): ExternalEditorCommand | null {
+  if (!isValidEditorType(editorType)) {
+    return null;
+  }
+
+  const executable = getEditorExecutable(editorType);
+  if (!executable) {
+    return null;
+  }
+
+  const needsShell =
+    process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
+
+  switch (editorType) {
+    case 'vim':
+    case 'neovim':
+    case 'emacs':
+      return {
+        command: executable,
+        args: [filePath],
+        needsShell,
+      };
+    case 'vscode':
+    case 'vscodium':
+    case 'windsurf':
+    case 'cursor':
+    case 'trae':
+    case 'zed': {
+      return {
+        command: executable,
+        args: [filePath, '--wait'],
+        needsShell,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+export function checkHasEditorType(editor: EditorType): boolean {
+  // Use the same resolution logic as getEditorExecutable to keep
+  // availability detection and execution in sync.
+  return getEditorExecutable(editor) !== null;
 }
 
 export function allowEditorTypeInSandbox(editor: EditorType): boolean {
   const notUsingSandbox = !process.env['SANDBOX'];
-  if (['vscode', 'vscodium', 'windsurf', 'cursor', 'zed'].includes(editor)) {
+  if (
+    ['vscode', 'vscodium', 'windsurf', 'cursor', 'zed', 'trae'].includes(editor)
+  ) {
     return notUsingSandbox;
   }
   // For terminal-based editors like vim and emacs, allow in sandbox.
@@ -102,6 +235,16 @@ export function getDiffCommand(
   if (!isValidEditorType(editor)) {
     return null;
   }
+
+  // Special handling for Zed on macOS
+  if (editor === 'zed') {
+    const zedCmd = getZedCommand();
+    if (!zedCmd) {
+      return null;
+    }
+    return { command: zedCmd, args: ['--wait', '--diff', oldPath, newPath] };
+  }
+
   const commandConfig = editorCommands[editor];
   const commands =
     process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
@@ -114,7 +257,7 @@ export function getDiffCommand(
     case 'vscodium':
     case 'windsurf':
     case 'cursor':
-    case 'zed':
+    case 'trae':
       return { command, args: ['--wait', '--diff', oldPath, newPath] };
     case 'vim':
     case 'neovim':
@@ -145,11 +288,21 @@ export function getDiffCommand(
           newPath,
         ],
       };
-    case 'emacs':
+    case 'emacs': {
+      // Paths are interpolated into an Elisp string literal, so backslashes
+      // (Windows separators) and double quotes have to be escaped or the
+      // (ediff ...) form is corrupted. Escape backslashes first so the
+      // backslashes we add for quotes are not doubled again.
+      const toElispString = (p: string) =>
+        p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       return {
         command: 'emacs',
-        args: ['--eval', `(ediff "${oldPath}" "${newPath}")`],
+        args: [
+          '--eval',
+          `(ediff "${toElispString(oldPath)}" "${toElispString(newPath)}")`,
+        ],
       };
+    }
     default:
       return null;
   }
@@ -168,62 +321,48 @@ export async function openDiff(
 ): Promise<void> {
   const diffCommand = getDiffCommand(oldPath, newPath, editor);
   if (!diffCommand) {
-    console.error('No diff tool available. Install a supported editor.');
+    debugLogger.error('No diff tool available. Install a supported editor.');
     return;
   }
 
   try {
-    switch (editor) {
-      case 'vscode':
-      case 'vscodium':
-      case 'windsurf':
-      case 'cursor':
-      case 'zed':
-        // Use spawn for GUI-based editors to avoid blocking the entire process
-        return new Promise((resolve, reject) => {
-          const childProcess = spawn(diffCommand.command, diffCommand.args, {
-            stdio: 'inherit',
-            shell: true,
-          });
-
-          childProcess.on('close', (code) => {
-            if (code === 0) {
-              resolve();
-            } else {
-              reject(new Error(`${editor} exited with code ${code}`));
-            }
-          });
-
-          childProcess.on('error', (error) => {
-            reject(error);
-          });
+    if (isTerminalEditor(editor)) {
+      try {
+        const result = spawnSync(diffCommand.command, diffCommand.args, {
+          stdio: 'inherit',
         });
-
-      case 'vim':
-      case 'emacs':
-      case 'neovim': {
-        // Use execSync for terminal-based editors
-        const command =
-          process.platform === 'win32'
-            ? `${diffCommand.command} ${diffCommand.args.join(' ')}`
-            : `${diffCommand.command} ${diffCommand.args.map((arg) => `"${arg}"`).join(' ')}`;
-        try {
-          execSync(command, {
-            stdio: 'inherit',
-            encoding: 'utf8',
-          });
-        } catch (e) {
-          console.error('Error in onEditorClose callback:', e);
-        } finally {
-          onEditorClose();
+        if (result.error) {
+          throw result.error;
         }
-        break;
+        if (result.status !== 0) {
+          throw new Error(`${editor} exited with code ${result.status}`);
+        }
+      } finally {
+        onEditorClose();
       }
-
-      default:
-        throw new Error(`Unsupported editor: ${editor}`);
+      return;
     }
+
+    return new Promise<void>((resolve, reject) => {
+      const childProcess = spawn(diffCommand.command, diffCommand.args, {
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      });
+
+      childProcess.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`${editor} exited with code ${code}`));
+        }
+      });
+
+      childProcess.on('error', (error) => {
+        reject(error);
+      });
+    });
   } catch (error) {
-    console.error(error);
+    debugLogger.error(error);
+    throw error;
   }
 }

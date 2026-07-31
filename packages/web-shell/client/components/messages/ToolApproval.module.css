@@ -1,0 +1,231 @@
+.approval {
+  margin: 0 auto;
+  width: 100%;
+  max-width: min(800px, var(--chat-content-width, 800px));
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.floating {
+  max-height: min(360px, 55vh);
+  margin: 0 auto;
+  overflow-y: auto;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.name {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desc {
+  margin-top: 4px;
+  padding-left: 24px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.desc:hover {
+  -webkit-line-clamp: unset;
+}
+
+.content {
+  margin: 10px 0 0;
+  margin-left: 24px;
+  padding: 6px 10px;
+  background: var(--secondary);
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.code {
+  margin: 10px 0 0;
+  margin-left: 24px;
+  padding: 8px 12px;
+  background: var(--secondary);
+  border-radius: 7px;
+}
+
+.codeBlock {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.code:hover .codeBlock,
+.content:hover {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+/* Kept in the accessibility tree (used as the alertdialog's aria-describedby
+   and the option group's label) but visually hidden — the tool name header and
+   the option labels already convey the choice to sighted users. */
+.question {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.options {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 16px;
+  margin-top: 24px;
+  padding-left: 0;
+  flex-wrap: wrap;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+  white-space: nowrap;
+  appearance: none;
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.optionPlain {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.optionSecondary {
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.optionPrimary {
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.option:hover {
+  opacity: 0.85;
+}
+
+.optionActive {
+  border-color: transparent;
+}
+
+.pointer {
+  display: none;
+}
+
+.num {
+  display: none;
+}
+
+.label {
+  flex: 1;
+}
+
+@media (max-width: 760px) {
+  .options {
+    justify-content: flex-start;
+  }
+}

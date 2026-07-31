@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { UiTelemetryService } from './uiTelemetry.js';
+import { UiTelemetryService, MAIN_SOURCE } from './uiTelemetry.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import type { ApiErrorEvent, ApiResponseEvent } from './types.js';
 import { ToolCallEvent } from './types.js';
@@ -15,17 +15,18 @@ import {
   EVENT_TOOL_CALL,
 } from './constants.js';
 import type {
+  CancelledToolCall,
   CompletedToolCall,
   ErroredToolCall,
   SuccessfulToolCall,
 } from '../core/coreToolScheduler.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { MockTool } from '../test-utils/tools.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 
 const createFakeCompletedToolCall = (
   name: string,
-  success: boolean,
+  success: boolean | 'cancelled',
   duration = 100,
   outcome?: ToolConfirmationOutcome,
   error?: Error,
@@ -37,9 +38,9 @@ const createFakeCompletedToolCall = (
     isClientInitiated: false,
     prompt_id: 'prompt-id-1',
   };
-  const tool = new MockTool(name);
+  const tool = new MockTool({ name });
 
-  if (success) {
+  if (success === true) {
     return {
       status: 'success',
       request,
@@ -63,6 +64,30 @@ const createFakeCompletedToolCall = (
       durationMs: duration,
       outcome,
     } as SuccessfulToolCall;
+  } else if (success === 'cancelled') {
+    return {
+      status: 'cancelled',
+      request,
+      tool,
+      invocation: tool.build({ param: 'test' }),
+      response: {
+        callId: request.callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: request.callId,
+              name,
+              response: { error: 'Tool cancelled' },
+            },
+          },
+        ],
+        error: new Error('Tool cancelled'),
+        errorType: ToolErrorType.UNKNOWN,
+        resultDisplay: 'Cancelled!',
+      },
+      durationMs: duration,
+      outcome,
+    } as CancelledToolCall;
   } else {
     return {
       status: 'error',
@@ -117,6 +142,12 @@ describe('UiTelemetryService', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      skills: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });
@@ -134,7 +165,6 @@ describe('UiTelemetryService', () => {
       total_token_count: 30,
       cached_content_token_count: 5,
       thoughts_token_count: 2,
-      tool_token_count: 3,
     } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
     service.addEvent(event);
@@ -142,7 +172,7 @@ describe('UiTelemetryService', () => {
     expect(spy).toHaveBeenCalledOnce();
     const { metrics, lastPromptTokenCount } = spy.mock.calls[0][0];
     expect(metrics).toBeDefined();
-    expect(lastPromptTokenCount).toBe(10);
+    expect(lastPromptTokenCount).toBe(0);
   });
 
   describe('API Response Event Processing', () => {
@@ -156,13 +186,12 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
 
       const metrics = service.getMetrics();
-      expect(metrics.models['gemini-2.5-pro']).toEqual({
+      const modelAggregate = {
         api: {
           totalRequests: 1,
           totalErrors: 0,
@@ -174,10 +203,15 @@ describe('UiTelemetryService', () => {
           total: 30,
           cached: 5,
           thoughts: 2,
-          tool: 3,
+        },
+      };
+      expect(metrics.models['gemini-2.5-pro']).toEqual({
+        ...modelAggregate,
+        bySource: {
+          [MAIN_SOURCE]: modelAggregate,
         },
       });
-      expect(service.getLastPromptTokenCount()).toBe(10);
+      expect(service.getLastPromptTokenCount()).toBe(0);
     });
 
     it('should aggregate multiple ApiResponseEvents for the same model', () => {
@@ -190,7 +224,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -203,7 +236,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 40,
         cached_content_token_count: 10,
         thoughts_token_count: 4,
-        tool_token_count: 6,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -212,7 +244,7 @@ describe('UiTelemetryService', () => {
       service.addEvent(event2);
 
       const metrics = service.getMetrics();
-      expect(metrics.models['gemini-2.5-pro']).toEqual({
+      const modelAggregate = {
         api: {
           totalRequests: 2,
           totalErrors: 0,
@@ -224,10 +256,15 @@ describe('UiTelemetryService', () => {
           total: 70,
           cached: 15,
           thoughts: 6,
-          tool: 9,
+        },
+      };
+      expect(metrics.models['gemini-2.5-pro']).toEqual({
+        ...modelAggregate,
+        bySource: {
+          [MAIN_SOURCE]: modelAggregate,
         },
       });
-      expect(service.getLastPromptTokenCount()).toBe(15);
+      expect(service.getLastPromptTokenCount()).toBe(0);
     });
 
     it('should handle ApiResponseEvents for different models', () => {
@@ -240,7 +277,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -253,7 +289,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -266,7 +301,98 @@ describe('UiTelemetryService', () => {
       expect(metrics.models['gemini-2.5-flash']).toBeDefined();
       expect(metrics.models['gemini-2.5-pro'].api.totalRequests).toBe(1);
       expect(metrics.models['gemini-2.5-flash'].api.totalRequests).toBe(1);
-      expect(service.getLastPromptTokenCount()).toBe(100);
+      expect(service.getLastPromptTokenCount()).toBe(0);
+    });
+  });
+
+  describe('Generation Timing Metrics', () => {
+    const timedResponse = (
+      overrides: Partial<ApiResponseEvent> = {},
+    ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model: 'qwen3-coder',
+        prompt_id: 'user-query',
+        duration_ms: 500,
+        ttft_ms: 100,
+        input_token_count: 10,
+        output_token_count: 20,
+        total_token_count: 30,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        ...overrides,
+      }) as ApiResponseEvent & {
+        'event.name': typeof EVENT_API_RESPONSE;
+      };
+
+    it('aggregates timed streaming responses and keeps the latest sample', () => {
+      service.addEvent(timedResponse());
+      service.addEvent(
+        timedResponse({
+          model: 'qwen-plus',
+          duration_ms: 800,
+          ttft_ms: 200,
+          output_token_count: 30,
+        }),
+      );
+
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 1000,
+        totalThroughputOutputTokens: 50,
+        last: {
+          model: 'qwen-plus',
+          ttftMs: 200,
+          generationDurationMs: 600,
+          outputTokens: 30,
+        },
+      });
+    });
+
+    it('does not create samples for missing TTFT or internal prompts', () => {
+      service.addEvent(timedResponse({ ttft_ms: undefined }));
+      service.addEvent(timedResponse({ prompt_id: 'prompt_suggestion' }));
+
+      expect(service.getMetrics().generation).toBeUndefined();
+    });
+
+    it('clamps sampling time when TTFT exceeds request duration', () => {
+      service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
+
+      expect(service.getMetrics().generation).toMatchObject({
+        timedRequests: 1,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+        last: {
+          ttftMs: 150,
+          generationDurationMs: 0,
+        },
+      });
+    });
+
+    it('keeps generation metrics isolated per session', () => {
+      service.addEvent(timedResponse(), 'session-a');
+      service.addEvent(
+        timedResponse({ model: 'qwen-plus', ttft_ms: 250 }),
+        'session-b',
+      );
+
+      expect(
+        service.getMetricsForSession('session-a').generation?.last?.model,
+      ).toBe('qwen3-coder');
+      expect(
+        service.getMetricsForSession('session-b').generation?.last?.model,
+      ).toBe('qwen-plus');
+    });
+
+    it('clears generation metrics when the service resets', () => {
+      service.addEvent(timedResponse());
+      expect(service.getMetrics().generation).toBeDefined();
+
+      service.reset();
+
+      expect(service.getMetrics().generation).toBeUndefined();
     });
   });
 
@@ -276,13 +402,13 @@ describe('UiTelemetryService', () => {
         'event.name': EVENT_API_ERROR,
         model: 'gemini-2.5-pro',
         duration_ms: 300,
-        error: 'Something went wrong',
+        error_message: 'Something went wrong',
       } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR };
 
       service.addEvent(event);
 
       const metrics = service.getMetrics();
-      expect(metrics.models['gemini-2.5-pro']).toEqual({
+      const modelAggregate = {
         api: {
           totalRequests: 1,
           totalErrors: 1,
@@ -294,7 +420,12 @@ describe('UiTelemetryService', () => {
           total: 0,
           cached: 0,
           thoughts: 0,
-          tool: 0,
+        },
+      };
+      expect(metrics.models['gemini-2.5-pro']).toEqual({
+        ...modelAggregate,
+        bySource: {
+          [MAIN_SOURCE]: modelAggregate,
         },
       });
     });
@@ -309,7 +440,6 @@ describe('UiTelemetryService', () => {
         total_token_count: 30,
         cached_content_token_count: 5,
         thoughts_token_count: 2,
-        tool_token_count: 3,
       } as ApiResponseEvent & {
         'event.name': typeof EVENT_API_RESPONSE;
       };
@@ -317,14 +447,14 @@ describe('UiTelemetryService', () => {
         'event.name': EVENT_API_ERROR,
         model: 'gemini-2.5-pro',
         duration_ms: 300,
-        error: 'Something went wrong',
+        error_message: 'Something went wrong',
       } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR };
 
       service.addEvent(responseEvent);
       service.addEvent(errorEvent);
 
       const metrics = service.getMetrics();
-      expect(metrics.models['gemini-2.5-pro']).toEqual({
+      const modelAggregate = {
         api: {
           totalRequests: 2,
           totalErrors: 1,
@@ -336,9 +466,154 @@ describe('UiTelemetryService', () => {
           total: 30,
           cached: 5,
           thoughts: 2,
-          tool: 3,
+        },
+      };
+      expect(metrics.models['gemini-2.5-pro']).toEqual({
+        ...modelAggregate,
+        bySource: {
+          [MAIN_SOURCE]: modelAggregate,
         },
       });
+    });
+  });
+
+  describe('Subagent Source Attribution', () => {
+    it('attributes API calls without subagent_name to MAIN_SOURCE', () => {
+      const event = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 100,
+        input_token_count: 10,
+        output_token_count: 5,
+        total_token_count: 15,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(event);
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      expect(Object.keys(modelMetrics.bySource)).toEqual([MAIN_SOURCE]);
+      expect(modelMetrics.bySource[MAIN_SOURCE].api.totalRequests).toBe(1);
+      expect(modelMetrics.api.totalRequests).toBe(1);
+    });
+
+    it('splits a single model between main and a subagent', () => {
+      const mainEvent = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 200,
+        input_token_count: 100,
+        output_token_count: 50,
+        total_token_count: 150,
+        cached_content_token_count: 20,
+        thoughts_token_count: 0,
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+      const subagentEvent = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 80,
+        input_token_count: 40,
+        output_token_count: 10,
+        total_token_count: 50,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: 'echoer',
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(mainEvent);
+      service.addEvent(subagentEvent);
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      // Aggregate spans both main and subagent calls
+      expect(modelMetrics.api.totalRequests).toBe(2);
+      expect(modelMetrics.api.totalLatencyMs).toBe(280);
+      expect(modelMetrics.tokens.prompt).toBe(140);
+      expect(modelMetrics.tokens.total).toBe(200);
+      // Per-source breakdown isolates each contributor
+      expect(new Set(Object.keys(modelMetrics.bySource))).toEqual(
+        new Set([MAIN_SOURCE, 'echoer']),
+      );
+      expect(modelMetrics.bySource[MAIN_SOURCE].api.totalRequests).toBe(1);
+      expect(modelMetrics.bySource[MAIN_SOURCE].tokens.prompt).toBe(100);
+      expect(modelMetrics.bySource['echoer'].api.totalRequests).toBe(1);
+      expect(modelMetrics.bySource['echoer'].tokens.prompt).toBe(40);
+    });
+
+    it('splits two subagents sharing a model into distinct source buckets', () => {
+      const makeEvent = (
+        subagentName: string,
+        duration: number,
+      ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model: 'glm-5',
+          duration_ms: duration,
+          input_token_count: 10,
+          output_token_count: 5,
+          total_token_count: 15,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          subagent_name: subagentName,
+        }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(makeEvent('alpha', 50));
+      service.addEvent(makeEvent('bravo', 70));
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      expect(modelMetrics.api.totalRequests).toBe(2);
+      expect(Object.keys(modelMetrics.bySource).sort()).toEqual([
+        'alpha',
+        'bravo',
+      ]);
+      expect(modelMetrics.bySource['alpha'].api.totalRequests).toBe(1);
+      expect(modelMetrics.bySource['bravo'].api.totalRequests).toBe(1);
+      // Main bucket should NOT be created when no main-origin event arrived
+      expect(modelMetrics.bySource[MAIN_SOURCE]).toBeUndefined();
+    });
+
+    it('handles a subagent named after an Object.prototype member without crashing', () => {
+      // `constructor` is a valid subagent name per the naming regex. A
+      // plain-object `bySource` would return `Object.prototype.constructor`
+      // from a truthiness check, short-circuiting the bucket creation and
+      // crashing the aggregation path. The prototype-free map prevents this.
+      const event = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 100,
+        input_token_count: 10,
+        output_token_count: 5,
+        total_token_count: 15,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: 'constructor',
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      expect(() => service.addEvent(event)).not.toThrow();
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      expect(modelMetrics.bySource['constructor']).toBeDefined();
+      expect(modelMetrics.bySource['constructor'].api.totalRequests).toBe(1);
+      expect(modelMetrics.bySource['constructor'].tokens.prompt).toBe(10);
+      // Sanity: the Object prototype member was not actually mutated.
+      expect(typeof modelMetrics.bySource['constructor']).toBe('object');
+    });
+
+    it('attributes API errors to the subagent source bucket', () => {
+      const errorEvent = {
+        'event.name': EVENT_API_ERROR,
+        model: 'glm-5',
+        duration_ms: 150,
+        error_message: 'boom',
+        subagent_name: 'alpha',
+      } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR };
+
+      service.addEvent(errorEvent);
+
+      const modelMetrics = service.getMetrics().models['glm-5'];
+      expect(modelMetrics.api.totalErrors).toBe(1);
+      expect(modelMetrics.bySource['alpha'].api.totalErrors).toBe(1);
+      expect(modelMetrics.bySource[MAIN_SOURCE]).toBeUndefined();
     });
   });
 
@@ -402,6 +677,40 @@ describe('UiTelemetryService', () => {
         success: 0,
         fail: 1,
         durationMs: 200,
+        decisions: {
+          [ToolCallDecision.ACCEPT]: 0,
+          [ToolCallDecision.REJECT]: 1,
+          [ToolCallDecision.MODIFY]: 0,
+          [ToolCallDecision.AUTO_ACCEPT]: 0,
+        },
+      });
+    });
+
+    it('should process a single cancelled ToolCallEvent', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'test_tool',
+        'cancelled',
+        180,
+        ToolConfirmationOutcome.Cancel,
+      );
+      service.addEvent({
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const metrics = service.getMetrics();
+      const { tools } = metrics;
+
+      expect(tools.totalCalls).toBe(1);
+      expect(tools.totalSuccess).toBe(0);
+      expect(tools.totalFail).toBe(1);
+      expect(tools.totalDurationMs).toBe(180);
+      expect(tools.totalDecisions[ToolCallDecision.REJECT]).toBe(1);
+      expect(tools.byName['test_tool']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+        durationMs: 180,
         decisions: {
           [ToolCallDecision.ACCEPT]: 0,
           [ToolCallDecision.REJECT]: 1,
@@ -525,6 +834,99 @@ describe('UiTelemetryService', () => {
       expect(tools.byName['tool_A'].count).toBe(1);
       expect(tools.byName['tool_B'].count).toBe(1);
     });
+
+    it('redacts function_args for structured_output calls while preserving metrics', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'structured_output',
+        true,
+        250,
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      // The fake helper hardcodes args to { foo: 'bar' }; in the real
+      // structured-output flow this would be the user's extracted payload.
+      // ToolCallEvent must not pass that through to telemetry.
+      (toolCall.request as { args: Record<string, unknown> }).args = {
+        secret: 'extracted private value',
+      };
+
+      const event = new ToolCallEvent(toolCall);
+
+      expect(event.function_name).toBe('structured_output');
+      expect(event.function_args).not.toHaveProperty('secret');
+      expect(event.function_args).toEqual({
+        __redacted: 'structured_output payload (see stdout result)',
+      });
+
+      // Metrics still flow through normally — duration, success, decision.
+      service.addEvent({
+        ...structuredClone(event),
+        'event.name': EVENT_TOOL_CALL,
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const { tools } = service.getMetrics();
+      expect(tools.totalCalls).toBe(1);
+      expect(tools.totalSuccess).toBe(1);
+      expect(tools.totalDurationMs).toBe(250);
+      expect(tools.byName['structured_output']).toMatchObject({
+        count: 1,
+        success: 1,
+        durationMs: 250,
+      });
+    });
+
+    it('does not redact function_args for non-structured_output tools', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'write_file',
+        true,
+        100,
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      (toolCall.request as { args: Record<string, unknown> }).args = {
+        path: '/tmp/x',
+        content: 'hello',
+      };
+
+      const event = new ToolCallEvent(toolCall);
+
+      expect(event.function_args).toEqual({
+        path: '/tmp/x',
+        content: 'hello',
+      });
+    });
+  });
+
+  describe('Skill Invocation Metrics', () => {
+    it('aggregates successful and failed skill invocations by name', () => {
+      service.recordSkillInvocation('review', true);
+      service.recordSkillInvocation('review', false);
+      service.recordSkillInvocation('testing', true);
+
+      expect(service.getMetrics().skills).toEqual({
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('handles skill names that collide with object prototype keys', () => {
+      service.recordSkillInvocation('constructor', true);
+      service.recordSkillInvocation('__proto__', false);
+
+      expect(service.getMetrics().skills?.byName['constructor']).toEqual({
+        count: 1,
+        success: 1,
+        fail: 0,
+      });
+      expect(service.getMetrics().skills?.byName['__proto__']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+      });
+    });
   });
 
   describe('resetLastPromptTokenCount', () => {
@@ -539,14 +941,13 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
-      expect(service.getLastPromptTokenCount()).toBe(100);
+      expect(service.getLastPromptTokenCount()).toBe(0);
 
       // Now reset the token count
-      service.resetLastPromptTokenCount();
+      service.setLastPromptTokenCount(0);
       expect(service.getLastPromptTokenCount()).toBe(0);
     });
 
@@ -564,13 +965,12 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
       spy.mockClear(); // Clear the spy to focus on the reset call
 
-      service.resetLastPromptTokenCount();
+      service.setLastPromptTokenCount(0);
 
       expect(spy).toHaveBeenCalledOnce();
       const { metrics, lastPromptTokenCount } = spy.mock.calls[0][0];
@@ -589,14 +989,13 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
 
       const metricsBefore = service.getMetrics();
 
-      service.resetLastPromptTokenCount();
+      service.setLastPromptTokenCount(0);
 
       const metricsAfter = service.getMetrics();
 
@@ -621,21 +1020,48 @@ describe('UiTelemetryService', () => {
         total_token_count: 300,
         cached_content_token_count: 50,
         thoughts_token_count: 20,
-        tool_token_count: 30,
       } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
 
       service.addEvent(event);
-      expect(service.getLastPromptTokenCount()).toBe(100);
+      expect(service.getLastPromptTokenCount()).toBe(0);
 
       // Reset once
-      service.resetLastPromptTokenCount();
+      service.setLastPromptTokenCount(0);
       expect(service.getLastPromptTokenCount()).toBe(0);
 
       // Reset again - should still be 0 and still emit event
       spy.mockClear();
-      service.resetLastPromptTokenCount();
+      service.setLastPromptTokenCount(0);
       expect(service.getLastPromptTokenCount()).toBe(0);
       expect(spy).toHaveBeenCalledOnce();
+    });
+
+    it('should correctly set status field for success/error/cancelled calls', () => {
+      const successCall = createFakeCompletedToolCall(
+        'success_tool',
+        true,
+        100,
+      );
+      const errorCall = createFakeCompletedToolCall('error_tool', false, 150);
+      const cancelledCall = createFakeCompletedToolCall(
+        'cancelled_tool',
+        'cancelled',
+        200,
+      );
+
+      const successEvent = new ToolCallEvent(successCall);
+      const errorEvent = new ToolCallEvent(errorCall);
+      const cancelledEvent = new ToolCallEvent(cancelledCall);
+
+      // Verify status field is correctly set
+      expect(successEvent.status).toBe('success');
+      expect(errorEvent.status).toBe('error');
+      expect(cancelledEvent.status).toBe('cancelled');
+
+      // Verify backward compatibility with success field
+      expect(successEvent.success).toBe(true);
+      expect(errorEvent.success).toBe(false);
+      expect(cancelledEvent.success).toBe(false);
     });
   });
 
@@ -646,8 +1072,8 @@ describe('UiTelemetryService', () => {
         ...structuredClone(new ToolCallEvent(toolCall)),
         'event.name': EVENT_TOOL_CALL,
         metadata: {
-          ai_added_lines: 10,
-          ai_removed_lines: 5,
+          model_added_lines: 10,
+          model_removed_lines: 5,
         },
       } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
 
@@ -664,8 +1090,8 @@ describe('UiTelemetryService', () => {
         ...structuredClone(new ToolCallEvent(toolCall)),
         'event.name': EVENT_TOOL_CALL,
         metadata: {
-          ai_added_lines: null,
-          ai_removed_lines: undefined,
+          model_added_lines: null,
+          model_removed_lines: undefined,
         },
       } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
 
@@ -674,6 +1100,224 @@ describe('UiTelemetryService', () => {
       const metrics = service.getMetrics();
       expect(metrics.files.totalLinesAdded).toBe(0);
       expect(metrics.files.totalLinesRemoved).toBe(0);
+    });
+  });
+
+  describe('Per-Session Metrics Isolation', () => {
+    const SESSION_A = 'session-aaa';
+    const SESSION_B = 'session-bbb';
+
+    const makeApiEvent = (model: string, inputTokens: number) =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model,
+        duration_ms: 100,
+        input_token_count: inputTokens,
+        output_token_count: 10,
+        total_token_count: inputTokens + 10,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+      }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+    const makeToolEvent = (name: string) =>
+      ({
+        'event.name': EVENT_TOOL_CALL,
+        function_name: name,
+        duration_ms: 50,
+        success: true,
+        decision: ToolCallDecision.AUTO_ACCEPT,
+        prompt_id: 'p1',
+      }) as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+    it('should isolate metrics by sessionId', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-b', 200), SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.models['model-a']?.tokens.prompt).toBe(100);
+      expect(metricsA.models['model-b']).toBeUndefined();
+
+      expect(metricsB.models['model-b']?.tokens.prompt).toBe(200);
+      expect(metricsB.models['model-a']).toBeUndefined();
+    });
+
+    it('should still accumulate to global metrics', () => {
+      service.addEvent(makeApiEvent('model-x', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-x', 200), SESSION_B);
+
+      const global = service.getMetrics();
+      expect(global.models['model-x']?.tokens.prompt).toBe(300);
+    });
+
+    it('should return empty metrics for unknown session', () => {
+      const metrics = service.getMetricsForSession('unknown');
+      expect(metrics.models).toEqual({});
+      expect(metrics.tools.totalCalls).toBe(0);
+    });
+
+    it('should handle events without sessionId (global only)', () => {
+      service.addEvent(makeApiEvent('model-z', 50));
+
+      const global = service.getMetrics();
+      expect(global.models['model-z']?.tokens.prompt).toBe(50);
+
+      const sessionMetrics = service.getMetricsForSession('any-session');
+      expect(sessionMetrics.models).toEqual({});
+    });
+
+    it('resetSession should clear only that session', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.addEvent(makeApiEvent('m', 200), SESSION_B);
+
+      service.resetSession(SESSION_A);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.models).toEqual({});
+      expect(metricsB.models['m']?.tokens.prompt).toBe(200);
+
+      // Global should not be affected
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(300);
+    });
+
+    it('removeSession should prevent late events from recreating bucket', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.removeSession(SESSION_A);
+
+      // Late event after removal
+      service.addEvent(makeApiEvent('m', 50), SESSION_A);
+
+      // Session bucket should not be recreated
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models).toEqual({});
+
+      // But global should still accumulate
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(150);
+    });
+
+    it('resetSession should re-enable a closed session', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.removeSession(SESSION_A);
+
+      // Re-open the session
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('m', 50), SESSION_A);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(50);
+    });
+
+    it('should isolate tool call metrics by session', () => {
+      service.addEvent(makeToolEvent('Read'), SESSION_A);
+      service.addEvent(makeToolEvent('Write'), SESSION_B);
+      service.addEvent(makeToolEvent('Read'), SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.tools.totalCalls).toBe(1);
+      expect(metricsA.tools.byName['Read']?.count).toBe(1);
+      expect(metricsA.tools.byName['Write']).toBeUndefined();
+
+      expect(metricsB.tools.totalCalls).toBe(2);
+      expect(metricsB.tools.byName['Write']?.count).toBe(1);
+      expect(metricsB.tools.byName['Read']?.count).toBe(1);
+    });
+
+    it('should isolate skill invocation metrics by session', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.recordSkillInvocation('review', false, SESSION_B);
+      service.recordSkillInvocation('testing', true, SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.skills).toEqual({
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: {
+          review: { count: 1, success: 1, fail: 0 },
+        },
+      });
+      expect(metricsB.skills).toEqual({
+        totalCalls: 2,
+        totalSuccess: 1,
+        totalFail: 1,
+        byName: {
+          review: { count: 1, success: 0, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('removeSession should prevent late skill metrics from recreating bucket', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.removeSession(SESSION_A);
+
+      service.recordSkillInvocation('review', false, SESSION_A);
+
+      expect(service.getMetricsForSession(SESSION_A).skills).toEqual({
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      });
+      expect(service.getMetrics().skills?.byName['review']).toEqual({
+        count: 2,
+        success: 1,
+        fail: 1,
+      });
+    });
+
+    it('resetSession should not clear global metrics (replay scenario)', () => {
+      // Simulate: session A active, session B being resumed
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.addEvent(makeApiEvent('m', 200), SESSION_B);
+
+      // Resume session B: resetSession only clears B's bucket
+      service.resetSession(SESSION_B);
+
+      // Session A untouched
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(100);
+
+      // Session B cleared
+      const metricsB = service.getMetricsForSession(SESSION_B);
+      expect(metricsB.models).toEqual({});
+
+      // Global NOT cleared (still has both sessions' original data)
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(300);
+
+      // Replay events into session B
+      service.addEvent(makeApiEvent('m', 50), SESSION_B);
+
+      // Session B has only replayed data
+      const metricsB2 = service.getMetricsForSession(SESSION_B);
+      expect(metricsB2.models['m']?.tokens.prompt).toBe(50);
+
+      // Global accumulated the replay too
+      const global2 = service.getMetrics();
+      expect(global2.models['m']?.tokens.prompt).toBe(350);
+    });
+
+    it('#closedSessions should be bounded', () => {
+      // Add more than MAX_CLOSED_SESSIONS
+      for (let i = 0; i < 1005; i++) {
+        service.addEvent(makeApiEvent('m', 1), `session-${i}`);
+        service.removeSession(`session-${i}`);
+      }
+      // Late event to oldest session should now create a new bucket
+      // (oldest was evicted from closedSessions)
+      service.addEvent(makeApiEvent('m', 99), 'session-0');
+      const metrics = service.getMetricsForSession('session-0');
+      expect(metrics.models['m']?.tokens.prompt).toBe(99);
     });
   });
 });

@@ -1,51 +1,444 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * Prepares the bundled CLI package for npm publishing
+ * This script adds publishing metadata (package.json, README, LICENSE) to dist/
+ * All runtime assets (cli.js, vendor/, *.sb) are already in dist/ from the bundle step
+ */
+
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const defaultRootDir = path.resolve(__dirname, '..');
+const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 96 * 1024 * 1024;
+const PACKAGE_TEXT_FILE_RE =
+  /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
+const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
+  ['chrome', 'devtools', 'mcp'].join('-'),
+  ['puppeteer', 'core'].join('-'),
+  ['oastify', 'com'].join('.'),
+  ['webhook', 'site'].join('.'),
+  ['ngrok', 'io'].join('.'),
+  ['ngrok-free', 'app'].join('.'),
+];
 
-const rootDir = path.resolve(__dirname, '..');
+export function preparePackage({
+  rootDir = defaultRootDir,
+  requireNativeAudioCapture = process.env
+    .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
+  maxPackageUnpackedBytes = DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES,
+} = {}) {
+  const distDir = path.join(rootDir, 'dist');
 
-function copyFiles(packageName, filesToCopy) {
-  const packageDir = path.resolve(rootDir, 'packages', packageName);
-  if (!fs.existsSync(packageDir)) {
-    console.error(`Error: Package directory not found at ${packageDir}`);
+  verifyBundleArtifacts(rootDir, distDir);
+  copyDocumentationFiles(rootDir, distDir);
+  copyLocales(rootDir, distDir);
+  copyExtensionExamples(rootDir, distDir);
+  verifyNativeAudioCapturePackage(rootDir, distDir, {
+    required: requireNativeAudioCapture,
+  });
+  writeDistPackageJson(rootDir, distDir);
+  assertNoSensitivePackageScanLiterals(distDir);
+  assertPreparedPackageSize(distDir, maxPackageUnpackedBytes);
+  printPackageStructure(distDir);
+}
+
+if (isDirectRun()) {
+  preparePackage();
+}
+
+function isDirectRun() {
+  return process.argv[1]
+    ? fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+    : false;
+}
+
+function verifyBundleArtifacts(rootDir, distDir) {
+  const requiredPaths = [
+    path.join(distDir, 'cli.js'),
+    path.join(distDir, 'vendor'),
+    path.join(distDir, 'bundled', 'qc-helper', 'docs'),
+    // The Web Shell ships with the published package ("Web Shell out of the
+    // box"). Gate on it here so a build that skipped the web-shell workspace
+    // (e.g. `npm ci --ignore-scripts` bypassing the root `prepare`) fails
+    // loudly during packaging instead of silently publishing an API-only CLI
+    // whose `GET /` 404s. copy_bundle_assets.js stays warn-and-skip for
+    // --cli-only dev bundles; this is the release gate.
+    path.join(distDir, 'web-shell', 'index.html'),
+    path.join(distDir, 'web-shell', 'assets'),
+  ];
+
+  if (!fs.existsSync(distDir)) {
+    console.error('Error: dist/ directory not found');
+    console.error('Please run "npm run bundle" first');
     process.exit(1);
   }
 
-  console.log(`Preparing package: ${packageName}`);
-  for (const [source, dest] of Object.entries(filesToCopy)) {
-    const sourcePath = path.resolve(rootDir, source);
-    const destPath = path.resolve(packageDir, dest);
-    try {
-      fs.copyFileSync(sourcePath, destPath);
-      console.log(`Copied ${source} to packages/${packageName}/`);
-    } catch (err) {
-      console.error(`Error copying ${source}:`, err);
+  for (const requiredPath of requiredPaths) {
+    if (!fs.existsSync(requiredPath)) {
+      console.error(
+        `Error: Required package artifact not found: ${requiredPath}`,
+      );
+      console.error('Please run "npm run bundle" first');
       process.exit(1);
     }
   }
 }
 
-// Prepare 'core' package
-copyFiles('core', {
-  'README.md': 'README.md',
-  LICENSE: 'LICENSE',
-  '.npmrc': '.npmrc',
-});
+function copyDocumentationFiles(rootDir, distDir) {
+  console.log('Copying documentation files...');
+  const filesToCopy = ['README.md', 'LICENSE'];
+  for (const file of filesToCopy) {
+    const sourcePath = path.join(rootDir, file);
+    const destPath = path.join(distDir, file);
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, destPath);
+      console.log(`Copied ${file}`);
+    } else {
+      console.warn(`Warning: ${file} not found at ${sourcePath}`);
+    }
+  }
+}
 
-// Prepare 'cli' package
-copyFiles('cli', {
-  'README.md': 'README.md',
-  LICENSE: 'LICENSE',
-});
+function copyLocales(rootDir, distDir) {
+  console.log('Copying locales folder...');
+  const localesSourceDir = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    'src',
+    'i18n',
+    'locales',
+  );
+  const localesDestDir = path.join(distDir, 'locales');
 
-console.log('Successfully prepared all packages.');
+  if (fs.existsSync(localesSourceDir)) {
+    copyRecursiveSync(localesSourceDir, localesDestDir);
+    console.log('Copied locales folder');
+  } else {
+    console.warn(`Warning: locales folder not found at ${localesSourceDir}`);
+  }
+}
+
+function copyExtensionExamples(rootDir, distDir) {
+  console.log('Copying extension examples folder...');
+  const extensionExamplesDir = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    'src',
+    'commands',
+    'extensions',
+    'examples',
+  );
+  const extensionExamplesDestDir = path.join(distDir, 'examples');
+
+  if (fs.existsSync(extensionExamplesDir)) {
+    copyRecursiveSync(extensionExamplesDir, extensionExamplesDestDir);
+    console.log('Copied extension examples folder');
+  } else {
+    console.warn(
+      `Warning: extension examples folder not found at ${extensionExamplesDir}`,
+    );
+  }
+}
+
+function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
+  console.log('Verifying native audio capture package...');
+
+  const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
+  const addonDest = path.join(
+    distDir,
+    'node_modules',
+    '@qwen-code',
+    'audio-capture',
+  );
+  const requiredPaths = [
+    path.join(addonSrc, 'dist'),
+    path.join(addonSrc, 'prebuilds'),
+    path.join(addonSrc, 'package.json'),
+  ];
+
+  fs.rmSync(addonDest, { recursive: true, force: true });
+
+  for (const requiredPath of requiredPaths) {
+    if (!fs.existsSync(requiredPath)) {
+      const message = `audio capture package artifact not found at ${requiredPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return;
+    }
+  }
+  for (const [artifactPath, description, predicate] of [
+    [
+      path.join(addonSrc, 'dist'),
+      'runtime JS',
+      (filePath) => /\.[cm]?js$/.test(filePath) && !TEST_FILE_RE.test(filePath),
+    ],
+    [
+      path.join(addonSrc, 'prebuilds'),
+      'native prebuild',
+      (filePath) => filePath.endsWith('.node'),
+    ],
+  ]) {
+    if (!hasFileMatching(artifactPath, predicate)) {
+      const message = `audio capture package artifact has no ${description}: ${artifactPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return;
+    }
+  }
+
+  let addonPkg;
+  try {
+    addonPkg = JSON.parse(
+      fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+    );
+  } catch {
+    const message = `audio capture package.json is not valid JSON at ${path.join(
+      addonSrc,
+      'package.json',
+    )}`;
+    if (required) {
+      throw new Error(
+        `Required ${message}. ` +
+          'Cannot publish package without native voice capture.',
+      );
+    }
+    console.warn(`Warning: ${message}`);
+    return;
+  }
+  const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
+  for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
+    try {
+      addonRequire.resolve(`${dependencyName}/package.json`);
+    } catch {
+      const message = `audio capture dependency not resolvable: ${dependencyName}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return;
+    }
+  }
+
+  console.log('Verified native audio capture package');
+}
+
+function hasFileMatching(dir, predicate) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    const stat = fs.statSync(entryPath);
+    if (stat.isDirectory()) {
+      if (hasFileMatching(entryPath, predicate)) return true;
+    } else if (stat.isFile() && predicate(entryPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function writeDistPackageJson(rootDir, distDir) {
+  console.log('Creating package.json for distribution...');
+
+  const cliEntryPath = path.join(distDir, 'cli-entry.js');
+  fs.copyFileSync(path.join(__dirname, 'cli-entry.js'), cliEntryPath);
+  fs.chmodSync(cliEntryPath, 0o755);
+  console.log('Created dist cli-entry.js wrapper');
+
+  const rootPackageJson = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
+  );
+
+  const distPackageJson = {
+    name: rootPackageJson.name,
+    version: rootPackageJson.version,
+    description:
+      rootPackageJson.description || 'Qwen Code - AI-powered coding assistant',
+    repository: rootPackageJson.repository,
+    type: 'module',
+    main: 'cli.js',
+    bin: {
+      qwen: 'cli-entry.js',
+    },
+    files: [
+      'cli-entry.js',
+      'cli.js',
+      // Worker thread entry loaded by FzfWorkerHandle at runtime via
+      // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
+      // Must ship in the tarball or the @-picker silently falls back to the
+      // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
+      'fzfWorker.js',
+      'chunks',
+      'vendor',
+      '*.sb',
+      'README.md',
+      'LICENSE',
+      'locales',
+      'examples',
+      'bundled',
+      'web-shell',
+    ],
+    config: rootPackageJson.config,
+    dependencies: {},
+    optionalDependencies: {
+      '@qwen-code/audio-capture': rootPackageJson.version,
+      '@lydell/node-pty': '1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64': '1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64': '1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64': '1.2.0-beta.10',
+      '@teddyzhu/clipboard': '0.0.5',
+      '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
+      '@teddyzhu/clipboard-darwin-x64': '0.0.5',
+      '@teddyzhu/clipboard-linux-x64-gnu': '0.0.5',
+      '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
+      '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
+      '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+      // sharp is a native module externalized in esbuild. Declaring sharp alone
+      // is sufficient: its own optionalDependencies pull in the matching @img
+      // platform binary for every OS/arch npm installs onto, so the platform
+      // packages are not pinned here (pinning them drifts on a sharp bump).
+      sharp: '0.34.5',
+    },
+    engines: rootPackageJson.engines,
+  };
+
+  fs.writeFileSync(
+    path.join(distDir, 'package.json'),
+    JSON.stringify(distPackageJson, null, 2) + '\n',
+  );
+}
+
+function assertNoSensitivePackageScanLiterals(distDir) {
+  for (const filePath of listTextPackageFiles(distDir)) {
+    const contents = fs.readFileSync(filePath, 'utf8');
+    const lowerContents = contents.toLowerCase();
+    for (const literal of PACKAGE_SCAN_FORBIDDEN_LITERALS) {
+      if (!lowerContents.includes(literal.toLowerCase())) continue;
+      const relativePath = path.relative(distDir, filePath);
+      throw new Error(
+        `Prepared package contains forbidden string "${literal}" in ${relativePath}`,
+      );
+    }
+  }
+}
+
+function listTextPackageFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listTextPackageFiles(entryPath));
+    } else if (entry.isFile() && PACKAGE_TEXT_FILE_RE.test(entry.name)) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+function assertPreparedPackageSize(distDir, maxUnpackedBytes) {
+  const packageFiles = collectPreparedPackageFiles(distDir);
+  let unpackedBytes = 0;
+  for (const filePath of packageFiles) {
+    unpackedBytes += fs.statSync(filePath).size;
+  }
+  if (unpackedBytes <= maxUnpackedBytes) return;
+  throw new Error(
+    `Prepared package unpacked size ${unpackedBytes} bytes exceeds ${maxUnpackedBytes} bytes`,
+  );
+}
+
+function collectPreparedPackageFiles(distDir) {
+  const distPackageJson = JSON.parse(
+    fs.readFileSync(path.join(distDir, 'package.json'), 'utf8'),
+  );
+  const packageFiles = new Set([path.join(distDir, 'package.json')]);
+
+  for (const entry of distPackageJson.files ?? []) {
+    if (entry === '*.sb') {
+      for (const fileName of fs.readdirSync(distDir)) {
+        if (fileName.endsWith('.sb')) {
+          packageFiles.add(path.join(distDir, fileName));
+        }
+      }
+      continue;
+    }
+
+    const entryPath = path.join(distDir, entry);
+    if (!fs.existsSync(entryPath)) continue;
+    collectFiles(entryPath, packageFiles);
+  }
+
+  return packageFiles;
+}
+
+function collectFiles(entryPath, output) {
+  const stat = fs.statSync(entryPath);
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(entryPath)) {
+      collectFiles(path.join(entryPath, entry), output);
+    }
+  } else if (stat.isFile()) {
+    output.add(entryPath);
+  }
+}
+
+function printPackageStructure(distDir) {
+  console.log('\n✅ Package prepared for publishing at dist/');
+  console.log('\nPackage structure:');
+  // Use Node.js to list directory contents (cross-platform)
+  const distFiles = fs.readdirSync(distDir);
+  for (const file of distFiles) {
+    const filePath = path.join(distDir, file);
+    const stats = fs.statSync(filePath);
+    const size = stats.isDirectory() ? '<DIR>' : formatBytes(stats.size);
+    console.log(`  ${size.padEnd(12)} ${file}`);
+  }
+}
+
+function copyRecursiveSync(src, dest) {
+  const stats = fs.statSync(src);
+  if (stats.isDirectory()) {
+    if (!fs.existsSync(dest)) {
+      fs.mkdirSync(dest, { recursive: true });
+    }
+    const entries = fs.readdirSync(src);
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry);
+      const destPath = path.join(dest, entry);
+      copyRecursiveSync(srcPath, destPath);
+    }
+  } else {
+    fs.copyFileSync(src, dest);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}

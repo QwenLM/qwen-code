@@ -5,125 +5,113 @@
  */
 
 import {
-  isProQuotaExceededError,
-  isGenericQuotaExceededError,
   isApiError,
   isStructuredError,
+  QUOTA_EXHAUSTED_PREFIX,
 } from './quotaErrorDetection.js';
-import {
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_FLASH_MODEL,
-} from '../config/models.js';
-import { UserTierId } from '../code_assist/types.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { getErrorMessage } from './errors.js';
 
-// Free Tier message functions
-const getRateLimitErrorMessageGoogleFree = (
-  fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,
-) =>
-  `\nPossible quota limitations in place or slow response times detected. Switching to the ${fallbackModel} model for the rest of this session.`;
+const RATE_LIMIT_MESSAGE_BY_AUTH = {
+  [AuthType.USE_GEMINI]:
+    '\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method',
+  [AuthType.USE_VERTEX_AI]:
+    '\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method',
+  default:
+    '\nPossible quota limitations in place or slow response times detected. Please wait and try again later.',
+} as const;
 
-const getRateLimitErrorMessageGoogleProQuotaFree = (
-  currentModel: string = DEFAULT_GEMINI_MODEL,
-  fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,
-) =>
-  `\nYou have reached your daily ${currentModel} quota limit. You will be switched to the ${fallbackModel} model for the rest of this session. To increase your limits, upgrade to a Gemini Code Assist Standard or Enterprise plan with higher limits at https://goo.gle/set-up-gemini-code-assist, or use /auth to switch to using a paid API key from AI Studio at https://aistudio.google.com/apikey`;
+const RATE_LIMIT_SUFFIXES = Object.values(RATE_LIMIT_MESSAGE_BY_AUTH);
 
-const getRateLimitErrorMessageGoogleGenericQuotaFree = () =>
-  `\nYou have reached your daily quota limit. To increase your limits, upgrade to a Gemini Code Assist Standard or Enterprise plan with higher limits at https://goo.gle/set-up-gemini-code-assist, or use /auth to switch to using a paid API key from AI Studio at https://aistudio.google.com/apikey`;
-
-// Legacy/Standard Tier message functions
-const getRateLimitErrorMessageGooglePaid = (
-  fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,
-) =>
-  `\nPossible quota limitations in place or slow response times detected. Switching to the ${fallbackModel} model for the rest of this session. We appreciate you for choosing Gemini Code Assist and the Gemini CLI.`;
-
-const getRateLimitErrorMessageGoogleProQuotaPaid = (
-  currentModel: string = DEFAULT_GEMINI_MODEL,
-  fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,
-) =>
-  `\nYou have reached your daily ${currentModel} quota limit. You will be switched to the ${fallbackModel} model for the rest of this session. We appreciate you for choosing Gemini Code Assist and the Gemini CLI. To continue accessing the ${currentModel} model today, consider using /auth to switch to using a paid API key from AI Studio at https://aistudio.google.com/apikey`;
-
-const getRateLimitErrorMessageGoogleGenericQuotaPaid = (
-  currentModel: string = DEFAULT_GEMINI_MODEL,
-) =>
-  `\nYou have reached your daily quota limit. We appreciate you for choosing Gemini Code Assist and the Gemini CLI. To continue accessing the ${currentModel} model today, consider using /auth to switch to using a paid API key from AI Studio at https://aistudio.google.com/apikey`;
-const RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI =
-  '\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method';
-const RATE_LIMIT_ERROR_MESSAGE_VERTEX =
-  '\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method';
-const getRateLimitErrorMessageDefault = (
-  fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,
-) =>
-  `\nPossible quota limitations in place or slow response times detected. Switching to the ${fallbackModel} model for the rest of this session.`;
-
-function getRateLimitMessage(
-  authType?: AuthType,
-  error?: unknown,
-  userTier?: UserTierId,
-  currentModel?: string,
-  fallbackModel?: string,
-): string {
-  switch (authType) {
-    case AuthType.LOGIN_WITH_GOOGLE: {
-      // Determine if user is on a paid tier (Legacy or Standard) - default to FREE if not specified
-      const isPaidTier =
-        userTier === UserTierId.LEGACY || userTier === UserTierId.STANDARD;
-
-      if (isProQuotaExceededError(error)) {
-        return isPaidTier
-          ? getRateLimitErrorMessageGoogleProQuotaPaid(
-              currentModel || DEFAULT_GEMINI_MODEL,
-              fallbackModel,
-            )
-          : getRateLimitErrorMessageGoogleProQuotaFree(
-              currentModel || DEFAULT_GEMINI_MODEL,
-              fallbackModel,
-            );
-      } else if (isGenericQuotaExceededError(error)) {
-        return isPaidTier
-          ? getRateLimitErrorMessageGoogleGenericQuotaPaid(
-              currentModel || DEFAULT_GEMINI_MODEL,
-            )
-          : getRateLimitErrorMessageGoogleGenericQuotaFree();
-      } else {
-        return isPaidTier
-          ? getRateLimitErrorMessageGooglePaid(fallbackModel)
-          : getRateLimitErrorMessageGoogleFree(fallbackModel);
-      }
-    }
-    case AuthType.USE_GEMINI:
-      return RATE_LIMIT_ERROR_MESSAGE_USE_GEMINI;
-    case AuthType.USE_VERTEX_AI:
-      return RATE_LIMIT_ERROR_MESSAGE_VERTEX;
-    default:
-      return getRateLimitErrorMessageDefault(fallbackModel);
+function getRateLimitMessage(authType?: AuthType): string {
+  if (authType === AuthType.USE_GEMINI) {
+    return RATE_LIMIT_MESSAGE_BY_AUTH[AuthType.USE_GEMINI];
   }
+
+  if (authType === AuthType.USE_VERTEX_AI) {
+    return RATE_LIMIT_MESSAGE_BY_AUTH[AuthType.USE_VERTEX_AI];
+  }
+
+  return RATE_LIMIT_MESSAGE_BY_AUTH.default;
+}
+
+const API_ERROR_PREFIX = '[API Error: ';
+
+/**
+ * Returns true when `value` is already in final user-facing form and must not
+ * be re-wrapped by parseAndFormatApiError.
+ *
+ * Accepts:
+ * 1) base format: "[API Error: ...]"
+ * 2) 429 format: "[API Error: ...]" followed by one of the known quota
+ *    guidance suffixes.
+ * 3) friendly quota-exhaustion messages ("Quota exhausted: ...") built by
+ *    formatQuotaExhaustedMessage — these live here rather than in the
+ *    Qwen-OAuth prefix list because they also arrive via the plain-string
+ *    path (a StreamContentError whose .message is the formatted text).
+ *
+ * Used as an idempotency guard: when an upstream caller has already passed an
+ * Error through parseAndFormatApiError, stuffed the formatted string into
+ * Error.message, and the message reaches us a second time, we should return it
+ * unchanged rather than producing "[API Error: [API Error: ...]]".
+ */
+function isAlreadyFormatted(value: string): boolean {
+  const trimmed = value.trimEnd();
+
+  // Friendly quota-exhaustion messages built by formatQuotaExhaustedMessage
+  // are already in final form — surface them verbatim, do not wrap.
+  if (trimmed.startsWith(QUOTA_EXHAUSTED_PREFIX)) {
+    return true;
+  }
+
+  if (!trimmed.startsWith(API_ERROR_PREFIX)) {
+    return false;
+  }
+
+  if (trimmed.endsWith(']')) {
+    return true;
+  }
+
+  return RATE_LIMIT_SUFFIXES.some((suffix) => trimmed.includes(`]${suffix}`));
 }
 
 export function parseAndFormatApiError(
   error: unknown,
   authType?: AuthType,
-  userTier?: UserTierId,
-  currentModel?: string,
-  fallbackModel?: string,
 ): string {
   if (isStructuredError(error)) {
-    let text = `[API Error: ${error.message}]`;
+    // Qwen OAuth quota errors have their own user-friendly message; don't wrap them
+    if (
+      error.message.startsWith('Qwen OAuth quota exceeded:') ||
+      error.message.startsWith('Qwen OAuth free tier has been discontinued')
+    ) {
+      return error.message;
+    }
+
+    // If a previous pass through this function already wrapped this message
+    // and stuffed it into Error.message, return it unchanged. Avoids the
+    // "[API Error: [API Error: ...]]" double-wrap reported in non-interactive
+    // mode when a 4xx flows through both the stream handler and handleError.
+    if (isAlreadyFormatted(error.message)) {
+      return error.message;
+    }
+
+    const message =
+      error instanceof Error ? getErrorMessage(error) : error.message;
+    let text = `[API Error: ${message}]`;
     if (error.status === 429) {
-      text += getRateLimitMessage(
-        authType,
-        error,
-        userTier,
-        currentModel,
-        fallbackModel,
-      );
+      text += getRateLimitMessage(authType);
     }
     return text;
   }
 
   // The error message might be a string containing a JSON object.
   if (typeof error === 'string') {
+    // Same idempotency guard for the plain-string path.
+    if (isAlreadyFormatted(error)) {
+      return error;
+    }
+
     const jsonStart = error.indexOf('{');
     if (jsonStart === -1) {
       return `[API Error: ${error}]`; // Not a JSON error, return as is.
@@ -144,15 +132,12 @@ export function parseAndFormatApiError(
         } catch (_e) {
           // It's not a nested JSON error, so we just use the message as is.
         }
-        let text = `[API Error: ${finalMessage} (Status: ${parsedError.error.status})]`;
+        const statusText = parsedError.error.status
+          ? ` (Status: ${parsedError.error.status})`
+          : '';
+        let text = `[API Error: ${finalMessage}${statusText}]`;
         if (parsedError.error.code === 429) {
-          text += getRateLimitMessage(
-            authType,
-            parsedError,
-            userTier,
-            currentModel,
-            fallbackModel,
-          );
+          text += getRateLimitMessage(authType);
         }
         return text;
       }

@@ -5,19 +5,25 @@
  */
 
 import stripAnsi from 'strip-ansi';
+import ansiRegex from 'ansi-regex';
 import { stripVTControlCharacters } from 'node:util';
+import stringWidth from 'string-width';
 
 /**
- * Calculates the maximum width of a multi-line ASCII art string.
+ * Calculates the maximum *visual* width (terminal cells) of a multi-line
+ * ASCII art string. Uses `string-width` semantics via `getCachedStringWidth`
+ * so CJK fullwidth characters count as 2 cells and emoji are sized
+ * correctly — `.length` would undercount these and let oversized art slip
+ * past the width budget that `pickAsciiArtTier` applies.
  * @param asciiArt The ASCII art string.
- * @returns The length of the longest line in the ASCII art.
+ * @returns The widest line's terminal-cell width.
  */
 export const getAsciiArtWidth = (asciiArt: string): number => {
   if (!asciiArt) {
     return 0;
   }
   const lines = asciiArt.split('\n');
-  return Math.max(...lines.map((line) => line.length));
+  return Math.max(...lines.map((line) => getCachedStringWidth(line)));
 };
 
 /*
@@ -26,10 +32,39 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
  *  code units so that surrogate‑pair emoji count as one "column".)
  * ---------------------------------------------------------------------- */
 
+// Cache for code points to reduce GC pressure
+const codePointsCache = new Map<string, string[]>();
+const MAX_STRING_LENGTH_TO_CACHE = 1000;
+
 export function toCodePoints(str: string): string[] {
-  // [...str] or Array.from both iterate by UTF‑32 code point, handling
-  // surrogate pairs correctly.
-  return Array.from(str);
+  // ASCII fast path - check if all chars are ASCII (0-127)
+  let isAscii = true;
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) > 127) {
+      isAscii = false;
+      break;
+    }
+  }
+  if (isAscii) {
+    return str.split('');
+  }
+
+  // Cache short strings
+  if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    const cached = codePointsCache.get(str);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const result = Array.from(str);
+
+  // Cache result (unlimited like Ink)
+  if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    codePointsCache.set(str, result);
+  }
+
+  return result;
 }
 
 export function cpLen(str: string): number {
@@ -51,12 +86,13 @@ export function cpSlice(str: string, start: number, end?: number): string {
  * Characters stripped:
  * - ANSI escape sequences (via strip-ansi)
  * - VT control sequences (via Node.js util.stripVTControlCharacters)
- * - C0 control chars (0x00-0x1F) except CR/LF which are handled elsewhere
+ * - C0 control chars (0x00-0x1F) except TAB/CR/LF which are handled elsewhere
  * - C1 control chars (0x80-0x9F) that can cause display issues
  *
  * Characters preserved:
  * - All printable Unicode including emojis
  * - DEL (0x7F) - handled functionally by applyOperations, not a display issue
+ * - TAB (0x09) - needed for pasted tab-separated data (e.g. from spreadsheets)
  * - CR/LF (0x0D/0x0A) - needed for line breaks
  */
 export function stripUnsafeCharacters(str: string): string {
@@ -68,8 +104,8 @@ export function stripUnsafeCharacters(str: string): string {
       const code = char.codePointAt(0);
       if (code === undefined) return false;
 
-      // Preserve CR/LF for line handling
-      if (code === 0x0a || code === 0x0d) return true;
+      // Preserve TAB/CR/LF for line handling and pasted tabular data
+      if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
 
       // Remove C0 control chars (except CR/LF) that can break display
       // Examples: BELL(0x07) makes noise, BS(0x08) moves cursor, VT(0x0B), FF(0x0C)
@@ -85,4 +121,448 @@ export function stripUnsafeCharacters(str: string): string {
       return true;
     })
     .join('');
+}
+
+// String width caching for performance optimization
+const stringWidthCache = new Map<string, number>();
+
+/**
+ * Cached version of stringWidth function for better performance
+ * Follows Ink's approach with unlimited cache (no eviction)
+ */
+export const getCachedStringWidth = (str: string): number => {
+  // ASCII printable chars have width 1
+  if (/^[\x20-\x7E]*$/.test(str)) {
+    return str.length;
+  }
+
+  if (stringWidthCache.has(str)) {
+    return stringWidthCache.get(str)!;
+  }
+
+  const width = stringWidth(str);
+  stringWidthCache.set(str, width);
+
+  return width;
+};
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
+
+export interface VisualHeightSlice {
+  text: string;
+  hiddenLinesCount: number;
+}
+
+interface SliceTextByVisualHeightOptions {
+  minHeight?: number;
+  reservedRows?: number;
+  overflowDirection?: 'top' | 'bottom';
+}
+
+/**
+ * Bounds text by terminal visual rows before it reaches Ink/Yoga layout.
+ *
+ * Explicit newlines and soft wraps caused by narrow terminals both count as
+ * visual rows. `overflowDirection: "top"` keeps the newest tail, which is
+ * useful for streaming logs; `"bottom"` keeps the beginning, which is useful
+ * for task prompts.
+ */
+export function sliceTextByVisualHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+  options: SliceTextByVisualHeightOptions = {},
+): VisualHeightSlice {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(
+    Math.round(maxHeight),
+    options.minHeight ?? 1,
+  );
+  const visibleContentHeight = Math.max(
+    1,
+    targetMaxHeight - (options.reservedRows ?? 0),
+  );
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const overflowDirection = options.overflowDirection ?? 'top';
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+
+    if (overflowDirection === 'bottom') {
+      if (visibleLines.length < visibleContentHeight) {
+        visibleLines.push(line);
+      }
+      return;
+    }
+
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  // Compare against `visibleContentHeight`, not `targetMaxHeight`: when a
+  // caller asks us to reserve rows for a separate footer/header (e.g. the
+  // "...N task lines hidden..." line), the budget for the actual content is
+  // `visibleContentHeight` and exceeding it must still trigger truncation.
+  if (visualLineCount <= visibleContentHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount: visualLineCount - visibleContentHeight,
+  };
+}
+
+/**
+ * Wrap text into the visual rows it occupies at `width` columns, accounting
+ * for both explicit newlines and code-point-width-aware soft wrapping. Unlike
+ * `sliceTextByVisualHeight` (which keeps only a head/tail window), this returns
+ * every visual row, so callers that scroll an arbitrary offset can slice the
+ * rows the user actually sees.
+ */
+export function wrapToVisualLines(text: string, width: number): string[] {
+  if (width <= 0) {
+    return [''];
+  }
+  const visualLines: string[] = [];
+  for (const logicalLine of text.split('\n')) {
+    if (logicalLine === '') {
+      visualLines.push('');
+      continue;
+    }
+    let currentLine = '';
+    let currentWidth = 0;
+    for (const char of logicalLine) {
+      // Clamped to 1, matching sliceTextByVisualHeight. `string-width` reports
+      // 0 for TAB, ZWJ and combining marks, so without this a run of them was
+      // charged nothing and the whole run counted as a single row: 50 tabs at
+      // width 10 came back as 1 row here and 5 there, for the same input. Any
+      // caller mixing the two -- scroll offsets, pending-render height -- then
+      // disagreed with itself. Erring high is the safe direction for a
+      // terminal: reserving a row too many costs a blank line, while counting
+      // one too few overflows the region and pushes content off screen.
+      const charWidth = Math.max(getCachedStringWidth(char), 1);
+      if (currentWidth + charWidth > width && currentWidth > 0) {
+        visualLines.push(currentLine);
+        currentLine = '';
+        currentWidth = 0;
+      }
+      currentLine += char;
+      currentWidth += charWidth;
+    }
+    if (currentLine) {
+      visualLines.push(currentLine);
+    }
+  }
+  if (visualLines.length === 0) {
+    visualLines.push('');
+  }
+  return visualLines;
+}
+
+/**
+ * Clear the string width cache
+ */
+export const clearStringWidthCache = (): void => {
+  stringWidthCache.clear();
+};
+
+const regex = ansiRegex();
+
+// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
+// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
+// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
+// are intentionally preserved: they legitimately structure multi-line output.
+// eslint-disable-next-line no-control-regex
+const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+// Unicode bidirectional override / isolate characters (the "Trojan Source"
+// attack class, CVE-2021-42572) that can visually reorder rendered text.
+const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Full sanitization for raw, untrusted text about to be rendered into a
+ * terminal `<Text>` (e.g. tool output in the Ctrl+O transcript, or a caught
+ * error message). Three passes: (1) neutralize ESC-prefixed ANSI sequences
+ * (alt-screen exit, OSC 52 clipboard, …); (2) strip bare C0/C1 control bytes
+ * ansi-regex misses, keeping only TAB/LF; (3) strip bidi override/isolate chars
+ * (Trojan Source). Single source of truth so every render site stays aligned.
+ */
+export function sanitizeTerminalText(value: string): string {
+  return escapeAnsiCtrlCodes(value)
+    .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
+
+/* Recursively traverses a JSON-like structure (objects, arrays, primitives)
+ * and escapes all ANSI control characters found in any string values.
+ *
+ * This function is designed to be robust, handling deeply nested objects and
+ * arrays. It applies a regex-based replacement to all string values to
+ * safely escape control characters.
+ *
+ * To optimize performance, this function uses a "copy-on-write" strategy.
+ * It avoids allocating new objects or arrays if no nested string values
+ * required escaping, returning the original object reference in such cases.
+ *
+ * @param obj The JSON-like value (object, array, string, etc.) to traverse.
+ * @returns A new value with all nested string fields escaped, or the
+ * original `obj` reference if no changes were necessary.
+ */
+export function escapeAnsiCtrlCodes<T>(obj: T): T {
+  if (typeof obj === 'string') {
+    if (obj.search(regex) === -1) {
+      return obj; // No changes return original string
+    }
+
+    regex.lastIndex = 0; // needed for global regex
+    return obj.replace(regex, (match) =>
+      JSON.stringify(match).slice(1, -1),
+    ) as T;
+  }
+
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    let newArr: unknown[] | null = null;
+
+    for (let i = 0; i < obj.length; i++) {
+      const value = obj[i];
+      const escapedValue = escapeAnsiCtrlCodes(value);
+      if (escapedValue !== value) {
+        if (newArr === null) {
+          newArr = [...obj];
+        }
+        newArr[i] = escapedValue;
+      }
+    }
+    return (newArr !== null ? newArr : obj) as T;
+  }
+
+  let newObj: T | null = null;
+  const keys = Object.keys(obj);
+
+  for (const key of keys) {
+    const value = (obj as Record<string, unknown>)[key];
+    const escapedValue = escapeAnsiCtrlCodes(value);
+
+    if (escapedValue !== value) {
+      if (newObj === null) {
+        newObj = { ...obj };
+      }
+      (newObj as Record<string, unknown>)[key] = escapedValue;
+    }
+  }
+
+  return newObj !== null ? newObj : obj;
+}
+
+/**
+ * Patterns that may indicate sensitive information like API keys, tokens, passwords.
+ */
+const SENSITIVE_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  // API keys with common prefixes
+  {
+    pattern: /(sk-[a-zA-Z0-9]{20,})/g,
+    replacement: 'sk-***REDACTED***',
+  },
+  {
+    pattern: /(api[_-]?key[_-]?[=:]\s*)[a-zA-Z0-9_-]{20,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Bearer tokens
+  {
+    pattern: /(Bearer\s+)[a-zA-Z0-9._-]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Generic tokens
+  {
+    pattern: /(token[_-]?[=:]\s*)[a-zA-Z0-9._-]{10,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Passwords in connection strings or assignments
+  {
+    pattern: /(password[_-]?[=:]\s*)[^\s]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  {
+    pattern: /(pwd[_-]?[=:]\s*)[^\s]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // AWS keys
+  {
+    pattern: /(AKIA[A-Z0-9]{16})/g,
+    replacement: '***REDACTED***',
+  },
+  // Generic secret patterns
+  {
+    pattern: /(secret[_-]?[=:]\s*)[a-zA-Z0-9._-]{10,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+];
+
+/**
+ * Sanitizes text by redacting potentially sensitive information like API keys,
+ * tokens, and passwords. Also truncates long text to a maximum length.
+ *
+ * @param text The text to sanitize
+ * @param maxLength Maximum length of the output text (default: 200)
+ * @returns Sanitized and truncated text
+ */
+export function sanitizeSensitiveText(
+  text: string,
+  maxLength: number = 200,
+): string {
+  let result = text;
+
+  // Apply each sensitive pattern replacement
+  for (const { pattern, replacement } of SENSITIVE_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+
+  // Truncate if too long
+  if (result.length > maxLength) {
+    if (maxLength <= 3) {
+      return result.slice(0, maxLength);
+    }
+    return result.slice(0, maxLength - 3) + '...';
+  }
+
+  return result;
+}
+
+// Match standalone C0 controls (incl. TAB/CR/LF/BEL/BS), DEL, and C1 controls.
+// `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
+// bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
+// inject terminal effects when rendered as part of a git-supplied filename.
+// The Unicode bidi embedding/isolate controls (U+202A–202E, U+2066–2069) are
+// also stripped so a crafted filename can't visually spoof its extension.
+/* eslint-disable no-control-regex */
+const FILENAME_CONTROL_CHARS_REGEX =
+  /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+// Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
+// (benign indentation), which multi-line display treats as layout.
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+function escapeControlChar(ch: string): string {
+  switch (ch) {
+    case '\b':
+      return '\\b';
+    case '\t':
+      return '\\t';
+    case '\n':
+      return '\\n';
+    case '\f':
+      return '\\f';
+    case '\r':
+      return '\\r';
+    default: {
+      // DEL (0x7F) and C1 controls (0x80-0x9F) are returned as raw bytes by
+      // JSON.stringify, which is exactly what we are trying to keep out of
+      // rendered output. Hand-roll the \uXXXX escape so every matched code
+      // point becomes printable.
+      const code = ch.charCodeAt(0);
+      return `\\u${code.toString(16).padStart(4, '0')}`;
+    }
+  }
+}
+
+/**
+ * Make a git-supplied filename safe to drop into a TUI text node or a
+ * stdout / log line. Strips both multi-byte ANSI sequences (via
+ * `escapeAnsiCtrlCodes`) and bare control bytes that git happily round-trips
+ * through `-z` paths but which would otherwise inject color resets, cursor
+ * moves, BEL, or layout-breaking newlines into the rendered output.
+ *
+ * Use this anywhere a path from `fetchGitDiff`, `fetchGitDiffHunks`, or a
+ * file-history backup is rendered to the user.
+ */
+export function sanitizeFilenameForDisplay(name: string): string {
+  return escapeAnsiCtrlCodes(name).replace(
+    FILENAME_CONTROL_CHARS_REGEX,
+    escapeControlChar,
+  );
+}
+
+/**
+ * Make untrusted multi-line text (e.g. model-generated file contents) safe to
+ * render in the TUI while preserving its line structure: neutralizes
+ * multi-byte ANSI/VT sequences (via `escapeAnsiCtrlCodes`), then escapes the
+ * remaining bare control bytes — BEL, BS, CR, DEL, C1, the 8-bit CSI — as
+ * inert, visible text. `\n` and `\t` pass through untouched.
+ */
+export function sanitizeMultilineForDisplay(text: string): string {
+  return escapeAnsiCtrlCodes(text).replace(
+    MULTILINE_CONTROL_CHARS_REGEX,
+    escapeControlChar,
+  );
 }

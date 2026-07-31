@@ -12,18 +12,27 @@ import type { Config } from '../../config/config.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
+  DeepSeekOpenAICompatibleProvider,
+  ZaiOpenAICompatibleProvider,
+  ModelScopeOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentGenerator } from './openaiContentGenerator.js';
-export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
+export { ContentGenerationPipeline } from './pipeline.js';
+export type { ErrorHandler, PipelineConfig, RequestContext } from './types.js';
 
 export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
+  DeepSeekOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -61,9 +70,40 @@ export function determineProvider(
     );
   }
 
-  // Check for OpenRouter provider
-  if (OpenRouterOpenAICompatibleProvider.isOpenRouterProvider(config)) {
-    return new OpenRouterOpenAICompatibleProvider(
+  if (DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config)) {
+    return new DeepSeekOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  if (ZaiOpenAICompatibleProvider.isZaiProvider(config)) {
+    return new ZaiOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
+  }
+
+  if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
+    return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
+  }
+
+  // Check for ModelScope provider
+  if (ModelScopeOpenAICompatibleProvider.isModelScopeProvider(config)) {
+    return new ModelScopeOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for MiniMax provider
+  if (MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)) {
+    return new MiniMaxOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Mistral provider
+  if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
+    return new MistralOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );
@@ -73,11 +113,4 @@ export function determineProvider(
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
 
-// Services
-export {
-  type TelemetryService,
-  type RequestContext,
-  DefaultTelemetryService,
-} from './telemetryService.js';
-
-export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';
+export { EnhancedErrorHandler } from './errorHandler.js';

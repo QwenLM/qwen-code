@@ -6,34 +6,55 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as Diff from 'diff';
 import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
   ToolLocation,
   ToolResult,
-  ToolResultDisplay,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isNodeError } from '../utils/errors.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { ensureCorrectEdit } from '../utils/editCorrector.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { logFileOperation } from '../telemetry/loggers.js';
+import { FileOperationEvent } from '../telemetry/types.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import {
+  getSpecificMimeType,
+  fileExists as isFilefileExists,
+} from '../utils/fileUtils.js';
+import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IDEConnectionStatus } from '../ide/ide-client.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { logFileOperation } from '../telemetry/loggers.js';
-import { FileOperationEvent } from '../telemetry/types.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
+import { safeLiteralReplace } from '../utils/textUtils.js';
+import {
+  countOccurrences,
+  extractEditSnippet,
+  maybeAugmentOldStringForDeletion,
+  normalizeEditStrings,
+} from '../utils/editHelper.js';
+
+const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -52,7 +73,9 @@ export function applyReplacement(
   if (oldString === '' && !isNewFile) {
     return currentContent;
   }
-  return currentContent.replaceAll(oldString, newString);
+
+  // Use intelligent replacement that handles $ sequences safely
+  return safeLiteralReplace(currentContent, oldString, newString);
 }
 
 /**
@@ -75,10 +98,9 @@ export interface EditToolParams {
   new_string: string;
 
   /**
-   * Number of replacements expected. Defaults to 1 if not specified.
-   * Use when you want to replace multiple occurrences.
+   * Replace every occurrence of old_string instead of requiring a unique match.
    */
-  expected_replacements?: number;
+  replace_all?: boolean;
 
   /**
    * Whether the edit was modified manually by the user.
@@ -86,9 +108,9 @@ export interface EditToolParams {
   modified_by_user?: boolean;
 
   /**
-   * Initially proposed string.
+   * Initially proposed content.
    */
-  ai_proposed_string?: string;
+  ai_proposed_content?: string;
 }
 
 interface CalculatedEdit {
@@ -97,6 +119,12 @@ interface CalculatedEdit {
   occurrences: number;
   error?: { display: string; raw: string; type: ToolErrorType };
   isNewFile: boolean;
+  /** Detected encoding of the existing file (e.g. 'utf-8', 'gbk') */
+  encoding: string;
+  /** Whether the existing file has a UTF-8 BOM */
+  bom: boolean;
+  /** Original line ending style of the existing file */
+  lineEnding: LineEnding;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -115,13 +143,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns An object describing the potential edit outcome
    * @throws File system errors if reading the file fails unexpectedly (e.g., permissions)
    */
-  private async calculateEdit(
-    params: EditToolParams,
-    abortSignal: AbortSignal,
-  ): Promise<CalculatedEdit> {
-    const expectedReplacements = params.expected_replacements ?? 1;
+  private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
+    const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
-    let fileExists = false;
+    let fileExists = await isFilefileExists(params.file_path);
     let isNewFile = false;
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
@@ -129,23 +154,123 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let error:
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
-
-    try {
-      currentContent = await this.config
-        .getFileSystemService()
-        .readTextFile(params.file_path);
-      // Normalize line endings to LF for consistent processing.
-      currentContent = currentContent.replace(/\r\n/g, '\n');
-      fileExists = true;
-    } catch (err: unknown) {
-      if (!isNodeError(err) || err.code !== 'ENOENT') {
-        // Rethrow unexpected FS errors (permissions, etc.)
-        throw err;
+    let useBOM = false;
+    let detectedEncoding = 'utf-8';
+    let detectedLineEnding: LineEnding = 'lf';
+    // Prior-read enforcement runs before any content is read so that
+    // the read pipeline below (and the content-derived error codes
+    // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
+    // NO_CHANGE) cannot be used as a read-less content oracle on a
+    // file the model has never legitimately Read.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — the same TOCTOU window WriteFile
+    // had — is now caught. ENOENT (genuinely absent) returns ok:true
+    // and falls through to the new-file path; an existing file that
+    // appeared in the race window is rejected as unread.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+      );
+      if (!decision.ok) {
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: decision.displayMessage,
+            raw: decision.rawMessage,
+            type: decision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
       }
-      fileExists = false;
+    }
+    if (fileExists) {
+      try {
+        const fileInfo = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: params.file_path });
+        if (fileInfo._meta?.bom !== undefined) {
+          useBOM = fileInfo._meta.bom;
+        } else {
+          useBOM =
+            fileInfo.content.length > 0 &&
+            fileInfo.content.codePointAt(0) === 0xfeff;
+        }
+        detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        // Detect original line ending style before normalizing
+        detectedLineEnding = detectLineEnding(fileInfo.content);
+        // Normalize line endings to LF for consistent processing.
+        currentContent = fileInfo.content.replace(/\r\n/g, '\n');
+        fileExists = true;
+        // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
+      } catch (err: unknown) {
+        if (!isNodeError(err) || err.code !== 'ENOENT') {
+          // Rethrow unexpected FS errors (permissions, etc.)
+          throw err;
+        }
+        fileExists = false;
+      }
     }
 
-    if (params.old_string === '' && !fileExists) {
+    // Post-read freshness re-check. The pre-read checkPriorRead above
+    // and readTextFile are two separate syscalls; if the file is
+    // modified between them, currentContent reflects post-write bytes
+    // the model never saw and any edit applied to it would still be
+    // a stale-write. Re-running checkPriorRead here closes the TOCTOU
+    // window: a stale state now (mtime/size drifted) means we read
+    // bytes the cache no longer trusts, and we reject before
+    // returning a CalculatedEdit that the call sites would honour.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        // Forensic trail for post-read TOCTOU rejections. These are
+        // rare ("file changed between stat and read") and the model
+        // self-heals by re-reading, so without a debug record an
+        // operator investigating "why did this Edit fail once?" has
+        // nothing to grep.
+        debugLogger.warn('post-read TOCTOU rejection', {
+          path: params.file_path,
+          reason: postDecision.type,
+        });
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: postDecision.displayMessage,
+            raw: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
+      }
+    }
+
+    const normalizedStrings = normalizeEditStrings(
+      currentContent,
+      finalOldString,
+      finalNewString,
+    );
+    finalOldString = normalizedStrings.oldString;
+    finalNewString = normalizedStrings.newString;
+
+    if (finalOldString === '' && !fileExists) {
       // Creating a new file
       isNewFile = true;
     } else if (!fileExists) {
@@ -156,18 +281,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         type: ToolErrorType.FILE_NOT_FOUND,
       };
     } else if (currentContent !== null) {
-      // Editing an existing file
-      const correctedEdit = await ensureCorrectEdit(
-        params.file_path,
+      finalOldString = maybeAugmentOldStringForDeletion(
         currentContent,
-        params,
-        this.config.getGeminiClient(),
-        abortSignal,
+        finalOldString,
+        finalNewString,
       );
-      finalOldString = correctedEdit.params.old_string;
-      finalNewString = correctedEdit.params.new_string;
-      occurrences = correctedEdit.occurrences;
 
+      occurrences = countOccurrences(currentContent, finalOldString);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -181,13 +301,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use ${ReadFileTool.Name} tool to verify.`,
           type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
         };
-      } else if (occurrences !== expectedReplacements) {
-        const occurrenceTerm =
-          expectedReplacements === 1 ? 'occurrence' : 'occurrences';
-
+      } else if (!replaceAll && occurrences > 1) {
         error = {
-          display: `Failed to edit, expected ${expectedReplacements} ${occurrenceTerm} but found ${occurrences}.`,
-          raw: `Failed to edit, Expected ${expectedReplacements} ${occurrenceTerm} but found ${occurrences} for old_string in file: ${params.file_path}`,
+          display: `Failed to edit because the text matches multiple locations. Provide more context or set replace_all to true.`,
+          raw: `Failed to edit. Found ${occurrences} occurrences for old_string in ${params.file_path} but replace_all was not enabled.`,
           type: ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
         };
       } else if (finalOldString === finalNewString) {
@@ -224,56 +341,102 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
+    // Scan the full resulting content, not just new_string, so a secret split
+    // across multiple edits (each fragment alone undetectable) is still caught.
+    if (!error) {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.file_path,
+        newContent,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        // If the secret is already in the on-disk file, this edit can't clear it
+        // — tell the user to remove the committed secret, not just retry.
+        const preExisting =
+          currentContent !== null &&
+          checkTeamMemorySecrets(
+            params.file_path,
+            currentContent,
+            this.config.getProjectRoot(),
+          ) !== null;
+        const message = preExisting
+          ? `${teamMemoryError} Note: the secret already exists in the current file content, so removing it from your edit alone is not enough — delete the committed secret from the file.`
+          : teamMemoryError;
+        error = {
+          display: message,
+          raw: message,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        };
+      }
+    }
+
     return {
       currentContent,
       newContent,
       occurrences,
       error,
       isNewFile,
+      bom: useBOM,
+      encoding: detectedEncoding,
+      lineEnding: detectedLineEnding,
     };
   }
 
   /**
-   * Handles the confirmation prompt for the Edit tool in the CLI.
-   * It needs to calculate the diff to show the user.
+   * Edit operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — edits default to 'ask'. (In AUTO_EDIT/YOLO the user
+   * has globally opted into auto-approval; team writes still surface in the git
+   * diff for review before commit.)
    */
-  async shouldConfirmExecute(
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
+  async getDefaultPermission(): Promise<PermissionDecision> {
+    const projectRoot = this.config.getProjectRoot();
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
     }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
+      return 'allow';
+    }
+    return 'ask';
+  }
 
+  /**
+   * Constructs the edit diff confirmation details.
+   */
+  async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params, abortSignal);
+      editData = await this.calculateEdit(this.params);
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.log(`Error preparing edit: ${errorMsg}`);
-      return false;
+      if (abortSignal.aborted) {
+        throw error;
+      }
+      const errorMsg = getErrorMessage(error);
+      throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
     if (editData.error) {
-      console.log(`Error: ${editData.error.display}`);
-      return false;
+      // Use the full `raw` message, not the short `display` form:
+      // the scheduler propagates `error.message` straight into the
+      // model-facing tool response. `raw` carries the remediation
+      // detail (file path, stale-vs-unread distinction, "without
+      // offset / limit / pages" hint) that `execute()` already
+      // surfaces — confirmation-required flows should not lose it.
+      throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
 
     const fileName = path.basename(this.params.file_path);
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
       editData.currentContent ?? '',
       editData.newContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
-    const ideClient = this.config.getIdeClient();
-    const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient?.getConnectionStatus().status === IDEConnectionStatus.Connected
-        ? ideClient.openDiff(this.params.file_path, editData.newContent)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Edit: ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
@@ -286,18 +449,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            // TODO(chrstn): See https://github.com/google-gemini/gemini-cli/pull/5618#discussion_r2255413084
-            // for info on a possible race condition where the file is modified on disk while being edited.
-            this.params.old_string = editData.currentContent ?? '';
-            this.params.new_string = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }
@@ -311,17 +463,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return `Create ${shortenPath(relativePath)}`;
     }
 
-    const oldStringSnippet =
-      this.params.old_string.split('\n')[0].substring(0, 30) +
-      (this.params.old_string.length > 30 ? '...' : '');
-    const newStringSnippet =
-      this.params.new_string.split('\n')[0].substring(0, 30) +
-      (this.params.new_string.length > 30 ? '...' : '');
-
     if (this.params.old_string === this.params.new_string) {
       return `No file changes to ${shortenPath(relativePath)}`;
     }
-    return `${shortenPath(relativePath)}: ${oldStringSnippet} => ${newStringSnippet}`;
+    return shortenPath(relativePath);
   }
 
   /**
@@ -332,9 +477,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   async execute(signal: AbortSignal): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params, signal);
+      editData = await this.calculateEdit(this.params);
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (signal.aborted) {
+        throw error;
+      }
+      const errorMsg = getErrorMessage(error);
       return {
         llmContent: `Error preparing edit: ${errorMsg}`,
         returnDisplay: `Error preparing edit: ${errorMsg}`,
@@ -357,81 +505,224 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     try {
-      this.ensureParentDirectoriesExist(this.params.file_path);
-      await this.config
-        .getFileSystemService()
-        .writeTextFile(this.params.file_path, editData.newContent);
+      // Backup the pre-edit content BEFORE the final freshness check.
+      // Mirrors the upstream `claude-code/src/tools/FileEditTool` ordering,
+      // which has an explicit comment on the equivalent block:
+      //
+      //   "These awaits must stay OUTSIDE the critical section below — a
+      //    yield between the staleness check and writeTextContent lets
+      //    concurrent edits interleave."
+      //
+      // `trackEdit` does `stat` + `copyFile` and on large files can take
+      // hundreds of milliseconds. The previous ordering ran it AFTER
+      // `checkPriorRead` and before `writeTextFile`, which widened the
+      // already-acknowledged stat-then-write window from "two adjacent
+      // syscalls" to "freshness check → potentially-multi-second backup →
+      // write". An external mutation landing inside the backup window was
+      // therefore no longer detected before the write clobbered it.
+      //
+      // Backing up first is safe: backups are idempotent (deterministic
+      // `{hash}@v{version}` filename) and per-snapshot. If the freshness
+      // check below then rejects the edit, we keep an unused-but-correct
+      // backup of the pre-edit state — not corrupt state. The next
+      // makeSnapshot will reuse it if the file is unchanged.
+      try {
+        await this.config
+          .getFileHistoryService()
+          .trackEdit(this.params.file_path);
+      } catch {
+        // File history is best-effort; never block core tool operations.
+      }
 
-      let displayResult: ToolResultDisplay;
+      // Final pre-write freshness check. calculateEdit() ran a
+      // post-read check, but execute() can be called arbitrarily
+      // long after that (user approval, modify-and-confirm, etc.).
+      // Between the post-read check and the writeTextFile below,
+      // an external mutation could land and be silently overwritten.
+      // This last guard tightens the window from "post-read →
+      // writeTextFile (unbounded)" to "stat → writeTextFile (two
+      // adjacent syscalls)".
+      //
+      // It does NOT eliminate the race. A concurrent writer that
+      // lands between this stat and the writeTextFile call below
+      // can still be clobbered — that residual is an OS-level
+      // limitation of the stat-then-write pattern, and the only
+      // way to close it is an atomic write (write to a temp file,
+      // then rename) or a content-hash post-check that re-reads
+      // the bytes after the write. Both are deferred to a follow-up
+      // PR; operators who care about strict overwrite-protection
+      // should set `fileReadCacheDisabled: true` and rely on
+      // application-level locking.
+      //
+      // Run unconditionally (not gated on `editData.isNewFile`):
+      // `isNewFile` was decided back in calculateEdit, but a file
+      // could be created in the gap between then and now and a
+      // confirmation-pending Edit would otherwise clobber it
+      // without enforcement. ENOENT inside checkPriorRead returns
+      // ok:true so genuine new-file creation is unaffected.
+      if (!this.config.getFileReadCacheDisabled()) {
+        const writeDecision = await checkPriorRead(
+          this.config.getFileReadCache(),
+          this.params.file_path,
+          'editing',
+          // For an in-place edit (`!isNewFile`), the file existed at
+          // read time and must still exist now — an ENOENT here
+          // means the original target disappeared and we should
+          // reject rather than fall through to a new-file write
+          // that would silently re-create a file from stale bytes.
+          // For genuine new-file creation, ENOENT is the expected
+          // pre-write state (ok:true → writeTextFile creates).
+          { expectExisting: !editData.isNewFile },
+        );
+        if (!writeDecision.ok) {
+          debugLogger.warn('pre-write TOCTOU rejection', {
+            path: this.params.file_path,
+            reason: writeDecision.type,
+          });
+          return {
+            llmContent: writeDecision.rawMessage,
+            returnDisplay: `Error: ${writeDecision.displayMessage}`,
+            error: {
+              message: writeDecision.rawMessage,
+              type: writeDecision.type,
+            },
+          };
+        }
+      }
+
+      // Create parent directories AFTER the pre-write enforcement
+      // check passes. Doing it before would leak intermediate
+      // directories on the failure path — a real (if minor) FS
+      // litter that the previous order created on every rejected
+      // edit.
+      this.ensureParentDirectoriesExist(this.params.file_path);
+
+      // For new files, apply default file encoding setting
+      // For existing files, preserve the original encoding (BOM and charset)
+      if (editData.isNewFile) {
+        const userEncoding = this.config.getDefaultFileEncoding();
+        let useBOM = false;
+        if (userEncoding === FileEncoding.UTF8_BOM) {
+          useBOM = true;
+        } else if (userEncoding === undefined) {
+          // No explicit setting: auto-detect (e.g. .ps1 on non-UTF-8 Windows)
+          useBOM = needsUtf8Bom(this.params.file_path);
+        }
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
+            bom: useBOM,
+          },
+        });
+      } else {
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
+            bom: editData.bom,
+            encoding: editData.encoding,
+            lineEnding: editData.lineEnding,
+          },
+        });
+      }
+
+      // Track AI contribution for commit attribution
+      if (!this.params.modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          this.params.file_path,
+          editData.currentContent,
+          editData.newContent,
+        );
+      }
+
+      // Mark the cache entry written, capturing the post-write stats
+      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
+      // through to the full pipeline instead of returning the
+      // pre-edit placeholder. Best-effort: a stat failure here does
+      // not undo the successful write — the next Read will simply
+      // re-stat and treat the cache entry as stale.
+      try {
+        const postWriteStats = fs.statSync(this.params.file_path);
+        this.config
+          .getFileReadCache()
+          .recordWrite(this.params.file_path, postWriteStats);
+      } catch {
+        // Non-fatal: leaving a stale entry is preferable to failing
+        // the user-visible Edit on a transient stat failure. The
+        // entry's mtime/size still does not match the on-disk bytes
+        // post-write, so the next ReadFile will report stale and
+        // refresh the entry.
+      }
+
       const fileName = path.basename(this.params.file_path);
       const originallyProposedContent =
-        this.params.ai_proposed_string || this.params.new_string;
+        this.params.ai_proposed_content || editData.newContent;
       const diffStat = getDiffStat(
         fileName,
         editData.currentContent ?? '',
         originallyProposedContent,
-        this.params.new_string,
+        editData.newContent,
       );
 
-      if (editData.isNewFile) {
-        displayResult = `Created ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`;
-      } else {
-        // Generate diff for display, even though core logic doesn't technically need it
-        // The CLI wrapper will use this part of the ToolResult
-        const fileDiff = Diff.createPatch(
-          fileName,
-          editData.currentContent ?? '', // Should not be null here if not isNewFile
-          editData.newContent,
-          'Current',
-          'Proposed',
-          DEFAULT_DIFF_OPTIONS,
-        );
-        displayResult = {
-          fileDiff,
-          fileName,
-          originalContent: editData.currentContent,
-          newContent: editData.newContent,
-          diffStat,
-        };
-      }
+      const fileDiff = createPatchSmart(
+        fileName,
+        editData.currentContent ?? '',
+        editData.newContent,
+        'Current',
+        'Proposed',
+      );
+      const displayResult = {
+        fileDiff,
+        fileName,
+        originalContent: editData.currentContent,
+        newContent: editData.newContent,
+        diffStat,
+      };
 
-      const llmSuccessMessageParts = [
-        editData.isNewFile
-          ? `Created new file: ${this.params.file_path} with provided content.`
-          : `Successfully modified file: ${this.params.file_path} (${editData.occurrences} replacements).`,
-      ];
-      if (this.params.modified_by_user) {
-        llmSuccessMessageParts.push(
-          `User modified the \`new_string\` content to be: ${this.params.new_string}.`,
-        );
-      }
-
-      const lines = editData.newContent.split('\n').length;
+      // Log file operation for telemetry (without diff_stat to avoid double-counting)
       const mimetype = getSpecificMimeType(this.params.file_path);
+      const programmingLanguage = getLanguageFromFilePath(
+        this.params.file_path,
+      );
       const extension = path.extname(this.params.file_path);
-      const programming_language = getProgrammingLanguage({
-        file_path: this.params.file_path,
-      });
+      const operation = editData.isNewFile
+        ? FileOperation.CREATE
+        : FileOperation.UPDATE;
 
       logFileOperation(
         this.config,
         new FileOperationEvent(
           EditTool.Name,
-          editData.isNewFile ? FileOperation.CREATE : FileOperation.UPDATE,
-          lines,
+          operation,
+          editData.newContent.split('\n').length,
           mimetype,
           extension,
-          diffStat,
-          programming_language,
+          programmingLanguage,
         ),
       );
+
+      const llmSuccessMessageParts = [
+        editData.isNewFile
+          ? `Created new file: ${this.params.file_path} with provided content.`
+          : `The file: ${this.params.file_path} has been updated.`,
+      ];
+
+      const snippetResult = extractEditSnippet(
+        editData.currentContent,
+        editData.newContent,
+      );
+      if (snippetResult) {
+        const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
+        llmSuccessMessageParts.push(snippetText);
+      }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
       };
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       return {
         llmContent: `Error executing edit: ${errorMsg}`,
         returnDisplay: `Error writing file: ${errorMsg}`,
@@ -461,12 +752,12 @@ export class EditTool
   extends BaseDeclarativeTool<EditToolParams, ToolResult>
   implements ModifiableDeclarativeTool<EditToolParams>
 {
-  static readonly Name = 'edit';
+  static readonly Name = ToolNames.EDIT;
   constructor(private readonly config: Config) {
     super(
       EditTool.Name,
-      'Edit',
-      `Replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when \`expected_replacements\` is specified. This tool requires providing significant context around the change to ensure precise targeting. Always use the ${ReadFileTool.Name} tool to examine the file's current content before attempting a text replacement.
+      ToolDisplayNames.EDIT,
+      `Replaces text within a file. By default, replaces a single occurrence. Set \`replace_all\` to true when you intend to modify every instance of \`old_string\`. This tool requires providing significant context around the change to ensure precise targeting. Always use the ${ReadFileTool.Name} tool to examine the file's current content before attempting a text replacement.
 
       The user has the ability to modify the \`new_string\` content. If modified, this will be stated in the response.
 
@@ -476,7 +767,7 @@ Expectation for required parameters:
 3. \`new_string\` MUST be the exact literal text to replace \`old_string\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.
 4. NEVER escape \`old_string\` or \`new_string\`, that would break the exact literal text requirement.
 **Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.
-**Multiple replacements:** Set \`expected_replacements\` to the number of occurrences you want to replace. The tool will replace ALL occurrences that match \`old_string\` exactly. Ensure the number of replacements matches your expectation.`,
+**Multiple replacements:** Set \`replace_all\` to true when you want to replace every occurrence that matches \`old_string\`.`,
       Kind.Edit,
       {
         properties: {
@@ -487,7 +778,7 @@ Expectation for required parameters:
           },
           old_string: {
             description:
-              'The exact literal text to replace, preferably unescaped. For single replacements (default), include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. For multiple replacements, specify expected_replacements parameter. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.',
+              'The exact literal text to replace, preferably unescaped. For single replacements (default), include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.',
             type: 'string',
           },
           new_string: {
@@ -495,11 +786,10 @@ Expectation for required parameters:
               'The exact literal text to replace `old_string` with, preferably unescaped. Provide the EXACT text. Ensure the resulting code is correct and idiomatic.',
             type: 'string',
           },
-          expected_replacements: {
-            type: 'number',
+          replace_all: {
+            type: 'boolean',
             description:
-              'Number of replacements expected. Defaults to 1 if not specified. Use when you want to replace multiple occurrences.',
-            minimum: 1,
+              'Replace all occurrences of old_string (default false).',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],
@@ -516,6 +806,10 @@ Expectation for required parameters:
   protected override validateToolParamValues(
     params: EditToolParams,
   ): string | null {
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    params.file_path = unescapePath(params.file_path.trim());
+
     if (!params.file_path) {
       return "The 'file_path' parameter must be non-empty.";
     }
@@ -524,10 +818,13 @@ Expectation for required parameters:
       return `File path must be absolute: ${params.file_path}`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(params.file_path)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(', ')}`;
+    const teamMemoryError = checkTeamMemorySecrets(
+      params.file_path,
+      params.new_string ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;
@@ -539,32 +836,65 @@ Expectation for required parameters:
     return new EditToolInvocation(this.config, params);
   }
 
+  override toAutoClassifierInput(
+    params: EditToolParams,
+  ): Record<string, unknown> {
+    const oldStr = params.old_string ?? '';
+    const newStr = params.new_string ?? '';
+    // 300 chars is enough headroom for the classifier to spot a malicious
+    // registry / shell / env line that hides behind a benign-looking
+    // prefix (~80 chars). In-workspace edits take the acceptEdits fast-
+    // path and never reach this projection; the preview is therefore
+    // only consulted for the smaller set of out-of-workspace writes
+    // (~/.npmrc, /etc/hosts, etc.) — exactly the case where the
+    // classifier needs the longer window.
+    return {
+      file_path: params.file_path,
+      old_string_preview: oldStr.slice(0, 300),
+      new_string_preview: newStr.slice(0, 300),
+      old_string_truncated: oldStr.length > 300,
+      new_string_truncated: newStr.length > 300,
+      lines_changed:
+        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
+    };
+  }
+
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
     return {
       getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          return this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        const fileExists = await isFilefileExists(params.file_path);
+        if (fileExists) {
+          try {
+            const { content } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return content;
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          const currentContent = await this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-          return applyReplacement(
-            currentContent,
-            params.old_string,
-            params.new_string,
-            params.old_string === '' && currentContent === '',
-          );
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        if (fs.existsSync(params.file_path)) {
+          try {
+            const { content: currentContent } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return applyReplacement(
+              currentContent,
+              params.old_string,
+              params.new_string,
+              params.old_string === '' && currentContent === '',
+            );
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },
@@ -572,16 +902,13 @@ Expectation for required parameters:
         oldContent: string,
         modifiedProposedContent: string,
         originalParams: EditToolParams,
-      ): EditToolParams => {
-        const content = originalParams.new_string;
-        return {
-          ...originalParams,
-          ai_proposed_string: content,
-          old_string: oldContent,
-          new_string: modifiedProposedContent,
-          modified_by_user: true,
-        };
-      },
+      ): EditToolParams => ({
+        ...originalParams,
+        ai_proposed_content: oldContent,
+        old_string: oldContent,
+        new_string: modifiedProposedContent,
+        modified_by_user: true,
+      }),
     };
   }
 }

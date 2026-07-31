@@ -9,8 +9,11 @@ import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { getErrorMessage, isNodeError } from './errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import type { FileFilteringOptions } from '../config/config.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/config.js';
+import type { FileFilteringOptions } from '../config/constants.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLDER_STRUCTURE');
 
 const MAX_ITEMS = 20;
 const TRUNCATION_INDICATOR = '...';
@@ -50,7 +53,12 @@ interface FullFolderInfo {
   totalFiles: number; // Number of files included from this folder during BFS scan
   isIgnored?: boolean; // Flag to easily identify ignored folders later
   hasMoreFiles?: boolean; // Indicates if files were truncated for this specific folder
-  hasMoreSubfolders?: boolean; // Indicates if subfolders were truncated for this specific folder
+  // True when this folder's subfolders were truncated, OR when the item budget
+  // ran out before the folder was read at all. Both render as a trailing `...`,
+  // which is the point: an unread folder must not be indistinguishable from one
+  // that was read and found empty. Any new consumer has to cover the second
+  // case too — gating on `subFolders.length > 0` drops it silently.
+  hasMoreSubfolders?: boolean;
 }
 
 // --- Interfaces ---
@@ -88,9 +96,16 @@ async function readFullStructure(
     processedPaths.add(currentPath);
 
     if (currentItemCount >= options.maxItems) {
-      // If the root itself caused us to exceed, we can't really show anything.
-      // Otherwise, this folder won't be processed further.
-      // The parent that queued this would have set its own hasMoreSubfolders flag.
+      // The budget ran out before this folder's own contents could be read.
+      // It was already added to its parent, so without a marker it renders as
+      // a bare leaf and reads as an empty directory. The parent's
+      // hasMoreSubfolders flag says nothing about it either -- that flag means
+      // "I could not add every subfolder", and this one was added.
+      //
+      // Only one flag is set: formatStructure emits an indicator per flag, and
+      // hasMoreSubfolders alone produces the single trailing `...` that says
+      // the contents are unexplored, whether they are files or folders.
+      folderInfo.hasMoreSubfolders = true;
       continue;
     }
 
@@ -104,7 +119,7 @@ async function readFullStructure(
         isNodeError(error) &&
         (error.code === 'EACCES' || error.code === 'ENOENT')
       ) {
-        console.warn(
+        debugLogger.warn(
           `Warning: Could not read directory ${currentPath}: ${error.message}`,
         );
         if (currentPath === rootPath && error.code === 'ENOENT') {
@@ -132,8 +147,8 @@ async function readFullStructure(
           const shouldIgnore =
             (options.fileFilteringOptions.respectGitIgnore &&
               options.fileService.shouldGitIgnoreFile(filePath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(filePath));
+            (options.fileFilteringOptions.respectQwenIgnore &&
+              options.fileService.shouldQwenIgnoreFile(filePath));
           if (shouldIgnore) {
             continue;
           }
@@ -172,8 +187,8 @@ async function readFullStructure(
           isIgnored =
             (options.fileFilteringOptions.respectGitIgnore &&
               options.fileService.shouldGitIgnoreFile(subFolderPath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(subFolderPath));
+            (options.fileFilteringOptions.respectQwenIgnore &&
+              options.fileService.shouldQwenIgnoreFile(subFolderPath));
         }
 
         if (options.ignoredFolders.has(subFolderName) || isIgnored) {
@@ -215,10 +230,11 @@ async function readFullStructure(
 }
 
 /**
- * Reads the directory structure using BFS, respecting maxItems.
+ * Formats a folder structure tree node into indented text lines.
  * @param node The current node in the reduced structure.
- * @param indent The current indentation string.
- * @param isLast Sibling indicator.
+ * @param currentIndent The current indentation string.
+ * @param isLastChildOfParent Sibling indicator.
+ * @param isProcessingRootNode Whether this is the root node of the structure.
  * @param builder Array to build the string lines.
  */
 function formatStructure(
@@ -322,27 +338,12 @@ export async function getFolderStructure(
     formatStructure(structureRoot, '', true, true, structureLines);
 
     // 3. Build the final output string
-    function isTruncated(node: FullFolderInfo): boolean {
-      if (node.hasMoreFiles || node.hasMoreSubfolders || node.isIgnored) {
-        return true;
-      }
-      for (const sub of node.subFolders) {
-        if (isTruncated(sub)) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    let summary = `Showing up to ${mergedOptions.maxItems} items (files + folders).`;
-
-    if (isTruncated(structureRoot)) {
-      summary += ` Folders or files indicated with ${TRUNCATION_INDICATOR} contain more items not shown, were ignored, or the display limit (${mergedOptions.maxItems} items) was reached.`;
-    }
-
-    return `${summary}\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
+    return `Showing up to ${mergedOptions.maxItems} items:\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
   } catch (error: unknown) {
-    console.error(`Error getting folder structure for ${resolvedPath}:`, error);
+    debugLogger.error(
+      `Error getting folder structure for ${resolvedPath}:`,
+      error,
+    );
     return `Error processing directory "${resolvedPath}": ${getErrorMessage(error)}`;
   }
 }

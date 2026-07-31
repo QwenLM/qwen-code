@@ -5,60 +5,208 @@
  */
 
 import type { CommandModule } from 'yargs';
-import {
-  installExtension,
-  type ExtensionInstallMetadata,
-} from '../../config/extension.js';
 
+import {
+  ExtensionManager,
+  isExtensionCommittedWithWarningsError,
+  parseInstallSource,
+  type ExtensionScope,
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { loadSettings } from '../../config/settings.js';
+import {
+  requestConsentOrFail,
+  requestConsentNonInteractive,
+  requestChoicePluginNonInteractive,
+} from './consent.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
-  source?: string;
-  path?: string;
+  source: string;
+  ref?: string;
+  autoUpdate?: boolean;
+  allowPreRelease?: boolean;
+  consent?: boolean;
+  registry?: string;
+  scope?: string;
+}
+
+// "workspace" is accepted as an alias of "project" to match enable/disable.
+function normalizeScope(scope: string | undefined): ExtensionScope {
+  return scope === 'project' || scope === 'workspace' ? 'project' : 'user';
 }
 
 export async function handleInstall(args: InstallArgs) {
+  const scope = normalizeScope(args.scope);
+  let extensionManager: ExtensionManager | undefined;
   try {
-    const installMetadata: ExtensionInstallMetadata = {
-      source: (args.source || args.path) as string,
-      type: args.source ? 'git' : 'local',
-    };
-    const extensionName = await installExtension(installMetadata);
-    console.log(
-      `Extension "${extensionName}" installed successfully and enabled.`,
+    const installMetadata = await parseInstallSource(args.source);
+
+    if (
+      installMetadata.type !== 'git' &&
+      installMetadata.type !== 'github-release' &&
+      installMetadata.type !== 'npm' &&
+      installMetadata.type !== 'archive-url'
+    ) {
+      if (args.ref || args.autoUpdate) {
+        throw new Error(
+          t(
+            '--ref and --auto-update are not applicable for marketplace extensions.',
+          ),
+        );
+      }
+    }
+
+    if (
+      (installMetadata.type === 'npm' ||
+        installMetadata.type === 'archive-url') &&
+      args.ref
+    ) {
+      throw new Error(
+        t(
+          installMetadata.type === 'npm'
+            ? '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).'
+            : '--ref is not applicable for archive URL extensions.',
+        ),
+      );
+    }
+
+    if (installMetadata.type !== 'npm' && args.registry) {
+      throw new Error(t('--registry is only applicable for npm extensions.'));
+    }
+
+    if (installMetadata.type === 'npm' && args.registry) {
+      installMetadata.registryUrl = args.registry;
+    }
+
+    const requestConsent = args.consent
+      ? () => Promise.resolve()
+      : requestConsentOrFail.bind(null, requestConsentNonInteractive);
+    const workspaceDir = process.cwd();
+    extensionManager = new ExtensionManager({
+      workspaceDir,
+      locale: getCurrentLanguage(),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+      requestConsent,
+      requestChoicePlugin: requestChoicePluginNonInteractive,
+    });
+    await extensionManager.refreshCache();
+
+    const extension = await extensionManager.installExtension(
+      {
+        ...installMetadata,
+        ref: args.ref,
+        autoUpdate: args.autoUpdate,
+        allowPreRelease: args.allowPreRelease,
+      },
+      requestConsent,
+      undefined,
+      workspaceDir,
+      undefined,
+      scope === 'project'
+        ? { scope: 'workspace', workspacePath: workspaceDir }
+        : { scope: 'user' },
+    );
+    if (args.scope) {
+      try {
+        extensionManager.setExtensionScope(extension.name, scope);
+      } catch (scopeError) {
+        writeStderrLine(
+          `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+        );
+      }
+    }
+    writeStdoutLine(
+      scope === 'project'
+        ? t(
+            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" installed successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    if (isExtensionCommittedWithWarningsError(error)) {
+      if (args.scope && extensionManager) {
+        try {
+          extensionManager.setExtensionScope(error.identity.name, scope);
+        } catch (scopeError) {
+          writeStderrLine(
+            `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+          );
+        }
+      }
+      writeStderrLine(`Warning: ${getErrorMessage(error)}`);
+      return;
+    }
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }
 
 export const installCommand: CommandModule = {
-  command: 'install [--source | --path ]',
-  describe: 'Installs an extension from a git repository or a local path.',
+  command: 'install <source>',
+  describe: t(
+    'Installs an extension from a git repository URL, local path or archive, archive URL, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+  ),
   builder: (yargs) =>
     yargs
-      .option('source', {
-        describe: 'The git URL of the extension to install.',
+      .positional('source', {
+        describe: t(
+          'The github URL, local path or archive, archive URL, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
+        ),
+        type: 'string',
+        demandOption: true,
+      })
+      .option('ref', {
+        describe: t('The git ref to install from.'),
         type: 'string',
       })
-      .option('path', {
-        describe: 'Path to a local extension directory.',
+      .option('auto-update', {
+        describe: t('Enable auto-update for this extension.'),
+        type: 'boolean',
+      })
+      .option('pre-release', {
+        describe: t('Enable pre-release versions for this extension.'),
+        type: 'boolean',
+      })
+      .option('registry', {
+        describe: t('Custom npm registry URL (only for npm extensions).'),
         type: 'string',
       })
-      .conflicts('source', 'path')
+      .option('consent', {
+        describe: t(
+          'Acknowledge the security risks of installing an extension and skip the confirmation prompt.',
+        ),
+        type: 'boolean',
+        default: false,
+      })
+      .option('scope', {
+        describe: t(
+          'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+        ),
+        type: 'string',
+        choices: ['user', 'project', 'workspace'],
+      })
       .check((argv) => {
-        if (!argv.source && !argv.path) {
-          throw new Error(
-            'Either a git URL --source or a --path must be provided.',
-          );
+        if (!argv.source) {
+          throw new Error(t('The source argument must be provided.'));
         }
         return true;
       }),
   handler: async (argv) => {
     await handleInstall({
-      source: argv['source'] as string | undefined,
-      path: argv['path'] as string | undefined,
+      source: argv['source'] as string,
+      ref: argv['ref'] as string | undefined,
+      autoUpdate: argv['auto-update'] as boolean | undefined,
+      allowPreRelease: argv['pre-release'] as boolean | undefined,
+      consent: argv['consent'] as boolean | undefined,
+      registry: argv['registry'] as string | undefined,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

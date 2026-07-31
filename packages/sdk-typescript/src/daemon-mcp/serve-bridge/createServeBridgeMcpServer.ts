@@ -1,0 +1,81 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Factory: wraps `qwen serve` HTTP API as an MCP server.
+ */
+
+import { DaemonClient } from '../../daemon/DaemonClient.js';
+import { createSdkMcpServer } from '../createSdkMcpServer.js';
+import type { McpSdkServerConfigWithInstance } from '../createSdkMcpServer.js';
+import type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';
+import { startSessionCleanup, stopEventStream } from './sse.js';
+import { allTools } from './tools/index.js';
+
+/** Strip trailing slashes without regex (avoids CodeQL ReDoS flag). */
+function stripTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 0x2f) end--;
+  return end === url.length ? url : url.slice(0, end);
+}
+
+/**
+ * Create an MCP server that proxies `qwen serve` HTTP endpoints as MCP tools.
+ *
+ * @example
+ * ```typescript
+ * import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+ * import { createServeBridgeMcpServer } from '@qwen-code/sdk';
+ *
+ * const server = createServeBridgeMcpServer({
+ *   daemonUrl: 'http://127.0.0.1:4170',
+ *   token: process.env.QWEN_DAEMON_TOKEN,
+ * });
+ *
+ * const transport = new StdioServerTransport();
+ * await server.instance.connect(transport);
+ * ```
+ */
+export function createServeBridgeMcpServer(
+  opts: ServeBridgeMcpServerOptions,
+): McpSdkServerConfigWithInstance {
+  const state: BridgeState = {
+    client: new DaemonClient({
+      baseUrl: opts.daemonUrl,
+      token: opts.token,
+    }),
+    daemonUrl: stripTrailingSlashes(opts.daemonUrl),
+    token: opts.token,
+    defaultSessionId: undefined,
+    workspaceCwd: opts.workspaceCwd,
+    eventStreams: new Map(),
+    allowGlobalScope: opts.allowGlobalScope ?? false,
+  };
+
+  const tools = allTools(state);
+
+  // Start periodic cleanup of idle SSE connections
+  const stopCleanup = startSessionCleanup(state);
+
+  const server = createSdkMcpServer({
+    name: 'qwen-serve-bridge',
+    version: '1.0.0',
+    tools,
+  });
+
+  // Stop cleanup timer and abort all active SSE streams when server closes.
+  // Use the SDK's onclose lifecycle hook (Protocol.onclose) instead of
+  // monkey-patching close() — the SDK calls onclose after transport shutdown
+  // and internal state cleanup, which is the supported extension point.
+  server.instance.server.onclose = () => {
+    stopCleanup();
+    for (const sessionId of [...state.eventStreams.keys()]) {
+      stopEventStream(state, sessionId);
+    }
+  };
+
+  return server;
+}

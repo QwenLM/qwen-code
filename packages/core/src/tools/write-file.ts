@@ -6,17 +6,21 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
+  ToolArtifact,
+  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -24,23 +28,55 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import {
-  ensureCorrectEdit,
-  ensureCorrectFileContent,
-} from '../utils/editCorrector.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { IDEConnectionStatus } from '../ide/ide-client.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import {
+  getSpecificMimeType,
+  fileExists as isFilefileExists,
+} from '../utils/fileUtils.js';
+import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  ARTIFACT_TITLE_MAX_LENGTH,
+  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+  hasControlCharacter,
+  hasUnsafeDisplayPayload,
+} from './record-artifact.js';
+
+const debugLogger = createDebugLogger('WRITE_FILE');
+const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.htm', 'html'],
+  ['.html', 'html'],
+  ['.ipynb', 'notebook'],
+  ['.jpeg', 'image'],
+  ['.jpg', 'image'],
+  ['.pdf', 'pdf'],
+  ['.png', 'image'],
+  ['.svg', 'image'],
+  ['.webp', 'image'],
+]);
+
+type WorkspaceToolArtifact = ToolArtifact & {
+  storage: 'workspace';
+  workspacePath: string;
+};
 
 /**
  * Parameters for the WriteFile tool
@@ -67,74 +103,6 @@ export interface WriteFileToolParams {
   ai_proposed_content?: string;
 }
 
-interface GetCorrectedFileContentResult {
-  originalContent: string;
-  correctedContent: string;
-  fileExists: boolean;
-  error?: { message: string; code?: string };
-}
-
-export async function getCorrectedFileContent(
-  config: Config,
-  filePath: string,
-  proposedContent: string,
-  abortSignal: AbortSignal,
-): Promise<GetCorrectedFileContentResult> {
-  let originalContent = '';
-  let fileExists = false;
-  let correctedContent = proposedContent;
-
-  try {
-    originalContent = await config
-      .getFileSystemService()
-      .readTextFile(filePath);
-    fileExists = true; // File exists and was read
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') {
-      fileExists = false;
-      originalContent = '';
-    } else {
-      // File exists but could not be read (permissions, etc.)
-      fileExists = true; // Mark as existing but problematic
-      originalContent = ''; // Can't use its content
-      const error = {
-        message: getErrorMessage(err),
-        code: isNodeError(err) ? err.code : undefined,
-      };
-      // Return early as we can't proceed with content correction meaningfully
-      return { originalContent, correctedContent, fileExists, error };
-    }
-  }
-
-  // If readError is set, we have returned.
-  // So, file was either read successfully (fileExists=true, originalContent set)
-  // or it was ENOENT (fileExists=false, originalContent='').
-
-  if (fileExists) {
-    // This implies originalContent is available
-    const { params: correctedParams } = await ensureCorrectEdit(
-      filePath,
-      originalContent,
-      {
-        old_string: originalContent, // Treat entire current content as old_string
-        new_string: proposedContent,
-        file_path: filePath,
-      },
-      config.getGeminiClient(),
-      abortSignal,
-    );
-    correctedContent = correctedParams.new_string;
-  } else {
-    // This implies new file (ENOENT)
-    correctedContent = await ensureCorrectFileContent(
-      proposedContent,
-      config.getGeminiClient(),
-      abortSignal,
-    );
-  }
-  return { originalContent, correctedContent, fileExists };
-}
-
 class WriteFileToolInvocation extends BaseToolInvocation<
   WriteFileToolParams,
   ToolResult
@@ -158,47 +126,137 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
-  override async shouldConfirmExecute(
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
+  /**
+   * Write operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — writes default to 'ask'. (In AUTO_EDIT/YOLO the
+   * user has globally opted into auto-approval; team writes still surface in the
+   * git diff for review before commit.)
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const projectRoot = this.config.getProjectRoot();
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
+    }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
+  /**
+   * Constructs the write-file diff confirmation details.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    let originalContent = '';
+    let fileExists = await isFilefileExists(this.params.file_path);
+    // Run prior-read enforcement *before* we read the file to render
+    // a confirmation diff. Otherwise the user could approve a diff
+    // computed from current bytes that the model has never received,
+    // and the subsequent execute() would still reject the call —
+    // confusing UX for any approve flow.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead's
+    // own stat decides whether the file actually exists right now.
+    // ENOENT means the path is genuinely absent → ok:true → fall
+    // through to the new-file diff; any other "stat says yes" outcome
+    // (including the file appearing between isFilefileExists() and
+    // here, a race window the pre-fix gating left wide open) means
+    // the model is about to clobber bytes it never read → reject.
+    if (!this.config.getFileReadCacheDisabled()) {
+      // No `requireFullRead`-style option is passed — by design,
+      // and applies to all 5 checkPriorRead call sites in this file.
+      // PR #3932 added that option to require a full read before
+      // overwrite; PR #4002 removed it because the truncate-tool-
+      // output limit makes "fully read" an impossible precondition
+      // on large files (issue #3945 deadlock). WriteFile and Edit
+      // now share the same contract — any prior read clears
+      // enforcement and mtime/size drift is the safety net. The
+      // `fileReadCacheDisabled: true` config check above goes the
+      // OTHER way (skipping `checkPriorRead` entirely so application-
+      // level locking can take over), it is not an opt-in to
+      // stricter behaviour. See the docstring on `checkPriorRead`
+      // for the full rationale and the residual #2499 risk this
+      // stance accepts.
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        this.params.file_path,
+        'overwriting',
+      );
+      if (!decision.ok) {
+        // Surface the structured ToolErrorType through scheduler.
+        // A plain `throw new Error` would hit the scheduler's catch
+        // block and be reported as UNHANDLED_EXCEPTION — losing the
+        // EDIT_REQUIRES_PRIOR_READ / FILE_CHANGED_SINCE_READ contract
+        // for any flow that requires confirmation.
+        throw new StructuredToolError(decision.rawMessage, decision.type);
+      }
+    }
+    if (fileExists) {
+      try {
+        const { content } = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: this.params.file_path });
+        originalContent = content;
+      } catch (err) {
+        // ENOENT here means the file disappeared between
+        // isFilefileExists() and readTextFile (a disappearance
+        // race). The pre-read checkPriorRead above already returned
+        // ok:true for ENOENT and let us fall through; mirror that
+        // in this read by falling back to the new-file diff (empty
+        // originalContent) instead of throwing a plain Error that
+        // the scheduler would surface as UNHANDLED_EXCEPTION.
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          fileExists = false;
+        } else {
+          throw new Error(
+            `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
+          );
+        }
+      }
     }
 
-    const correctedContentResult = await getCorrectedFileContent(
-      this.config,
-      this.params.file_path,
-      this.params.content,
-      abortSignal,
-    );
-
-    if (correctedContentResult.error) {
-      // If file exists but couldn't be read, we can't show a diff for confirmation.
-      return false;
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: showing the user a diff computed
+    // from bytes the model never saw is the very confusing-approval
+    // UX this enforcement block exists to prevent.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        this.params.file_path,
+        'overwriting',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (confirmation)', {
+          path: this.params.file_path,
+          reason: postDecision.type,
+        });
+        throw new StructuredToolError(
+          postDecision.rawMessage,
+          postDecision.type,
+        );
+      }
     }
 
-    const { originalContent, correctedContent } = correctedContentResult;
     const relativePath = makeRelative(
       this.params.file_path,
       this.config.getTargetDir(),
     );
     const fileName = path.basename(this.params.file_path);
 
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      correctedContent, // Content after potential correction
+      originalContent,
+      this.params.content,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
-
-    const ideClient = this.config.getIdeClient();
-    const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient.getConnectionStatus().status === IDEConnectionStatus.Connected
-        ? ideClient.openDiff(this.params.file_path, correctedContent)
-        : undefined;
 
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
@@ -207,87 +265,297 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       filePath: this.params.file_path,
       fileDiff,
       originalContent,
-      newContent: correctedContent,
+      newContent: this.params.content,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            this.params.content = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }
 
-  async execute(abortSignal: AbortSignal): Promise<ToolResult> {
+  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
-    const correctedContentResult = await getCorrectedFileContent(
-      this.config,
+
+    let fileExists = await isFilefileExists(file_path);
+    let originalContent = '';
+    let useBOM = false;
+    let detectedEncoding: string | undefined;
+    let detectedLineEnding: LineEnding | undefined;
+    const dirName = path.dirname(file_path);
+
+    const teamMemoryError = checkTeamMemorySecrets(
       file_path,
       content,
-      abortSignal,
+      this.config.getProjectRoot(),
     );
-
-    if (correctedContentResult.error) {
-      const errDetails = correctedContentResult.error;
-      const errorMsg = errDetails.code
-        ? `Error checking existing file '${file_path}': ${errDetails.message} (${errDetails.code})`
-        : `Error checking existing file: ${errDetails.message}`;
+    if (teamMemoryError) {
+      // Must carry `error` so the framework treats the blocked write as a
+      // failure (retry/telemetry), not a silent success. Mirrors edit.ts.
       return {
-        llmContent: errorMsg,
-        returnDisplay: errorMsg,
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
         error: {
-          message: errorMsg,
-          type: ToolErrorType.FILE_WRITE_FAILURE,
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
         },
       };
     }
 
-    const {
-      originalContent,
-      correctedContent: fileContent,
-      fileExists,
-    } = correctedContentResult;
-    // fileExists is true if the file existed (and was readable or unreadable but caught by readError).
-    // fileExists is false if the file did not exist (ENOENT).
-    const isNewFile =
-      !fileExists ||
-      (correctedContentResult.error !== undefined &&
-        !correctedContentResult.fileExists);
+    // Prior-read enforcement runs BEFORE we read the existing file:
+    //  - rejecting a write should not first slurp the entire file
+    //    into memory (wasted I/O on every reject), and
+    //  - we should not be holding bytes of a file the model never
+    //    legitimately saw, even transiently.
+    // Mirrors the order in getConfirmationDetails() above.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — exactly the TOCTOU window pointed
+    // out in review — is now caught and rejected instead of being
+    // silently overwritten.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+      );
+      if (!decision.ok) {
+        return {
+          llmContent: decision.rawMessage,
+          returnDisplay: `Error: ${decision.displayMessage}`,
+          error: {
+            message: decision.rawMessage,
+            type: decision.type,
+          },
+        };
+      }
+    }
+
+    if (fileExists) {
+      try {
+        const fileInfo = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: file_path });
+        if (fileInfo._meta?.bom !== undefined) {
+          useBOM = fileInfo._meta.bom;
+        } else {
+          useBOM =
+            fileInfo.content.length > 0 &&
+            fileInfo.content.codePointAt(0) === 0xfeff;
+        }
+        detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        detectedLineEnding = detectLineEnding(fileInfo.content);
+        originalContent = fileInfo.content;
+        fileExists = true; // File exists and was read
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          fileExists = false;
+        } else {
+          const error = {
+            message: getErrorMessage(err),
+            code: isNodeError(err) ? err.code : undefined,
+          };
+          const errorMsg = error.code
+            ? `Error checking existing file '${file_path}': ${error.message} (${error.code})`
+            : `Error checking existing file: ${error.message}`;
+          return {
+            llmContent: errorMsg,
+            returnDisplay: errorMsg,
+            error: {
+              message: errorMsg,
+              type: ToolErrorType.FILE_WRITE_FAILURE,
+            },
+          };
+        }
+      }
+    }
+
+    // Post-read freshness re-check. Closes the TOCTOU window between
+    // the pre-read checkPriorRead above and the readTextFile that
+    // produced `originalContent`: an external write that lands
+    // between those two syscalls would otherwise overwrite bytes the
+    // model never saw, even though enforcement was supposed to block
+    // exactly that.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        debugLogger.warn('post-read TOCTOU rejection (execute)', {
+          path: file_path,
+          reason: postDecision.type,
+        });
+        return {
+          llmContent: postDecision.rawMessage,
+          returnDisplay: `Error: ${postDecision.displayMessage}`,
+          error: {
+            message: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+        };
+      }
+    }
+
+    if (!fileExists) {
+      const userEncoding = this.config.getDefaultFileEncoding();
+      if (userEncoding === FileEncoding.UTF8_BOM) {
+        // User explicitly configured UTF-8 BOM for all new files
+        useBOM = true;
+      } else if (userEncoding === undefined) {
+        // No explicit setting: auto-detect based on platform/extension.
+        // e.g. .ps1 on Windows with a non-UTF-8 code page needs BOM so
+        // PowerShell 5.1 reads the file as UTF-8 instead of the system ANSI page
+        useBOM = needsUtf8Bom(file_path);
+      }
+      // else: user explicitly set 'utf-8' (no BOM) — respect it
+      detectedEncoding = undefined;
+    }
+
+    // Backup the pre-edit content BEFORE the final freshness check.
+    // Mirrors the upstream `claude-code/src/tools/FileEditTool` ordering,
+    // which has an explicit comment on the equivalent block:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // `trackEdit` does `stat` + `copyFile` and on large files can take
+    // hundreds of milliseconds. The previous ordering ran it AFTER
+    // `checkPriorRead` and before `writeTextFile`, which widened the
+    // already-acknowledged stat-then-write window from "two adjacent
+    // syscalls" to "freshness check → potentially-multi-second backup →
+    // write". An external mutation landing inside the backup window was
+    // therefore no longer detected before the write clobbered it.
+    //
+    // Backing up first is safe: backups are idempotent (deterministic
+    // `{hash}@v{version}` filename) and per-snapshot. If the freshness
+    // check below then rejects the write, we keep an unused-but-correct
+    // backup of the pre-overwrite state — not corrupt state.
+    try {
+      await this.config.getFileHistoryService().trackEdit(file_path);
+    } catch {
+      // File history is best-effort; never block core tool operations.
+    }
+
+    // Final pre-write freshness check. The earlier post-read check
+    // ran before encoding detection; we re-stat here so an external
+    // mutation that lands in the gap between those operations and
+    // the writeTextFile below is caught.
+    //
+    // It does NOT eliminate the race. A concurrent writer that
+    // lands between this stat and the writeTextFile call below
+    // can still be clobbered — that residual is an OS-level
+    // limitation of the stat-then-write pattern, and the only way
+    // to close it is an atomic write (write-to-temp + rename) or
+    // a content-hash post-check that re-reads the bytes after the
+    // write. Both are deferred to a follow-up; operators who care
+    // about strict overwrite-protection should set
+    // `fileReadCacheDisabled: true` and rely on application-level
+    // locking.
+    //
+    // Run unconditionally (not gated on `fileExists`): if the path
+    // was absent during the earlier checkPriorRead but a different
+    // process creates it before this writeTextFile, the gated form
+    // would skip enforcement and silently overwrite a pre-existing
+    // file the model never read. ENOENT inside checkPriorRead
+    // returns ok:true so the genuine new-file creation path is
+    // unchanged.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const writeDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        file_path,
+        'overwriting',
+        // If the file existed when we read it (`fileExists` is still
+        // true after readTextFile), ENOENT here means the original
+        // target disappeared between the post-read check and now —
+        // reject rather than fall through and silently re-create the
+        // file from stale bytes. For new-file creation
+        // (`fileExists === false`), ENOENT is the expected pre-write
+        // state (ok:true → writeTextFile creates).
+        { expectExisting: fileExists },
+      );
+      if (!writeDecision.ok) {
+        debugLogger.warn('pre-write TOCTOU rejection', {
+          path: file_path,
+          reason: writeDecision.type,
+        });
+        return {
+          llmContent: writeDecision.rawMessage,
+          returnDisplay: `Error: ${writeDecision.displayMessage}`,
+          error: {
+            message: writeDecision.rawMessage,
+            type: writeDecision.type,
+          },
+        };
+      }
+    }
+
+    // Create parent directories AFTER the pre-write enforcement
+    // check passes. Doing it before would leak intermediate
+    // directories on the failure path (rejected new-file writes
+    // would otherwise litter the filesystem with empty mkdir'd
+    // ancestors).
+    if (!fileExists) {
+      fs.mkdirSync(dirName, { recursive: true });
+    }
 
     try {
-      const dirName = path.dirname(file_path);
-      if (!fs.existsSync(dirName)) {
-        fs.mkdirSync(dirName, { recursive: true });
+      await this.config.getFileSystemService().writeTextFile({
+        path: file_path,
+        content,
+        _meta: {
+          bom: useBOM,
+          encoding: detectedEncoding,
+          lineEnding: detectedLineEnding,
+        },
+      });
+
+      // Track AI contribution for commit attribution.
+      // Pass null only when the file truly did not exist before this write;
+      // an empty string means the file existed but was empty.
+      if (!modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          file_path,
+          fileExists ? originalContent : null,
+          content,
+        );
       }
 
-      await this.config
-        .getFileSystemService()
-        .writeTextFile(file_path, fileContent);
+      // Mark the cache entry written, capturing the post-write stats
+      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
+      // through to the full pipeline instead of returning the
+      // pre-write placeholder. Best-effort: a stat failure here does
+      // not undo the successful write — the next Read will re-stat
+      // and either see fresh content or treat the entry as stale.
+      let postWriteSizeBytes: number | undefined;
+      try {
+        const postWriteStats = fs.statSync(file_path);
+        postWriteSizeBytes = postWriteStats.size;
+        this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
+      } catch {
+        // Non-fatal: leaving a stale entry is preferable to failing
+        // the user-visible Write on a transient stat failure.
+      }
 
       // Generate diff for display result
       const fileName = path.basename(file_path);
       // If there was a readError, originalContent in correctedContentResult is '',
       // but for the diff, we want to show the original content as it was before the write if possible.
       // However, if it was unreadable, currentContentForDiff will be empty.
-      const currentContentForDiff = correctedContentResult.error
-        ? '' // Or some indicator of unreadable content
-        : originalContent;
+      const currentContentForDiff = originalContent;
 
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         currentContentForDiff,
-        fileContent,
+        content,
         'Original',
         'Written',
-        DEFAULT_DIFF_OPTIONS,
       );
 
       const originallyProposedContent = ai_proposed_content || content;
@@ -299,7 +567,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       );
 
       const llmSuccessMessageParts = [
-        isNewFile
+        !fileExists
           ? `Successfully created and wrote to new file: ${file_path}.`
           : `Successfully overwrote file: ${file_path}.`,
       ];
@@ -308,50 +576,50 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
+      const artifact = buildWorkspaceArtifactMetadata(
+        this.config,
+        file_path,
+        postWriteSizeBytes,
+      );
+      if (artifact) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
+      }
+
+      // Log file operation for telemetry (without diff_stat to avoid double-counting)
+      const mimetype = getSpecificMimeType(file_path);
+      const programmingLanguage = getLanguageFromFilePath(file_path);
+      const extension = path.extname(file_path);
+      const operation = !fileExists
+        ? FileOperation.CREATE
+        : FileOperation.UPDATE;
+
+      const lineCount = content.split('\n').length;
+      logFileOperation(
+        this.config,
+        new FileOperationEvent(
+          WriteFileTool.Name,
+          operation,
+          lineCount,
+          mimetype,
+          extension,
+          programmingLanguage,
+        ),
+      );
 
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
-        originalContent: correctedContentResult.originalContent,
-        newContent: correctedContentResult.correctedContent,
+        originalContent,
+        newContent: content,
         diffStat,
       };
-
-      const lines = fileContent.split('\n').length;
-      const mimetype = getSpecificMimeType(file_path);
-      const extension = path.extname(file_path); // Get extension
-      const programming_language = getProgrammingLanguage({ file_path });
-      if (isNewFile) {
-        logFileOperation(
-          this.config,
-          new FileOperationEvent(
-            WriteFileTool.Name,
-            FileOperation.CREATE,
-            lines,
-            mimetype,
-            extension,
-            diffStat,
-            programming_language,
-          ),
-        );
-      } else {
-        logFileOperation(
-          this.config,
-          new FileOperationEvent(
-            WriteFileTool.Name,
-            FileOperation.UPDATE,
-            lines,
-            mimetype,
-            extension,
-            diffStat,
-            programming_language,
-          ),
-        );
-      }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       // Capture detailed error information for debugging
@@ -376,12 +644,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
         // Include stack trace in debug mode for better troubleshooting
         if (this.config.getDebugMode() && error.stack) {
-          console.error('Write file error stack:', error.stack);
+          debugLogger.debug('Write file error stack:', error.stack);
         }
-      } else if (error instanceof Error) {
-        errorMsg = `Error writing to file: ${error.message}`;
       } else {
-        errorMsg = `Error writing to file: ${String(error)}`;
+        errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
       }
 
       return {
@@ -397,21 +663,121 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
+ * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
+ * the daemon's `GET /file` route resolves the `workspacePath` this produces.
+ * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
+ */
+export function buildRecordArtifactReminder(
+  config: Config,
+  filePath: string,
+): string | null {
+  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
+}
+
+function formatRecordArtifactReminder(workspacePath: string): string {
+  return (
+    `This file was automatically recorded as a workspace artifact with ` +
+    `workspacePath "${workspacePath}". No extra artifact registration step ` +
+    `is needed.`
+  );
+}
+
+export function buildWorkspaceArtifactMetadata(
+  config: Config,
+  filePath: string,
+  sizeBytes?: number,
+): WorkspaceToolArtifact | null {
+  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
+  if (!workspacePath) {
+    return null;
+  }
+  const title = path.basename(filePath);
+  // The daemon store rejects titles and paths that are too long, carry control
+  // characters, or contain markup; skip the artifact rather than tell the model
+  // it was recorded when it will be dropped.
+  if (
+    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
+    hasControlCharacter(title) ||
+    hasUnsafeDisplayPayload(title) ||
+    workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
+    hasControlCharacter(workspacePath) ||
+    hasUnsafeDisplayPayload(workspacePath)
+  ) {
+    debugLogger.debug('workspace artifact skipped (safety checks)', {
+      path: filePath,
+    });
+    return null;
+  }
+  return {
+    title,
+    kind: inferWorkspaceArtifactKind(filePath),
+    storage: 'workspace',
+    workspacePath,
+    mimeType:
+      getSpecificMimeType(filePath) ??
+      (filePath.toLowerCase().endsWith('.ipynb')
+        ? 'application/x-ipynb+json'
+        : undefined),
+    sizeBytes,
+  };
+}
+
+function getRecordArtifactWorkspacePath(
+  config: Config,
+  filePath: string,
+): string | null {
+  if (!config.isRecordArtifactEnabled()) {
+    return null;
+  }
+  if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
+    return null;
+  }
+  // The daemon's file-read route resolves workspacePath against the
+  // original workspace root, not the session cwd. When the session
+  // runs inside a worktree (<root>/.qwen/worktrees/<slug>), anchor
+  // the relative path at the workspace root so artifact previews
+  // resolve correctly.
+  const targetDir = config.getTargetDir();
+  const wtMatch = targetDir.match(
+    /^(.+)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/,
+  );
+  const baseDir = wtMatch ? wtMatch[1] : targetDir;
+  const relativePath = path.relative(baseDir, filePath);
+  if (
+    !relativePath ||
+    relativePath === '..' ||
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath)
+  ) {
+    return null;
+  }
+  return relativePath.split(path.sep).join('/');
+}
+
+function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
+  return (
+    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
+    'file'
+  );
+}
+
+/**
  * Implementation of the WriteFile tool logic
  */
 export class WriteFileTool
   extends BaseDeclarativeTool<WriteFileToolParams, ToolResult>
   implements ModifiableDeclarativeTool<WriteFileToolParams>
 {
-  static readonly Name: string = 'write_file';
+  static readonly Name: string = ToolNames.WRITE_FILE;
 
   constructor(private readonly config: Config) {
     super(
       WriteFileTool.Name,
-      'WriteFile',
-      `Writes content to a specified file in the local filesystem.
+      ToolDisplayNames.WRITE_FILE,
+      `Writes content to a specified file in the local filesystem. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
-      The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
+The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
       {
         properties: {
@@ -434,7 +800,10 @@ export class WriteFileTool
   protected override validateToolParamValues(
     params: WriteFileToolParams,
   ): string | null {
-    const filePath = params.file_path;
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    const filePath = unescapePath(params.file_path.trim());
+    params.file_path = filePath;
 
     if (!filePath) {
       return `Missing or empty "file_path"`;
@@ -442,14 +811,6 @@ export class WriteFileTool
 
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute: ${filePath}`;
-    }
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(filePath)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
     }
 
     try {
@@ -460,9 +821,18 @@ export class WriteFileTool
         }
       }
     } catch (statError: unknown) {
-      return `Error accessing path properties for validation: ${filePath}. Reason: ${
-        statError instanceof Error ? statError.message : String(statError)
-      }`;
+      return `Error accessing path properties for validation: ${filePath}. Reason: ${getErrorMessage(
+        statError,
+      )}`;
+    }
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      filePath,
+      params.content ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;
@@ -474,29 +844,44 @@ export class WriteFileTool
     return new WriteFileToolInvocation(this.config, params);
   }
 
+  override toAutoClassifierInput(
+    params: WriteFileToolParams,
+  ): Record<string, unknown> {
+    const content = params.content ?? '';
+    // 300-char window for the same reason as EditTool's projection —
+    // out-of-workspace writes need enough headroom for the classifier
+    // to spot a malicious registry / shell / env line hidden behind
+    // a benign prefix.
+    return {
+      file_path: params.file_path,
+      byte_count: Buffer.byteLength(content, 'utf8'),
+      content_preview: content.slice(0, 300),
+      content_truncated: content.length > 300,
+    };
+  }
+
   getModifyContext(
-    abortSignal: AbortSignal,
+    _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {
     return {
       getFilePath: (params: WriteFileToolParams) => params.file_path,
       getCurrentContent: async (params: WriteFileToolParams) => {
-        const correctedContentResult = await getCorrectedFileContent(
-          this.config,
-          params.file_path,
-          params.content,
-          abortSignal,
-        );
-        return correctedContentResult.originalContent;
+        const fileExists = await isFilefileExists(params.file_path);
+        if (fileExists) {
+          try {
+            const { content } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return content;
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
+          return '';
+        }
       },
-      getProposedContent: async (params: WriteFileToolParams) => {
-        const correctedContentResult = await getCorrectedFileContent(
-          this.config,
-          params.file_path,
-          params.content,
-          abortSignal,
-        );
-        return correctedContentResult.correctedContent;
-      },
+      getProposedContent: async (params: WriteFileToolParams) => params.content,
       createUpdatedParams: (
         _oldContent: string,
         modifiedProposedContent: string,

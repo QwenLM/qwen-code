@@ -9,7 +9,8 @@ import { Box, Text } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import type { ToolCategory } from '../types.js';
 import { Kind, type Config } from '@qwen-code/qwen-code-core';
-import { Colors } from '../../../colors.js';
+import { theme } from '../../../semantic-colors.js';
+import { t } from '../../../../i18n/index.js';
 
 interface ToolOption {
   label: string;
@@ -45,7 +46,7 @@ export function ToolSelector({
         toolCategories: [
           {
             id: 'all',
-            name: 'All Tools (Default)',
+            name: t('All Tools (Default)'),
             tools: [],
           },
         ],
@@ -89,22 +90,22 @@ export function ToolSelector({
     const toolCategories = [
       {
         id: 'all',
-        name: 'All Tools',
+        name: t('All Tools'),
         tools: [],
       },
       {
         id: 'read',
-        name: 'Read-only Tools',
+        name: t('Read-only Tools'),
         tools: readTools,
       },
       {
         id: 'edit',
-        name: 'Read & Edit Tools',
+        name: t('Read & Edit Tools'),
         tools: [...readTools, ...editTools],
       },
       {
         id: 'execute',
-        name: 'Read & Edit & Execution Tools',
+        name: t('Read & Edit & Execution Tools'),
         tools: [...readTools, ...editTools, ...executeTools],
       },
     ].filter((category) => category.id === 'all' || category.tools.length > 0);
@@ -184,6 +185,7 @@ export function ToolSelector({
       <Box flexDirection="column">
         <RadioButtonSelect
           items={toolOptions.map((option) => ({
+            key: option.value,
             label: option.label,
             value: option.value,
           }))}
@@ -200,12 +202,12 @@ export function ToolSelector({
       {currentCategory && (
         <Box flexDirection="column">
           {currentCategory.id === 'all' ? (
-            <Text color={Colors.Gray}>
-              All tools selected, including MCP tools
+            <Text color={theme.text.secondary}>
+              {t('All tools selected, including MCP tools')}
             </Text>
           ) : currentCategory.tools.length > 0 ? (
             <>
-              <Text color={Colors.Gray}>Selected tools:</Text>
+              <Text color={theme.text.secondary}>{t('Selected tools:')}</Text>
               <Box flexDirection="column" marginLeft={2}>
                 {(() => {
                   // Filter the already categorized tools to show only those in current category
@@ -222,18 +224,20 @@ export function ToolSelector({
                   return (
                     <>
                       {categoryReadTools.length > 0 && (
-                        <Text color={Colors.Gray}>
-                          • Read-only tools: {categoryReadTools.join(', ')}
+                        <Text color={theme.text.secondary}>
+                          • {t('Read-only tools:')}{' '}
+                          {categoryReadTools.join(', ')}
                         </Text>
                       )}
                       {categoryEditTools.length > 0 && (
-                        <Text color={Colors.Gray}>
-                          • Edit tools: {categoryEditTools.join(', ')}
+                        <Text color={theme.text.secondary}>
+                          • {t('Edit tools:')} {categoryEditTools.join(', ')}
                         </Text>
                       )}
                       {categoryExecuteTools.length > 0 && (
-                        <Text color={Colors.Gray}>
-                          • Execution tools: {categoryExecuteTools.join(', ')}
+                        <Text color={theme.text.secondary}>
+                          • {t('Execution tools:')}{' '}
+                          {categoryExecuteTools.join(', ')}
                         </Text>
                       )}
                     </>

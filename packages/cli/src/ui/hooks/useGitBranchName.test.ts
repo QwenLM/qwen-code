@@ -4,227 +4,297 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { MockedFunction } from 'vitest';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 import { act } from 'react';
 import { renderHook } from '@testing-library/react';
-import { useGitBranchName } from './useGitBranchName.js';
-import { fs, vol } from 'memfs'; // For mocking fs
-import { EventEmitter } from 'node:events';
-import { exec as mockExec, type ChildProcess } from 'node:child_process';
-import type { FSWatcher } from 'memfs/lib/volume.js';
+import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  useGitBranchName,
+  BRANCH_POLL_INTERVAL_MS,
+} from './useGitBranchName.js';
 
-// Mock child_process
-vi.mock('child_process');
+// The hook is a thin wrapper over core's gitDirect helpers; the direct-read
+// logic itself is covered by core's gitDirect.test.ts. Here we mock those two
+// functions and exercise the hook's wiring and lifecycle.
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  resolveBranchName: vi.fn(),
+  watchRepoBranch: vi.fn(),
+}));
 
-// Mock fs and fs/promises
-vi.mock('node:fs', async () => {
-  const memfs = await vi.importActual<typeof import('memfs')>('memfs');
-  return memfs.fs;
-});
-
-vi.mock('node:fs/promises', async () => {
-  const memfs = await vi.importActual<typeof import('memfs')>('memfs');
-  return memfs.fs.promises;
-});
+const mockResolve = resolveBranchName as Mock;
+const mockWatch = watchRepoBranch as Mock;
 
 const CWD = '/test/project';
-const GIT_HEAD_PATH = `${CWD}/.git/HEAD`;
+
+async function flushAsyncEffects() {
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve();
+  }
+}
 
 describe('useGitBranchName', () => {
   beforeEach(() => {
-    vol.reset(); // Reset in-memory filesystem
-    vol.fromJSON({
-      [GIT_HEAD_PATH]: 'ref: refs/heads/main',
-    });
-    vi.useFakeTimers(); // Use fake timers for async operations
+    mockResolve.mockReset();
+    mockWatch.mockReset();
+    // Default: the watcher registers and hands back a no-op disposer.
+    mockWatch.mockResolvedValue(() => {});
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
-  it('should return branch name', async () => {
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (_command, _options, callback) => {
-        callback?.(null, 'main\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
+  it('reads the branch name on mount', async () => {
+    mockResolve.mockResolvedValue('main');
 
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
-
+    const { result } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers(); // Advance timers to trigger useEffect and exec callback
-      rerender(); // Rerender to get the updated state
+      await flushAsyncEffects();
     });
 
     expect(result.current).toBe('main');
   });
 
-  it('should return undefined if git command fails', async () => {
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (_command, _options, callback) => {
-        callback?.(new Error('Git error'), '', 'error output');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
+  it('is undefined when not in a git repository', async () => {
+    mockResolve.mockResolvedValue(undefined);
 
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
-    expect(result.current).toBeUndefined();
-
+    const { result } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
-      rerender();
+      await flushAsyncEffects();
     });
+
     expect(result.current).toBeUndefined();
   });
 
-  it('should return short commit hash if branch is HEAD (detached state)', async () => {
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (command, _options, callback) => {
-        if (command === 'git rev-parse --abbrev-ref HEAD') {
-          callback?.(null, 'HEAD\n', '');
-        } else if (command === 'git rev-parse --short HEAD') {
-          callback?.(null, 'a1b2c3d\n', '');
-        }
-        return new EventEmitter() as ChildProcess;
-      },
-    );
+  it('subscribes to branch changes for the given cwd', async () => {
+    mockResolve.mockResolvedValue('main');
 
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
+    renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
-      rerender();
+      await flushAsyncEffects();
     });
-    expect(result.current).toBe('a1b2c3d');
+
+    expect(mockWatch).toHaveBeenCalledWith(CWD, expect.any(Function));
   });
 
-  it('should return undefined if branch is HEAD and getting commit hash fails', async () => {
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (command, _options, callback) => {
-        if (command === 'git rev-parse --abbrev-ref HEAD') {
-          callback?.(null, 'HEAD\n', '');
-        } else if (command === 'git rev-parse --short HEAD') {
-          callback?.(new Error('Git error'), '', 'error output');
-        }
-        return new EventEmitter() as ChildProcess;
-      },
-    );
-
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
-    await act(async () => {
-      vi.runAllTimers();
-      rerender();
+  it('refreshes the branch name when the watcher fires', async () => {
+    mockResolve.mockResolvedValueOnce('main').mockResolvedValueOnce('develop');
+    let fire: (() => void) | undefined;
+    mockWatch.mockImplementation(async (_cwd: string, onChange: () => void) => {
+      fire = onChange;
+      return () => {};
     });
-    expect(result.current).toBeUndefined();
-  });
 
-  it('should update branch name when .git/HEAD changes', async ({ skip }) => {
-    skip(); // TODO: fix
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementationOnce(
-      (_command, _options, callback) => {
-        callback?.(null, 'main\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
-
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
-
+    const { result } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
-      rerender();
+      await flushAsyncEffects();
     });
     expect(result.current).toBe('main');
 
-    // Simulate a branch change
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementationOnce(
-      (_command, _options, callback) => {
-        callback?.(null, 'develop\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
-
-    // Simulate file change event
-    // Ensure the watcher is set up before triggering the change
     await act(async () => {
-      fs.writeFileSync(GIT_HEAD_PATH, 'ref: refs/heads/develop'); // Trigger watcher
-      vi.runAllTimers(); // Process timers for watcher and exec
-      rerender();
+      fire?.();
+      await flushAsyncEffects();
     });
-
     expect(result.current).toBe('develop');
   });
 
-  it('should handle watcher setup error silently', async () => {
-    // Remove .git/HEAD to cause an error in fs.watch setup
-    vol.unlinkSync(GIT_HEAD_PATH);
+  it('ignores a stale refresh that resolves after a newer one', async () => {
+    mockResolve.mockResolvedValueOnce('main');
+    let fire: (() => void) | undefined;
+    mockWatch.mockImplementation(async (_cwd: string, onChange: () => void) => {
+      fire = onChange;
+      return () => {};
+    });
 
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (_command, _options, callback) => {
-        callback?.(null, 'main\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
+    // Two concurrent reads whose resolution order we control: the first one
+    // started (stale) resolves last, the second (fresh) resolves first.
+    let resolveStale!: (value: string) => void;
+    let resolveFresh!: (value: string) => void;
+    const stale = new Promise<string>((resolve) => {
+      resolveStale = resolve;
+    });
+    const fresh = new Promise<string>((resolve) => {
+      resolveFresh = resolve;
+    });
+    mockResolve.mockReturnValueOnce(stale).mockReturnValueOnce(fresh);
 
-    const { result, rerender } = renderHook(() => useGitBranchName(CWD));
-
+    const { result } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
-      rerender();
+      await flushAsyncEffects();
     });
-
-    expect(result.current).toBe('main'); // Branch name should still be fetched initially
-
-    // Try to trigger a change that would normally be caught by the watcher
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementationOnce(
-      (_command, _options, callback) => {
-        callback?.(null, 'develop\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
-
-    // This write would trigger the watcher if it was set up
-    // but since it failed, the branch name should not update
-    // We need to create the file again for writeFileSync to not throw
-    vol.fromJSON({
-      [GIT_HEAD_PATH]: 'ref: refs/heads/develop',
-    });
-
-    await act(async () => {
-      fs.writeFileSync(GIT_HEAD_PATH, 'ref: refs/heads/develop');
-      vi.runAllTimers();
-      rerender();
-    });
-
-    // Branch name should not change because watcher setup failed
     expect(result.current).toBe('main');
+
+    // Start both refreshes; each begins its read before either resolves.
+    await act(async () => {
+      fire?.();
+      fire?.();
+      await flushAsyncEffects();
+    });
+
+    // The newer read resolves first with the switched branch.
+    await act(async () => {
+      resolveFresh('develop');
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('develop');
+
+    // The older read resolves later with the pre-switch value; the generation
+    // guard discards it instead of flashing the stale branch name.
+    await act(async () => {
+      resolveStale('main');
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('develop');
   });
 
-  it('should cleanup watcher on unmount', async ({ skip }) => {
-    skip(); // TODO: fix
-    const closeMock = vi.fn();
-    const watchMock = vi.spyOn(fs, 'watch').mockReturnValue({
-      close: closeMock,
-    } as unknown as FSWatcher);
+  it('disposes the watcher on unmount', async () => {
+    mockResolve.mockResolvedValue('main');
+    const dispose = vi.fn();
+    mockWatch.mockResolvedValue(dispose);
 
-    (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
-      (_command, _options, callback) => {
-        callback?.(null, 'main\n', '');
-        return new EventEmitter() as ChildProcess;
-      },
-    );
-
-    const { unmount, rerender } = renderHook(() => useGitBranchName(CWD));
-
+    const { unmount } = renderHook(() => useGitBranchName(CWD));
     await act(async () => {
-      vi.runAllTimers();
-      rerender();
+      await flushAsyncEffects();
     });
 
     unmount();
-    expect(watchMock).toHaveBeenCalledWith(GIT_HEAD_PATH, expect.any(Function));
-    expect(closeMock).toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes immediately if the watcher resolves after unmount', async () => {
+    mockResolve.mockResolvedValue('main');
+    const dispose = vi.fn();
+    let resolveWatch!: (d: () => void) => void;
+    mockWatch.mockImplementation(
+      () =>
+        new Promise<() => void>((resolve) => {
+          resolveWatch = resolve;
+        }),
+    );
+
+    const { unmount } = renderHook(() => useGitBranchName(CWD));
+    // Let init() progress past the initial read to the pending watch setup.
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    unmount();
+
+    await act(async () => {
+      resolveWatch(dispose);
+      await flushAsyncEffects();
+    });
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-subscribes when cwd changes', async () => {
+    mockResolve.mockResolvedValue('main');
+    const dispose1 = vi.fn();
+    const dispose2 = vi.fn();
+    mockWatch.mockResolvedValueOnce(dispose1).mockResolvedValueOnce(dispose2);
+
+    const { rerender } = renderHook(({ cwd }) => useGitBranchName(cwd), {
+      initialProps: { cwd: '/repo-a' },
+    });
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(mockWatch).toHaveBeenCalledWith('/repo-a', expect.any(Function));
+
+    rerender({ cwd: '/repo-b' });
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+
+    // The old repo's watcher is disposed, and the new cwd is resolved + watched.
+    expect(dispose1).toHaveBeenCalledTimes(1);
+    expect(mockResolve).toHaveBeenCalledWith('/repo-b');
+    expect(mockWatch).toHaveBeenCalledWith('/repo-b', expect.any(Function));
+  });
+
+  it('still renders the branch if watcher setup rejects', async () => {
+    mockResolve.mockResolvedValue('main');
+    mockWatch.mockRejectedValue(new Error('watch boom'));
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+
+    // The initial read still rendered; the rejected setup is swallowed by the
+    // hook's .catch() (no unhandled rejection).
+    expect(result.current).toBe('main');
+  });
+
+  it('polls on the interval and updates when the branch changed', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValueOnce('main').mockResolvedValueOnce('develop');
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('main');
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS);
+      await flushAsyncEffects();
+    });
+
+    // The initial read plus one poll; the polled value replaced the stale one.
+    expect(mockResolve).toHaveBeenCalledTimes(2);
+    expect(result.current).toBe('develop');
+  });
+
+  it('keeps a stable value when polling finds no change', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValue('main');
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('main');
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS * 3);
+      await flushAsyncEffects();
+    });
+
+    // The poll ran repeatedly, but the unchanged value left the state stable.
+    expect(mockResolve.mock.calls.length).toBeGreaterThan(1);
+    expect(result.current).toBe('main');
+  });
+
+  it('stops polling after unmount', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValue('main');
+    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+
+    const { unmount } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    const callsAfterMount = mockResolve.mock.calls.length;
+
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS * 2);
+      await flushAsyncEffects();
+    });
+
+    // No further polls fire once the timer is cleared on unmount.
+    expect(mockResolve.mock.calls.length).toBe(callsAfterMount);
   });
 });

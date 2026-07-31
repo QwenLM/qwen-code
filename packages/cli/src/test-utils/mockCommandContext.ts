@@ -7,8 +7,8 @@
 import { vi } from 'vitest';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { LoadedSettings } from '../config/settings.js';
-import type { GitService } from '@qwen-code/qwen-code-core';
 import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
+import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 
 // A utility type to make all properties of an object, and its nested objects, partial.
 type DeepPartial<T> = T extends object
@@ -28,6 +28,7 @@ export const createMockCommandContext = (
   overrides: DeepPartial<CommandContext> = {},
 ): CommandContext => {
   const defaultMocks: CommandContext = {
+    executionMode: 'interactive',
     invocation: {
       raw: '',
       name: '',
@@ -35,8 +36,11 @@ export const createMockCommandContext = (
     },
     services: {
       config: null,
-      settings: { merged: {} } as LoadedSettings,
-      git: undefined as GitService | undefined,
+      settings: {
+        merged: {},
+        setValue: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings,
       logger: {
         log: vi.fn(),
         logMessage: vi.fn(),
@@ -46,19 +50,31 @@ export const createMockCommandContext = (
       } as any, // Cast because Logger is a class.
     },
     ui: {
+      history: [],
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
       pendingItem: null,
       setPendingItem: vi.fn(),
+      btwItem: null,
+      setBtwItem: vi.fn(),
+      cancelBtw: vi.fn(),
+      btwAbortControllerRef: { current: null },
+      isIdleRef: { current: true },
       loadHistory: vi.fn(),
-      toggleCorgiMode: vi.fn(),
+      refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
+      extensionsUpdateState: new Map(),
+      setExtensionsUpdateState: vi.fn(),
+      reloadCommands: vi.fn(),
+      setSessionName: vi.fn(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
     session: {
       sessionShellAllowlist: new Set<string>(),
+      startNewSession: vi.fn(),
       stats: {
+        sessionId: '',
         sessionStartTime: new Date(),
         lastPromptTokenCount: 0,
         metrics: {
@@ -68,7 +84,19 @@ export const createMockCommandContext = (
             totalSuccess: 0,
             totalFail: 0,
             totalDurationMs: 0,
-            totalDecisions: { accept: 0, reject: 0, modify: 0 },
+            totalDecisions: {
+              [ToolCallDecision.ACCEPT]: 0,
+              [ToolCallDecision.REJECT]: 0,
+              [ToolCallDecision.MODIFY]: 0,
+              [ToolCallDecision.AUTO_ACCEPT]: 0,
+            },
+            byName: {},
+          },
+          files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+          skills: {
+            totalCalls: 0,
+            totalSuccess: 0,
+            totalFail: 0,
             byName: {},
           },
         },

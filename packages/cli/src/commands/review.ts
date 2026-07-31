@@ -1,0 +1,63 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Parent command for 'qwen review'. Hosts the internal helpers used by
+// the /review skill (presubmit checks, post-review cleanup) so the prompt
+// can stay short and the logic stays testable.
+
+import type { Argv, CommandModule } from 'yargs';
+import { parseArgsCommand } from './review/parse-args.js';
+import { composeReviewCommand } from './review/compose-review.js';
+import { fetchPrCommand } from './review/fetch-pr.js';
+import { captureLocalCommand } from './review/capture-local.js';
+import { planDiffCommand } from './review/plan-diff.js';
+import { prContextCommand } from './review/pr-context.js';
+import { commentStatusCommand } from './review/comment-status.js';
+import { loadRulesCommand } from './review/load-rules.js';
+import { presubmitCommand } from './review/presubmit.js';
+import { resolveAnchorsCommand } from './review/resolve-anchors.js';
+import { checkCoverageCommand } from './review/check-coverage.js';
+import { agentPromptCommand } from './review/agent-prompt.js';
+import { buildTestCommand } from './review/build-test.js';
+import { scriptLintCommand } from './review/script-lint.js';
+import { submitCommand } from './review/submit.js';
+import { testEfficacyCommand } from './review/test-efficacy.js';
+import { cleanupCommand } from './review/cleanup.js';
+import { runCommand } from './review/run.js';
+
+export const reviewCommand: CommandModule = {
+  command: 'review',
+  describe:
+    'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+  builder: (yargs: Argv) =>
+    yargs
+      .command(runCommand)
+      .command(parseArgsCommand)
+      .command(fetchPrCommand)
+      .command(captureLocalCommand)
+      .command(planDiffCommand)
+      .command(prContextCommand)
+      .command(commentStatusCommand)
+      .command(loadRulesCommand)
+      .command(agentPromptCommand)
+      .command(buildTestCommand)
+      .command(scriptLintCommand)
+      .command(resolveAnchorsCommand)
+      .command(checkCoverageCommand)
+      .command(presubmitCommand)
+      .command(testEfficacyCommand)
+      .command(composeReviewCommand)
+      .command(submitCommand)
+      .command(cleanupCommand)
+      .demandCommand(
+        1,
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+      )
+      .version(false),
+  handler: () => {
+    // yargs handles this via demandCommand(1) above.
+  },
+};

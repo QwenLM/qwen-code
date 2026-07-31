@@ -1,0 +1,26 @@
+{
+  "name": "Pierre",
+  "description": "Clean, built for diffs",
+  "author": "Pierre Computer Company",
+  "license": "MIT",
+  "source": "https://github.com/pierrecomputer/theme",
+  "supportedModes": ["light", "dark"],
+  "shikiTheme": {
+    "light": "github-light",
+    "dark": "github-dark"
+  },
+  "background": "#ffffff",
+  "foreground": "#24292f",
+  "accent": "#009fff",
+  "info": "#fe8c2c",
+  "success": "#0dbe4e",
+  "destructive": "#fc2b73",
+  "dark": {
+    "background": "#0d1117",
+    "foreground": "#c9d1d9",
+    "accent": "#69b1ff",
+    "info": "#ffa359",
+    "success": "#5ecc71",
+    "destructive": "#ff678d"
+  }
+}

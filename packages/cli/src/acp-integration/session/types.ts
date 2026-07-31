@@ -1,0 +1,150 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Config, ToolArtifact } from '@qwen-code/qwen-code-core';
+import type { Part } from '@google/genai';
+import type {
+  SessionUpdate,
+  ToolCallLocation,
+  ToolKind,
+} from '@agentclientprotocol/sdk';
+import type { MessageRewriteMiddleware } from './rewrite/index.js';
+
+export type ApprovalModeValue =
+  | 'plan'
+  | 'default'
+  | 'auto-edit'
+  | 'auto'
+  | 'yolo';
+
+/**
+ * Interface for sending session updates to the ACP client.
+ * Implemented by Session class and used by all emitters.
+ */
+export interface SessionUpdateSender {
+  sendUpdate(update: SessionUpdate): Promise<void>;
+}
+
+/**
+ * Running cumulative usage for the conversation, mutated in place as usage
+ * metadata is emitted (MessageEmitter) and snapshotted onto each plan/todo
+ * update (PlanEmitter). The web-shell diffs consecutive snapshots to show a
+ * finished task's token/time spend.
+ *
+ * `apiTimeMs` only advances on the live path: history replay re-emits usage
+ * metadata without per-turn durations, so on `/resume` it stays 0 — the
+ * intended "API time is live-only" behaviour. Tokens accumulate on both paths
+ * because replayed usage metadata carries the counts.
+ */
+export interface CumulativeUsage {
+  promptTokens: number;
+  cachedTokens: number;
+  candidateTokens: number;
+  apiTimeMs: number;
+}
+
+export interface SessionEmitterContext extends SessionUpdateSender {
+  readonly sessionId: string;
+  /** History replay hook used to correlate emitted updates with disk records. */
+  setActiveRecordId?: (id: string | null, timestamp?: string) => void;
+  /** Optional message rewrite middleware for ACP message transformation.
+   *  Installed after history replay to avoid rewriting historical messages. */
+  messageRewriter?: MessageRewriteMiddleware;
+  /**
+   * Running cumulative usage, when the context wants per-todo resource detail.
+   * Mutated by MessageEmitter as usage is emitted and read by PlanEmitter to
+   * stamp plan updates. Optional so contexts that don't need it (export, etc.)
+   * can omit it.
+   */
+  readonly cumulativeUsage?: CumulativeUsage;
+}
+
+/**
+ * Session context shared by live emitters that may resolve runtime metadata.
+ */
+export interface SessionContext extends SessionEmitterContext {
+  readonly config: Config;
+}
+
+export function hasFullSessionContext(
+  context: SessionEmitterContext,
+): context is SessionContext {
+  return 'config' in context;
+}
+
+/**
+ * Subagent metadata for tracking parent tool call context.
+ */
+export interface SubagentMeta {
+  /** ID of the parent AgentTool call that created this subagent */
+  parentToolCallId?: string;
+  /** Type of subagent (from AgentParams.subagent_type) */
+  subagentType?: string;
+}
+
+/**
+ * Parameters for emitting a tool call start event.
+ */
+export interface ToolCallStartParams {
+  /** Name of the tool being called */
+  toolName: string;
+  /** Unique identifier for this tool call */
+  callId: string;
+  /** Arguments passed to the tool */
+  args?: Record<string, unknown>;
+  /** Status of the tool call */
+  status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Transient phase recognized by clients that support tool preparation. */
+  phase?: 'preparing';
+  /** Optional subagent metadata */
+  subagentMeta?: SubagentMeta;
+  /** Server-side timestamp (ISO string or ms) for message ordering */
+  timestamp?: string | number;
+}
+
+/**
+ * Parameters for emitting a tool call result event.
+ */
+export interface ToolCallResultParams {
+  /** Name of the tool that was called */
+  toolName: string;
+  /** Unique identifier for this tool call */
+  callId: string;
+  /** Whether the tool execution succeeded */
+  success: boolean;
+  /** The response parts from tool execution (maps to content in update event) */
+  message: Part[];
+  /** Display result from tool execution (maps to rawOutput in update event) */
+  resultDisplay?: unknown;
+  /** Error if tool execution failed */
+  error?: Error;
+  /** Structured artifacts produced by the tool result. */
+  artifacts?: ToolArtifact[];
+  /** Original args (fallback for TodoWriteTool todos extraction) */
+  args?: Record<string, unknown>;
+  /** Optional subagent metadata */
+  subagentMeta?: SubagentMeta;
+  /** Server-side timestamp (ISO string or ms) for message ordering */
+  timestamp?: string | number;
+}
+
+/**
+ * Todo item structure for plan updates.
+ */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+/**
+ * Resolved tool metadata from the registry.
+ */
+export interface ResolvedToolMetadata {
+  title: string;
+  locations: ToolCallLocation[];
+  kind: ToolKind;
+}

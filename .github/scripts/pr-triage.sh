@@ -19,42 +19,20 @@ process_pr() {
     local PR_NUMBER=$1
     echo "🔄 Processing PR #${PR_NUMBER}"
 
-    # Get PR body with error handling
-    local PR_BODY
-    if ! PR_BODY=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json body -q .body 2>/dev/null); then
-        echo "   ⚠️ Could not fetch PR #${PR_NUMBER} details"
-        return 1
-    fi
-
-    # Look for issue references using multiple patterns
-    local ISSUE_NUMBER=""
-
-    # Pattern 1: Direct reference like #123
-    if [[ -z "${ISSUE_NUMBER}" ]]; then
-        ISSUE_NUMBER=$(echo "${PR_BODY}" | grep -oE '#[0-9]+' | head -1 | sed 's/#//' 2>/dev/null || echo "")
-    fi
-
-    # Pattern 2: Closes/Fixes/Resolves patterns (case-insensitive)
-    if [[ -z "${ISSUE_NUMBER}" ]]; then
-        ISSUE_NUMBER=$(echo "${PR_BODY}" | grep -iE '(closes?|fixes?|resolves?) #[0-9]+' | grep -oE '#[0-9]+' | head -1 | sed 's/#//' 2>/dev/null || echo "")
+    # Get closing issue number with error handling
+    local ISSUE_NUMBER
+    if ! ISSUE_NUMBER=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json closingIssuesReferences -q '.closingIssuesReferences.nodes[0].number' 2>/dev/null); then
+        echo "   ⚠️ Could not fetch closing issue for PR #${PR_NUMBER}"
     fi
 
     if [[ -z "${ISSUE_NUMBER}" ]]; then
-        echo "⚠️  No linked issue found for PR #${PR_NUMBER}, adding status/need-issue label"
-        if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --add-label "status/need-issue" 2>/dev/null; then
-            echo "   ⚠️ Failed to add label (may already exist or have permission issues)"
-        fi
-        # Add PR number to the list
-        if [[ -z "${PRS_NEEDING_COMMENT}" ]]; then
-            PRS_NEEDING_COMMENT="${PR_NUMBER}"
-        else
-            PRS_NEEDING_COMMENT="${PRS_NEEDING_COMMENT},${PR_NUMBER}"
-        fi
-        echo "needs_comment=true" >> "${GITHUB_OUTPUT}"
+        echo "ℹ️  No linked issue found for PR #${PR_NUMBER} - this is acceptable for independent contributions"
+        # We no longer require PRs to have linked issues
+        # Independent valuable contributions are encouraged
     else
         echo "🔗 Found linked issue #${ISSUE_NUMBER}"
 
-        # Remove status/need-issue label if present
+        # Remove status/need-issue label if present (legacy cleanup)
         if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --remove-label "status/need-issue" 2>/dev/null; then
             echo "   status/need-issue label not present or could not be removed"
         fi
@@ -99,7 +77,7 @@ process_pr() {
         local LABELS_TO_REMOVE=""
         for label in "${PR_LABEL_ARRAY[@]}"; do
             if [[ -n "${label}" ]] && [[ " ${ISSUE_LABEL_ARRAY[*]} " != *" ${label} "* ]]; then
-                # Don't remove status/need-issue since we already handled it
+                # Don't remove status/need-issue since we already handled it (legacy cleanup)
                 if [[ "${label}" != "status/need-issue" ]]; then
                     if [[ -z "${LABELS_TO_REMOVE}" ]]; then
                         LABELS_TO_REMOVE="${label}"
@@ -118,14 +96,7 @@ process_pr() {
             fi
         fi
 
-        if [[ -n "${LABELS_TO_REMOVE}" ]]; then
-            echo "➖ Removing labels: ${LABELS_TO_REMOVE}"
-            if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --remove-label "${LABELS_TO_REMOVE}" 2>/dev/null; then
-                echo "   ⚠️ Failed to remove some labels"
-            fi
-        fi
-
-        if [[ -z "${LABELS_TO_ADD}" ]] && [[ -z "${LABELS_TO_REMOVE}" ]]; then
+        if [[ -z "${LABELS_TO_ADD}" ]]; then
             echo "✅ Labels already synchronized"
         fi
         echo "needs_comment=false" >> "${GITHUB_OUTPUT}"

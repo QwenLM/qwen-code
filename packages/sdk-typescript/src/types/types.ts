@@ -1,0 +1,627 @@
+import type {
+  PermissionMode,
+  PermissionSuggestion,
+  SubagentConfig,
+  SDKMcpServerConfig,
+  AuthType,
+} from './protocol.js';
+import type { SpawnInfo } from '../utils/cliPath.js';
+
+export type { PermissionMode, AuthType };
+
+export type TransportOptions = {
+  pathToQwenExecutable?: string;
+  spawnInfo?: SpawnInfo;
+  cwd?: string;
+  model?: string;
+  permissionMode?: PermissionMode;
+  env?: Record<string, string>;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  abortController?: AbortController;
+  debug?: boolean;
+  stderr?: (message: string) => void;
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  maxSessionTurns?: number;
+  coreTools?: string[];
+  excludeTools?: string[];
+  allowedTools?: string[];
+  authType?: AuthType;
+  includePartialMessages?: boolean;
+  /**
+   * Resume the most recent session for the current project.
+   * Equivalent to CLI's --continue flag.
+   * @default false
+   */
+  continue?: boolean;
+  /**
+   * Resume a specific session by its ID.
+   * Equivalent to CLI's --resume flag.
+   * When provided, takes precedence over `continue`.
+   */
+  resume?: string;
+  /**
+   * Session ID to use for this session.
+   * Passed to CLI via --session-id to ensure consistent session ID.
+   * When resume is provided, this should match the resume ID.
+   */
+  sessionId?: string;
+  forkSession?: boolean;
+  maxToolCalls?: number;
+  maxSubagentDepth?: number;
+  includeDirectories?: string[];
+  extraArgs?: string[];
+  extensions?: string[];
+  allowedMcpServerNames?: string[];
+  fallbackModel?: string[];
+  proxy?: string;
+  sandbox?: boolean;
+  safeMode?: boolean;
+  insecure?: boolean;
+  worktree?: boolean;
+  disabledSlashCommands?: string[];
+};
+
+export interface QuerySystemPromptPreset {
+  type: 'preset';
+  preset: 'qwen_code';
+  append?: string;
+}
+
+export type QuerySystemPrompt = string | QuerySystemPromptPreset;
+
+type ToolInput = Record<string, unknown>;
+
+export type CanUseTool = (
+  toolName: string,
+  input: ToolInput,
+  options: {
+    signal: AbortSignal;
+    suggestions?: PermissionSuggestion[] | null;
+  },
+) => Promise<PermissionResult>;
+
+export type PermissionResult =
+  | {
+      behavior: 'allow';
+      updatedInput: ToolInput;
+    }
+  | {
+      behavior: 'deny';
+      message: string;
+      interrupt?: boolean;
+    };
+
+/**
+ * OAuth configuration for MCP servers
+ */
+export interface McpOAuthConfig {
+  enabled?: boolean;
+  clientId?: string;
+  clientSecret?: string;
+  scopes?: string[];
+  redirectUri?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  audiences?: string[];
+  tokenParamName?: string;
+  registrationUrl?: string;
+}
+
+/**
+ * Auth provider type for MCP servers
+ */
+export type McpAuthProviderType =
+  | 'dynamic_discovery'
+  | 'google_credentials'
+  | 'service_account_impersonation';
+
+/**
+ * CLI MCP Server configuration
+ *
+ * Supports multiple transport types:
+ * - stdio: command, args, env, cwd
+ * - SSE: url
+ * - Streamable HTTP: httpUrl, headers
+ * - WebSocket: tcp
+ *
+ * This interface aligns with MCPServerConfig in @qwen-code/qwen-code-core.
+ */
+export interface CLIMcpServerConfig {
+  // For stdio transport
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  // For SSE transport
+  url?: string;
+  // For streamable HTTP transport
+  httpUrl?: string;
+  headers?: Record<string, string>;
+  // For WebSocket transport
+  tcp?: string;
+  // Common
+  timeout?: number;
+  trust?: boolean;
+  // Metadata
+  description?: string;
+  includeTools?: string[];
+  excludeTools?: string[];
+  extensionName?: string;
+  // OAuth configuration
+  oauth?: McpOAuthConfig;
+  authProviderType?: McpAuthProviderType;
+  // Service Account Configuration
+  /** targetAudience format: CLIENT_ID.apps.googleusercontent.com */
+  targetAudience?: string;
+  /** targetServiceAccount format: <service-account-name>@<project-num>.iam.gserviceaccount.com */
+  targetServiceAccount?: string;
+}
+
+/**
+ * Unified MCP Server configuration
+ *
+ * Supports both external MCP servers (stdio/SSE/HTTP/WebSocket) and SDK-embedded MCP servers.
+ *
+ * @example External MCP server (stdio)
+ * ```typescript
+ * mcpServers: {
+ *   'my-server': { command: 'node', args: ['server.js'] }
+ * }
+ * ```
+ *
+ * @example External MCP server (SSE)
+ * ```typescript
+ * mcpServers: {
+ *   'remote-server': { url: 'http://localhost:3000/sse' }
+ * }
+ * ```
+ *
+ * @example External MCP server (Streamable HTTP)
+ * ```typescript
+ * mcpServers: {
+ *   'http-server': { httpUrl: 'http://localhost:3000/mcp', headers: { 'Authorization': 'Bearer token' } }
+ * }
+ * ```
+ *
+ * @example SDK MCP server
+ * ```typescript
+ * const server = createSdkMcpServer('weather', '1.0.0', [weatherTool]);
+ * mcpServers: {
+ *   'weather': { type: 'sdk', name: 'weather', instance: server }
+ * }
+ * ```
+ */
+export type McpServerConfig = CLIMcpServerConfig | SDKMcpServerConfig;
+
+/**
+ * Type guard to check if a config is an SDK MCP server
+ */
+export function isSdkMcpServerConfig(
+  config: McpServerConfig,
+): config is SDKMcpServerConfig {
+  return 'type' in config && config.type === 'sdk';
+}
+
+/**
+ * Configuration options for creating a query session with the Qwen CLI.
+ */
+export interface QueryOptions {
+  /**
+   * The working directory for the query session.
+   * This determines the context in which file operations and commands are executed.
+   * @default process.cwd()
+   */
+  cwd?: string;
+
+  /**
+   * The AI model to use for the query session.
+   * This takes precedence over the environment variables `OPENAI_MODEL` and `QWEN_MODEL`
+   * @example 'qwen-max', 'qwen-plus', 'qwen-turbo'
+   */
+  model?: string;
+
+  /**
+   * Path to the Qwen CLI executable.
+   *
+   * If not provided, the SDK automatically uses the bundled CLI included in the package.
+   *
+   * Supports multiple formats:
+   * - Command name (no path separators): `'qwen'` -> executes from PATH
+   * - JavaScript file: `'/path/to/cli.js'` -> uses Node.js (or Bun if running under Bun)
+   * - TypeScript file: `'/path/to/index.ts'` -> uses tsx if available (silent support for dev/debug)
+   * - Native binary: `'/path/to/qwen'` -> executes directly
+   *
+   * Runtime detection:
+   * - `.js/.mjs/.cjs` files: Node.js (or Bun if running under Bun)
+   * - `.ts/.tsx` files: tsx if available, otherwise treated as native
+   * - Command names: executed directly from PATH
+   * - Other files: executed as native binaries
+   *
+   * @example '/path/to/cli.js'
+   * @example 'qwen'
+   * @example './packages/cli/index.ts'
+   */
+  pathToQwenExecutable?: string;
+
+  /**
+   * Environment variables to pass to the Qwen CLI process.
+   * These variables will be merged with the current process environment.
+   */
+  env?: Record<string, string>;
+
+  /**
+   * System prompt configuration for the Qwen CLI session.
+   *
+   * - `string`: fully overrides the main session system prompt
+   * - `{ type: 'preset', preset: 'qwen_code', append?: string }`:
+   *   uses Qwen Code's built-in prompt as the base and optionally appends extra
+   *   instructions for the main session
+   */
+  systemPrompt?: QuerySystemPrompt;
+
+  /**
+   * Permission mode controlling how the SDK handles tool execution approval.
+   *
+   * - 'default': Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`.
+   *   Read-only tools execute without confirmation.
+   * - 'plan': Blocks all write tools, instructing AI to present a plan first.
+   *   Read-only tools execute normally.
+   * - 'auto-edit': Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+   * - 'auto': An LLM classifier evaluates each tool call and auto-approves
+   *   safe ones / blocks risky ones. Fail-closed: classifier outages route
+   *   the call to manual approval. Best for long autonomous sessions in
+   *   trusted projects. See `docs/users/features/auto-mode.md`.
+   * - 'yolo': All tools execute automatically without confirmation.
+   *
+   * **Priority Chain (highest to lowest):**
+   * 1. `excludeTools` - Blocks tools completely (returns permission error)
+   * 2. `permissionMode: 'plan'` - Blocks non-read-only tools (except exit_plan_mode)
+   * 3. `permissionMode: 'yolo'` - Auto-approves all tools
+   * 4. `allowedTools` - Auto-approves matching tools
+   * 5. `permissionMode: 'auto'` - Classifier-mediated approval for the rest
+   * 6. `canUseTool` callback - Custom approval logic
+   * 7. Default behavior - Auto-deny in SDK mode
+   *
+   * @default 'default'
+   * @see canUseTool For custom permission handling
+   * @see allowedTools For auto-approving specific tools
+   * @see excludeTools For blocking specific tools
+   */
+  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+
+  /**
+   * Custom permission handler for tool execution approval.
+   *
+   * This callback is invoked when a tool requires confirmation and allows you to
+   * programmatically approve or deny execution. It acts as a fallback after
+   * `allowedTools` check but before default denial.
+   *
+   * **When is this called?**
+   * - Only for tools requiring confirmation (write operations, shell commands, etc.)
+   * - After `excludeTools` and `allowedTools` checks
+   * - Not called in 'yolo' mode or 'plan' mode
+   * - Not called for tools already in `allowedTools`
+   *
+   * **Usage with permissionMode:**
+   * - 'default': Invoked for all write tools not in `allowedTools`; if not provided, auto-denied.
+   * - 'auto-edit': Invoked for non-edit tools (edit/write_file auto-approved); if not provided, auto-denied.
+   * - 'plan': Not invoked; write tools are blocked by plan mode.
+   * - 'yolo': Not invoked; all tools auto-approved.
+   *
+   * @see allowedTools For auto-approving tools without callback
+   */
+  canUseTool?: CanUseTool;
+
+  /**
+   * MCP (Model Context Protocol) servers to connect to.
+   *
+   * Supports both external MCP servers and SDK-embedded MCP servers:
+   *
+   * **External MCP servers** - Run in separate processes, connected via stdio/SSE/HTTP:
+   * ```typescript
+   * mcpServers: {
+   *   'stdio-server': { command: 'node', args: ['server.js'], env: { PORT: '3000' } },
+   *   'sse-server': { url: 'http://localhost:3000/sse' },
+   *   'http-server': { httpUrl: 'http://localhost:3000/mcp' }
+   * }
+   * ```
+   *
+   * **SDK MCP servers** - Run in the SDK process, connected via in-memory transport:
+   * ```typescript
+   * const myTool = tool({
+   *   name: 'my_tool',
+   *   description: 'My custom tool',
+   *   inputSchema: { type: 'object', properties: { input: { type: 'string' } } },
+   *   handler: async (input) => ({ result: input.input.toUpperCase() }),
+   * });
+   *
+   * const server = createSdkMcpServer('my-server', '1.0.0', [myTool]);
+   *
+   * mcpServers: {
+   *   'my-server': { type: 'sdk', name: 'my-server', instance: server }
+   * }
+   * ```
+   */
+  mcpServers?: Record<string, McpServerConfig>;
+
+  /**
+   * AbortController to cancel the query session.
+   * Call abortController.abort() to terminate the session and cleanup resources.
+   * Remember to handle the AbortError when the session is aborted.
+   */
+  abortController?: AbortController;
+
+  /**
+   * Enable debug mode for verbose logging.
+   * When true, additional diagnostic information will be output.
+   * Use this with `logLevel` to control the verbosity of the logs.
+   * @default false
+   */
+  debug?: boolean;
+
+  /**
+   * Custom handler for stderr output from the Qwen CLI process.
+   * Use this to capture and process error messages or diagnostic output.
+   */
+  stderr?: (message: string) => void;
+
+  /**
+   * Logging level for the SDK.
+   * Controls the verbosity of log messages output by the SDK.
+   * @default 'error'
+   */
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+
+  /**
+   * Maximum number of conversation turns before the session automatically terminates.
+   * A turn consists of a user message and an assistant response.
+   * @default -1 (unlimited)
+   */
+  maxSessionTurns?: number;
+
+  /**
+   * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
+   * If specified, only matching core tools are registered for the session.
+   * This is separate from `permissions.allow`, which auto-approves matching
+   * tool calls but does not restrict tool registration.
+   * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
+   * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tool registration, not invocation.
+   * @example ['read_file', 'edit', 'run_shell_command']
+   */
+  coreTools?: string[];
+
+  /**
+   * Equivalent to `permissions.deny` in settings.json.
+   * List of tools to exclude from the session.
+   *
+   * **Behavior:**
+   * - Excluded tools return a permission error immediately when invoked
+   * - Takes highest priority - overrides all other permission settings
+   * - Tools will not be available to the AI, even if in `coreTools` or `allowedTools`
+   *
+   * **Pattern matching:**
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(rm *)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
+   *
+   * @example ['Bash(rm *)', 'Read(.env)', 'Edit(/secrets/**)']
+   * @see allowedTools For allowing specific tools
+   */
+  excludeTools?: string[];
+
+  /**
+   * Equivalent to `permissions.allow` in settings.json.
+   * List of tools that are allowed to run without confirmation.
+   *
+   * **Behavior:**
+   * - Matching tools bypass `canUseTool` callback and execute automatically
+   * - Only applies when tool requires confirmation (write operations, shell commands)
+   * - Checked after `excludeTools` but before `canUseTool` callback
+   * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
+   * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
+   *
+   * **Pattern matching:**
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(git status)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
+   *
+   * **Use cases:**
+   * - Auto-approve safe shell commands: `['Bash(git status)', 'Bash(ls)']`
+   * - Auto-approve specific tools: `['write_file', 'edit']`
+   * - Combine with `permissionMode: 'default'` to selectively auto-approve tools
+   *
+   * @example ['Read', 'Bash(git status)', 'Bash(npm test)']
+   * @see canUseTool For custom approval logic
+   * @see excludeTools For blocking specific tools
+   */
+  allowedTools?: string[];
+
+  /**
+   * Authentication type for the AI service.
+   * - 'openai': Use OpenAI-compatible authentication
+   * - 'qwen-oauth': Legacy Qwen OAuth authentication
+   *
+   * Qwen OAuth free tier was discontinued on 2026-04-15. New SDK setups should
+   * use OpenAI-compatible authentication or another supported provider.
+   */
+  authType?: AuthType;
+
+  /**
+   * Configuration for subagents that can be invoked during the session.
+   * Subagents are specialized AI agents that can handle specific tasks or domains.
+   * The invocation is marked as a `task` tool use with the name of agent and a tool_use_id.
+   * The tool use of these agent is marked with the parent_tool_use_id of the `task` tool use.
+   */
+  agents?: SubagentConfig[];
+
+  /**
+   * Initial reasoning effort tier applied at session start.
+   *
+   * Controls the depth of model reasoning/thinking. Higher tiers produce more
+   * thorough reasoning at the cost of latency and tokens. Provider adapters
+   * clamp the tier to what the active model supports.
+   *
+   * - `'low'`: Minimal reasoning, fastest responses
+   * - `'medium'`: Balanced reasoning and speed
+   * - `'high'`: More thorough reasoning
+   * - `'xhigh'`: Extended reasoning for complex tasks
+   * - `'max'`: Maximum reasoning depth
+   *
+   * Use {@link Query.setEffort} to change the tier at runtime.
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+  /**
+   * Include partial messages in the response stream.
+   * When true, the SDK will emit incomplete messages as they are being generated,
+   * allowing for real-time streaming of the AI's response.
+   * @default false
+   */
+  includePartialMessages?: boolean;
+
+  /**
+   * Resume a previous session by providing its session ID.
+   * This is equivalent to using the `--resume` flag in the Qwen CLI.
+   * @example '123e4567-e89b-12d3-a456-426614174000'
+   */
+  resume?: string;
+
+  /**
+   * Specify a session ID for the new session.
+   * This ensures the SDK and CLI use the same session ID without resuming a previous session.
+   * Equivalent to CLI's `--session-id` flag.
+   * @example '123e4567-e89b-12d3-a456-426614174000'
+   */
+  sessionId?: string;
+
+  /**
+   * Fork from an existing session instead of starting fresh.
+   * Equivalent to CLI's `--fork-session` flag.
+   * @default false
+   */
+  forkSession?: boolean;
+
+  /**
+   * Maximum cumulative tool calls. -1 means no limit.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
+
+  /**
+   * Maximum nesting depth for sub-agents (1-100).
+   * Equivalent to CLI's `--max-subagent-depth` flag.
+   */
+  maxSubagentDepth?: number;
+
+  /**
+   * Additional directories to include in the workspace.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
+
+  /**
+   * Additional CLI arguments to pass through directly.
+   * Cannot contain SDK-managed or security-sensitive flags (e.g. `--model`,
+   * `--auth-type`, `--approval-mode`, `--insecure`, `--dangerously-skip-permissions`).
+   */
+  extraArgs?: string[];
+
+  /**
+   * Extensions to enable for this session.
+   * Equivalent to CLI's `--extensions` flag.
+   */
+  extensions?: string[];
+
+  /**
+   * Whitelist of MCP server names to allow.
+   * Equivalent to CLI's `--allowed-mcp-server-names` flag.
+   */
+  allowedMcpServerNames?: string[];
+
+  /**
+   * Fallback model(s) for capacity errors (429/503/529).
+   * Up to 3 models, tried in order when the primary model is unavailable.
+   */
+  fallbackModel?: string[];
+
+  /**
+   * Proxy URL for the Qwen CLI process.
+   * @deprecated Use the "proxy" setting in settings.json instead.
+   */
+  proxy?: string;
+
+  /**
+   * Run in sandbox mode.
+   * Equivalent to CLI's `--sandbox` flag.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Disable all customizations for troubleshooting.
+   * Equivalent to CLI's `--safe-mode` flag.
+   * @default false
+   */
+  safeMode?: boolean;
+
+  /**
+   * Skip TLS certificate verification for API connections.
+   * Equivalent to CLI's `--insecure` flag.
+   * @default false
+   */
+  insecure?: boolean;
+
+  /**
+   * Enable Git worktree mode.
+   * Equivalent to CLI's `--worktree` flag.
+   * @default false
+   */
+  worktree?: boolean;
+
+  /**
+   * Slash command names to hide/disable.
+   * Equivalent to CLI's `--disabled-slash-commands` flag.
+   */
+  disabledSlashCommands?: string[];
+
+  /**
+   * Timeout configuration for various SDK operations.
+   * All values are in milliseconds.
+   */
+  timeout?: {
+    /**
+     * Timeout for the `canUseTool` callback.
+     * If the callback doesn't resolve within this time, the permission request
+     * will be denied with a timeout error (fail-safe behavior).
+     * @default 60000 (1 minute)
+     */
+    canUseTool?: number;
+
+    /**
+     * Timeout for SDK MCP tool calls.
+     * This applies to tool calls made to SDK-embedded MCP servers.
+     * @default 60000 (1 minute)
+     */
+    mcpRequest?: number;
+
+    /**
+     * Timeout for SDK→CLI control requests.
+     * This applies to internal control operations like initialize, interrupt,
+     * setPermissionMode, setModel, etc.
+     * @default 60000 (1 minute)
+     */
+    controlRequest?: number;
+
+    /**
+     * Timeout for waiting before closing CLI's stdin after user messages are sent.
+     * In multi-turn mode with SDK MCP servers, after all user messages are processed,
+     * the SDK waits for the first result message to ensure all initialization
+     * (control responses, MCP server setup, etc.) is complete before closing stdin.
+     * This timeout is a fallback to avoid hanging indefinitely.
+     * @default 60000 (1 minute)
+     */
+    streamClose?: number;
+  };
+}

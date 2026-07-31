@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { ToolInvocation, ToolResult } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { DeclarativeTool, hasCycleInSchema, Kind } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 
@@ -23,8 +24,12 @@ class TestToolInvocation implements ToolInvocation<object, ToolResult> {
     return [];
   }
 
-  shouldConfirmExecute(): Promise<false> {
-    return Promise.resolve(false);
+  getDefaultPermission(): Promise<PermissionDecision> {
+    return Promise.resolve('allow');
+  }
+
+  getConfirmationDetails(): Promise<never> {
+    throw new Error('Not implemented');
   }
 
   execute(): Promise<ToolResult> {

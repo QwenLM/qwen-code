@@ -7,15 +7,18 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
-import { Colors } from '../../../colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
+import { t } from '../../../../i18n/index.js';
 
 interface NavigationState {
-  currentBlock: 'project' | 'user' | 'builtin';
+  currentBlock: 'project' | 'user' | 'builtin' | 'extension';
   projectIndex: number;
   userIndex: number;
   builtinIndex: number;
+  extensionIndex: number;
 }
 
 interface AgentSelectionStepProps {
@@ -32,6 +35,7 @@ export const AgentSelectionStep = ({
     projectIndex: 0,
     userIndex: 0,
     builtinIndex: 0,
+    extensionIndex: 0,
   });
 
   // Group agents by level
@@ -47,6 +51,10 @@ export const AgentSelectionStep = ({
     () => availableAgents.filter((agent) => agent.level === 'builtin'),
     [availableAgents],
   );
+  const extensionAgents = useMemo(
+    () => availableAgents.filter((agent) => agent.level === 'extension'),
+    [availableAgents],
+  );
   const projectNames = useMemo(
     () => new Set(projectAgents.map((agent) => agent.name)),
     [projectAgents],
@@ -60,15 +68,17 @@ export const AgentSelectionStep = ({
       setNavigation((prev) => ({ ...prev, currentBlock: 'user' }));
     } else if (builtinAgents.length > 0) {
       setNavigation((prev) => ({ ...prev, currentBlock: 'builtin' }));
+    } else if (extensionAgents.length > 0) {
+      setNavigation((prev) => ({ ...prev, currentBlock: 'extension' }));
     }
-  }, [projectAgents, userAgents, builtinAgents]);
+  }, [projectAgents, userAgents, builtinAgents, extensionAgents]);
 
   // Custom keyboard navigation
   useKeypress(
     (key) => {
       const { name } = key;
 
-      if (name === 'up' || name === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex > 0) {
@@ -86,6 +96,13 @@ export const AgentSelectionStep = ({
                 ...prev,
                 currentBlock: 'user',
                 userIndex: userAgents.length - 1,
+              };
+            } else if (extensionAgents.length > 0) {
+              // Move to last item in extension block
+              return {
+                ...prev,
+                currentBlock: 'extension',
+                extensionIndex: extensionAgents.length - 1,
               };
             } else {
               // Wrap to last item in project block
@@ -108,11 +125,18 @@ export const AgentSelectionStep = ({
                 currentBlock: 'builtin',
                 builtinIndex: builtinAgents.length - 1,
               };
+            } else if (extensionAgents.length > 0) {
+              // Move to last item in extension block
+              return {
+                ...prev,
+                currentBlock: 'extension',
+                extensionIndex: extensionAgents.length - 1,
+              };
             } else {
               // Wrap to last item in user block
               return { ...prev, userIndex: userAgents.length - 1 };
             }
-          } else {
+          } else if (prev.currentBlock === 'builtin') {
             // builtin block
             if (prev.builtinIndex > 0) {
               return { ...prev, builtinIndex: prev.builtinIndex - 1 };
@@ -130,13 +154,49 @@ export const AgentSelectionStep = ({
                 currentBlock: 'project',
                 projectIndex: projectAgents.length - 1,
               };
+            } else if (extensionAgents.length > 0) {
+              // Move to last item in extension block
+              return {
+                ...prev,
+                currentBlock: 'extension',
+                extensionIndex: extensionAgents.length - 1,
+              };
             } else {
               // Wrap to last item in builtin block
               return { ...prev, builtinIndex: builtinAgents.length - 1 };
             }
+          } else {
+            // extension block
+            if (prev.extensionIndex > 0) {
+              return { ...prev, extensionIndex: prev.extensionIndex - 1 };
+            } else if (userAgents.length > 0) {
+              // Move to last item in user block
+              return {
+                ...prev,
+                currentBlock: 'user',
+                userIndex: userAgents.length - 1,
+              };
+            } else if (projectAgents.length > 0) {
+              // Move to last item in project block
+              return {
+                ...prev,
+                currentBlock: 'project',
+                projectIndex: projectAgents.length - 1,
+              };
+            } else if (builtinAgents.length > 0) {
+              // Move to last item in builtin block
+              return {
+                ...prev,
+                currentBlock: 'builtin',
+                builtinIndex: builtinAgents.length - 1,
+              };
+            } else {
+              // Wrap to last item in extension block
+              return { ...prev, extensionIndex: extensionAgents.length - 1 };
+            }
           }
         });
-      } else if (name === 'down' || name === 'j') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex < projectAgents.length - 1) {
@@ -147,6 +207,9 @@ export const AgentSelectionStep = ({
             } else if (builtinAgents.length > 0) {
               // Move to first item in builtin block
               return { ...prev, currentBlock: 'builtin', builtinIndex: 0 };
+            } else if (extensionAgents.length > 0) {
+              // Move to first item in extension block
+              return { ...prev, currentBlock: 'extension', extensionIndex: 0 };
             } else {
               // Wrap to first item in project block
               return { ...prev, projectIndex: 0 };
@@ -157,6 +220,9 @@ export const AgentSelectionStep = ({
             } else if (builtinAgents.length > 0) {
               // Move to first item in builtin block
               return { ...prev, currentBlock: 'builtin', builtinIndex: 0 };
+            } else if (extensionAgents.length > 0) {
+              // Move to first item in extension block
+              return { ...prev, currentBlock: 'extension', extensionIndex: 0 };
             } else if (projectAgents.length > 0) {
               // Move to first item in project block
               return { ...prev, currentBlock: 'project', projectIndex: 0 };
@@ -164,10 +230,13 @@ export const AgentSelectionStep = ({
               // Wrap to first item in user block
               return { ...prev, userIndex: 0 };
             }
-          } else {
+          } else if (prev.currentBlock === 'builtin') {
             // builtin block
             if (prev.builtinIndex < builtinAgents.length - 1) {
               return { ...prev, builtinIndex: prev.builtinIndex + 1 };
+            } else if (extensionAgents.length > 0) {
+              // Move to first item in extension block
+              return { ...prev, currentBlock: 'extension', extensionIndex: 0 };
             } else if (projectAgents.length > 0) {
               // Move to first item in project block
               return { ...prev, currentBlock: 'project', projectIndex: 0 };
@@ -177,6 +246,23 @@ export const AgentSelectionStep = ({
             } else {
               // Wrap to first item in builtin block
               return { ...prev, builtinIndex: 0 };
+            }
+          } else {
+            // extension block
+            if (prev.extensionIndex < extensionAgents.length - 1) {
+              return { ...prev, extensionIndex: prev.extensionIndex + 1 };
+            } else if (projectAgents.length > 0) {
+              // Move to first item in project block
+              return { ...prev, currentBlock: 'project', projectIndex: 0 };
+            } else if (userAgents.length > 0) {
+              // Move to first item in user block
+              return { ...prev, currentBlock: 'user', userIndex: 0 };
+            } else if (builtinAgents.length > 0) {
+              // Move to first item in builtin block
+              return { ...prev, currentBlock: 'builtin', builtinIndex: 0 };
+            } else {
+              // Wrap to first item in extension block
+              return { ...prev, extensionIndex: 0 };
             }
           }
         });
@@ -188,11 +274,17 @@ export const AgentSelectionStep = ({
         } else if (navigation.currentBlock === 'user') {
           // User agents come after project agents in the availableAgents array
           globalIndex = projectAgents.length + navigation.userIndex;
-        } else {
-          // builtin block
+        } else if (navigation.currentBlock === 'builtin') {
           // Builtin agents come after project and user agents in the availableAgents array
           globalIndex =
             projectAgents.length + userAgents.length + navigation.builtinIndex;
+        } else {
+          // Extension agents come after project, user, and builtin agents
+          globalIndex =
+            projectAgents.length +
+            userAgents.length +
+            builtinAgents.length +
+            navigation.extensionIndex;
         }
 
         if (globalIndex >= 0 && globalIndex < availableAgents.length) {
@@ -206,9 +298,9 @@ export const AgentSelectionStep = ({
   if (availableAgents.length === 0) {
     return (
       <Box flexDirection="column">
-        <Text color={theme.text.secondary}>No subagents found.</Text>
+        <Text color={theme.text.secondary}>{t('No subagents found.')}</Text>
         <Text color={theme.text.secondary}>
-          Use &apos;/agents create&apos; to create your first subagent.
+          {t("Use '/agents create' to create your first subagent.")}
         </Text>
       </Box>
     );
@@ -218,7 +310,7 @@ export const AgentSelectionStep = ({
   const renderAgentItem = (
     agent: {
       name: string;
-      level: 'project' | 'user' | 'builtin';
+      level: 'project' | 'user' | 'builtin' | 'session' | 'extension';
       isBuiltin?: boolean;
     },
     index: number,
@@ -227,10 +319,10 @@ export const AgentSelectionStep = ({
     const textColor = isSelected ? theme.text.accent : theme.text.primary;
 
     return (
-      <Box key={agent.name} alignItems="center">
+      <Box key={`${agent.name}-${agent.level}`} alignItems="center">
         <Box minWidth={2} flexShrink={0}>
           <Text color={isSelected ? theme.text.accent : theme.text.primary}>
-            {isSelected ? '●' : ' '}
+            {isSelected ? ICON.CIRCLE_FILLED : ' '}
           </Text>
         </Box>
         <Text color={textColor} wrap="truncate">
@@ -238,13 +330,15 @@ export const AgentSelectionStep = ({
           {agent.isBuiltin && (
             <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
               {' '}
-              (built-in)
+              {t('(built-in)')}
             </Text>
           )}
           {agent.level === 'user' && projectNames.has(agent.name) && (
-            <Text color={isSelected ? theme.status.warning : Colors.Gray}>
+            <Text
+              color={isSelected ? theme.status.warning : theme.text.secondary}
+            >
               {' '}
-              (overridden by project level agent)
+              {t('(overridden by project level agent)')}
             </Text>
           )}
         </Text>
@@ -256,7 +350,8 @@ export const AgentSelectionStep = ({
   const enabledAgentsCount =
     projectAgents.length +
     userAgents.filter((agent) => !projectNames.has(agent.name)).length +
-    builtinAgents.length;
+    builtinAgents.length +
+    extensionAgents.length;
 
   return (
     <Box flexDirection="column">
@@ -264,7 +359,9 @@ export const AgentSelectionStep = ({
       {projectAgents.length > 0 && (
         <Box flexDirection="column" marginBottom={1}>
           <Text color={theme.text.primary} bold>
-            Project Level ({projectAgents[0].filePath.replace(/\/[^/]+$/, '')})
+            {t('Project Level ({{path}})', {
+              path: projectAgents[0].filePath?.replace(/\/[^/]+$/, '') || '',
+            })}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {projectAgents.map((agent, index) => {
@@ -284,7 +381,9 @@ export const AgentSelectionStep = ({
           marginBottom={builtinAgents.length > 0 ? 1 : 0}
         >
           <Text color={theme.text.primary} bold>
-            User Level ({userAgents[0].filePath.replace(/\/[^/]+$/, '')})
+            {t('User Level ({{path}})', {
+              path: userAgents[0].filePath?.replace(/\/[^/]+$/, '') || '',
+            })}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {userAgents.map((agent, index) => {
@@ -299,9 +398,12 @@ export const AgentSelectionStep = ({
 
       {/* Built-in Agents */}
       {builtinAgents.length > 0 && (
-        <Box flexDirection="column">
+        <Box
+          flexDirection="column"
+          marginBottom={extensionAgents.length > 0 ? 1 : 0}
+        >
           <Text color={theme.text.primary} bold>
-            Built-in Agents
+            {t('Built-in Agents')}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {builtinAgents.map((agent, index) => {
@@ -314,13 +416,33 @@ export const AgentSelectionStep = ({
         </Box>
       )}
 
+      {/* Extension Agents */}
+      {extensionAgents.length > 0 && (
+        <Box flexDirection="column">
+          <Text color={theme.text.primary} bold>
+            {t('Extension Agents')}
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            {extensionAgents.map((agent, index) => {
+              const isSelected =
+                navigation.currentBlock === 'extension' &&
+                navigation.extensionIndex === index;
+              return renderAgentItem(agent, index, isSelected);
+            })}
+          </Box>
+        </Box>
+      )}
+
       {/* Agent count summary */}
       {(projectAgents.length > 0 ||
         userAgents.length > 0 ||
-        builtinAgents.length > 0) && (
+        builtinAgents.length > 0 ||
+        extensionAgents.length > 0) && (
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
-            Using: {enabledAgentsCount} agents
+            {t('Using: {{count}} agents', {
+              count: enabledAgentsCount.toString(),
+            })}
           </Text>
         </Box>
       )}

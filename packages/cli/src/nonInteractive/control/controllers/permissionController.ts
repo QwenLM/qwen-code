@@ -1,0 +1,588 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Permission Controller
+ *
+ * Handles permission-related control requests:
+ * - can_use_tool: Check if tool usage is allowed
+ * - set_permission_mode: Change permission mode at runtime
+ *
+ * Abstracts all permission logic from the session manager to keep it clean.
+ */
+
+import type {
+  WaitingToolCall,
+  ToolExecuteConfirmationDetails,
+  ToolMcpConfirmationDetails,
+  ApprovalMode,
+  TeammateApprovalRequestEvent,
+  ToolConfirmationPayload,
+} from '@qwen-code/qwen-code-core';
+import {
+  InputFormat,
+  ToolConfirmationOutcome,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
+import type {
+  CLIControlPermissionRequest,
+  CLIControlSetPermissionModeRequest,
+  ControlRequestPayload,
+  PermissionMode,
+  PermissionSuggestion,
+} from '../../types.js';
+import { BaseController } from './baseController.js';
+import { buildPermissionSuggestions } from '../../../utils/permission-suggestions.js';
+
+const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
+
+export class PermissionController extends BaseController {
+  private pendingOutgoingRequests = new Set<string>();
+
+  /**
+   * Handle permission control requests
+   */
+  protected async handleRequestPayload(
+    payload: ControlRequestPayload,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    switch (payload.subtype) {
+      case 'can_use_tool':
+        return this.handleCanUseTool(
+          payload as CLIControlPermissionRequest,
+          signal,
+        );
+
+      case 'set_permission_mode':
+        return this.handleSetPermissionMode(
+          payload as CLIControlSetPermissionModeRequest,
+          signal,
+        );
+
+      default:
+        throw new Error(`Unsupported request subtype in PermissionController`);
+    }
+  }
+
+  /**
+   * Handle can_use_tool request
+   *
+   * Comprehensive permission evaluation based on:
+   * - Permission mode (approval level)
+   * - Tool registry validation
+   * - Error handling with safe defaults
+   */
+  private async handleCanUseTool(
+    payload: CLIControlPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    const toolName = payload.tool_name;
+    if (
+      !toolName ||
+      typeof toolName !== 'string' ||
+      toolName.trim().length === 0
+    ) {
+      return {
+        subtype: 'can_use_tool',
+        behavior: 'deny',
+        message: 'Missing or invalid tool_name in can_use_tool request',
+      };
+    }
+
+    let behavior: 'allow' | 'deny' = 'allow';
+    let message: string | undefined;
+
+    try {
+      // Check permission mode first
+      const permissionResult = this.checkPermissionMode();
+      if (!permissionResult.allowed) {
+        behavior = 'deny';
+        message = permissionResult.message;
+      }
+
+      // Check tool registry if permission mode allows
+      if (behavior === 'allow') {
+        const registryResult = this.checkToolRegistry(toolName);
+        if (!registryResult.allowed) {
+          behavior = 'deny';
+          message = registryResult.message;
+        }
+      }
+    } catch (error) {
+      behavior = 'deny';
+      message =
+        error instanceof Error
+          ? `Failed to evaluate tool permission: ${error.message}`
+          : 'Failed to evaluate tool permission';
+    }
+
+    const response: Record<string, unknown> = {
+      subtype: 'can_use_tool',
+      behavior,
+    };
+
+    if (message) {
+      response['message'] = message;
+    }
+
+    return response;
+  }
+
+  /**
+   * Check permission mode for tool execution
+   */
+  private checkPermissionMode(): { allowed: boolean; message?: string } {
+    const mode = this.context.permissionMode;
+
+    // Map permission modes to approval logic (aligned with VALID_APPROVAL_MODE_VALUES)
+    switch (mode) {
+      case 'yolo': // Allow all tools
+      case 'auto-edit': // Auto-approve edit operations
+      case 'auto': // Auto-approve via LLM classifier — coreToolScheduler enforces the gate
+      case 'plan': // Auto-approve planning operations
+        return { allowed: true };
+
+      case 'default': // TODO: allow all tools for test
+      default:
+        return {
+          allowed: false,
+          message:
+            'Tool execution requires manual approval. Update permission mode or approve via host.',
+        };
+    }
+  }
+
+  /**
+   * Check if tool exists in registry
+   */
+  private checkToolRegistry(toolName: string): {
+    allowed: boolean;
+    message?: string;
+  } {
+    try {
+      // Access tool registry through config
+      const config = this.context.config;
+      const registryProvider = config as unknown as {
+        getToolRegistry?: () => {
+          getTool?: (name: string) => unknown;
+        };
+      };
+
+      if (typeof registryProvider.getToolRegistry === 'function') {
+        const registry = registryProvider.getToolRegistry();
+        if (
+          registry &&
+          typeof registry.getTool === 'function' &&
+          !registry.getTool(toolName)
+        ) {
+          return {
+            allowed: false,
+            message: `Tool "${toolName}" is not registered.`,
+          };
+        }
+      }
+
+      return { allowed: true };
+    } catch (error) {
+      return {
+        allowed: false,
+        message: `Failed to check tool registry: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
+   * Handle set_permission_mode request
+   *
+   * Updates the permission mode in the context
+   */
+  private async handleSetPermissionMode(
+    payload: CLIControlSetPermissionModeRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    const mode = payload.mode;
+    const validModes: PermissionMode[] = [
+      'default',
+      'plan',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ];
+
+    if (!validModes.includes(mode)) {
+      throw new Error(
+        `Invalid permission mode: ${mode}. Valid values are: ${validModes.join(', ')}`,
+      );
+    }
+
+    this.context.permissionMode = mode;
+    this.context.config.setApprovalMode(mode as ApprovalMode);
+
+    this.debugLogger.info(
+      `[PermissionController] Permission mode updated to: ${mode}`,
+    );
+
+    return { status: 'updated', mode };
+  }
+
+  /**
+   * Build permission suggestions for tool confirmation UI
+   *
+   * This method creates UI suggestions based on tool confirmation details,
+   * helping the host application present appropriate permission options.
+   */
+  buildPermissionSuggestions(
+    confirmationDetails: unknown,
+  ): PermissionSuggestion[] | null {
+    return buildPermissionSuggestions(confirmationDetails);
+  }
+
+  /**
+   * Get callback for monitoring tool calls and handling outgoing permission requests
+   * This is passed to executeToolCall to hook into CoreToolScheduler updates
+   */
+  getToolCallUpdateCallback(): (toolCalls: unknown[]) => void {
+    return (toolCalls: unknown[]) => {
+      for (const call of toolCalls) {
+        if (
+          call &&
+          typeof call === 'object' &&
+          (call as { status?: string }).status === 'awaiting_approval'
+        ) {
+          const awaiting = call as WaitingToolCall;
+          if (
+            typeof awaiting.confirmationDetails?.onConfirm === 'function' &&
+            !this.pendingOutgoingRequests.has(awaiting.request.callId)
+          ) {
+            this.pendingOutgoingRequests.add(awaiting.request.callId);
+            void this.handleOutgoingPermissionRequest(awaiting);
+          }
+        }
+      }
+    };
+  }
+
+  /**
+   * Build the confirmation payload for an approved (`allow`) tool call.
+   *
+   * `updatedInput` carries the (possibly sanitised) tool args the host
+   * wants executed. For `ask_user_question` the host also delivers the
+   * user's answers on this channel as `updatedInput.answers`; those
+   * answers must reach the tool via `payload.answers` (the tool reads
+   * them from there, not from its args). Answers are promoted only for
+   * `ask_user_question`, so a same-named `answers` field on any other
+   * tool's input can never leak into the confirmation payload.
+   *
+   * Returns `undefined` when the host sent no usable `updatedInput`, so
+   * callers fall back to a plain single-argument confirmation.
+   */
+  private buildAllowConfirmationPayload(
+    toolName: string,
+    updatedInput: unknown,
+  ): ToolConfirmationPayload | undefined {
+    if (
+      !updatedInput ||
+      typeof updatedInput !== 'object' ||
+      Array.isArray(updatedInput)
+    ) {
+      return undefined;
+    }
+    const updatedInputObj = updatedInput as Record<string, unknown>;
+    const answers =
+      toolName === ToolNames.ASK_USER_QUESTION
+        ? updatedInputObj['answers']
+        : undefined;
+    return {
+      updatedInput: updatedInputObj,
+      ...(answers && typeof answers === 'object' && !Array.isArray(answers)
+        ? { answers: answers as Record<string, string> }
+        : {}),
+    };
+  }
+
+  /**
+   * Handle a teammate tool approval request routed via the
+   * TEAMMATE_APPROVAL_REQUEST team event. Stream-json only —
+   * non-stream-json sessions handle teammate approvals directly
+   * in `nonInteractiveCli.ts` (mode-aware fallback that warns on
+   * stderr and cancels). The caller in nonInteractiveCli only
+   * forwards events here when `options.controlService` is set,
+   * which is itself stream-json-only. Defensive guard remains
+   * in case that contract is ever broken.
+   */
+  async handleTeammateApproval(
+    event: TeammateApprovalRequestEvent,
+  ): Promise<void> {
+    try {
+      if (this.context.abortSignal?.aborted) {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const inputFormat = this.context.config.getInputFormat?.();
+      if (inputFormat !== InputFormat.STREAM_JSON) {
+        // Should not happen under the current wiring; cancel
+        // safely rather than silently auto-proceeding.
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      // Stream-json mode: ask SDK for permission.
+      const callId = `teammate-${event.teammateName}-${event.timestamp}`;
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: event.toolName,
+          tool_use_id: callId,
+          input: event.toolInput,
+          permission_suggestions: buildPermissionSuggestions(
+            event.confirmationDetails,
+          ),
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        undefined,
+        this.context.abortSignal,
+      );
+
+      if (response.subtype !== 'success') {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const behavior = String(payload['behavior'] || '').toLowerCase();
+
+      if (behavior === 'allow') {
+        // Forward `updatedInput` (the SDK's sanitised tool args)
+        // to the teammate's scheduler so a host that approves a
+        // command-with-stripped-flag, or a write-with-rewritten-
+        // path, actually runs the sanitised version. Without
+        // this, the teammate runs the original (un-sanitised)
+        // args and the host's policy is silently bypassed. The
+        // leader's same-process path mutates `request.args`
+        // directly; teammates can't reach across process so the
+        // payload carries the override instead. For
+        // `ask_user_question` this same payload also carries the
+        // user's answers, mirroring the leader path.
+        const respondPayload = this.buildAllowConfirmationPayload(
+          event.toolName,
+          payload['updatedInput'],
+        );
+        await event.respond(
+          ToolConfirmationOutcome.ProceedOnce,
+          respondPayload,
+        );
+      } else {
+        const cancelMessage =
+          typeof payload['message'] === 'string'
+            ? payload['message']
+            : undefined;
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          cancelMessage
+            ? ({ cancelMessage } as ToolConfirmationPayload)
+            : undefined,
+        );
+      }
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Teammate approval failed:',
+        error,
+      );
+      // Best-effort: respond() can itself reject (the teammate's
+      // scheduler re-throws, or the teammate terminated mid-request).
+      // Swallow it so handleTeammateApproval never rejects out of its
+      // own error path — call sites fire-and-forget this method, and
+      // an escaped rejection here is an unhandledRejection that can
+      // take down an SDK session.
+      try {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+      } catch (cancelError) {
+        this.debugLogger.error(
+          '[PermissionController] Teammate approval cancel failed:',
+          cancelError,
+        );
+      }
+    }
+  }
+
+  /**
+   * Handle outgoing permission request
+   *
+   * Behavior depends on input format:
+   * - stream-json mode: Send can_use_tool to SDK and await response
+   * - Other modes: Check local approval mode and decide immediately
+   */
+  private async handleOutgoingPermissionRequest(
+    toolCall: WaitingToolCall,
+  ): Promise<void> {
+    const requiresUserInteraction =
+      toolCall.invocation?.requiresUserInteraction?.() === true;
+    const interactionUnavailableMessage =
+      toolCall.request.name === ToolNames.EXIT_PLAN_MODE
+        ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
+        : `The host could not present the required approval for "${toolCall.request.name}".`;
+    try {
+      // Check if already aborted
+      if (this.context.abortSignal?.aborted) {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+        );
+        return;
+      }
+
+      const inputFormat = this.context.config.getInputFormat?.();
+      const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
+      if (!isStreamJsonMode) {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.Cancel,
+            {
+              cancelMessage: interactionUnavailableMessage,
+            },
+          );
+          return;
+        }
+        // No SDK available - use local permission check
+        const modeCheck = this.checkPermissionMode();
+        const outcome = modeCheck.allowed
+          ? ToolConfirmationOutcome.ProceedOnce
+          : ToolConfirmationOutcome.Cancel;
+
+        await toolCall.confirmationDetails.onConfirm(outcome);
+        return;
+      }
+
+      // Stream-json mode: ask SDK for permission
+      const permissionSuggestions = this.buildPermissionSuggestions(
+        toolCall.confirmationDetails,
+      );
+
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: toolCall.request.name,
+          tool_use_id: toolCall.request.callId,
+          input: toolCall.request.args,
+          permission_suggestions: permissionSuggestions,
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
+        this.context.abortSignal,
+      );
+
+      if (response.subtype !== 'success') {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          requiresUserInteraction
+            ? {
+                cancelMessage: interactionUnavailableMessage,
+              }
+            : undefined,
+        );
+        return;
+      }
+
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const behavior = String(payload['behavior'] || '').toLowerCase();
+
+      if (behavior === 'allow') {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+          return;
+        }
+        // Handle updated input if provided. The SDK's `can_use_tool`
+        // callback returns `updatedInput` — the (possibly sanitised)
+        // tool args the host wants executed. For most tools this simply
+        // overrides `request.args`. For `ask_user_question` the host also
+        // uses this channel to deliver the user's answers: it returns
+        // `{ ...originalInput, answers }`, and those answers must reach the
+        // tool via the confirmation payload (`payload.answers`) — the tool
+        // reads answers from there, not from `request.args`.
+        const confirmationPayload = this.buildAllowConfirmationPayload(
+          toolCall.request.name,
+          payload['updatedInput'],
+        );
+
+        if (confirmationPayload) {
+          // Override the tool's args in-process with the host's
+          // sanitised input before confirming.
+          toolCall.request.args = confirmationPayload.updatedInput ?? {};
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+            confirmationPayload,
+          );
+        } else {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
+      } else {
+        // Extract cancel message from response if available
+        const cancelMessage =
+          typeof payload['message'] === 'string'
+            ? payload['message']
+            : undefined;
+
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          cancelMessage ? { cancelMessage } : undefined,
+        );
+      }
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Outgoing permission failed:',
+        error,
+      );
+
+      // Extract error message
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      // On error, pass error message as cancel message
+      // Only pass payload for exec and mcp types that support it
+      const confirmationType = toolCall.confirmationDetails.type;
+      if (requiresUserInteraction) {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: interactionUnavailableMessage,
+          },
+        );
+      } else if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
+        const execOrMcpDetails = toolCall.confirmationDetails as
+          | ToolExecuteConfirmationDetails
+          | ToolMcpConfirmationDetails;
+        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `Error: ${errorMessage}`,
+        });
+      } else {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: `Error: ${errorMessage}`,
+          },
+        );
+      }
+    } finally {
+      this.pendingOutgoingRequests.delete(toolCall.request.callId);
+    }
+  }
+}

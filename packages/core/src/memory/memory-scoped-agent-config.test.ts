@@ -1,0 +1,535 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Config } from '../config/config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
+import { ToolNames } from '../tools/tool-names.js';
+import {
+  createMemoryScopedAgentConfig,
+  isAllowedMemoryPath,
+} from './memory-scoped-agent-config.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from './paths.js';
+
+describe('createMemoryScopedAgentConfig', () => {
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+  let tempDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-scoped-'));
+    projectRoot = path.join(tempDir, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
+    await fs.mkdir(path.join(getAutoMemoryRoot(projectRoot), 'project'), {
+      recursive: true,
+    });
+    await fs.mkdir(path.join(getUserAutoMemoryRoot(), 'user'), {
+      recursive: true,
+    });
+  });
+
+  afterEach(async () => {
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  function permissionManager(config: Config): PermissionManager {
+    const pm = config.getPermissionManager?.();
+    if (!pm) throw new Error('missing permission manager');
+    return pm;
+  }
+
+  it('restricts reads to memory paths only when requested', async () => {
+    const unrestricted = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+    await expect(
+      unrestricted.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: path.join(projectRoot, 'transcripts', 'latest.jsonl'),
+      }),
+    ).resolves.toBe('default');
+
+    const restricted = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        restrictReadsToMemoryPaths: true,
+      }),
+    );
+    await expect(
+      restricted.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: path.join(projectRoot, 'transcripts', 'latest.jsonl'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      restricted.evaluate({
+        toolName: ToolNames.GREP,
+        filePath: getAutoMemoryRoot(projectRoot),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      restricted.evaluate({
+        toolName: ToolNames.LS,
+        filePath: getUserAutoMemoryRoot(),
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('can keep writes project-memory-only for the dream agent', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+      }),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getAutoMemoryRoot(projectRoot), 'project', 'a.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('allows creating new nested topic files inside memory roots', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          'project',
+          'new-topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(
+          getUserAutoMemoryRoot(),
+          'user',
+          'new-topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('allows memory paths with dot-prefixed names inside memory roots', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          '..topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('denies memory-root symlinks that resolve outside memory', async () => {
+    const outsideDir = path.join(tempDir, 'outside');
+    await fs.mkdir(outsideDir, { recursive: true });
+    const outsideFile = path.join(outsideDir, 'target.md');
+    await fs.writeFile(outsideFile, 'secret');
+
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(path.join(memoryRoot, 'project'), { recursive: true });
+    const symlinkFile = path.join(memoryRoot, 'project', 'link.md');
+    const symlinkDir = path.join(memoryRoot, 'project', 'linked-dir');
+    await fs.symlink(outsideFile, symlinkFile);
+    await fs.symlink(outsideDir, symlinkDir);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: symlinkFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(symlinkDir, 'new.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('denies dangling symlink leaves inside memory roots', async () => {
+    const outsideDir = path.join(tempDir, 'outside');
+    await fs.mkdir(outsideDir, { recursive: true });
+
+    const link = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'link.md',
+    );
+    await fs.symlink(path.join(outsideDir, 'missing.md'), link);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: link,
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('allows only read-only shell commands when shell is enabled', async () => {
+    const disabled = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+    await expect(disabled.isToolEnabled(ToolNames.SHELL)).resolves.toBe(false);
+    await expect(
+      disabled.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'ls',
+      }),
+    ).resolves.toBe('deny');
+
+    const enabled = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        allowShell: true,
+      }),
+    );
+    await expect(enabled.isToolEnabled(ToolNames.SHELL)).resolves.toBe(true);
+    await expect(
+      enabled.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'ls -la',
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      enabled.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'touch bad',
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('lets base deny rules override scoped allows', async () => {
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue('base deny'),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig(
+        {
+          getPermissionManager: () => basePm as PermissionManager,
+        } as Config,
+        projectRoot,
+      ),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getAutoMemoryRoot(projectRoot), 'project', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('can bypass base ask rules for scoped memory writes only', async () => {
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig(
+        {
+          getPermissionManager: () => basePm as PermissionManager,
+        } as Config,
+        projectRoot,
+        { bypassBaseAskForScopedPaths: true },
+      ),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(projectRoot, 'README.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('does not bypass base deny rules for scoped memory writes', async () => {
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue('base deny'),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig(
+        {
+          getPermissionManager: () => basePm as PermissionManager,
+        } as Config,
+        projectRoot,
+        { bypassBaseAskForScopedPaths: true },
+      ),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+  });
+});
+
+describe('isAllowedMemoryPath with a symlinked project root', () => {
+  const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  let baseDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    // Local-memory mode anchors the managed-memory root at
+    // `<projectRoot>/.qwen/memory`, so routing the project root through an
+    // explicit symlink puts a symlink component in the memory-root path on
+    // every platform — not only where os.tmpdir() happens to be a symlink
+    // (e.g. macOS `/var` -> `/private/var`). The memory root is deliberately
+    // NOT created, so the allow-check must resolve the nearest existing
+    // ancestor (the symlink) rather than assume the root already exists.
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-symlink-'));
+    const realProject = path.join(baseDir, 'realproj');
+    projectRoot = path.join(baseDir, 'linkproj');
+    await fs.mkdir(realProject, { recursive: true });
+    await fs.symlink(realProject, projectRoot);
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(baseDir, { recursive: true, force: true });
+  });
+
+  it('allows a write under a symlinked managed-memory root that does not exist yet', () => {
+    // Regression: the root was resolved with path.resolve (symlink kept) while
+    // the candidate was realpath'd (symlink resolved), so the two diverged
+    // (a `linkproj/...` root vs a `realproj/...` candidate) and a legitimate
+    // managed-memory write was rejected. Both sides must resolve the symlink
+    // identically even before the root directory exists.
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('still denies a path outside the symlinked managed-memory root', () => {
+    // The symmetric resolution must not become overly permissive: a normal
+    // project file that is not under `<projectRoot>/.qwen/memory` — reached
+    // through the same symlinked root — is still rejected.
+    const outsideFile = path.join(projectRoot, 'notes.md');
+    expect(isAllowedMemoryPath(outsideFile, projectRoot)).toBe(false);
+  });
+});
+
+describe('isAllowedMemoryPath with a symlinked managed-memory suffix', () => {
+  // Unlike the block above (where the symlink sits ABOVE the trusted anchor —
+  // the project root itself is a symlink, like macOS `/var`), here the symlink
+  // is a repo-tracked `.qwen` INSIDE the managed suffix pointing outside the
+  // project. Canonicalizing such a symlink would relocate the "allowed" root
+  // out of the project, so the anchor is canonicalized but the `.qwen/memory`
+  // suffix is appended literally and the write is denied.
+  const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  let baseDir: string;
+  let projectRoot: string;
+  let outsideDir: string;
+
+  beforeEach(async () => {
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-qwenlink-'));
+    projectRoot = path.join(baseDir, 'repo');
+    outsideDir = path.join(baseDir, 'outside');
+    await fs.mkdir(projectRoot, { recursive: true });
+    await fs.mkdir(outsideDir, { recursive: true });
+    // The whole `.qwen` dir is a symlink escaping the project — a malicious
+    // repo can ship this as a git-tracked symlink.
+    await fs.symlink(outsideDir, path.join(projectRoot, '.qwen'));
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(baseDir, { recursive: true, force: true });
+  });
+
+  it('denies a write via a `.qwen` symlink escaping the project when the target is absent', () => {
+    // `.qwen -> /outside` with `/outside/memory` not yet created: the candidate
+    // resolves to `/outside/memory/project.md`, but the allowed root keeps the
+    // literal `.qwen/memory` suffix, so the escape is rejected before it can
+    // create `/outside/memory/project.md`.
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+
+  it('denies a write via a `.qwen` symlink escaping the project when the target already exists', async () => {
+    // The same escape must stay denied even once `/outside/memory` exists —
+    // otherwise realpath'ing the whole root would resolve the symlink on both
+    // sides and let the write through.
+    await fs.mkdir(path.join(outsideDir, 'memory'), { recursive: true });
+    const memoryFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+});
+
+describe('isAllowedMemoryPath in default (shared) memory mode', () => {
+  // The two symlink blocks above both force QWEN_CODE_MEMORY_LOCAL=1, so they
+  // only exercise the local-mode anchor (the project root). In the default
+  // (shared) mode the managed root lives under getMemoryBaseDir() and THAT is
+  // the trusted anchor — a distinct branch of getAutoMemoryTrustedAnchor /
+  // resolveTrustedMemoryRoot. Pin both sides of its trust boundary too, so a
+  // regression in the shared-base-dir path can't stay green behind the local
+  // tests.
+  const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+  let tempDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-shared-'));
+    projectRoot = path.join(tempDir, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('allows a write under a symlinked shared base dir whose managed root is absent', async () => {
+    // Route the shared base dir (the trusted anchor in this mode) through an
+    // explicit symlink — like macOS /var -> /private/var — and leave the managed
+    // root uncreated. The anchor must canonicalize so the symlinked root and the
+    // realpath'd candidate agree, instead of falsely denying the write.
+    const realBase = path.join(tempDir, 'real-base');
+    const linkBase = path.join(tempDir, 'link-base');
+    await fs.mkdir(realBase, { recursive: true });
+    await fs.symlink(realBase, linkBase);
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = linkBase;
+    clearAutoMemoryRootCache();
+
+    // Sanity: this is the default (shared) mode — the root lives under the
+    // (symlinked) base dir, not under `<projectRoot>/.qwen`. Guards the test
+    // against silently falling back into local mode.
+    const root = getAutoMemoryRoot(projectRoot);
+    expect(root.startsWith(linkBase + path.sep)).toBe(true);
+
+    const memoryFile = path.join(root, 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('denies a write when a symlink below the shared suffix escapes the anchor', async () => {
+    // A symlink planted INSIDE the managed suffix (here the `memory` dir itself
+    // -> outside) must NOT be followed: the base-dir anchor is canonicalized but
+    // the `projects/<id>/memory` suffix is appended literally, so the escape
+    // stays denied even though the candidate realpath-resolves into /outside.
+    const realBase = path.join(tempDir, 'real-base');
+    const outside = path.join(tempDir, 'outside');
+    await fs.mkdir(realBase, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = realBase;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    // Sanity: default (shared) mode — the root lives under the base dir.
+    expect(managedRoot.startsWith(realBase + path.sep)).toBe(true);
+    await fs.mkdir(path.dirname(managedRoot), { recursive: true });
+    await fs.symlink(outside, managedRoot);
+
+    const memoryFile = path.join(managedRoot, 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+});

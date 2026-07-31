@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import type { SummaryProps } from '../../types.js';
 import Spinner from 'ink-spinner';
 import { Colors } from '../../colors.js';
+import { t } from '../../../i18n/index.js';
 
 export interface SummaryDisplayProps {
   summary: SummaryProps;
@@ -23,16 +24,18 @@ export const SummaryMessage: React.FC<SummaryDisplayProps> = ({ summary }) => {
     if (summary.isPending) {
       switch (summary.stage) {
         case 'generating':
-          return 'Generating project summary...';
+          return t('Generating project summary...');
         case 'saving':
-          return 'Saving project summary...';
+          return t('Saving project summary...');
         default:
-          return 'Processing summary...';
+          return t('Processing summary...');
       }
     }
-    const baseMessage = 'Project summary generated and saved successfully!';
+    const baseMessage = t('Project summary generated and saved successfully!');
     if (summary.filePath) {
-      return `${baseMessage} Saved to: ${summary.filePath}`;
+      return `${baseMessage} ${t('Saved to: {{filePath}}', {
+        filePath: summary.filePath,
+      })}`;
     }
     return baseMessage;
   };
@@ -41,13 +44,15 @@ export const SummaryMessage: React.FC<SummaryDisplayProps> = ({ summary }) => {
     if (summary.isPending) {
       return <Spinner type="dots" />;
     }
-    return <Text color={Colors.AccentGreen}>✅</Text>;
+    return <Text color={Colors.AccentGreen}>✓</Text>;
   };
 
   return (
     <Box flexDirection="row">
-      <Box marginRight={1}>{getIcon()}</Box>
-      <Box>
+      <Box width={2} flexShrink={0}>
+        {getIcon()}
+      </Box>
+      <Box flexGrow={1}>
         <Text
           color={summary.isPending ? Colors.AccentPurple : Colors.AccentGreen}
         >

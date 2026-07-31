@@ -5,13 +5,22 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Settings } from './settingsSchema.js';
-import { SETTINGS_SCHEMA } from './settingsSchema.js';
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
+import {
+  getSettingsSchema,
+  type SettingDefinition,
+  type Settings,
+  type SettingsSchema,
+} from './settingsSchema.js';
 
 describe('SettingsSchema', () => {
-  describe('SETTINGS_SCHEMA', () => {
+  describe('getSettingsSchema', () => {
     it('should contain all expected top-level settings', () => {
-      const expectedSettings = [
+      const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
         'general',
         'ui',
@@ -24,18 +33,18 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
-        'enableWelcomeBack',
+        'plansDirectory',
+        'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
-        expect(
-          SETTINGS_SCHEMA[setting as keyof typeof SETTINGS_SCHEMA],
-        ).toBeDefined();
+        expect(getSettingsSchema()[setting as keyof Settings]).toBeDefined();
       });
     });
 
     it('should have correct structure for each setting', () => {
-      Object.entries(SETTINGS_SCHEMA).forEach(([_key, definition]) => {
+      Object.entries(getSettingsSchema()).forEach(([_key, definition]) => {
         expect(definition).toHaveProperty('type');
         expect(definition).toHaveProperty('label');
         expect(definition).toHaveProperty('category');
@@ -49,7 +58,7 @@ describe('SettingsSchema', () => {
     });
 
     it('should have correct nested setting structure', () => {
-      const nestedSettings = [
+      const nestedSettings: Array<keyof Settings> = [
         'general',
         'ui',
         'ide',
@@ -63,11 +72,9 @@ describe('SettingsSchema', () => {
       ];
 
       nestedSettings.forEach((setting) => {
-        const definition = SETTINGS_SCHEMA[
-          setting as keyof typeof SETTINGS_SCHEMA
-        ] as (typeof SETTINGS_SCHEMA)[keyof typeof SETTINGS_SCHEMA] & {
-          properties: unknown;
-        };
+        const definition = getSettingsSchema()[
+          setting as keyof Settings
+        ] as SettingDefinition;
         expect(definition.type).toBe('object');
         expect(definition.properties).toBeDefined();
         expect(typeof definition.properties).toBe('object');
@@ -76,44 +83,229 @@ describe('SettingsSchema', () => {
 
     it('should have accessibility nested properties', () => {
       expect(
-        SETTINGS_SCHEMA.ui?.properties?.accessibility?.properties,
+        getSettingsSchema().ui?.properties?.accessibility?.properties,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.ui?.properties?.accessibility.properties
-          ?.disableLoadingPhrases.type,
-      ).toBe('boolean');
-    });
-
-    it('should have checkpointing nested properties', () => {
-      expect(
-        SETTINGS_SCHEMA.general?.properties?.checkpointing.properties?.enabled,
-      ).toBeDefined();
-      expect(
-        SETTINGS_SCHEMA.general?.properties?.checkpointing.properties?.enabled
-          .type,
+        getSettingsSchema().ui?.properties?.accessibility.properties
+          ?.enableLoadingPhrases.type,
       ).toBe('boolean');
     });
 
     it('should have fileFiltering nested properties', () => {
       expect(
-        SETTINGS_SCHEMA.context.properties.fileFiltering.properties
+        getSettingsSchema().context.properties.fileFiltering.properties
           ?.respectGitIgnore,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.context.properties.fileFiltering.properties
-          ?.respectGeminiIgnore,
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.respectQwenIgnore,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.context.properties.fileFiltering.properties
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles,
+      ).toBeDefined();
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.type,
+      ).toBe('array');
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.default,
+      ).toEqual([...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES]);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.showInDialog,
+      ).toBe(false);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
+    });
+
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
+    it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
+      const threshold =
+        getSettingsSchema().context.properties.clearContextOnIdle.properties
+          ?.toolResultsTotalCharsThreshold;
+
+      expect(threshold).toBeDefined();
+      expect(threshold?.type).toBe('number');
+      expect(threshold?.default).toBe(500_000);
+      expect(threshold?.requiresRestart).toBe(false);
+    });
+
+    it('should have sandboxImage setting under tools', () => {
+      expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
+      expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
+        'string',
+      );
+      expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
+        undefined,
+      );
+    });
+
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    it('should have top-level proxy setting in schema', () => {
+      expect(getSettingsSchema().proxy).toBeDefined();
+      expect(getSettingsSchema().proxy.type).toBe('string');
+      expect(getSettingsSchema().proxy.category).toBe('Advanced');
+      expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
+      expect(getSettingsSchema().proxy.default).toBe(undefined);
+      expect(getSettingsSchema().proxy.showInDialog).toBe(false);
+    });
+
+    it('should have plansDirectory setting in schema', () => {
+      expect(getSettingsSchema().plansDirectory).toBeDefined();
+      expect(getSettingsSchema().plansDirectory.type).toBe('string');
+      expect(getSettingsSchema().plansDirectory.category).toBe('Advanced');
+      expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
+      expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
+      expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have voice model setting in schema', () => {
+      const voiceModel = getSettingsSchema().voiceModel;
+
+      expect(voiceModel).toBeDefined();
+      expect(voiceModel.type).toBe('string');
+      expect(voiceModel.category).toBe('Model');
+      expect(voiceModel.default).toBe('');
+      expect(voiceModel.requiresRestart).toBe(false);
+      expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
+    });
+
+    it('should define the built-in Explore model setting', () => {
+      const exploreModel =
+        getSettingsSchema().agents.properties.builtin.properties.exploreModel;
+
+      expect(exploreModel.type).toBe('string');
+      expect(exploreModel.category).toBe('Model');
+      expect(exploreModel.default).toBe('inherit');
+      expect(exploreModel.requiresRestart).toBe(true);
+      expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
+    it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
+      const timeout = getSettingsSchema().visionBridgeTimeoutMs;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(2_147_483_647);
+      expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define count-based model limits as integers', () => {
+      const model = getSettingsSchema().model.properties;
+
+      expect(model.maxSessionTurns.type).toBe('integer');
+      expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define stopHookBlockingCap schema override as a positive integer', () => {
+      expect(
+        getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
+      ).toEqual({
+        type: 'integer',
+        minimum: 1,
+        default: 8,
+      });
+    });
+
+    it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(
+        telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
+      ).toEqual({
+        description:
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
+        type: 'integer',
+        minimum: 1,
+        maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
+      });
+    });
+
+    it('should have voice dictation settings under general', () => {
+      const voice =
+        getSettingsSchema().general.properties.voice.properties ?? {};
+
+      expect(voice.enabled.type).toBe('boolean');
+      expect(voice.enabled.default).toBe(false);
+
+      expect(voice.mode.type).toBe('enum');
+      expect(voice.mode.default).toBe('hold');
+      expect(
+        voice.mode.options?.map((o: { value: string }) => o.value),
+      ).toEqual(['hold', 'tap']);
+
+      expect(voice.language.type).toBe('string');
+      expect(voice.language.default).toBe('');
+
+      expect(voice.keytermsFile.type).toBe('string');
+      expect(voice.keytermsFile.default).toBe('');
+
+      expect(voice.refineTranscript.type).toBe('boolean');
+      expect(voice.refineTranscript.default).toBe(true);
     });
 
     it('should have unique categories', () => {
       const categories = new Set();
 
       // Collect categories from top-level settings
-      Object.values(SETTINGS_SCHEMA).forEach((definition) => {
+      Object.values(getSettingsSchema()).forEach((definition) => {
         categories.add(definition.category);
         // Also collect from nested properties
         const defWithProps = definition as typeof definition & {
@@ -137,76 +329,131 @@ describe('SettingsSchema', () => {
       expect(categories).toContain('Advanced');
     });
 
+    it('marks MCP reconcile inputs as hot-reloadable but startup-only MCP keys as restart-required (sub-task 3)', () => {
+      // These three feed the runtime reconcile (mcpServers is the server map;
+      // mcp.allowed / mcp.excluded are read by mcpGatingEqual), so they MUST be
+      // hot-reloadable — otherwise the SettingsWatcher suppresses MCP-only
+      // edits and registerMcpHotReload never fires for the advertised
+      // add/remove/restart/gating changes.
+      expect(getSettingsSchema().mcpServers.requiresRestart).toBe(false);
+      expect(getSettingsSchema().mcp.properties!.allowed.requiresRestart).toBe(
+        false,
+      );
+      expect(getSettingsSchema().mcp.properties!.excluded.requiresRestart).toBe(
+        false,
+      );
+      // serverCommand is consumed once at startup (not part of the reconcile
+      // input), so it stays restart-required. The mcp parent node also stays
+      // restart-required; the watcher resolves the longest-matching schema key,
+      // so the flipped leaves win for allowed/excluded edits regardless.
+      expect(
+        getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
+      ).toBe(true);
+      expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
     it('should have consistent default values for boolean settings', () => {
-      const checkBooleanDefaults = (schema: Record<string, unknown>) => {
-        Object.entries(schema).forEach(
-          ([_key, definition]: [string, unknown]) => {
-            const def = definition as {
-              type?: string;
-              default?: unknown;
-              properties?: Record<string, unknown>;
-            };
-            if (def.type === 'boolean') {
-              // Boolean settings can have boolean or undefined defaults (for optional settings)
-              expect(['boolean', 'undefined']).toContain(typeof def.default);
-            }
-            if (def.properties) {
-              checkBooleanDefaults(def.properties);
-            }
-          },
-        );
+      const checkBooleanDefaults = (schema: SettingsSchema) => {
+        Object.entries(schema).forEach(([, definition]) => {
+          const def = definition as SettingDefinition;
+          if (def.type === 'boolean') {
+            // Boolean settings can have boolean or undefined defaults (for optional settings)
+            expect(['boolean', 'undefined']).toContain(typeof def.default);
+          }
+          if (def.properties) {
+            checkBooleanDefaults(def.properties);
+          }
+        });
       };
 
-      checkBooleanDefaults(SETTINGS_SCHEMA as Record<string, unknown>);
+      checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
     });
 
     it('should have showInDialog property configured', () => {
       // Check that user-facing settings are marked for dialog display
-      expect(SETTINGS_SCHEMA.ui.properties.showMemoryUsage.showInDialog).toBe(
+      expect(getSettingsSchema().general.properties.vimMode.showInDialog).toBe(
         true,
       );
-      expect(SETTINGS_SCHEMA.general.properties.vimMode.showInDialog).toBe(
+      expect(getSettingsSchema().ide.properties.enabled.showInDialog).toBe(
         true,
       );
-      expect(SETTINGS_SCHEMA.ide.properties.enabled.showInDialog).toBe(true);
       expect(
-        SETTINGS_SCHEMA.general.properties.disableAutoUpdate.showInDialog,
+        getSettingsSchema().general.properties.enableAutoUpdate.showInDialog,
       ).toBe(true);
-      expect(SETTINGS_SCHEMA.ui.properties.hideWindowTitle.showInDialog).toBe(
+      expect(
+        getSettingsSchema().ui.properties.hideWindowTitle.showInDialog,
+      ).toBe(false);
+      expect(getSettingsSchema().ui.properties.hideTips.showInDialog).toBe(
         true,
       );
-      expect(SETTINGS_SCHEMA.ui.properties.hideTips.showInDialog).toBe(true);
-      expect(SETTINGS_SCHEMA.ui.properties.hideBanner.showInDialog).toBe(true);
       expect(
-        SETTINGS_SCHEMA.privacy.properties.usageStatisticsEnabled.showInDialog,
-      ).toBe(false);
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
+        getSettingsSchema().privacy.properties.usageStatisticsEnabled
+          .showInDialog,
+      ).toBe(true);
 
       // Check that advanced settings are hidden from dialog
-      expect(SETTINGS_SCHEMA.security.properties.auth.showInDialog).toBe(false);
-      expect(SETTINGS_SCHEMA.tools.properties.core.showInDialog).toBe(false);
-      expect(SETTINGS_SCHEMA.mcpServers.showInDialog).toBe(false);
-      expect(SETTINGS_SCHEMA.telemetry.showInDialog).toBe(false);
+      expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
+        false,
+      );
+      expect(getSettingsSchema().permissions.showInDialog).toBe(false);
+      expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
+      expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
 
       // Check that some settings are appropriately hidden
-      expect(SETTINGS_SCHEMA.ui.properties.theme.showInDialog).toBe(false); // Changed to false
-      expect(SETTINGS_SCHEMA.ui.properties.customThemes.showInDialog).toBe(
+      expect(getSettingsSchema().ui.properties.theme.showInDialog).toBe(true);
+      expect(getSettingsSchema().ui.properties.customThemes.showInDialog).toBe(
         false,
       ); // Managed via theme editor
-      expect(
-        SETTINGS_SCHEMA.general.properties.checkpointing.showInDialog,
-      ).toBe(false); // Experimental feature
-      expect(SETTINGS_SCHEMA.ui.properties.accessibility.showInDialog).toBe(
+      expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
-      ); // Changed to false
+      );
       expect(
-        SETTINGS_SCHEMA.context.properties.fileFiltering.showInDialog,
-      ).toBe(false); // Changed to false
-      expect(
-        SETTINGS_SCHEMA.general.properties.preferredEditor.showInDialog,
-      ).toBe(false); // Changed to false
-      expect(
-        SETTINGS_SCHEMA.advanced.properties.autoConfigureMemory.showInDialog,
+        getSettingsSchema().context.properties.fileFiltering.showInDialog,
       ).toBe(false);
+      expect(
+        getSettingsSchema().general.properties.preferredEditor.showInDialog,
+      ).toBe(true);
+      expect(
+        getSettingsSchema().advanced.properties.autoConfigureMemory
+          .showInDialog,
+      ).toBe(false);
+    });
+
+    it('should define Markdown render mode as a user-facing UI enum', () => {
+      const renderMode = getSettingsSchema().ui.properties.renderMode;
+
+      expect(renderMode.type).toBe('enum');
+      expect(renderMode.default).toBe('render');
+      expect(renderMode.requiresRestart).toBe(false);
+      expect(renderMode.showInDialog).toBe(true);
+      expect(renderMode.options).toEqual([
+        { value: 'render', label: 'Render visual previews' },
+        { value: 'raw', label: 'Show raw source' },
+      ]);
+    });
+
+    it('should have useTerminalBuffer in ui settings', () => {
+      const useTerminalBuffer =
+        getSettingsSchema().ui.properties.useTerminalBuffer;
+      expect(useTerminalBuffer).toBeDefined();
+      expect(useTerminalBuffer.type).toBe('boolean');
+      expect(useTerminalBuffer.default).toBe(true);
+      expect(useTerminalBuffer.showInDialog).toBe(true);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
+    });
+
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
     });
 
     it('should infer Settings type correctly', () => {
@@ -214,96 +461,132 @@ describe('SettingsSchema', () => {
       const settings: Settings = {
         ui: {
           theme: 'dark',
+          renderMode: 'raw',
         },
         context: {
           includeDirectories: ['/path/to/dir'],
-          loadMemoryFromIncludeDirectories: true,
+          loadFromIncludeDirectories: true,
         },
       };
 
       // TypeScript should not complain about these properties
       expect(settings.ui?.theme).toBe('dark');
+      expect(settings.ui?.renderMode).toBe('raw');
       expect(settings.context?.includeDirectories).toEqual(['/path/to/dir']);
-      expect(settings.context?.loadMemoryFromIncludeDirectories).toBe(true);
+      expect(settings.context?.loadFromIncludeDirectories).toBe(true);
     });
 
     it('should have includeDirectories setting in schema', () => {
       expect(
-        SETTINGS_SCHEMA.context?.properties.includeDirectories,
+        getSettingsSchema().context?.properties.includeDirectories,
       ).toBeDefined();
-      expect(SETTINGS_SCHEMA.context?.properties.includeDirectories.type).toBe(
-        'array',
-      );
       expect(
-        SETTINGS_SCHEMA.context?.properties.includeDirectories.category,
+        getSettingsSchema().context?.properties.includeDirectories.type,
+      ).toBe('array');
+      expect(
+        getSettingsSchema().context?.properties.includeDirectories.category,
       ).toBe('Context');
       expect(
-        SETTINGS_SCHEMA.context?.properties.includeDirectories.default,
+        getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
     });
 
-    it('should have loadMemoryFromIncludeDirectories setting in schema', () => {
+    it('should define context.fileName schema override as string or string array', () => {
       expect(
-        SETTINGS_SCHEMA.context?.properties.loadMemoryFromIncludeDirectories,
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
+    });
+
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
+    });
+
+    it('should have loadFromIncludeDirectories setting in schema', () => {
+      expect(
+        getSettingsSchema().context?.properties.loadFromIncludeDirectories,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.context?.properties.loadMemoryFromIncludeDirectories
-          .type,
+        getSettingsSchema().context?.properties.loadFromIncludeDirectories.type,
       ).toBe('boolean');
       expect(
-        SETTINGS_SCHEMA.context?.properties.loadMemoryFromIncludeDirectories
+        getSettingsSchema().context?.properties.loadFromIncludeDirectories
           .category,
       ).toBe('Context');
       expect(
-        SETTINGS_SCHEMA.context?.properties.loadMemoryFromIncludeDirectories
+        getSettingsSchema().context?.properties.loadFromIncludeDirectories
           .default,
       ).toBe(false);
     });
 
     it('should have folderTrustFeature setting in schema', () => {
       expect(
-        SETTINGS_SCHEMA.security.properties.folderTrust.properties.enabled,
+        getSettingsSchema().security.properties.folderTrust.properties.enabled,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.security.properties.folderTrust.properties.enabled.type,
+        getSettingsSchema().security.properties.folderTrust.properties.enabled
+          .type,
       ).toBe('boolean');
       expect(
-        SETTINGS_SCHEMA.security.properties.folderTrust.properties.enabled
+        getSettingsSchema().security.properties.folderTrust.properties.enabled
           .category,
       ).toBe('Security');
       expect(
-        SETTINGS_SCHEMA.security.properties.folderTrust.properties.enabled
+        getSettingsSchema().security.properties.folderTrust.properties.enabled
           .default,
       ).toBe(false);
       expect(
-        SETTINGS_SCHEMA.security.properties.folderTrust.properties.enabled
+        getSettingsSchema().security.properties.folderTrust.properties.enabled
           .showInDialog,
-      ).toBe(true);
+      ).toBe(false);
     });
 
     it('should have debugKeystrokeLogging setting in schema', () => {
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging,
+        getSettingsSchema().general.properties.debugKeystrokeLogging,
       ).toBeDefined();
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging.type,
+        getSettingsSchema().general.properties.debugKeystrokeLogging.type,
       ).toBe('boolean');
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging.category,
+        getSettingsSchema().general.properties.debugKeystrokeLogging.category,
       ).toBe('General');
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging.default,
+        getSettingsSchema().general.properties.debugKeystrokeLogging.default,
       ).toBe(false);
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging
+        getSettingsSchema().general.properties.debugKeystrokeLogging
           .requiresRestart,
       ).toBe(false);
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging.showInDialog,
-      ).toBe(true);
+        getSettingsSchema().general.properties.debugKeystrokeLogging
+          .showInDialog,
+      ).toBe(false);
       expect(
-        SETTINGS_SCHEMA.general.properties.debugKeystrokeLogging.description,
+        getSettingsSchema().general.properties.debugKeystrokeLogging
+          .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

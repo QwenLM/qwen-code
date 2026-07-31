@@ -7,6 +7,7 @@
 import { Box } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import type { WizardStepProps } from '../types.js';
+import { t } from '../../../../i18n/index.js';
 
 interface LocationOption {
   label: string;
@@ -15,11 +16,15 @@ interface LocationOption {
 
 const locationOptions: LocationOption[] = [
   {
-    label: 'Project Level (.qwen/agents/)',
+    get label() {
+      return t('Project Level (.qwen/agents/)');
+    },
     value: 'project',
   },
   {
-    label: 'User Level (~/.qwen/agents/)',
+    get label() {
+      return t('User Level (~/.qwen/agents/)');
+    },
     value: 'user',
   },
 ];
@@ -38,6 +43,7 @@ export function LocationSelector({ state, dispatch, onNext }: WizardStepProps) {
     <Box flexDirection="column">
       <RadioButtonSelect
         items={locationOptions.map((option) => ({
+          key: option.value,
           label: option.label,
           value: option.value,
         }))}

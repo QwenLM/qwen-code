@@ -8,6 +8,9 @@ import type { Message } from '../types.js';
 import { MessageType } from '../types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('SHOW_MEMORY');
 
 export function createShowMemoryAction(
   config: Config | null,
@@ -24,25 +27,23 @@ export function createShowMemoryAction(
       return;
     }
 
-    const debugMode = config.getDebugMode();
+    debugLogger.debug('[DEBUG] Show Memory command invoked.');
 
-    if (debugMode) {
-      console.log('[DEBUG] Show Memory command invoked.');
-    }
-
-    const currentMemory = config.getUserMemory();
+    const contextMemory = config.getUserMemory();
+    const autoMemoryPrompt = config.getAutoMemoryPrompt();
+    const currentMemory = [contextMemory, autoMemoryPrompt]
+      .filter((section) => section.trim().length > 0)
+      .join('\n\n---\n\n');
     const fileCount = config.getGeminiMdFileCount();
     const contextFileName = settings.merged.context?.fileName;
     const contextFileNames = Array.isArray(contextFileName)
       ? contextFileName
       : [contextFileName];
 
-    if (debugMode) {
-      console.log(
-        `[DEBUG] Showing memory. Content from config.getUserMemory() (first 200 chars): ${currentMemory.substring(0, 200)}...`,
-      );
-      console.log(`[DEBUG] Number of context files loaded: ${fileCount}`);
-    }
+    debugLogger.debug(
+      `[DEBUG] Showing memory. Content from config.getUserMemory() (first 200 chars): ${currentMemory.substring(0, 200)}...`,
+    );
+    debugLogger.debug(`[DEBUG] Number of context files loaded: ${fileCount}`);
 
     if (fileCount > 0) {
       const allNamesTheSame = new Set(contextFileNames).size < 2;

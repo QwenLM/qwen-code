@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
-import { Colors } from '../colors.js';
+import { theme } from '../semantic-colors.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   getStatusColor,
@@ -17,6 +17,7 @@ import {
 } from '../utils/displayUtils.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type { ToolCallStats } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 const TOOL_NAME_COL_WIDTH = 25;
 const CALLS_COL_WIDTH = 8;
@@ -37,22 +38,28 @@ const StatRow: React.FC<{
   return (
     <Box>
       <Box width={TOOL_NAME_COL_WIDTH}>
-        <Text color={Colors.LightBlue}>{name}</Text>
+        <Text color={theme.text.link}>{name}</Text>
       </Box>
       <Box width={CALLS_COL_WIDTH} justifyContent="flex-end">
-        <Text>{stats.count}</Text>
+        <Text color={theme.text.primary}>{stats.count}</Text>
       </Box>
       <Box width={SUCCESS_RATE_COL_WIDTH} justifyContent="flex-end">
         <Text color={successColor}>{successRate.toFixed(1)}%</Text>
       </Box>
       <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-        <Text>{formatDuration(avgDuration)}</Text>
+        <Text color={theme.text.primary}>{formatDuration(avgDuration)}</Text>
       </Box>
     </Box>
   );
 };
 
-export const ToolStatsDisplay: React.FC = () => {
+interface ToolStatsDisplayProps {
+  width?: number;
+}
+
+export const ToolStatsDisplay: React.FC<ToolStatsDisplayProps> = ({
+  width,
+}) => {
   const { stats } = useSessionStats();
   const { tools } = stats.metrics;
   const activeTools = Object.entries(tools.byName).filter(
@@ -63,11 +70,14 @@ export const ToolStatsDisplay: React.FC = () => {
     return (
       <Box
         borderStyle="round"
-        borderColor={Colors.Gray}
+        borderColor={theme.border.default}
         paddingY={1}
         paddingX={2}
+        width={width}
       >
-        <Text>No tool calls have been made in this session.</Text>
+        <Text color={theme.text.primary}>
+          {t('No tool calls have been made in this session.')}
+        </Text>
       </Box>
     );
   }
@@ -94,30 +104,38 @@ export const ToolStatsDisplay: React.FC = () => {
   return (
     <Box
       borderStyle="round"
-      borderColor={Colors.Gray}
+      borderColor={theme.border.default}
       flexDirection="column"
       paddingY={1}
       paddingX={2}
-      width={70}
+      width={width}
     >
-      <Text bold color={Colors.AccentPurple}>
-        Tool Stats For Nerds
+      <Text bold color={theme.text.accent}>
+        {t('Tool Stats For Nerds')}
       </Text>
       <Box height={1} />
 
       {/* Header */}
       <Box>
         <Box width={TOOL_NAME_COL_WIDTH}>
-          <Text bold>Tool Name</Text>
+          <Text bold color={theme.text.primary}>
+            {t('Tool Name')}
+          </Text>
         </Box>
         <Box width={CALLS_COL_WIDTH} justifyContent="flex-end">
-          <Text bold>Calls</Text>
+          <Text bold color={theme.text.primary}>
+            {t('Calls')}
+          </Text>
         </Box>
         <Box width={SUCCESS_RATE_COL_WIDTH} justifyContent="flex-end">
-          <Text bold>Success Rate</Text>
+          <Text bold color={theme.text.primary}>
+            {t('Success Rate')}
+          </Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-          <Text bold>Avg Duration</Text>
+          <Text bold color={theme.text.primary}>
+            {t('Avg Duration')}
+          </Text>
         </Box>
       </Box>
 
@@ -128,6 +146,7 @@ export const ToolStatsDisplay: React.FC = () => {
         borderTop={false}
         borderLeft={false}
         borderRight={false}
+        borderColor={theme.border.default}
         width="100%"
       />
 
@@ -139,45 +158,49 @@ export const ToolStatsDisplay: React.FC = () => {
       <Box height={1} />
 
       {/* User Decision Summary */}
-      <Text bold>User Decision Summary</Text>
+      <Text bold color={theme.text.primary}>
+        {t('User Decision Summary')}
+      </Text>
       <Box>
         <Box
           width={TOOL_NAME_COL_WIDTH + CALLS_COL_WIDTH + SUCCESS_RATE_COL_WIDTH}
         >
-          <Text color={Colors.LightBlue}>Total Reviewed Suggestions:</Text>
+          <Text color={theme.text.link}>
+            {t('Total Reviewed Suggestions:')}
+          </Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-          <Text>{totalReviewed}</Text>
+          <Text color={theme.text.primary}>{totalReviewed}</Text>
         </Box>
       </Box>
       <Box>
         <Box
           width={TOOL_NAME_COL_WIDTH + CALLS_COL_WIDTH + SUCCESS_RATE_COL_WIDTH}
         >
-          <Text> » Accepted:</Text>
+          <Text color={theme.text.primary}>{t(' » Accepted:')}</Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-          <Text color={Colors.AccentGreen}>{totalDecisions.accept}</Text>
+          <Text color={theme.status.success}>{totalDecisions.accept}</Text>
         </Box>
       </Box>
       <Box>
         <Box
           width={TOOL_NAME_COL_WIDTH + CALLS_COL_WIDTH + SUCCESS_RATE_COL_WIDTH}
         >
-          <Text> » Rejected:</Text>
+          <Text color={theme.text.primary}>{t(' » Rejected:')}</Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-          <Text color={Colors.AccentRed}>{totalDecisions.reject}</Text>
+          <Text color={theme.status.error}>{totalDecisions.reject}</Text>
         </Box>
       </Box>
       <Box>
         <Box
           width={TOOL_NAME_COL_WIDTH + CALLS_COL_WIDTH + SUCCESS_RATE_COL_WIDTH}
         >
-          <Text> » Modified:</Text>
+          <Text color={theme.text.primary}>{t(' » Modified:')}</Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
-          <Text color={Colors.AccentYellow}>{totalDecisions.modify}</Text>
+          <Text color={theme.status.warning}>{totalDecisions.modify}</Text>
         </Box>
       </Box>
 
@@ -188,6 +211,7 @@ export const ToolStatsDisplay: React.FC = () => {
         borderTop={false}
         borderLeft={false}
         borderRight={false}
+        borderColor={theme.border.default}
         width="100%"
       />
 
@@ -195,7 +219,9 @@ export const ToolStatsDisplay: React.FC = () => {
         <Box
           width={TOOL_NAME_COL_WIDTH + CALLS_COL_WIDTH + SUCCESS_RATE_COL_WIDTH}
         >
-          <Text> Overall Agreement Rate:</Text>
+          <Text color={theme.text.primary}>
+            {t(' Overall Agreement Rate:')}
+          </Text>
         </Box>
         <Box width={AVG_DURATION_COL_WIDTH} justifyContent="flex-end">
           <Text bold color={totalReviewed > 0 ? agreementColor : undefined}>

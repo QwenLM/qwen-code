@@ -1,0 +1,330 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { ToolCallConfirmationDetails } from '@qwen-code/qwen-code-core';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import type {
+  AgentSideConnection,
+  PermissionOption,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  ToolCallContent,
+} from '@agentclientprotocol/sdk';
+
+const basicPermissionOptions = [
+  {
+    optionId: ToolConfirmationOutcome.ProceedOnce,
+    name: 'Allow',
+    kind: 'allow_once',
+  },
+  {
+    optionId: ToolConfirmationOutcome.Cancel,
+    name: 'Reject',
+    kind: 'reject_once',
+  },
+] as const satisfies readonly PermissionOption[];
+
+function supportsHideAlwaysAllow(
+  confirmation: ToolCallConfirmationDetails,
+): confirmation is Exclude<
+  ToolCallConfirmationDetails,
+  { type: 'ask_user_question' }
+> {
+  return confirmation.type !== 'ask_user_question';
+}
+
+function filterAlwaysAllowOptions(
+  confirmation: ToolCallConfirmationDetails,
+  options: PermissionOption[],
+  forceHideAlwaysAllow = false,
+): PermissionOption[] {
+  const hideAlwaysAllow =
+    forceHideAlwaysAllow ||
+    confirmation.autoModeFallback !== undefined ||
+    (supportsHideAlwaysAllow(confirmation) &&
+      confirmation.hideAlwaysAllow === true);
+  const visibleOptions = hideAlwaysAllow
+    ? options.filter((option) => option.kind !== 'allow_always')
+    : options;
+  if (!confirmation.autoModeFallback) return visibleOptions;
+
+  const switchOption: PermissionOption = {
+    optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    name: 'Switch to Default Mode and allow once (recommended)',
+    kind: 'allow_once',
+  };
+  const rejectIndex = visibleOptions.findIndex(
+    (option) => option.kind === 'reject_once',
+  );
+  if (rejectIndex === -1) return [...visibleOptions, switchOption];
+  return [
+    ...visibleOptions.slice(0, rejectIndex),
+    switchOption,
+    ...visibleOptions.slice(rejectIndex),
+  ];
+}
+
+function formatExecPermissionScopeLabel(
+  confirmation: Extract<ToolCallConfirmationDetails, { type: 'exec' }>,
+): string {
+  const permissionRules = confirmation.permissionRules ?? [];
+  const bashRules = permissionRules
+    .map((rule) => {
+      const match = /^Bash\((.*)\)$/.exec(rule.trim());
+      return match?.[1]?.trim() || undefined;
+    })
+    .filter((rule): rule is string => Boolean(rule));
+
+  const uniqueRules = [...new Set(bashRules)];
+  if (uniqueRules.length === 1) {
+    return uniqueRules[0];
+  }
+  if (uniqueRules.length > 1) {
+    return uniqueRules.join(', ');
+  }
+  return confirmation.rootCommand;
+}
+
+/** Metadata that lets daemon session polling distinguish questions from tools. */
+export function interactionMetaFields(
+  confirmation: ToolCallConfirmationDetails,
+): Record<string, unknown> {
+  return confirmation.type === 'ask_user_question'
+    ? {
+        qwenInteractionKind: 'user_question',
+        qwenQuestions: confirmation.questions,
+      }
+    : {};
+}
+
+export function buildPermissionRequestContent(
+  confirmation: ToolCallConfirmationDetails,
+): ToolCallContent[] {
+  const content: ToolCallContent[] = [];
+
+  if (confirmation.autoModeFallback) {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: confirmation.autoModeFallback.message,
+      },
+    });
+  }
+
+  const warnings =
+    confirmation.type === 'exec' || confirmation.type === 'edit'
+      ? (confirmation.warnings ?? [])
+      : [];
+  for (const warning of warnings) {
+    content.push({
+      type: 'content',
+      content: { type: 'text', text: warning },
+    });
+  }
+
+  if (confirmation.type === 'edit') {
+    content.push({
+      type: 'diff',
+      path: confirmation.filePath ?? confirmation.fileName,
+      oldText: confirmation.originalContent ?? '',
+      newText: confirmation.newContent,
+    });
+  }
+
+  if (confirmation.type === 'plan') {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: confirmation.plan,
+      },
+    });
+  }
+
+  return content;
+}
+
+function permissionAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Permission request was aborted.');
+}
+
+export function requestPermissionWithAbort(
+  client: Pick<AgentSideConnection, 'requestPermission'>,
+  params: RequestPermissionRequest,
+  signal: AbortSignal,
+): Promise<RequestPermissionResponse> {
+  if (signal.aborted) {
+    return Promise.reject(permissionAbortError(signal));
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(permissionAbortError(signal)));
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    let request: Promise<RequestPermissionResponse>;
+    try {
+      request = client.requestPermission(params);
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    request.then(
+      (response) => finish(() => resolve(response)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+export function resolvePermissionOutcome(
+  response: RequestPermissionResponse,
+  offeredOptions: readonly PermissionOption[],
+): ToolConfirmationOutcome {
+  if (response.outcome.outcome === 'cancelled') {
+    return ToolConfirmationOutcome.Cancel;
+  }
+
+  const optionId = response.outcome.optionId;
+  if (!offeredOptions.some((option) => option.optionId === optionId)) {
+    throw new Error(
+      `Permission response selected unoffered option: ${optionId}`,
+    );
+  }
+  if (
+    !Object.values(ToolConfirmationOutcome).includes(
+      optionId as ToolConfirmationOutcome,
+    )
+  ) {
+    throw new Error(`Permission response selected invalid option: ${optionId}`);
+  }
+  return optionId as ToolConfirmationOutcome;
+}
+
+export function toPermissionOptions(
+  confirmation: ToolCallConfirmationDetails,
+  forceHideAlwaysAllow = false,
+): PermissionOption[] {
+  switch (confirmation.type) {
+    case 'edit':
+      return filterAlwaysAllowOptions(
+        confirmation,
+        [
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlways,
+            name: 'Allow All Edits',
+            kind: 'allow_always',
+          },
+          ...basicPermissionOptions,
+        ],
+        forceHideAlwaysAllow,
+      );
+    case 'exec': {
+      const label = formatExecPermissionScopeLabel(confirmation);
+      return filterAlwaysAllowOptions(
+        confirmation,
+        [
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+            name: `Always Allow in project: ${label}`,
+            kind: 'allow_always',
+          },
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+            name: `Always Allow for user: ${label}`,
+            kind: 'allow_always',
+          },
+          ...basicPermissionOptions,
+        ],
+        forceHideAlwaysAllow,
+      );
+    }
+    case 'mcp':
+      return filterAlwaysAllowOptions(
+        confirmation,
+        [
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+            name: `Always Allow in project: ${confirmation.toolName}`,
+            kind: 'allow_always',
+          },
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+            name: `Always Allow for user: ${confirmation.toolName}`,
+            kind: 'allow_always',
+          },
+          ...basicPermissionOptions,
+        ],
+        forceHideAlwaysAllow,
+      );
+    case 'info':
+      return filterAlwaysAllowOptions(
+        confirmation,
+        [
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+            name: 'Always Allow in project',
+            kind: 'allow_always',
+          },
+          {
+            optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+            name: 'Always Allow for user',
+            kind: 'allow_always',
+          },
+          ...basicPermissionOptions,
+        ],
+        forceHideAlwaysAllow,
+      );
+    case 'plan':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.RestorePrevious,
+          name: `Yes, restore previous mode (${confirmation.prePlanMode ?? 'default'})`,
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'No, keep planning (esc)',
+          kind: 'reject_once',
+        },
+      ];
+    case 'ask_user_question':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
+          kind: 'reject_once',
+        },
+      ];
+    default: {
+      const unreachable: never = confirmation;
+      throw new Error(`Unexpected: ${unreachable}`);
+    }
+  }
+}

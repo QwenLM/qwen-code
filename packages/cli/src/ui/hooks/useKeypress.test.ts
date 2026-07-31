@@ -54,6 +54,7 @@ vi.mock('readline', () => {
 
 class MockStdin extends EventEmitter {
   isTTY = true;
+  isRaw = false;
   setRawMode = vi.fn();
   override on = this.addListener;
   override removeListener = super.removeListener;
@@ -110,7 +111,7 @@ describe('useKeypress', () => {
       KeypressProvider,
       {
         kittyProtocolEnabled: false,
-        pasteWoraround: false,
+        pasteWorkaround: false,
       },
       children,
     );
@@ -124,7 +125,7 @@ describe('useKeypress', () => {
       KeypressProvider,
       {
         kittyProtocolEnabled: false,
-        pasteWoraround: true,
+        pasteWorkaround: true,
       },
       children,
     );
@@ -209,17 +210,20 @@ describe('useKeypress', () => {
       description: 'Modern Node (>= v20)',
       setup: () => setNodeVersion('20.0.0'),
       isLegacy: false,
-      pasteWoraround: false,
+      pasteWorkaround: false,
     },
     {
       description: 'PasteWorkaround Environment Variable',
       setup: () => {
         setNodeVersion('20.0.0');
       },
-      isLegacy: false,
-      pasteWoraround: true,
+      // The paste workaround puts KeypressProvider into passthrough mode,
+      // which reads raw `data` from stdin (not 'keypress' events). The mock
+      // must emit raw data for this path to be exercised at all.
+      isLegacy: true,
+      pasteWorkaround: true,
     },
-  ])('in $description', ({ setup, isLegacy, pasteWoraround }) => {
+  ])('in $description', ({ setup, isLegacy, pasteWorkaround }) => {
     beforeEach(() => {
       setup();
       stdin.setLegacy(isLegacy);
@@ -227,7 +231,7 @@ describe('useKeypress', () => {
 
     it('should process a paste as a single event', async () => {
       renderHook(() => useKeypress(onKeypress, { isActive: true }), {
-        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+        wrapper: pasteWorkaround ? wrapperWithWindowsWorkaround : wrapper,
       });
       const pasteText = 'hello world';
       act(() => stdin.paste(pasteText));
@@ -248,7 +252,7 @@ describe('useKeypress', () => {
 
     it('should handle keypress interspersed with pastes', async () => {
       renderHook(() => useKeypress(onKeypress, { isActive: true }), {
-        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+        wrapper: pasteWorkaround ? wrapperWithWindowsWorkaround : wrapper,
       });
 
       const keyA = { name: 'a', sequence: 'a' };
@@ -285,7 +289,7 @@ describe('useKeypress', () => {
       const { unmount } = renderHook(
         () => useKeypress(onKeypress, { isActive: true }),
         {
-          wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+          wrapper: pasteWorkaround ? wrapperWithWindowsWorkaround : wrapper,
         },
       );
       const pasteText = 'incomplete paste';

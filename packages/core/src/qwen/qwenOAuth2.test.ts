@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
-import { type ChildProcess } from 'child_process';
 import type { Config } from '../config/config.js';
 import {
   generateCodeChallenge,
@@ -16,12 +15,16 @@ import {
   isDeviceTokenPending,
   isDeviceTokenSuccess,
   isErrorResponse,
+  qwenOAuth2Events,
+  QwenOAuth2Event,
   QwenOAuth2Client,
+  showFallbackMessage,
   type DeviceAuthorizationResponse,
   type DeviceTokenResponse,
   type ErrorData,
   type QwenCredentials,
 } from './qwenOAuth2.js';
+import { HYPERLINK_ENV_KEYS } from '../utils/osc8.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -33,6 +36,8 @@ interface MockSharedTokenManager {
   getCurrentCredentials(): QwenCredentials | null;
   clearCache(): void;
 }
+
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 
 // Mock SharedTokenManager
 vi.mock('./sharedTokenManager.js', () => ({
@@ -89,16 +94,8 @@ vi.mock('./sharedTokenManager.js', () => ({
   },
 }));
 
-// Mock qrcode-terminal
-vi.mock('qrcode-terminal', () => ({
-  default: {
-    generate: vi.fn(),
-  },
-}));
-
-// Mock open
-vi.mock('open', () => ({
-  default: vi.fn(),
+vi.mock('../utils/secure-browser-launcher.js', () => ({
+  openBrowserSecurely: mockOpenBrowserSecurely,
 }));
 
 // Mock process.stdout.write
@@ -115,8 +112,18 @@ vi.mock('node:fs', () => ({
     writeFile: vi.fn(),
     unlink: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
+    // PR #4255 round-11 #2 (gpt-5.5 review): atomic write uses
+    // temp-file → chmod → rename. Tests need chmod + rename in the
+    // mocked fs surface; both default to no-op success.
+    chmod: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
   },
 }));
+
+beforeEach(() => {
+  mockOpenBrowserSecurely.mockReset();
+  mockOpenBrowserSecurely.mockResolvedValue(undefined);
+});
 
 describe('PKCE Code Generation', () => {
   describe('generateCodeVerifier', () => {
@@ -372,6 +379,13 @@ describe('QwenOAuth2Client', () => {
     it('should successfully refresh access token', async () => {
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -399,6 +413,11 @@ describe('QwenOAuth2Client', () => {
     it('should handle refresh error', async () => {
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            error: 'INVALID_GRANT',
+            error_description: 'The refresh token is invalid',
+          }),
         json: async () => ({
           error: 'INVALID_GRANT',
           error_description: 'The refresh token is invalid',
@@ -418,6 +437,13 @@ describe('QwenOAuth2Client', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -455,6 +481,14 @@ describe('QwenOAuth2Client', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new-refresh-token',
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -623,14 +657,16 @@ describe('QwenOAuth2Client', () => {
     });
 
     it('should handle authorization_pending with HTTP 400 according to RFC 8628', async () => {
+      const errorData = {
+        error: 'authorization_pending',
+        error_description: 'The authorization request is still pending',
+      };
       const mockResponse = {
         ok: false,
         status: 400,
         statusText: 'Bad Request',
-        json: async () => ({
-          error: 'authorization_pending',
-          error_description: 'The authorization request is still pending',
-        }),
+        text: async () => JSON.stringify(errorData),
+        json: async () => errorData,
       };
 
       vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
@@ -646,14 +682,16 @@ describe('QwenOAuth2Client', () => {
     });
 
     it('should handle slow_down with HTTP 429 according to RFC 8628', async () => {
+      const errorData = {
+        error: 'slow_down',
+        error_description: 'The client is polling too frequently',
+      };
       const mockResponse = {
         ok: false,
         status: 429,
         statusText: 'Too Many Requests',
-        json: async () => ({
-          error: 'slow_down',
-          error_description: 'The client is polling too frequently',
-        }),
+        text: async () => JSON.stringify(errorData),
+        json: async () => errorData,
       };
 
       vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
@@ -716,6 +754,147 @@ describe('QwenOAuth2Client', () => {
         'Token refresh failed: 500 Internal Server Error',
       );
     });
+
+    it('should time out hung refresh token requests', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(
+          (_url, init) =>
+            new Promise<Response>((_, reject) => {
+              const signal = (init as RequestInit).signal;
+              if (!signal) {
+                reject(new Error('missing abort signal'));
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => {
+                  reject(
+                    Object.assign(
+                      new DOMException(
+                        'The operation was aborted',
+                        'AbortError',
+                      ),
+                      { cause: signal.reason },
+                    ),
+                  );
+                },
+                { once: true },
+              );
+            }),
+        );
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(
+          'Token refresh timeout: The operation was aborted (cause: Operation timed out)',
+        );
+        expect((error as Error).cause).toBeInstanceOf(DOMException);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should keep the refresh timeout active while reading the response body', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(async (_url, init) => {
+          const signal = (init as RequestInit).signal;
+          if (!signal) {
+            throw new Error('missing abort signal');
+          }
+          return {
+            ok: true,
+            text: () =>
+              new Promise<string>((_, reject) => {
+                signal.addEventListener('abort', () => reject(signal.reason), {
+                  once: true,
+                });
+              }),
+          } as Response;
+        });
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('Token refresh timeout:');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve non-timeout network errors and show the token endpoint', async () => {
+      const cause = Object.assign(new Error('connect ECONNREFUSED'), {
+        code: 'ECONNREFUSED',
+      });
+      const networkError = new TypeError('fetch failed', { cause });
+      vi.mocked(global.fetch).mockRejectedValue(networkError);
+
+      const error = await client
+        .refreshAccessToken()
+        .catch((refreshError: unknown) => refreshError);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).cause).toBe(networkError);
+      expect((error as Error).message).toContain('Token refresh failed:');
+      expect((error as Error).message).toContain(
+        'https://chat.qwen.ai/api/v1/oauth2/token',
+      );
+    });
+
+    it('should NOT clear credentials on malformed 200 response (e.g. proxy HTML)', async () => {
+      const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        text: async () => '<html><body>Proxy Error</body></html>',
+      };
+
+      vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
+
+      // Should throw a retryable Error, NOT CredentialsClearRequiredError
+      // (CredentialsClearRequiredError implies credentials were cleared)
+      await expect(client.refreshAccessToken()).rejects.toBeInstanceOf(Error);
+      await expect(client.refreshAccessToken()).rejects.not.toBeInstanceOf(
+        CredentialsClearRequiredError,
+      );
+      await expect(client.refreshAccessToken()).rejects.toThrow(
+        'Qwen OAuth refresh returned invalid JSON:',
+      );
+    });
+
+    it('should clear credentials and throw CredentialsClearRequiredError on 401 response', async () => {
+      const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+      const mockResponse = {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        text: async () => 'Unauthorized',
+      };
+
+      vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
+
+      await expect(client.refreshAccessToken()).rejects.toBeInstanceOf(
+        CredentialsClearRequiredError,
+      );
+
+      await expect(client.refreshAccessToken()).rejects.toThrow(
+        "Refresh token expired or invalid. Please use '/auth' to re-authenticate.",
+      );
+    });
   });
 
   describe('credentials management', () => {
@@ -745,6 +924,7 @@ describe('getQwenOAuthClient', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -757,17 +937,12 @@ describe('getQwenOAuthClient', () => {
   });
 
   it('should load cached credentials if available', async () => {
-    const fs = await import('node:fs');
     const mockCredentials = {
       access_token: 'cached-token',
       refresh_token: 'cached-refresh',
       token_type: 'Bearer',
       expiry_date: Date.now() + 3600000,
     };
-
-    vi.mocked(fs.promises.readFile).mockResolvedValue(
-      JSON.stringify(mockCredentials),
-    );
 
     // Mock SharedTokenManager to use cached credentials
     const mockTokenManager = {
@@ -788,18 +963,6 @@ describe('getQwenOAuthClient', () => {
   });
 
   it('should handle cached credentials refresh failure', async () => {
-    const fs = await import('node:fs');
-    const mockCredentials = {
-      access_token: 'cached-token',
-      refresh_token: 'expired-refresh',
-      token_type: 'Bearer',
-      expiry_date: Date.now() + 3600000, // Valid expiry time so loadCachedQwenCredentials returns true
-    };
-
-    vi.mocked(fs.promises.readFile).mockResolvedValue(
-      JSON.stringify(mockCredentials),
-    );
-
     // Mock SharedTokenManager to fail with a specific error
     const mockTokenManager = {
       getValidCredentials: vi
@@ -825,8 +988,89 @@ describe('getQwenOAuthClient', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
+    SharedTokenManager.getInstance = originalGetInstance;
+  });
+
+  it('should not start device flow when requireCachedCredentials is true', async () => {
+    // Make SharedTokenManager fail so we hit the fallback path
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
+    };
+
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    // If requireCachedCredentials is honored, device-flow network requests should not start
+    vi.mocked(global.fetch).mockResolvedValue({ ok: true } as Response);
+
+    await expect(
+      import('./qwenOAuth2.js').then((module) =>
+        module.getQwenOAuthClient(mockConfig, {
+          requireCachedCredentials: true,
+        }),
+      ),
+    ).rejects.toThrow(
+      'Qwen OAuth credentials expired. Please use /auth to re-authenticate with qwen-oauth.',
+    );
+
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    SharedTokenManager.getInstance = originalGetInstance;
+  });
+
+  it('should include troubleshooting hints when device auth fetch fails', async () => {
+    // Make SharedTokenManager fail so we hit the fallback device-flow path
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('Token refresh failed')),
+    };
+
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    const tlsCause = new Error('unable to verify the first certificate');
+    (tlsCause as Error & { code?: string }).code =
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
+
+    const fetchError = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    fetchError.cause = tlsCause;
+
+    vi.mocked(global.fetch).mockRejectedValue(fetchError);
+
+    const emitSpy = vi.spyOn(qwenOAuth2Events, 'emit');
+
+    let thrownError: unknown;
+    try {
+      const { getQwenOAuthClient } = await import('./qwenOAuth2.js');
+      await getQwenOAuthClient(mockConfig);
+    } catch (error: unknown) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(Error);
+    expect((thrownError as Error).message).toContain(
+      'Device authorization flow failed: fetch failed',
+    );
+    expect((thrownError as Error).message).toContain(
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    );
+    expect((thrownError as Error).message).toContain('NODE_EXTRA_CA_CERTS');
+    expect((thrownError as Error).message).toContain('--proxy');
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      QwenOAuth2Event.AuthProgress,
+      'error',
+      expect.stringContaining('NODE_EXTRA_CA_CERTS'),
+    );
+
+    emitSpy.mockRestore();
     SharedTokenManager.getInstance = originalGetInstance;
   });
 });
@@ -937,6 +1181,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -983,7 +1228,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1032,7 +1277,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication timed out');
+    ).rejects.toThrow('Authorization timeout, please restart the process.');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1082,7 +1327,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
         module.getQwenOAuthClient(mockConfig),
       ),
     ).rejects.toThrow(
-      'Too many request for Qwen OAuth authentication, please try again later.',
+      'Too many requests. The server is rate limiting our requests. Please select a different authentication method or try again later.',
     );
 
     SharedTokenManager.getInstance = originalGetInstance;
@@ -1119,7 +1364,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1132,6 +1377,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1177,7 +1423,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1264,7 +1510,9 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow(
+      'Device code expired or invalid, please restart the authorization process.',
+    );
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1321,6 +1569,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
 
     expect(client).toBeInstanceOf(Object);
     expect(mockConfig.isBrowserLaunchSuppressed).toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1333,6 +1582,7 @@ describe('Browser Launch and Error Handling', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1350,9 +1600,15 @@ describe('Browser Launch and Error Handling', () => {
       new Error('No cached credentials'),
     );
 
-    // Mock open to throw error
-    const open = await import('open');
-    vi.mocked(open.default).mockRejectedValue(
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
+    };
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    mockOpenBrowserSecurely.mockRejectedValue(
       new Error('Browser launch failed'),
     );
 
@@ -1387,27 +1643,26 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 
-  it('should handle browser child process error gracefully', async () => {
+  it('should launch the device flow URL through the shared browser helper', async () => {
     const { promises: fs } = await import('node:fs');
     vi.mocked(fs.readFile).mockRejectedValue(
       new Error('No cached credentials'),
     );
 
-    // Mock open to return a child process that will emit error
-    const open = await import('open');
-    const mockChildProcess = {
-      on: vi.fn((event: string, callback: (error: Error) => void) => {
-        if (event === 'error') {
-          // Call the error handler immediately for testing
-          setTimeout(() => callback(new Error('Process spawn failed')), 0);
-        }
-      }),
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
     };
-    vi.mocked(open.default).mockResolvedValue(
-      mockChildProcess as unknown as ChildProcess,
-    );
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
 
     const mockAuthResponse = {
       ok: true,
@@ -1440,6 +1695,11 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 });
 
@@ -1551,6 +1811,12 @@ describe('Credential Caching Functions', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
         json: async () => ({
           access_token: 'new-token',
           token_type: 'Bearer',
@@ -1566,178 +1832,6 @@ describe('Credential Caching Functions', () => {
       // This test verifies that refreshAccessToken works correctly
       const updatedCredentials = client.getCredentials();
       expect(updatedCredentials.access_token).toBe('new-token');
-    });
-  });
-
-  describe('loadCachedQwenCredentials', () => {
-    it('should load and validate cached credentials successfully', async () => {
-      const { promises: fs } = await import('node:fs');
-      const mockCredentials = {
-        access_token: 'cached-token',
-        refresh_token: 'cached-refresh',
-        token_type: 'Bearer',
-        expiry_date: Date.now() + 3600000,
-      };
-
-      vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify(mockCredentials));
-
-      // Test through getQwenOAuthClient which calls loadCachedQwenCredentials
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      // Make SharedTokenManager fail to test the fallback
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock successful auth flow after cache load fails
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          device_code: 'test-device-code',
-          user_code: 'TEST123',
-          verification_uri: 'https://chat.qwen.ai/device',
-          verification_uri_complete: 'https://chat.qwen.ai/device?code=TEST123',
-          expires_in: 1800,
-        }),
-      };
-
-      const mockTokenResponse = {
-        ok: true,
-        json: async () => ({
-          access_token: 'new-access-token',
-          refresh_token: 'new-refresh-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-          scope: 'openid profile email model.completion',
-        }),
-      };
-
-      global.fetch = vi
-        .fn()
-        .mockResolvedValueOnce(mockAuthResponse as Response)
-        .mockResolvedValue(mockTokenResponse as Response);
-
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      expect(fs.readFile).toHaveBeenCalled();
-      SharedTokenManager.getInstance = originalGetInstance;
-    });
-
-    it('should handle invalid cached credentials gracefully', async () => {
-      const { promises: fs } = await import('node:fs');
-
-      // Mock file read to return invalid JSON
-      vi.mocked(fs.readFile).mockResolvedValue('invalid-json');
-
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock auth flow
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          device_code: 'test-device-code',
-          user_code: 'TEST123',
-          verification_uri: 'https://chat.qwen.ai/device',
-          verification_uri_complete: 'https://chat.qwen.ai/device?code=TEST123',
-          expires_in: 1800,
-        }),
-      };
-
-      const mockTokenResponse = {
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          refresh_token: 'new-refresh',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      };
-
-      global.fetch = vi
-        .fn()
-        .mockResolvedValueOnce(mockAuthResponse as Response)
-        .mockResolvedValue(mockTokenResponse as Response);
-
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      SharedTokenManager.getInstance = originalGetInstance;
-    });
-
-    it('should handle file access errors', async () => {
-      const { promises: fs } = await import('node:fs');
-
-      vi.mocked(fs.readFile).mockRejectedValue(new Error('File not found'));
-
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock device flow to fail quickly
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          error: 'invalid_request',
-          error_description: 'Invalid request parameters',
-        }),
-      };
-
-      global.fetch = vi.fn().mockResolvedValue(mockAuthResponse as Response);
-
-      // Should proceed to device flow when cache loading fails
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      SharedTokenManager.getInstance = originalGetInstance;
     });
   });
 });
@@ -1778,20 +1872,11 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      // Mock console.warn to avoid test noise
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       // With our race condition fix, we no longer fall back to local credentials
       // to ensure single source of truth
       expect(result.token).toBeUndefined();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to get access token from shared manager:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
     });
 
     it('should return undefined when both manager and cache fail', async () => {
@@ -1814,13 +1899,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
 
     it('should handle missing credentials gracefully', async () => {
@@ -1840,13 +1921,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('No credentials')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
   });
 
@@ -1991,14 +2068,16 @@ describe('Enhanced Error Handling and Edge Cases', () => {
     });
 
     it('should handle authorization_pending with correct status', async () => {
+      const errorData = {
+        error: 'authorization_pending',
+        error_description: 'Authorization request is pending',
+      };
       const mockResponse = {
         ok: false,
         status: 400,
         statusText: 'Bad Request',
-        json: vi.fn().mockResolvedValue({
-          error: 'authorization_pending',
-          error_description: 'Authorization request is pending',
-        }),
+        text: vi.fn().mockResolvedValue(JSON.stringify(errorData)),
+        json: vi.fn().mockResolvedValue(errorData),
       };
 
       vi.mocked(global.fetch).mockResolvedValue(
@@ -2083,6 +2162,13 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            // No refresh_token in response
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -2106,6 +2192,13 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-resource-url.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -2141,6 +2234,7 @@ describe('SharedTokenManager Integration in QwenOAuth2Client', () => {
   it('should handle TokenManagerError types correctly in getQwenOAuthClient', async () => {
     const mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     // Test different TokenManagerError types
@@ -2293,5 +2387,72 @@ describe('Constants and Configuration', () => {
     expect(options?.body).toContain(
       'scope=openid%20profile%20email%20model.completion',
     );
+  });
+});
+
+describe('showFallbackMessage', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  const url = 'https://chat.qwen.ai/authorize?user_code=WDJB-MJHT';
+
+  beforeEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  const capture = (isTTY: boolean) => {
+    const chunks: string[] = [];
+    const out = {
+      isTTY,
+      write: (chunk: string) => {
+        chunks.push(String(chunk));
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { out, text: () => chunks.join('') };
+  };
+
+  it('emits the URL as a single OSC 8 hyperlink when the terminal supports it', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    // OSC 8 envelope: ESC ] 8 ; ; <url> BEL <label> ESC ] 8 ; ; BEL
+    expect(output).toContain(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`);
+    // The ASCII box is not drawn on the hyperlink path.
+    expect(output).not.toContain('+--');
+  });
+
+  it('falls back to the ASCII box when hyperlinks are disabled', () => {
+    process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('Qwen OAuth Device Authorization');
+    expect(output).toContain('+'); // box border
+  });
+
+  it('falls back to the ASCII box for a non-TTY stream even with FORCE_HYPERLINK', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(false);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('+');
   });
 });

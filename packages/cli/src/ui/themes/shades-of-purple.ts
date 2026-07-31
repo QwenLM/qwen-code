@@ -22,6 +22,8 @@ const shadesOfPurpleColors: ColorsTheme = {
   AccentGreen: '#A5FF90', // Strings and many others
   AccentYellow: '#fad000', // Title, main yellow
   AccentRed: '#ff628c', // Error/deletion accent
+  AccentYellowDim: '#8B7530',
+  AccentRedDim: '#8B3A4A',
   DiffAdded: '#383E45',
   DiffRemoved: '#572244',
   Comment: '#B362FF', // Comment color (same as AccentPurple)

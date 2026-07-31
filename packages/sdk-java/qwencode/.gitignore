@@ -1,0 +1,14 @@
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+# Mac
+.DS_Store
+ 
+# Maven
+log/
+target/
+
+/docs/

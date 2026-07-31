@@ -1,40 +1,25 @@
-# Welcome to Qwen Code documentation
+# Qwen Code Documentation
 
-This documentation provides a comprehensive guide to installing, using, and developing Qwen Code. This tool lets you interact with AI models through a command-line interface.
+Welcome to the Qwen Code documentation. Qwen Code is an agentic coding tool that lives in your terminal and helps you turn ideas into code faster than ever before.
 
-## Overview
+## Documentation Sections
 
-Qwen Code brings the capabilities of advanced code models to your terminal in an interactive Read-Eval-Print Loop (REPL) environment. Qwen Code consists of a client-side application (`packages/cli`) that communicates with a local server (`packages/core`). Qwen Code also contains a variety of tools for tasks such as performing file system operations, running shells, and web fetching, which are managed by `packages/core`.
+### [User Guide](./users/overview)
 
-## Navigating the documentation
+Learn how to use Qwen Code as an end user. This section covers:
 
-This documentation is organized into the following sections:
+- Basic installation and setup
+- Common usage patterns
+- Features and capabilities
+- Configuration options
+- Troubleshooting
 
-- **[Execution and Deployment](./deployment.md):** Information for running Qwen Code.
-- **[Architecture Overview](./architecture.md):** Understand the high-level design of Qwen Code, including its components and how they interact.
-- **CLI Usage:** Documentation for `packages/cli`.
-  - **[CLI Introduction](./cli/index.md):** Overview of the command-line interface.
-  - **[Commands](./cli/commands.md):** Description of available CLI commands.
-  - **[Configuration](./cli/configuration.md):** Information on configuring the CLI.
-  - **[Checkpointing](./checkpointing.md):** Documentation for the checkpointing feature.
-  - **[Extensions](./extension.md):** How to extend the CLI with new functionality.
-  - **[IDE Integration](./ide-integration.md):** Connect the CLI to your editor.
-  - **[Telemetry](./telemetry.md):** Overview of telemetry in the CLI.
-- **Core Details:** Documentation for `packages/core`.
-  - **[Core Introduction](./core/index.md):** Overview of the core component.
-  - **[Tools API](./core/tools-api.md):** Information on how the core manages and exposes tools.
-- **Tools:**
-  - **[Tools Overview](./tools/index.md):** Overview of the available tools.
-  - **[File System Tools](./tools/file-system.md):** Documentation for the `read_file` and `write_file` tools.
-  - **[Multi-File Read Tool](./tools/multi-file.md):** Documentation for the `read_many_files` tool.
-  - **[Shell Tool](./tools/shell.md):** Documentation for the `run_shell_command` tool.
-  - **[Web Fetch Tool](./tools/web-fetch.md):** Documentation for the `web_fetch` tool.
-  - **[Web Search Tool](./tools/web-search.md):** Documentation for the `web_search` tool.
-  - **[Memory Tool](./tools/memory.md):** Documentation for the `save_memory` tool.
-- **[Subagents](./subagents.md):** Specialized AI assistants for focused tasks with comprehensive management, configuration, and usage guidance.
-- **[Contributing & Development Guide](../CONTRIBUTING.md):** Information for contributors and developers, including setup, building, testing, and coding conventions.
-- **[NPM](./npm.md):** Details on how the project's packages are structured
-- **[Troubleshooting Guide](./troubleshooting.md):** Find solutions to common problems and FAQs.
-- **[Terms of Service and Privacy Notice](./tos-privacy.md):** Information on the terms of service and privacy notices applicable to your use of Qwen Code.
+### [Developer Guide](./developers/architecture)
 
-We hope this documentation helps you make the most of Qwen Code!
+Learn how to contribute to and develop Qwen Code. This section covers:
+
+- Architecture overview
+- Contributing guidelines
+- Core concepts and implementation details
+- Tools and development workflow
+- Extension and plugin development

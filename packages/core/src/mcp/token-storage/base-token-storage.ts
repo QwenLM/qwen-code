@@ -9,7 +9,7 @@ import type { TokenStorage, OAuthCredentials } from './types.js';
 export abstract class BaseTokenStorage implements TokenStorage {
   protected readonly serviceName: string;
 
-  constructor(serviceName: string = 'gemini-cli-mcp-oauth') {
+  constructor(serviceName: string) {
     this.serviceName = serviceName;
   }
 
@@ -40,7 +40,7 @@ export abstract class BaseTokenStorage implements TokenStorage {
       return false;
     }
     const bufferMs = 5 * 60 * 1000;
-    return Date.now() > credentials.token.expiresAt - bufferMs;
+    return Date.now() + bufferMs >= credentials.token.expiresAt;
   }
 
   protected sanitizeServerName(serverName: string): string {

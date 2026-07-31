@@ -1,0 +1,66 @@
+.message {
+  color: var(--foreground);
+  overflow: auto;
+  margin-bottom: 12px;
+  margin-left: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+  max-height: 200px;
+}
+
+.compact {
+  overflow: hidden;
+  max-height: none;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.status {
+  color: var(--success-color);
+  flex: 0 0 auto;
+}
+
+.name {
+  color: var(--foreground);
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.command {
+  color: var(--muted-foreground);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.output {
+  margin: 0;
+  padding: 8px 14px 10px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.compactHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.35;
+}

@@ -1,12 +1,7 @@
-/**
- * @license
- * Copyright 2025 Qwen
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
 import type { EditorType } from '@qwen-code/qwen-code-core';
+import { getEditorExecutable } from '@qwen-code/qwen-code-core';
 import { spawnSync } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
 
@@ -15,7 +10,14 @@ import { useSettings } from '../contexts/SettingsContext.js';
  */
 function getEditorCommand(preferredEditor?: EditorType): string {
   if (preferredEditor) {
-    return preferredEditor;
+    const execCmd = getEditorExecutable(preferredEditor);
+    if (!execCmd) {
+      throw new Error(
+        `No available editor found for ${preferredEditor}. ` +
+          `Please install a supported editor or set a different preferredEditor in settings.`,
+      );
+    }
+    return execCmd;
   }
 
   // Platform-specific defaults with UI preference for macOS
@@ -63,8 +65,14 @@ export function useLaunchEditor() {
       try {
         setRawMode?.(false);
 
+        // On Windows, .cmd and .bat files need shell: true
+        const needsShell =
+          process.platform === 'win32' &&
+          (editorCommand.endsWith('.cmd') || editorCommand.endsWith('.bat'));
+
         const { status, error } = spawnSync(editorCommand, editorArgs, {
           stdio: 'inherit',
+          shell: needsShell,
         });
 
         if (error) throw error;

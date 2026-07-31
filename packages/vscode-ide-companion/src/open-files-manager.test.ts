@@ -6,7 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { OpenFilesManager, MAX_FILES } from './open-files-manager.js';
+import { OpenFilesManager } from './open-files-manager.js';
+import { MAX_FILES } from './services/open-files-manager/constants.js';
 
 vi.mock('vscode', () => ({
   EventEmitter: vi.fn(() => {
@@ -414,7 +415,7 @@ describe('OpenFilesManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     file1 = manager.state.workspaceState!.openFiles!.find(
-      (f) => f.path === '/test/file1.txt',
+      (f: { path: string }) => f.path === '/test/file1.txt',
     )!;
     const file2 = manager.state.workspaceState!.openFiles![0];
 

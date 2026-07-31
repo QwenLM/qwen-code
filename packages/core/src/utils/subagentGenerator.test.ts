@@ -13,66 +13,29 @@ import {
   type Mock,
   afterEach,
 } from 'vitest';
-import type { Content, GoogleGenAI, Models } from '@google/genai';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { GeminiClient } from '../core/client.js';
-import { Config } from '../config/config.js';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type { Config } from '../config/config.js';
 import {
   subagentGenerator,
   type SubagentGeneratedContent,
 } from './subagentGenerator.js';
 
-// Mock GeminiClient and Config constructor
-vi.mock('../core/client.js');
-vi.mock('../config/config.js');
-
-// Define mocks for GoogleGenAI and Models instances that will be used across tests
-const mockModelsInstance = {
-  generateContent: vi.fn(),
-  generateContentStream: vi.fn(),
-  countTokens: vi.fn(),
-  embedContent: vi.fn(),
-  batchEmbedContents: vi.fn(),
-} as unknown as Models;
-
-const mockGoogleGenAIInstance = {
-  getGenerativeModel: vi.fn().mockReturnValue(mockModelsInstance),
-} as unknown as GoogleGenAI;
-
-vi.mock('@google/genai', async () => {
-  const actualGenAI =
-    await vi.importActual<typeof import('@google/genai')>('@google/genai');
-  return {
-    ...actualGenAI,
-    GoogleGenAI: vi.fn(() => mockGoogleGenAIInstance),
-  };
-});
-
 describe('subagentGenerator', () => {
-  let mockGeminiClient: GeminiClient;
-  let MockConfig: Mock;
+  let mockClient: BaseLlmClient;
+  let mockConfig: Config;
   const abortSignal = new AbortController().signal;
 
   beforeEach(() => {
-    MockConfig = vi.mocked(Config);
-    const mockConfigInstance = new MockConfig(
-      'test-api-key',
-      'gemini-pro',
-      false,
-      '.',
-      false,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      undefined,
-    );
+    // Create a mock client with generateJson method
+    mockClient = {
+      generateJson: vi.fn(),
+    } as unknown as BaseLlmClient;
 
-    mockGeminiClient = new GeminiClient(mockConfigInstance);
-
-    // Reset mocks before each test to ensure test isolation
-    vi.mocked(mockModelsInstance.generateContent).mockReset();
-    vi.mocked(mockModelsInstance.generateContentStream).mockReset();
+    // Create a mock config that returns the mock client and model
+    mockConfig = {
+      getBaseLlmClient: vi.fn().mockReturnValue(mockClient),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    } as unknown as Config;
   });
 
   afterEach(() => {
@@ -81,14 +44,14 @@ describe('subagentGenerator', () => {
 
   it('should throw error for empty user description', async () => {
     await expect(
-      subagentGenerator('', mockGeminiClient, abortSignal),
+      subagentGenerator('', mockConfig, abortSignal),
     ).rejects.toThrow('User description cannot be empty');
 
     await expect(
-      subagentGenerator('   ', mockGeminiClient, abortSignal),
+      subagentGenerator('   ', mockConfig, abortSignal),
     ).rejects.toThrow('User description cannot be empty');
 
-    expect(mockGeminiClient.generateJson).not.toHaveBeenCalled();
+    expect(mockClient.generateJson).not.toHaveBeenCalled();
   });
 
   it('should successfully generate content with valid LLM response', async () => {
@@ -101,38 +64,33 @@ describe('subagentGenerator', () => {
         'You are a code review expert. Analyze code for best practices, bugs, and improvements.',
     };
 
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(mockApiResponse);
+    (mockClient.generateJson as Mock).mockResolvedValue(mockApiResponse);
 
     const result = await subagentGenerator(
       userDescription,
-      mockGeminiClient,
+      mockConfig,
       abortSignal,
     );
 
     expect(result).toEqual(mockApiResponse);
-    expect(mockGeminiClient.generateJson).toHaveBeenCalledTimes(1);
+    expect(mockClient.generateJson).toHaveBeenCalledTimes(1);
 
-    // Verify the call parameters
-    const generateJsonCall = (mockGeminiClient.generateJson as Mock).mock
-      .calls[0];
-    const contents = generateJsonCall[0] as Content[];
+    // Verify the call parameters - now it's a single object parameter
+    const generateJsonCall = (mockClient.generateJson as Mock).mock.calls[0];
+    const callParams = generateJsonCall[0];
 
-    // Should have 1 user message with the query
-    expect(contents).toHaveLength(1);
-    expect(contents[0]?.role).toBe('user');
-    expect(contents[0]?.parts?.[0]?.text).toContain(
+    // Check the contents
+    expect(callParams.contents).toHaveLength(1);
+    expect(callParams.contents[0]?.role).toBe('user');
+    expect(callParams.contents[0]?.parts?.[0]?.text).toContain(
       `Create an agent configuration based on this request: "${userDescription}"`,
     );
 
-    // Check that system prompt is passed in the config parameter
-    expect(generateJsonCall[2]).toBe(abortSignal);
-    expect(generateJsonCall[3]).toBe(DEFAULT_QWEN_MODEL);
-    expect(generateJsonCall[4]).toEqual(
-      expect.objectContaining({
-        systemInstruction: expect.stringContaining(
-          'You are an elite AI agent architect',
-        ),
-      }),
+    // Check other parameters
+    expect(callParams.abortSignal).toBe(abortSignal);
+    expect(callParams.model).toBe('qwen3-coder-plus');
+    expect(callParams.systemInstruction).toContain(
+      'You are an elite AI agent architect',
     );
   });
 
@@ -144,15 +102,13 @@ describe('subagentGenerator', () => {
       // Missing systemPrompt
     };
 
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(
-      incompleteResponse,
-    );
+    (mockClient.generateJson as Mock).mockResolvedValue(incompleteResponse);
 
     await expect(
-      subagentGenerator(userDescription, mockGeminiClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
 
-    expect(mockGeminiClient.generateJson).toHaveBeenCalledTimes(1);
+    expect(mockClient.generateJson).toHaveBeenCalledTimes(1);
   });
 
   it('should throw error when LLM response has empty fields', async () => {
@@ -163,23 +119,19 @@ describe('subagentGenerator', () => {
       systemPrompt: 'You are a database expert.',
     };
 
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(
-      emptyFieldsResponse,
-    );
+    (mockClient.generateJson as Mock).mockResolvedValue(emptyFieldsResponse);
 
     await expect(
-      subagentGenerator(userDescription, mockGeminiClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 
   it('should throw error when generateJson throws an error', async () => {
     const userDescription = 'testing automation';
-    (mockGeminiClient.generateJson as Mock).mockRejectedValue(
-      new Error('API Error'),
-    );
+    (mockClient.generateJson as Mock).mockRejectedValue(new Error('API Error'));
 
     await expect(
-      subagentGenerator(userDescription, mockGeminiClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('API Error');
   });
 
@@ -191,24 +143,24 @@ describe('subagentGenerator', () => {
       systemPrompt: 'You are a data analysis expert.',
     };
 
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(mockResponse);
+    (mockClient.generateJson as Mock).mockResolvedValue(mockResponse);
 
-    await subagentGenerator(userDescription, mockGeminiClient, abortSignal);
+    await subagentGenerator(userDescription, mockConfig, abortSignal);
 
-    expect(mockGeminiClient.generateJson).toHaveBeenCalledWith(
-      expect.any(Array),
+    expect(mockClient.generateJson).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: 'object',
-        properties: expect.objectContaining({
-          name: expect.objectContaining({ type: 'string' }),
-          description: expect.objectContaining({ type: 'string' }),
-          systemPrompt: expect.objectContaining({ type: 'string' }),
+        model: 'qwen3-coder-plus',
+        contents: expect.any(Object),
+        schema: expect.objectContaining({
+          type: 'object',
+          properties: expect.objectContaining({
+            name: expect.objectContaining({ type: 'string' }),
+            description: expect.objectContaining({ type: 'string' }),
+            systemPrompt: expect.objectContaining({ type: 'string' }),
+          }),
+          required: ['name', 'description', 'systemPrompt'],
         }),
-        required: ['name', 'description', 'systemPrompt'],
-      }),
-      abortSignal,
-      DEFAULT_QWEN_MODEL,
-      expect.objectContaining({
+        abortSignal,
         systemInstruction: expect.stringContaining(
           'You are an elite AI agent architect',
         ),
@@ -224,47 +176,42 @@ describe('subagentGenerator', () => {
       systemPrompt: 'You are an ML expert.',
     };
 
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(mockResponse);
+    (mockClient.generateJson as Mock).mockResolvedValue(mockResponse);
 
-    await subagentGenerator(userDescription, mockGeminiClient, abortSignal);
+    await subagentGenerator(userDescription, mockConfig, abortSignal);
 
-    const generateJsonCall = (mockGeminiClient.generateJson as Mock).mock
-      .calls[0];
-    const contents = generateJsonCall[0] as Content[];
+    const generateJsonCall = (mockClient.generateJson as Mock).mock.calls[0];
+    const callParams = generateJsonCall[0];
 
     // Check user query (only message)
-    expect(contents).toHaveLength(1);
-    const userQueryContent = contents[0]?.parts?.[0]?.text;
+    expect(callParams.contents).toHaveLength(1);
+    const userQueryContent = callParams.contents[0]?.parts?.[0]?.text;
     expect(userQueryContent).toContain(userDescription);
     expect(userQueryContent).toContain(
       'Create an agent configuration based on this request:',
     );
 
-    // Check that system prompt is passed in the config parameter
-    expect(generateJsonCall[4]).toEqual(
-      expect.objectContaining({
-        systemInstruction: expect.stringContaining(
-          'You are an elite AI agent architect',
-        ),
-      }),
+    // Check that system prompt is passed correctly
+    expect(callParams.systemInstruction).toContain(
+      'You are an elite AI agent architect',
     );
   });
 
   it('should throw error for null response from generateJson', async () => {
     const userDescription = 'security auditing';
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(null);
+    (mockClient.generateJson as Mock).mockResolvedValue(null);
 
     await expect(
-      subagentGenerator(userDescription, mockGeminiClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 
   it('should throw error for undefined response from generateJson', async () => {
     const userDescription = 'api documentation';
-    (mockGeminiClient.generateJson as Mock).mockResolvedValue(undefined);
+    (mockClient.generateJson as Mock).mockResolvedValue(undefined);
 
     await expect(
-      subagentGenerator(userDescription, mockGeminiClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 });

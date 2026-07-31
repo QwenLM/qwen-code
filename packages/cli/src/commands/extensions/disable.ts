@@ -5,47 +5,59 @@
  */
 
 import { type CommandModule } from 'yargs';
-import { disableExtension } from '../../config/extension.js';
 import { SettingScope } from '../../config/settings.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 interface DisableArgs {
   name: string;
-  scope: SettingScope;
+  scope?: string;
 }
 
 export async function handleDisable(args: DisableArgs) {
+  const extensionManager = await getExtensionManager();
   try {
-    disableExtension(args.name, args.scope);
-    console.log(
-      `Extension "${args.name}" successfully disabled for scope "${args.scope}".`,
+    const scope = resolveExtensionCommandScope(args.scope);
+    const result = await extensionManager.disableExtension(args.name, scope);
+    writeStdoutLine(
+      t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
+        name: args.name,
+        scope: args.scope || SettingScope.User,
+      }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }
 
 export const disableCommand: CommandModule = {
   command: 'disable [--scope] <name>',
-  describe: 'Disables an extension.',
+  describe: t('Disables an extension.'),
   builder: (yargs) =>
     yargs
       .positional('name', {
-        describe: 'The name of the extension to disable.',
+        describe: t('The name of the extension to disable.'),
         type: 'string',
       })
       .option('scope', {
-        describe: 'The scope to disable the extenison in.',
+        describe: t('The scope to disable the extension in.'),
         type: 'string',
         default: SettingScope.User,
-        choices: [SettingScope.User, SettingScope.Workspace],
       })
-      .check((_argv) => true),
+      .check((argv) => {
+        resolveExtensionCommandScope(argv.scope as string | undefined);
+        return true;
+      }),
   handler: async (argv) => {
     await handleDisable({
       name: argv['name'] as string,
-      scope: argv['scope'] as SettingScope,
+      scope: argv['scope'] as string,
     });
   },
 };

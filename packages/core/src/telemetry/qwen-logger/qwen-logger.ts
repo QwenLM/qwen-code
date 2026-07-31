@@ -6,7 +6,11 @@
 
 import { Buffer } from 'buffer';
 import * as https from 'https';
+import * as os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Storage } from '../../config/storage.js';
 
 import type {
   StartSessionEvent,
@@ -15,6 +19,7 @@ import type {
   ApiRequestEvent,
   ApiResponseEvent,
   ApiErrorEvent,
+  ApiCancelEvent,
   FileOperationEvent,
   FlashFallbackEvent,
   LoopDetectedEvent,
@@ -26,11 +31,30 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
+  ExtensionInstallEvent,
+  ExtensionUninstallEvent,
+  ToolOutputTruncatedEvent,
+  ExtensionEnableEvent,
+  ModelSlashCommandEvent,
+  ExtensionDisableEvent,
+  AuthEvent,
+  SkillLaunchEvent,
+  UserFeedbackEvent,
+  UserRetryEvent,
+  RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
+  EndSessionEvent,
+  ExtensionUpdateEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  HookCallEvent,
 } from '../types.js';
-import { EndSessionEvent } from '../types.js';
 import type {
   RumEvent,
   RumViewEvent,
@@ -38,10 +62,15 @@ import type {
   RumResourceEvent,
   RumExceptionEvent,
   RumPayload,
+  RumOS,
 } from './event-types.js';
 import type { Config } from '../../config/config.js';
+import {
+  createDebugLogger,
+  type DebugLogger,
+} from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { type HttpError, retryWithBackoff } from '../../utils/retry.js';
+import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -56,6 +85,11 @@ const RUN_APP_ID = 'gb4w8c3ygj@851d5d500f08f92';
  * Interval in which buffered events are sent to RUM.
  */
 const FLUSH_INTERVAL_MS = 1000 * 60;
+
+/**
+ * Minimum interval between logging network errors to avoid log spam.
+ */
+const ERROR_LOG_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Maximum amount of events to keep in memory. Events added after this amount
@@ -78,6 +112,7 @@ export interface LogResponse {
 export class QwenLogger {
   private static instance: QwenLogger;
   private config?: Config;
+  private debugLogger: DebugLogger;
   private readonly installationManager: InstallationManager;
 
   /**
@@ -92,7 +127,14 @@ export class QwenLogger {
   private lastFlushTime: number = Date.now();
 
   private userId: string;
+
   private sessionId: string;
+
+  /**
+   * Cached source information read from source.json.
+   * Only read once at session start to avoid repeated file I/O.
+   */
+  private sourceInfo: string = '';
 
   /**
    * The value is true when there is a pending flush happening. This prevents
@@ -105,17 +147,20 @@ export class QwenLogger {
    */
   private pendingFlush: boolean = false;
 
-  private isShutdown: boolean = false;
+  /**
+   * Timestamp of the last network error log to prevent log spam.
+   */
+  private lastErrorLogTime: number = 0;
 
-  private constructor(config?: Config) {
+  private constructor(config: Config) {
     this.config = config;
+    this.debugLogger = createDebugLogger('QWEN_LOGGER');
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
     this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
-    this.sessionId =
-      typeof this.config?.getSessionId === 'function'
-        ? this.config.getSessionId()
-        : '';
+    this.sessionId = config.getSessionId();
+    // Read source info once during initialization
+    this.sourceInfo = this.readSourceInfo();
   }
 
   private generateUserId(): string {
@@ -129,10 +174,6 @@ export class QwenLogger {
       return undefined;
     if (!QwenLogger.instance) {
       QwenLogger.instance = new QwenLogger(config);
-      process.on(
-        'exit',
-        QwenLogger.instance.shutdown.bind(QwenLogger.instance),
-      );
     }
 
     return QwenLogger.instance;
@@ -149,15 +190,13 @@ export class QwenLogger {
 
       this.events.push(event);
 
-      if (wasAtCapacity && this.config?.getDebugMode()) {
-        console.debug(
+      if (wasAtCapacity) {
+        this.debugLogger.debug(
           `QwenLogger: Dropped old event to prevent memory leak (queue size: ${this.events.size})`,
         );
       }
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('QwenLogger: Failed to enqueue log event.', error);
-      }
+      this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
     }
   }
 
@@ -208,27 +247,38 @@ export class QwenLogger {
     return this.createRumEvent('exception', type, name, properties);
   }
 
+  private getOsMetadata(): RumOS {
+    return {
+      type: os.platform(),
+      version: os.release(),
+    };
+  }
+
   async createRumPayload(): Promise<RumPayload> {
     const authType = this.config?.getAuthType();
     const version = this.config?.getCliVersion() || 'unknown';
+    const osMetadata = this.getOsMetadata();
 
+    // Use cached source information
     return {
       app: {
         id: RUN_APP_ID,
         env: process.env['DEBUG'] ? 'dev' : 'prod',
         version: version || 'unknown',
         type: 'cli',
+        channel: this.sourceInfo || undefined,
       },
       user: {
         id: this.userId,
       },
       session: {
-        id: this.sessionId,
+        id: this.sessionId || this.config?.getSessionId(),
       },
       view: {
-        id: this.sessionId,
+        id: this.sessionId || this.config?.getSessionId(),
         name: 'qwen-code-cli',
       },
+      os: osMetadata,
 
       events: this.events.toArray() as RumEvent[],
       properties: {
@@ -236,11 +286,14 @@ export class QwenLogger {
         model: this.config?.getModel(),
         base_url:
           authType === AuthType.USE_OPENAI
-            ? process.env['OPENAI_BASE_URL']
+            ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
+        ...(this.config?.getChannel?.()
+          ? { channel: this.config.getChannel() }
+          : {}),
       },
       _v: `qwen-code@${version}`,
-    };
+    } as RumPayload;
   }
 
   flushIfNeeded(): void {
@@ -248,28 +301,52 @@ export class QwenLogger {
       return;
     }
 
-    this.flushToRum().catch((error) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
+    void this.flushToRum();
+  }
+
+  readSourceInfo(): string {
+    try {
+      const globalDir = Storage.getGlobalQwenDir();
+      const sourceJsonPath = path.join(globalDir, 'source.json');
+
+      // Also check legacy ~/.qwen/source.json when QWEN_HOME is set,
+      // since the installer writes to ~/.qwen/ regardless of the env var.
+      const legacyPath = path.join(os.homedir(), '.qwen', 'source.json');
+      const candidates =
+        path.normalize(sourceJsonPath) !== path.normalize(legacyPath)
+          ? [sourceJsonPath, legacyPath]
+          : [sourceJsonPath];
+
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          const sourceJsonContent = fs.readFileSync(candidate, 'utf8');
+          const sourceData = JSON.parse(sourceJsonContent);
+          if (
+            sourceData &&
+            typeof sourceData === 'object' &&
+            sourceData.source &&
+            sourceData.source !== 'unknown'
+          ) {
+            return sourceData.source;
+          }
+        }
       }
-    });
+    } catch (_error) {
+      // Ignore errors when reading source.json - continue without source info
+    }
+    return '';
   }
 
   async flushToRum(): Promise<LogResponse> {
     if (this.isFlushInProgress) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          'QwenLogger: Flush already in progress, marking pending flush.',
-        );
-      }
+      this.debugLogger.debug(
+        'QwenLogger: Flush already in progress, marking pending flush.',
+      );
       this.pendingFlush = true;
       return Promise.resolve({});
     }
     this.isFlushInProgress = true;
 
-    if (this.config?.getDebugMode()) {
-      console.log('Flushing log events to RUM.');
-    }
     if (this.events.size === 0) {
       this.isFlushInProgress = false;
       return {};
@@ -281,8 +358,8 @@ export class QwenLogger {
     const rumPayload = await this.createRumPayload();
     // Override events with the ones we're sending
     rumPayload.events = eventsToSend;
-    const flushFn = () =>
-      new Promise<Buffer>((resolve, reject) => {
+    try {
+      await new Promise<Buffer>((resolve, reject) => {
         const body = safeJsonStringify(rumPayload);
         const options = {
           hostname: USAGE_STATS_HOSTNAME,
@@ -304,10 +381,9 @@ export class QwenLogger {
               res.statusCode &&
               (res.statusCode < 200 || res.statusCode >= 300)
             ) {
-              const err: HttpError = new Error(
+              const err = new Error(
                 `Request failed with status ${res.statusCode}`,
               );
-              err.status = res.statusCode;
               res.resume();
               return reject(err);
             }
@@ -319,26 +395,14 @@ export class QwenLogger {
         req.end(body);
       });
 
-    try {
-      await retryWithBackoff(flushFn, {
-        maxAttempts: 3,
-        initialDelayMs: 200,
-        shouldRetry: (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          const status = (err as HttpError).status as number | undefined;
-          // If status is not available, it's likely a network error
-          if (status === undefined) return true;
-
-          // Retry on 429 (Too many Requests) and 5xx server errors.
-          return status === 429 || (status >= 500 && status < 600);
-        },
-      });
-
       this.lastFlushTime = Date.now();
       return {};
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('RUM flush failed after multiple retries.', error);
+      // Only log network errors if sufficient time has passed to avoid spam
+      const now = Date.now();
+      if (now - this.lastErrorLogTime > ERROR_LOG_INTERVAL_MS) {
+        this.debugLogger.error('RUM flush failed.', error);
+        this.lastErrorLogTime = now;
       }
 
       // Re-queue failed events for retry
@@ -351,75 +415,138 @@ export class QwenLogger {
       if (this.pendingFlush) {
         this.pendingFlush = false;
         // Fire and forget the pending flush
-        this.flushToRum().catch((error) => {
-          if (this.config?.getDebugMode()) {
-            console.debug('Error in pending flush to RUM:', error);
-          }
-        });
+        void this.flushToRum();
       }
     }
   }
 
-  logStartSessionEvent(event: StartSessionEvent): void {
+  // session events
+  async logStartSessionEvent(event: StartSessionEvent): Promise<void> {
+    // Flush all pending events with the old session ID first.
+    // If flush fails, discard the pending events to avoid mixing sessions.
+    await this.flushToRum();
+
+    // Clear any remaining events (discard if flush failed)
+    this.events.clear();
+
+    // Now set the new session ID
+    this.sessionId = event.session_id;
+
+    // Re-read source info at the start of each new session
+    this.sourceInfo = this.readSourceInfo();
+
     const applicationEvent = this.createViewEvent('session', 'session_start', {
       properties: {
-        model: event.model,
-      },
-      snapshots: JSON.stringify({
-        embedding_model: event.embedding_model,
-        sandbox_enabled: event.sandbox_enabled,
-        core_tools_enabled: event.core_tools_enabled,
         approval_mode: event.approval_mode,
-        api_key_enabled: event.api_key_enabled,
-        vertex_ai_enabled: event.vertex_ai_enabled,
+        core_tools_enabled: event.core_tools_enabled,
         debug_enabled: event.debug_enabled,
+        hooks: event.hooks,
+        ide_enabled: event.ide_enabled,
+        interactive_shell_enabled: event.interactive_shell_enabled,
         mcp_servers: event.mcp_servers,
+        model: event.model,
+        sandbox_enabled: event.sandbox_enabled,
+        skills: event.skills,
+        subagents: event.subagents,
         telemetry_enabled: event.telemetry_enabled,
-        telemetry_log_user_prompts_enabled:
-          event.telemetry_log_user_prompts_enabled,
-      }),
+        truncate_tool_output_lines: event.truncate_tool_output_lines,
+        truncate_tool_output_threshold: event.truncate_tool_output_threshold,
+      },
     });
 
     // Flush start event immediately
     this.enqueueLogEvent(applicationEvent);
-    this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
-    });
+    void this.flushToRum();
   }
 
-  logNewPromptEvent(event: UserPromptEvent): void {
-    const rumEvent = this.createActionEvent('user_prompt', 'user_prompt', {
-      properties: {
-        auth_type: event.auth_type,
-        prompt_id: event.prompt_id,
+  logEndSessionEvent(_event: EndSessionEvent): void {
+    const applicationEvent = this.createViewEvent('session', 'session_end', {});
+
+    // Flush immediately on session end.
+    this.enqueueLogEvent(applicationEvent);
+    void this.flushToRum();
+  }
+
+  logConversationFinishedEvent(event: ConversationFinishedEvent): void {
+    const rumEvent = this.createActionEvent(
+      'conversation',
+      'conversation_finished',
+      {
+        properties: {
+          approval_mode: event.approvalMode,
+          turn_count: event.turnCount,
+        },
       },
-      snapshots: JSON.stringify({
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // user action events
+  logNewPromptEvent(event: UserPromptEvent): void {
+    const rumEvent = this.createActionEvent('user', 'new_prompt', {
+      properties: {
+        prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
-      }),
+        ...(event.model ? { model: event.model } : {}),
+      },
     });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 
+  logRetryEvent(event: UserRetryEvent): void {
+    const rumEvent = this.createActionEvent('user', 'retry', {
+      properties: {
+        prompt_id: event.prompt_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logSlashCommandEvent(event: SlashCommandEvent): void {
+    const rumEvent = this.createActionEvent('user', 'slash_command', {
+      properties: {
+        command: event.command,
+        subcommand: event.subcommand,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logModelSlashCommandEvent(event: ModelSlashCommandEvent): void {
+    const rumEvent = this.createActionEvent('user', 'model_slash_command', {
+      properties: {
+        model: event.model_name,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // tool call events
   logToolCallEvent(event: ToolCallEvent): void {
     const rumEvent = this.createActionEvent(
-      'tool_call',
+      'tool',
       `tool_call#${event.function_name}`,
       {
         properties: {
           prompt_id: event.prompt_id,
-        },
-        snapshots: JSON.stringify({
-          function_name: event.function_name,
-          decision: event.decision,
-          success: event.success,
+          response_id: event.response_id,
+          tool_name: event.function_name,
+          permission: event.decision,
+          success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
-          error: event.error,
           error_type: event.error_type,
-        }),
+          error_message: event.error,
+        },
       },
     );
 
@@ -429,7 +556,7 @@ export class QwenLogger {
 
   logFileOperationEvent(event: FileOperationEvent): void {
     const rumEvent = this.createActionEvent(
-      'file_operation',
+      'tool',
       `file_operation#${event.tool_name}`,
       {
         properties: {
@@ -440,9 +567,6 @@ export class QwenLogger {
           extension: event.extension,
           programming_language: event.programming_language,
         },
-        snapshots: event.diff_stat
-          ? JSON.stringify({ diff_stat: event.diff_stat })
-          : undefined,
       },
     );
 
@@ -450,11 +574,48 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logSubagentExecutionEvent(event: SubagentExecutionEvent): void {
+    const rumEvent = this.createActionEvent('tool', 'subagent_execution', {
+      properties: {
+        subagent_name: event.subagent_name,
+        status: event.status,
+        terminate_reason: event.terminate_reason,
+      },
+      snapshots: JSON.stringify({
+        ...(event.execution_summary
+          ? { execution_summary: event.execution_summary }
+          : {}),
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolOutputTruncatedEvent(event: ToolOutputTruncatedEvent): void {
+    const rumEvent = this.createActionEvent('tool', 'tool_output_truncated', {
+      properties: {
+        tool_name: event.tool_name,
+      },
+      snapshots: JSON.stringify({
+        original_content_length: event.original_content_length,
+        truncated_content_length: event.truncated_content_length,
+        threshold: event.threshold,
+        lines: event.lines,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // api events
   logApiRequestEvent(event: ApiRequestEvent): void {
     const rumEvent = this.createResourceEvent('api', 'api_request', {
       properties: {
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
     });
 
@@ -467,20 +628,33 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 1,
-      message: event.error,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
       snapshots: JSON.stringify({
         input_token_count: event.input_token_count,
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
         thoughts_token_count: event.thoughts_token_count,
-        tool_token_count: event.tool_token_count,
       }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logApiCancelEvent(event: ApiCancelEvent): void {
+    const rumEvent = this.createActionEvent('api', 'api_cancel', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id,
+        auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
+      },
     });
 
     this.enqueueLogEvent(rumEvent);
@@ -492,26 +666,15 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 0,
-      message: event.error,
+      message: event.error_message,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
-      },
-      snapshots: JSON.stringify({
+        subagent_name: event.subagent_name,
+        error_message: event.error_message,
         error_type: event.error_type,
-      }),
-    });
-
-    this.enqueueLogEvent(rumEvent);
-    this.flushIfNeeded();
-  }
-
-  logFlashFallbackEvent(event: FlashFallbackEvent): void {
-    const rumEvent = this.createActionEvent('fallback', 'flash_fallback', {
-      properties: {
-        auth_type: event.auth_type,
       },
     });
 
@@ -519,43 +682,31 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logLoopDetectedEvent(event: LoopDetectedEvent): void {
-    const rumEvent = this.createExceptionEvent('error', 'loop_detected', {
-      subtype: 'loop_detected',
-      properties: {
-        prompt_id: event.prompt_id,
-      },
-      snapshots: JSON.stringify({
-        loop_type: event.loop_type,
-      }),
+  // error events
+  logInvalidChunkEvent(event: InvalidChunkEvent): void {
+    const rumEvent = this.createExceptionEvent('error', 'invalid_chunk', {
+      subtype: 'invalid_chunk',
+      message: event.error_message,
     });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 
-  logNextSpeakerCheck(event: NextSpeakerCheckEvent): void {
-    const rumEvent = this.createActionEvent('check', 'next_speaker_check', {
-      properties: {
-        prompt_id: event.prompt_id,
+  logContentRetryFailureEvent(event: ContentRetryFailureEvent): void {
+    const rumEvent = this.createExceptionEvent(
+      'error',
+      'content_retry_failure',
+      {
+        subtype: 'content_retry_failure',
+        message: `Content retry failed after ${event.total_attempts} attempts`,
+        properties: {
+          error_type: event.final_error_type,
+          total_attempts: event.total_attempts,
+          total_duration_ms: event.total_duration_ms,
+        },
       },
-      snapshots: JSON.stringify({
-        finish_reason: event.finish_reason,
-        result: event.result,
-      }),
-    });
-
-    this.enqueueLogEvent(rumEvent);
-    this.flushIfNeeded();
-  }
-
-  logSlashCommandEvent(event: SlashCommandEvent): void {
-    const rumEvent = this.createActionEvent('command', 'slash_command', {
-      snapshots: JSON.stringify({
-        command: event.command,
-        subcommand: event.subcommand,
-      }),
-    });
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
@@ -577,26 +728,14 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logIdeConnectionEvent(event: IdeConnectionEvent): void {
-    const rumEvent = this.createActionEvent('connection', 'ide_connection', {
-      snapshots: JSON.stringify({ connection_type: event.connection_type }),
-    });
-
-    this.enqueueLogEvent(rumEvent);
-    this.flushIfNeeded();
-  }
-
-  logConversationFinishedEvent(event: ConversationFinishedEvent): void {
-    const rumEvent = this.createActionEvent(
-      'conversation',
-      'conversation_finished',
-      {
-        snapshots: JSON.stringify({
-          approval_mode: event.approvalMode,
-          turn_count: event.turnCount,
-        }),
+  logLoopDetectedEvent(event: LoopDetectedEvent): void {
+    const rumEvent = this.createExceptionEvent('error', 'loop_detected', {
+      subtype: 'loop_detected',
+      properties: {
+        prompt_id: event.prompt_id,
+        error_type: event.loop_type,
       },
-    );
+    });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
@@ -608,8 +747,10 @@ export class QwenLogger {
       'kitty_sequence_overflow',
       {
         subtype: 'kitty_sequence_overflow',
-        snapshots: JSON.stringify({
+        properties: {
           sequence_length: event.sequence_length,
+        },
+        snapshots: JSON.stringify({
           truncated_sequence: event.truncated_sequence,
         }),
       },
@@ -619,53 +760,42 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logChatCompressionEvent(event: ChatCompressionEvent): void {
-    const rumEvent = this.createActionEvent('compression', 'chat_compression', {
-      snapshots: JSON.stringify({
-        tokens_before: event.tokens_before,
-        tokens_after: event.tokens_after,
-      }),
+  // ide events
+  logIdeConnectionEvent(event: IdeConnectionEvent): void {
+    const rumEvent = this.createActionEvent('ide', 'ide_connection', {
+      properties: {
+        connection_type: event.connection_type,
+      },
     });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 
-  logInvalidChunkEvent(event: InvalidChunkEvent): void {
-    const rumEvent = this.createExceptionEvent('error', 'invalid_chunk', {
-      subtype: 'invalid_chunk',
-      message: event.error_message,
+  // extension events
+  logExtensionInstallEvent(event: ExtensionInstallEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_install', {
+      properties: {
+        extension_name: event.extension_name,
+        extension_version: event.extension_version,
+        extension_source: event.extension_source,
+        status: event.status,
+      },
     });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 
-  logContentRetryEvent(event: ContentRetryEvent): void {
-    const rumEvent = this.createActionEvent('retry', 'content_retry', {
-      snapshots: JSON.stringify({
-        attempt_number: event.attempt_number,
-        error_type: event.error_type,
-        retry_delay_ms: event.retry_delay_ms,
-      }),
-    });
-
-    this.enqueueLogEvent(rumEvent);
-    this.flushIfNeeded();
-  }
-
-  logContentRetryFailureEvent(event: ContentRetryFailureEvent): void {
-    const rumEvent = this.createExceptionEvent(
-      'error',
-      'content_retry_failure',
+  logExtensionUninstallEvent(event: ExtensionUninstallEvent): void {
+    const rumEvent = this.createActionEvent(
+      'extension',
+      'extension_uninstall',
       {
-        subtype: 'content_retry_failure',
-        message: `Content retry failed after ${event.total_attempts} attempts`,
-        snapshots: JSON.stringify({
-          total_attempts: event.total_attempts,
-          final_error_type: event.final_error_type,
-          total_duration_ms: event.total_duration_ms,
-        }),
+        properties: {
+          extension_name: event.extension_name,
+          status: event.status,
+        },
       },
     );
 
@@ -673,30 +803,307 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logSubagentExecutionEvent(event: SubagentExecutionEvent): void {
-    const rumEvent = this.createActionEvent('subagent', 'subagent_execution', {
-      snapshots: JSON.stringify({
-        subagent_name: event.subagent_name,
+  logExtensionUpdateEvent(event: ExtensionUpdateEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_update', {
+      properties: {
+        extension_name: event.extension_name,
         status: event.status,
-        terminate_reason: event.terminate_reason,
-        execution_summary: event.execution_summary,
-      }),
+        extension_id: event.extension_id,
+        extension_previous_version: event.extension_previous_version,
+        extension_version: event.extension_version,
+        extension_source: event.extension_source,
+      },
     });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 
-  logEndSessionEvent(_event: EndSessionEvent): void {
-    const applicationEvent = this.createViewEvent('session', 'session_end', {});
-
-    // Flush immediately on session end.
-    this.enqueueLogEvent(applicationEvent);
-    this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
+  logExtensionEnableEvent(event: ExtensionEnableEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_enable', {
+      properties: {
+        extension_name: event.extension_name,
+        setting_scope: event.setting_scope,
+      },
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logExtensionDisableEvent(event: ExtensionDisableEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_disable', {
+      properties: {
+        extension_name: event.extension_name,
+        setting_scope: event.setting_scope,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logAuthEvent(event: AuthEvent): void {
+    const rumEvent = this.createActionEvent('auth', 'auth', {
+      properties: {
+        auth_type: event.auth_type,
+        action_type: event.action_type,
+        success: event.status === 'success' ? 1 : 0,
+        error_type: event.status !== 'success' ? event.status : undefined,
+        error_message:
+          event.status === 'error' ? event.error_message : undefined,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // misc events
+  logFlashFallbackEvent(event: FlashFallbackEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'flash_fallback', {
+      properties: {
+        auth_type: event.auth_type,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logRipgrepFallbackEvent(event: RipgrepFallbackEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'ripgrep_fallback', {
+      properties: {
+        platform: process.platform,
+        arch: process.arch,
+        use_ripgrep: event.use_ripgrep,
+        use_builtin_ripgrep: event.use_builtin_ripgrep,
+        error_message: event.error,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logRipgrepRuntimeRecoveryEvent(event: RipgrepRuntimeRecoveryEvent): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'ripgrep_runtime_recovery',
+      {
+        properties: {
+          platform: process.platform,
+          arch: process.arch,
+          selection_mode: event.selection_mode,
+          retry_triggered: event.retry_triggered,
+          ...(event.retry_succeeded !== undefined
+            ? { retry_succeeded: event.retry_succeeded }
+            : {}),
+          failure_kind: event.failure_kind,
+        },
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logLoopDetectionDisabledEvent(): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'loop_detection_disabled',
+      {},
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logNextSpeakerCheck(event: NextSpeakerCheckEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'next_speaker_check', {
+      properties: {
+        prompt_id: event.prompt_id,
+        finish_reason: event.finish_reason,
+        result: event.result,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logSkillLaunchEvent(event: SkillLaunchEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'skill_launch', {
+      properties: {
+        skill_name: event.skill_name,
+        success: event.success ? 1 : 0,
+        prompt_id: event.prompt_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logUserFeedbackEvent(event: UserFeedbackEvent): void {
+    const rumEvent = this.createActionEvent('user', 'user_feedback', {
+      properties: {
+        session_id: event.session_id,
+        rating: event.rating,
+        model: event.model,
+        approval_mode: event.approval_mode,
+        prompt_id: event.prompt_id || '',
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logChatCompressionEvent(event: ChatCompressionEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'chat_compression', {
+      properties: {
+        tokens_before: event.tokens_before,
+        tokens_after: event.tokens_after,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logContentRetryEvent(event: ContentRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'content_retry', {
+      properties: {
+        error_type: event.error_type,
+        attempt_number: event.attempt_number,
+        retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // arena events
+  logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        model_ids: JSON.stringify(event.model_ids),
+        task_length: event.task_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaAgentCompletedEvent(event: ArenaAgentCompletedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_agent_completed', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        agent_session_id: event.agent_session_id,
+        agent_model_id: event.agent_model_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        rounds: event.rounds,
+        total_tokens: event.total_tokens,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        tool_calls: event.tool_calls,
+        successful_tool_calls: event.successful_tool_calls,
+        failed_tool_calls: event.failed_tool_calls,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaSessionEndedEvent(event: ArenaSessionEndedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_ended', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        display_backend: event.display_backend,
+        agent_count: event.agent_count,
+        completed_agents: event.completed_agents,
+        failed_agents: event.failed_agents,
+        cancelled_agents: event.cancelled_agents,
+        winner_model_id: event.winner_model_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  /**
+   * Log a hook call event
+   * Records hook execution telemetry for observability
+   */
+  logHookCallEvent(event: HookCallEvent): void {
+    // Sanitize hook name to remove potentially sensitive information
+    const sanitizedHookName = sanitizeHookName(event.hook_name);
+
+    const properties: Record<string, unknown> = {
+      hook_event_name: event.hook_event_name,
+      hook_type: event.hook_type,
+      hook_name: sanitizedHookName,
+      duration_ms: event.duration_ms,
+      success: event.success ? 1 : 0,
+      exit_code: event.exit_code,
+    };
+
+    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
+      properties['error'] = event.error;
+    }
+
+    const rumEvent = this.createActionEvent(
+      'hook',
+      `hook_call#${event.hook_event_name}`,
+      { properties },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
   }
 
   getProxyAgent() {
@@ -704,19 +1111,11 @@ export class QwenLogger {
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');
     }
-  }
-
-  shutdown() {
-    if (this.isShutdown) return;
-
-    this.isShutdown = true;
-    const event = new EndSessionEvent(this.config);
-    this.logEndSessionEvent(event);
   }
 
   private requeueFailedEvents(eventsToSend: RumEvent[]): void {
@@ -724,8 +1123,8 @@ export class QwenLogger {
     const eventsToRetry = eventsToSend.slice(-MAX_RETRY_EVENTS); // Keep only the most recent events
 
     // Log a warning if we're dropping events
-    if (eventsToSend.length > MAX_RETRY_EVENTS && this.config?.getDebugMode()) {
-      console.warn(
+    if (eventsToSend.length > MAX_RETRY_EVENTS) {
+      this.debugLogger.warn(
         `QwenLogger: Dropping ${
           eventsToSend.length - MAX_RETRY_EVENTS
         } events due to retry queue limit. Total events: ${
@@ -739,11 +1138,6 @@ export class QwenLogger {
     const numEventsToRequeue = Math.min(eventsToRetry.length, availableSpace);
 
     if (numEventsToRequeue === 0) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          `QwenLogger: No events re-queued (queue size: ${this.events.size})`,
-        );
-      }
       return;
     }
 
@@ -762,11 +1156,9 @@ export class QwenLogger {
       this.events.pop();
     }
 
-    if (this.config?.getDebugMode()) {
-      console.debug(
-        `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
-      );
-    }
+    this.debugLogger.debug(
+      `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
+    );
   }
 }
 

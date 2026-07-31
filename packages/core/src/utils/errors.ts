@@ -10,19 +10,283 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
 
+/**
+ * Check if the error is an abort error (user cancellation).
+ * This handles both DOMException-style AbortError and Node.js abort errors.
+ */
+export function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  // Check for AbortError by name (standard DOMException and custom AbortError)
+  if (error instanceof Error && error.name === 'AbortError') {
+    return true;
+  }
+
+  // Check for Node.js abort error code
+  if (isNodeError(error) && error.code === 'ABORT_ERR') {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Best-effort one-line description of an error's `cause`, used to surface the
+ * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
+ * failed` (whose own message carries nothing). Returns `undefined` when there
+ * is no useful detail.
+ *
+ * Handles three shapes:
+ *   - `AggregateError` (undici retries multiple addresses, e.g. IPv6 `::1` then
+ *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
+ *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
+ *     empty message — prefer `code`, combine with message when both add signal.
+ *   - nested `.cause` chains: walk through opaque wrappers to the deepest code.
+ *   - any other value — stringify.
+ */
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause == null) return undefined;
+  return (
+    describeCodedCause(cause, 0, new Set<object>()) ??
+    describeCauseFallback(cause)
+  );
+}
+
+function describeCauseFallback(cause: unknown): string | undefined {
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeSingleError(error))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+  return describeSingleError(cause);
+}
+
+function describeCodedCause(
+  cause: unknown,
+  depth: number,
+  visited: Set<object>,
+): string | undefined {
+  if (
+    cause == null ||
+    depth >= 8 ||
+    typeof cause !== 'object' ||
+    visited.has(cause)
+  ) {
+    return undefined;
+  }
+
+  visited.add(cause);
+
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeCodedCause(error, depth + 1, visited))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+
+  const nested = describeCodedCause(
+    (cause as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
+  if (nested) {
+    return nested;
+  }
+
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' && code
+    ? describeSingleError(cause)
+    : undefined;
+}
+
+function describeSingleError(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    const codeStr = typeof code === 'string' ? code : undefined;
+    const msg = err.message?.trim();
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
+  }
+  if (err && typeof err === 'object' && !Array.isArray(err)) {
+    const rec = err as Record<string, unknown>;
+    const code = rec['code'];
+    const codeStr =
+      typeof code === 'string' && code
+        ? code
+        : typeof code === 'number'
+          ? String(code)
+          : undefined;
+    const message = rec['message'];
+    const msg =
+      typeof message === 'string' && message.trim()
+        ? message.trim()
+        : undefined;
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr;
+  }
+  const str = String(err);
+  return str && str !== '[object Object]' ? str : undefined;
+}
+
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    const detail = describeErrorCause(error.cause);
+    if (detail && detail !== error.message) {
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
+    }
+    // Capped like every other branch. Returning `error.message` raw made the
+    // limit depend on details of the error that have nothing to do with how
+    // long it is: the same string was capped as `{ message }` or once a
+    // distinct `cause` was attached, and uncapped only for a bare `Error`.
+    // That is the shape a provider SDK throws when it packs a whole response
+    // body into the message, and the result flows straight into `llmContent`.
+    return truncateStringifiedErrorMessage(error.message);
+  }
+  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (typeof message === 'string' && message.trim()) {
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
+    } catch {
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
+    }
   }
   try {
     return String(error);
   } catch {
     return 'Failed to get error details';
   }
+}
+
+/**
+ * Extracts the HTTP status code from an error object.
+ *
+ * Checks the following properties in order of priority:
+ * 1. `error.status` - OpenAI, Anthropic, Gemini SDK errors
+ * 2. `error.statusCode` - Some HTTP client libraries
+ * 3. `error.response.status` - Axios-style errors
+ * 4. `error.error.code` - Nested error objects
+ * 5. `HTTP_STATUS/NNN` pattern in `error.message` - SSE-embedded streaming
+ *    errors where the SDK never sees a real HTTP status because the stream
+ *    opened with 200 OK and the provider signaled the error mid-stream.
+ *    DashScope uses `:HTTP_STATUS/429` as an SSE comment on throttling.
+ *
+ * @returns The HTTP status code (100-599), or undefined if not found.
+ */
+export function getErrorStatus(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const err = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+    error?: { code?: unknown };
+    message?: unknown;
+  };
+
+  const value =
+    err.status ?? err.statusCode ?? err.response?.status ?? err.error?.code;
+
+  if (typeof value === 'number' && value >= 100 && value <= 599) {
+    return value;
+  }
+
+  if (typeof err.message === 'string') {
+    const match = err.message.match(/HTTP_STATUS\/(\d{3})\b/);
+    if (match) {
+      const parsed = Number(match[1]);
+      if (parsed >= 100 && parsed <= 599) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Extracts a descriptive error type string from an error object.
+ *
+ * Uses the error's constructor name (e.g. "APIConnectionError",
+ * "APIConnectionTimeoutError") which is more specific than the generic
+ * `.type` field. Falls back to `.type` for SDK errors that set it,
+ * then to `error.name`, then "unknown".
+ *
+ * For network errors, appends the cause code (e.g. "ECONNREFUSED")
+ * when available.
+ *
+ * @returns A string identifying the error type.
+ */
+export function getErrorType(error: unknown): string {
+  if (typeof error !== 'object' || error === null) {
+    return 'unknown';
+  }
+
+  // Prefer the constructor name — SDK subclasses like APIConnectionError,
+  // RateLimitError etc. have meaningful names.
+  const constructorName =
+    error instanceof Error && error.constructor.name !== 'Error'
+      ? error.constructor.name
+      : undefined;
+
+  // .type is set by OpenAI SDK (e.g. "invalid_request_error")
+  const sdkType = (error as { type?: string }).type;
+
+  const baseType =
+    constructorName ??
+    sdkType ??
+    (error instanceof Error ? error.name : 'unknown');
+
+  // For network errors, append the cause code (e.g. ECONNREFUSED, ETIMEDOUT)
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeCode =
+    cause && typeof cause === 'object' && 'code' in cause
+      ? (cause as { code?: string }).code
+      : undefined;
+
+  return causeCode ? `${baseType}:${causeCode}` : baseType;
 }
 
 export class FatalError extends Error {
@@ -57,6 +321,28 @@ export class FatalConfigError extends FatalError {
 export class FatalTurnLimitedError extends FatalError {
   constructor(message: string) {
     super(message, 53);
+  }
+}
+export class FatalToolExecutionError extends FatalError {
+  constructor(message: string) {
+    super(message, 54);
+  }
+}
+/**
+ * Raised when a headless / unattended run exceeds a configured budget
+ * (`--max-wall-time`, `--max-tool-calls`). Distinct exit code from
+ * `FatalTurnLimitedError` (53) so CI scripts can branch on
+ * "run exhausted its budget" vs. "run hit the turn cap." See issue
+ * QwenLM/qwen-code#4103.
+ */
+export class FatalBudgetExceededError extends FatalError {
+  constructor(message: string) {
+    super(message, 55);
+  }
+}
+export class FatalCancellationError extends FatalError {
+  constructor(message: string) {
+    super(message, 130); // Standard exit code for SIGINT
   }
 }
 

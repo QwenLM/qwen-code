@@ -17,6 +17,8 @@ const atomOneDarkColors: ColorsTheme = {
   AccentGreen: '#98c379',
   AccentYellow: '#e6c07b',
   AccentRed: '#e06c75',
+  AccentYellowDim: '#8B7530',
+  AccentRedDim: '#8B3A4A',
   DiffAdded: '#39544E',
   DiffRemoved: '#562B2F',
   Comment: '#5c6370',

@@ -1,0 +1,249 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * PermissionDrawer component styles
+ * These classes can be used instead of inline styles
+ */
+
+/* Permission Request Card */
+.permission-request-card {
+  background: var(--app-input-background);
+  border: 1px solid var(--app-primary, #3b82f6);
+  border-radius: var(--app-radius-md, 6px);
+  margin: var(--app-spacing-medium, 8px) 0;
+  margin-bottom: var(--app-spacing-lg, 16px);
+  overflow: visible;
+  animation: fadeIn 0.2s ease-in;
+}
+
+.permission-card-body {
+  padding: var(--app-spacing-lg, 12px);
+  min-height: fit-content;
+  height: auto;
+}
+
+.permission-header {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-lg, 12px);
+  margin-bottom: var(--app-spacing-lg, 12px);
+}
+
+.permission-icon-wrapper {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(59, 130, 246, 0.1);
+  border-radius: var(--app-radius-md, 6px);
+  flex-shrink: 0;
+}
+
+.permission-icon {
+  font-size: 20px;
+}
+
+.permission-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.permission-title {
+  font-weight: 600;
+  color: var(--app-primary-foreground);
+  margin-bottom: 2px;
+}
+
+.permission-subtitle {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+}
+
+.permission-command-section {
+  margin-bottom: var(--app-spacing-lg, 12px);
+}
+
+.permission-command-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  margin-bottom: var(--app-spacing-sm, 4px);
+  text-transform: uppercase;
+}
+
+.permission-command-code {
+  display: block;
+  font-family: var(--app-font-mono);
+  font-size: var(--app-monospace-font-size, 13px);
+  color: var(--app-primary-foreground);
+  background: var(--app-primary-background);
+  padding: var(--app-spacing-medium, 8px);
+  border-radius: var(--app-radius-sm, 4px);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.permission-locations-section {
+  margin-bottom: var(--app-spacing-lg, 12px);
+}
+
+.permission-locations-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  margin-bottom: var(--app-spacing-sm, 4px);
+  text-transform: uppercase;
+}
+
+.permission-location-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-sm, 4px);
+  padding: var(--app-spacing-sm, 4px) 0;
+  font-size: 12px;
+}
+
+.permission-location-icon {
+  flex-shrink: 0;
+}
+
+.permission-location-path {
+  color: var(--app-primary-foreground);
+  font-family: var(--app-font-mono);
+}
+
+.permission-location-line {
+  color: var(--app-secondary-foreground);
+}
+
+.permission-options-section {
+  margin-top: var(--app-spacing-lg, 12px);
+}
+
+.permission-options-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--app-primary-foreground);
+  margin-bottom: var(--app-spacing-medium, 8px);
+}
+
+.permission-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-spacing-sm, 4px);
+}
+
+.permission-option {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-medium, 8px);
+  padding: var(--app-spacing-medium, 8px) var(--app-spacing-lg, 12px);
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-sm, 4px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.permission-option:hover {
+  background: var(--app-list-hover-background);
+  border-color: var(--app-primary, #3b82f6);
+}
+
+.permission-option.selected {
+  border-color: var(--app-primary, #3b82f6);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.permission-radio {
+  flex-shrink: 0;
+}
+
+.permission-option-content {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-sm, 4px);
+  flex: 1;
+}
+
+.permission-option-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  background-color: var(--app-list-hover-background);
+  border-radius: 4px;
+  margin-right: 4px;
+}
+
+.permission-option.selected .permission-option-number {
+  color: white;
+  background-color: var(--app-primary, #3b82f6);
+}
+
+.permission-always-badge {
+  font-size: 12px;
+}
+
+.permission-no-options {
+  text-align: center;
+  padding: var(--app-spacing-lg, 12px);
+  color: var(--app-secondary-foreground);
+}
+
+.permission-actions {
+  margin-top: var(--app-spacing-lg, 12px);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.permission-confirm-button {
+  padding: var(--app-spacing-medium, 8px) var(--app-spacing-lg, 16px);
+  background: var(--app-primary, #3b82f6);
+  color: white;
+  border: none;
+  border-radius: var(--app-radius-sm, 4px);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.permission-confirm-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.permission-confirm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.permission-success {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-spacing-medium, 8px);
+  padding: var(--app-spacing-lg, 12px);
+  background: rgba(16, 185, 129, 0.1);
+  border-radius: var(--app-radius-sm, 4px);
+  margin-top: var(--app-spacing-lg, 12px);
+}
+
+.permission-success-icon {
+  color: var(--app-success, #10b981);
+  font-weight: bold;
+}
+
+.permission-success-text {
+  color: var(--app-success, #10b981);
+  font-size: 13px;
+}

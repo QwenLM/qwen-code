@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import picomatch from 'picomatch';
+
 /**
  * Implements an in-memory cache for file search results.
  * This cache optimizes subsequent searches by leveraging previously computed results.
@@ -43,9 +45,15 @@ export class ResultCache {
     // This finds the most specific, already-cached query that is a prefix
     // of the current query.
     let bestBaseQuery = '';
-    for (const key of this.cache?.keys?.() ?? []) {
-      if (query.startsWith(key) && key.length > bestBaseQuery.length) {
-        bestBaseQuery = key;
+    if (!hasGlobSyntax(query)) {
+      for (const key of this.cache?.keys?.() ?? []) {
+        if (
+          !hasGlobSyntax(key) &&
+          query.startsWith(key) &&
+          key.length > bestBaseQuery.length
+        ) {
+          bestBaseQuery = key;
+        }
       }
     }
 
@@ -64,4 +72,8 @@ export class ResultCache {
   set(query: string, results: string[]): void {
     this.cache.set(query, results);
   }
+}
+
+function hasGlobSyntax(query: string): boolean {
+  return picomatch.scan(query).isGlob;
 }

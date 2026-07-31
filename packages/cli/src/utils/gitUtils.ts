@@ -4,42 +4,74 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
-import { ProxyAgent } from 'undici';
+import * as childProcess from 'node:child_process';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { loadUndici } from './load-undici.js';
 
-/**
- * Checks if a directory is within a git repository hosted on GitHub.
- * @returns true if the directory is in a git repository with a github.com remote, false otherwise
- */
-export const isGitHubRepository = (): boolean => {
-  try {
-    const remotes = (
-      execSync('git remote -v', {
+const debugLogger = createDebugLogger('GIT');
+
+interface GitCommandOptions {
+  cwd?: string;
+}
+
+async function runGit(
+  args: string[],
+  opts: GitCommandOptions = {},
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    childProcess.execFile(
+      'git',
+      args,
+      {
         encoding: 'utf-8',
-      }) || ''
-    ).trim();
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      },
+      (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(String(stdout ?? '').trim());
+      },
+    );
+  });
+}
 
-    const pattern = /github\.com/;
+export const isGitHubRepositoryAsync = async (
+  opts: GitCommandOptions = {},
+): Promise<boolean> => {
+  try {
+    const remotes = await runGit(['remote', '-v'], opts);
 
-    return pattern.test(remotes);
+    return remotes.split('\n').some((line) => {
+      const remoteUrl = line.trim().split(/\s+/)[1];
+      return remoteUrl ? isGitHubRemoteUrl(remoteUrl) : false;
+    });
   } catch (_error) {
-    // If any filesystem error occurs, assume not a git repo
-    console.debug(`Failed to get git remote:`, _error);
+    debugLogger.debug(`Failed to get git remote:`, _error);
     return false;
   }
 };
 
-/**
- * getGitRepoRoot returns the root directory of the git repository.
- * @returns the path to the root of the git repo.
- * @throws error if the exec command fails.
- */
-export const getGitRepoRoot = (): string => {
-  const gitRepoRoot = (
-    execSync('git rev-parse --show-toplevel', {
-      encoding: 'utf-8',
-    }) || ''
-  ).trim();
+function isGitHubRemoteUrl(remoteUrl: string): boolean {
+  if (remoteUrl.startsWith('git@github.com:')) {
+    return true;
+  }
+  if (remoteUrl.startsWith('git@')) {
+    return false;
+  }
+
+  try {
+    return new URL(remoteUrl).hostname === 'github.com';
+  } catch {
+    return false;
+  }
+}
+
+export const getGitRepoRootAsync = async (
+  opts: GitCommandOptions = {},
+): Promise<string> => {
+  const gitRepoRoot = await runGit(['rev-parse', '--show-toplevel'], opts);
 
   if (!gitRepoRoot) {
     throw new Error(`Git repo returned empty value`);
@@ -58,7 +90,13 @@ export const getLatestGitHubRelease = async (
   try {
     const controller = new AbortController();
 
-    const endpoint = `https://api.github.com/repos/google-github-actions/run-gemini-cli/releases/latest`;
+    const endpoint = `https://api.github.com/repos/QwenLM/qwen-code-action/releases/latest`;
+
+    // Lazy-load undici so it stays out of the eager startup closure
+    // (issue #7264).
+    const dispatcher = proxy
+      ? new (await loadUndici()).ProxyAgent(proxy)
+      : undefined;
 
     const response = await fetch(endpoint, {
       method: 'GET',
@@ -67,7 +105,7 @@ export const getLatestGitHubRelease = async (
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28',
       },
-      dispatcher: proxy ? new ProxyAgent(proxy) : undefined,
+      dispatcher,
       signal: AbortSignal.any([AbortSignal.timeout(30_000), controller.signal]),
     } as RequestInit);
 
@@ -83,34 +121,63 @@ export const getLatestGitHubRelease = async (
     }
     return releaseTag;
   } catch (_error) {
-    console.debug(`Failed to determine latest run-gemini-cli release:`, _error);
+    debugLogger.debug(
+      `Failed to determine latest qwen-code-action release:`,
+      _error,
+    );
     throw new Error(
-      `Unable to determine the latest run-gemini-cli release on GitHub.`,
+      `Unable to determine the latest qwen-code-action release on GitHub.`,
     );
   }
 };
 
-/**
- * getGitHubRepoInfo returns the owner and repository for a GitHub repo.
- * @returns the owner and repository of the github repo.
- * @throws error if the exec command fails.
- */
-export function getGitHubRepoInfo(): { owner: string; repo: string } {
-  const remoteUrl = execSync('git remote get-url origin', {
-    encoding: 'utf-8',
-  }).trim();
-
-  // Matches either https://github.com/owner/repo.git or git@github.com:owner/repo.git
-  const match = remoteUrl.match(
-    /(?:https?:\/\/|git@)github\.com(?::|\/)([^/]+)\/([^/]+?)(?:\.git)?$/,
+export async function getGitHubRepoInfoAsync(
+  opts: GitCommandOptions = {},
+): Promise<{
+  owner: string;
+  repo: string;
+}> {
+  return parseGitHubRepoInfo(
+    await runGit(['remote', 'get-url', 'origin'], opts),
   );
+}
 
-  // If the regex fails match, throw an error.
-  if (!match || !match[1] || !match[2]) {
+function parseGitHubRepoInfo(remoteUrl: string): {
+  owner: string;
+  repo: string;
+} {
+  // Handle SCP-style SSH URLs (git@github.com:owner/repo.git)
+  let urlToParse = remoteUrl;
+  if (remoteUrl.startsWith('git@github.com:')) {
+    urlToParse = remoteUrl.replace('git@github.com:', '');
+  } else if (remoteUrl.startsWith('git@')) {
+    // SSH URL for a different provider (GitLab, Bitbucket, etc.)
     throw new Error(
       `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
     );
   }
 
-  return { owner: match[1], repo: match[2] };
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(urlToParse, 'https://github.com');
+  } catch {
+    throw new Error(
+      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
+    );
+  }
+
+  if (parsedUrl.hostname !== 'github.com') {
+    throw new Error(
+      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
+    );
+  }
+
+  const parts = parsedUrl.pathname.split('/').filter((part) => part !== '');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(
+      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
+    );
+  }
+
+  return { owner: parts[0], repo: parts[1].replace(/\.git$/, '') };
 }

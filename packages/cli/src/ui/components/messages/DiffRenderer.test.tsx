@@ -9,6 +9,17 @@ import { render } from 'ink-testing-library';
 import { DiffRenderer } from './DiffRenderer.js';
 import * as CodeColorizer from '../../utils/CodeColorizer.js';
 import { vi } from 'vitest';
+import type { LoadedSettings } from '../../../config/settings.js';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
+
+const mockSettings: LoadedSettings = {
+  merged: {
+    ui: {
+      showLineNumbers: true,
+    },
+  },
+} as LoadedSettings;
 
 describe('<OverflowProvider><DiffRenderer /></OverflowProvider>', () => {
   const mockColorizeCode = vi.spyOn(CodeColorizer, 'colorizeCode');
@@ -17,8 +28,8 @@ describe('<OverflowProvider><DiffRenderer /></OverflowProvider>', () => {
     mockColorizeCode.mockClear();
   });
 
-  const sanitizeOutput = (output: string | undefined, terminalWidth: number) =>
-    output?.replace(/GAP_INDICATOR/g, '═'.repeat(terminalWidth));
+  const sanitizeOutput = (output: string | undefined, contentWidth: number) =>
+    output?.replace(/GAP_INDICATOR/g, '═'.repeat(contentWidth));
 
   it('should call colorizeCode with correct language for new file with known extension', () => {
     const newFileDiffContent = `
@@ -35,7 +46,8 @@ index 0000000..e69de29
         <DiffRenderer
           diffContent={newFileDiffContent}
           filename="test.py"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -44,7 +56,7 @@ index 0000000..e69de29
       'python',
       undefined,
       80,
-      undefined,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 
@@ -63,7 +75,8 @@ index 0000000..e69de29
         <DiffRenderer
           diffContent={newFileDiffContent}
           filename="test.unknown"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -72,7 +85,7 @@ index 0000000..e69de29
       null,
       undefined,
       80,
-      undefined,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 
@@ -88,7 +101,11 @@ index 0000000..e69de29
 `;
     render(
       <OverflowProvider>
-        <DiffRenderer diffContent={newFileDiffContent} terminalWidth={80} />
+        <DiffRenderer
+          diffContent={newFileDiffContent}
+          contentWidth={80}
+          settings={mockSettings}
+        />
       </OverflowProvider>,
     );
     expect(mockColorizeCode).toHaveBeenCalledWith(
@@ -96,7 +113,7 @@ index 0000000..e69de29
       null,
       undefined,
       80,
-      undefined,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 
@@ -115,7 +132,8 @@ index 0000001..0000002 100644
         <DiffRenderer
           diffContent={existingFileDiffContent}
           filename="test.txt"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -145,7 +163,8 @@ index 1234567..1234567 100644
         <DiffRenderer
           diffContent={noChangeDiff}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -156,7 +175,11 @@ index 1234567..1234567 100644
   it('should handle empty diff content', () => {
     const { lastFrame } = render(
       <OverflowProvider>
-        <DiffRenderer diffContent="" terminalWidth={80} />
+        <DiffRenderer
+          diffContent=""
+          contentWidth={80}
+          settings={mockSettings}
+        />
       </OverflowProvider>,
     );
     expect(lastFrame()).toContain('No diff content');
@@ -182,7 +205,8 @@ index 123..456 100644
         <DiffRenderer
           diffContent={diffWithGap}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -219,7 +243,8 @@ index abc..def 100644
         <DiffRenderer
           diffContent={diffWithSmallGap}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -251,7 +276,7 @@ index 123..789 100644
 
     it.each([
       {
-        terminalWidth: 80,
+        contentWidth: 80,
         height: undefined,
         expected: ` 1   console.log('first hunk');
  2 - const oldVar = 1;
@@ -264,7 +289,7 @@ index 123..789 100644
 22   console.log('end of second hunk');`,
       },
       {
-        terminalWidth: 80,
+        contentWidth: 80,
         height: 6,
         expected: `... first 4 lines hidden ...
 ════════════════════════════════════════════════════════════════════════════════
@@ -274,7 +299,7 @@ index 123..789 100644
 22   console.log('end of second hunk');`,
       },
       {
-        terminalWidth: 30,
+        contentWidth: 30,
         height: 6,
         expected: `... first 10 lines hidden ...
    ;
@@ -284,20 +309,21 @@ index 123..789 100644
      second hunk');`,
       },
     ])(
-      'with terminalWidth $terminalWidth and height $height',
-      ({ terminalWidth, height, expected }) => {
+      'with contentWidth $contentWidth and height $height',
+      ({ contentWidth, height, expected }) => {
         const { lastFrame } = render(
           <OverflowProvider>
             <DiffRenderer
               diffContent={diffWithMultipleHunks}
               filename="multi.js"
-              terminalWidth={terminalWidth}
+              contentWidth={contentWidth}
               availableTerminalHeight={height}
+              settings={mockSettings}
             />
           </OverflowProvider>,
         );
         const output = lastFrame();
-        expect(sanitizeOutput(output, terminalWidth)).toEqual(expected);
+        expect(sanitizeOutput(output, contentWidth)).toEqual(expected);
       },
     );
   });
@@ -323,7 +349,8 @@ fileDiff Index: file.txt
         <DiffRenderer
           diffContent={newFileDiff}
           filename="TEST"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -353,7 +380,8 @@ fileDiff Index: Dockerfile
         <DiffRenderer
           diffContent={newFileDiff}
           filename="Dockerfile"
-          terminalWidth={80}
+          contentWidth={80}
+          settings={mockSettings}
         />
       </OverflowProvider>,
     );
@@ -361,5 +389,113 @@ fileDiff Index: Dockerfile
     expect(output).toEqual(`1 FROM node:14
 2 RUN npm install
 3 RUN npm run build`);
+  });
+
+  describe('showLineNumbers setting', () => {
+    const diffContent = `
+diff --git a/test.txt b/test.txt
+index 0000001..0000002 100644
+--- a/test.txt
++++ b/test.txt
+@@ -1,2 +1,2 @@
+-old line 1
++new line 1
+ context line 2
+`;
+
+    it('should show line numbers by default when settings is undefined', () => {
+      const { lastFrame } = render(
+        <OverflowProvider>
+          <DiffRenderer
+            diffContent={diffContent}
+            filename="test.txt"
+            contentWidth={80}
+          />
+        </OverflowProvider>,
+      );
+      const output = lastFrame();
+      expect(output).toContain('1 -');
+      expect(output).toContain('1 +');
+      expect(output).toContain('2  ');
+    });
+
+    it('should show line numbers when showLineNumbers is true', () => {
+      const mockSettings = {
+        merged: {
+          ui: {
+            showLineNumbers: true,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { lastFrame } = render(
+        <OverflowProvider>
+          <DiffRenderer
+            diffContent={diffContent}
+            filename="test.txt"
+            contentWidth={80}
+            settings={mockSettings}
+          />
+        </OverflowProvider>,
+      );
+      const output = lastFrame();
+      expect(output).toContain('1 -');
+      expect(output).toContain('1 +');
+      expect(output).toContain('2  ');
+    });
+
+    it('excludes line numbers but keeps diff markers when copied', () => {
+      const { stdout } = render(
+        <OverflowProvider>
+          <DiffRenderer
+            diffContent={diffContent}
+            filename="test.txt"
+            contentWidth={80}
+            settings={mockSettings}
+          />
+        </OverflowProvider>,
+      );
+      const frame = getScreenBuffer(
+        stdout as unknown as NodeJS.WriteStream,
+      )!.frame!;
+      const copied = getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      });
+
+      expect(copied).toContain('- old line 1');
+      expect(copied).toContain('+ new line 1');
+      expect(copied).not.toMatch(/^\d+ [-+]/mu);
+    });
+
+    it('should hide line numbers when showLineNumbers is false', () => {
+      const mockSettings = {
+        merged: {
+          ui: {
+            showLineNumbers: false,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const { lastFrame } = render(
+        <OverflowProvider>
+          <DiffRenderer
+            diffContent={diffContent}
+            filename="test.txt"
+            contentWidth={80}
+            settings={mockSettings}
+          />
+        </OverflowProvider>,
+      );
+      const output = lastFrame();
+      // Line numbers should not be present
+      expect(output).not.toMatch(/^\s*\d+\s*[-+]/m);
+      // But the content should still be there
+      expect(output).toContain('old line 1');
+      expect(output).toContain('new line 1');
+      expect(output).toContain('context line 2');
+    });
   });
 });

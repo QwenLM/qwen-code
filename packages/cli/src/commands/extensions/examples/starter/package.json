@@ -1,0 +1,18 @@
+{
+  "name": "starter-example",
+  "version": "1.0.0",
+  "description": "Complete example Qwen Code extension (context, agent, command, skill, and MCP server)",
+  "type": "module",
+  "main": "example.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "~5.4.5",
+    "@types/node": "^20.11.25"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "zod": "^3.22.4"
+  }
+}

@@ -4,66 +4,140 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import { StreamingState } from '../types.js';
-
-export interface UseMessageQueueOptions {
-  streamingState: StreamingState;
-  submitQuery: (query: string) => void;
-}
+import { useCallback, useRef, useState } from 'react';
+import { isSlashCommand } from '../utils/commandUtils.js';
 
 export interface UseMessageQueueReturn {
   messageQueue: string[];
-  addMessage: (message: string) => void;
+  addMessage: (
+    message: string,
+    deferUntilIdle?: boolean,
+    submittedPrompt?: string,
+  ) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
+  /** Drain the entire queue joined with `\n\n`. For Ctrl+C / ESC / Up edit-restore. */
+  popAllMessages: () => QueuedSubmission | null;
+  /** Restore interrupted steer messages to the front of the queue. */
+  restoreMessages: (messages: string[]) => void;
+  /**
+   * Drain plain-text prompts that can steer the active turn. Pass true at the
+   * idle boundary to also drain messages explicitly deferred with Ctrl+Q.
+   * Slash commands stay queued except `/goal`, which must control active loops.
+   */
+  drainQueue: (includeDeferred?: boolean) => string[];
+  /** Drain the next idle turn while preserving eligible prompt provenance. */
+  popNextTurn: () => QueuedSubmission | null;
 }
 
-/**
- * Hook for managing message queuing during streaming responses.
- * Allows users to queue messages while the AI is responding and automatically
- * sends them when streaming completes.
- */
-export function useMessageQueue({
-  streamingState,
-  submitQuery,
-}: UseMessageQueueOptions): UseMessageQueueReturn {
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
+export interface QueuedSubmission {
+  modelText: string;
+  submittedPrompt?: string;
+}
 
-  // Add a message to the queue
-  const addMessage = useCallback((message: string) => {
-    const trimmedMessage = message.trim();
-    if (trimmedMessage.length > 0) {
-      setMessageQueue((prev) => [...prev, trimmedMessage]);
-    }
-  }, []);
+interface QueuedMessage extends QueuedSubmission {
+  deferUntilIdle: boolean;
+}
 
-  // Clear the entire queue
+export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
+
+function aggregateMessages(
+  messages: readonly QueuedMessage[],
+): QueuedSubmission {
+  const modelText = messages.map((message) => message.modelText).join('\n\n');
+  const submittedPrompts = messages.map((message) => message.submittedPrompt);
+  return submittedPrompts.every(
+    (submittedPrompt): submittedPrompt is string =>
+      submittedPrompt !== undefined,
+  )
+    ? { modelText, submittedPrompt: submittedPrompts.join('\n\n') }
+    : { modelText };
+}
+
+export function useMessageQueue(): UseMessageQueueReturn {
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  // Synchronous mirror so non-React callbacks see the latest queue.
+  const queueRef = useRef<QueuedMessage[]>([]);
+
+  const addMessage = useCallback(
+    (message: string, deferUntilIdle = false, submittedPrompt?: string) => {
+      const modelText = message.trim();
+      if (modelText.length > 0) {
+        queueRef.current = [
+          ...queueRef.current,
+          { modelText, deferUntilIdle, submittedPrompt },
+        ];
+        setQueuedMessages(queueRef.current);
+      }
+    },
+    [],
+  );
+
   const clearQueue = useCallback(() => {
-    setMessageQueue([]);
+    queueRef.current = [];
+    setQueuedMessages([]);
   }, []);
 
-  // Get all queued messages as a single text string
   const getQueuedMessagesText = useCallback(() => {
-    if (messageQueue.length === 0) return '';
-    return messageQueue.join('\n\n');
-  }, [messageQueue]);
+    if (queuedMessages.length === 0) return '';
+    return queuedMessages.map(({ modelText }) => modelText).join('\n\n');
+  }, [queuedMessages]);
 
-  // Process queued messages when streaming becomes idle
-  useEffect(() => {
-    if (streamingState === StreamingState.Idle && messageQueue.length > 0) {
-      // Combine all messages with double newlines for clarity
-      const combinedMessage = messageQueue.join('\n\n');
-      // Clear the queue and submit
-      setMessageQueue([]);
-      submitQuery(combinedMessage);
-    }
-  }, [streamingState, messageQueue, submitQuery]);
+  const popAllMessages = useCallback((): QueuedSubmission | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    queueRef.current = [];
+    setQueuedMessages([]);
+    return aggregateMessages(current);
+  }, []);
+
+  const restoreMessages = useCallback((messages: string[]) => {
+    const restored = messages
+      .map((text) => text.trim())
+      .filter(Boolean)
+      .map((modelText) => ({ modelText, deferUntilIdle: false }));
+    if (restored.length === 0) return;
+    queueRef.current = [...restored, ...queueRef.current];
+    setQueuedMessages(queueRef.current);
+  }, []);
+
+  const drainQueue = useCallback((includeDeferred = false): string[] => {
+    const current = queueRef.current;
+    if (current.length === 0) return [];
+    const shouldDrain = (message: QueuedMessage) =>
+      (!isSlashCommand(message.modelText) ||
+        (!includeDeferred && GOAL_COMMAND_RE.test(message.modelText))) &&
+      (includeDeferred || !message.deferUntilIdle);
+    const drained = current.filter(shouldDrain);
+    if (drained.length === 0) return [];
+    const rest = current.filter((message) => !shouldDrain(message));
+    queueRef.current = rest;
+    setQueuedMessages(rest);
+    return drained.map(({ modelText }) => modelText);
+  }, []);
+
+  const popNextTurn = useCallback((): QueuedSubmission | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    const plainMessages = current.filter(
+      (message) => !isSlashCommand(message.modelText),
+    );
+    const messages = plainMessages.length > 0 ? plainMessages : [current[0]];
+    const selected = new Set(messages);
+    const rest = current.filter((message) => !selected.has(message));
+    queueRef.current = rest;
+    setQueuedMessages(rest);
+    return aggregateMessages(messages);
+  }, []);
 
   return {
-    messageQueue,
+    messageQueue: queuedMessages.map(({ modelText }) => modelText),
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    popAllMessages,
+    restoreMessages,
+    drainQueue,
+    popNextTurn,
   };
 }

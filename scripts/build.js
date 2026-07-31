@@ -30,9 +30,69 @@ if (!existsSync(join(root, 'node_modules'))) {
   execSync('npm install', { stdio: 'inherit', cwd: root });
 }
 
-// build all workspaces/packages
+// build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
-execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root });
+
+// --cli-only: skip packages not needed by the CLI bundle
+// (webui, web-shell, vscode-ide-companion are for IDE/web use only)
+const cliOnly = process.argv.includes('--cli-only');
+
+// Build in dependency order:
+// 1. core (foundation package, includes test-utils)
+// 2. web-templates (embeddable web templates - used by cli)
+// 3. channel-base (base channel infrastructure - used by channel adapters and cli)
+// 4. channel adapters (depend on channel-base)
+// 5. audio-capture (native microphone backend used by cli)
+// 6. acp-bridge (depends on core - used by cli)
+// 7. sdk (build-time devDep on acp-bridge for shared constants, used by cli channel worker)
+// 8. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
+// 9. webui (shared UI components - used by vscode companion)
+// 10. web-shell (depends on webui and sdk)
+// 11. vscode-ide-companion (depends on webui)
+// 12. external-context (private Qwen extension)
+const buildOrder = [
+  'packages/core',
+  'packages/web-templates',
+  'packages/channels/base',
+  'packages/channels/telegram',
+  'packages/channels/weixin',
+  'packages/channels/dingtalk',
+  'packages/channels/wecom',
+  'packages/channels/feishu',
+  'packages/channels/qqbot',
+  'packages/channels/github',
+  'packages/channels/plugin-example',
+  'packages/audio-capture',
+  'packages/acp-bridge',
+  'packages/sdk-typescript',
+  'packages/cli',
+  ...(cliOnly
+    ? []
+    : [
+        'packages/webui',
+        'packages/web-shell',
+        'packages/vscode-ide-companion',
+        'packages/chrome-extension',
+        'integrations/external-context',
+      ]),
+];
+
+for (const workspace of buildOrder) {
+  const command =
+    workspace === 'packages/audio-capture'
+      ? `npm run build:ts --workspace=${workspace}`
+      : `npm run build --workspace=${workspace}`;
+  execSync(command, { stdio: 'inherit', cwd: root });
+
+  // After cli is built, generate the JSON Schema for settings
+  // so the vscode-ide-companion extension can provide IntelliSense
+  if (workspace === 'packages/cli') {
+    execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
+      stdio: 'inherit',
+      cwd: root,
+    });
+  }
+}
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above

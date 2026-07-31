@@ -12,54 +12,137 @@ export const DEFAULT_DIFF_OPTIONS: Diff.PatchOptions = {
   ignoreWhitespace: true,
 };
 
+/**
+ * Returns true when the unified diff patch string contains at least one hunk.
+ */
+export function hasHunks(patch: string): boolean {
+  return patch.includes('\n@@ ');
+}
+
+/**
+ * Creates a unified diff patch with smart whitespace handling.
+ *
+ * Uses ignoreWhitespace:true first to produce clean diffs when content and
+ * whitespace change together. Falls back to ignoreWhitespace:false when no
+ * hunks are found, so that whitespace-only edits (e.g. re-indentation) still
+ * produce a visible diff instead of "No changes detected".
+ */
+export function createPatchSmart(
+  filename: string,
+  oldStr: string,
+  newStr: string,
+  oldHeader?: string,
+  newHeader?: string,
+): string {
+  const cleanPatch = Diff.createPatch(
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    DEFAULT_DIFF_OPTIONS,
+  );
+
+  if (hasHunks(cleanPatch)) {
+    return cleanPatch;
+  }
+
+  return Diff.createPatch(filename, oldStr, newStr, oldHeader, newHeader, {
+    ...DEFAULT_DIFF_OPTIONS,
+    ignoreWhitespace: false,
+  });
+}
+
+function structuredPatchSmart(
+  filename: string,
+  oldStr: string,
+  newStr: string,
+  oldHeader?: string,
+  newHeader?: string,
+): Diff.ParsedDiff {
+  const result = Diff.structuredPatch(
+    filename,
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    DEFAULT_DIFF_OPTIONS,
+  );
+
+  if (result.hunks.length > 0) {
+    return result;
+  }
+
+  return Diff.structuredPatch(
+    filename,
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    {
+      ...DEFAULT_DIFF_OPTIONS,
+      ignoreWhitespace: false,
+    },
+  );
+}
+
 export function getDiffStat(
   fileName: string,
   oldStr: string,
   aiStr: string,
   userStr: string,
 ): DiffStat {
-  const countLines = (patch: Diff.ParsedDiff) => {
-    let added = 0;
-    let removed = 0;
+  const getStats = (patch: Diff.ParsedDiff) => {
+    let addedLines = 0;
+    let removedLines = 0;
+    let addedChars = 0;
+    let removedChars = 0;
+
     patch.hunks.forEach((hunk: Diff.Hunk) => {
       hunk.lines.forEach((line: string) => {
         if (line.startsWith('+')) {
-          added++;
+          addedLines++;
+          addedChars += line.length - 1;
         } else if (line.startsWith('-')) {
-          removed++;
+          removedLines++;
+          removedChars += line.length - 1;
         }
       });
     });
-    return { added, removed };
+    return { addedLines, removedLines, addedChars, removedChars };
   };
 
-  const patch = Diff.structuredPatch(
-    fileName,
+  const modelPatch = structuredPatchSmart(
     fileName,
     oldStr,
     aiStr,
     'Current',
     'Proposed',
-    DEFAULT_DIFF_OPTIONS,
   );
-  const { added: aiAddedLines, removed: aiRemovedLines } = countLines(patch);
+  const modelStats = getStats(modelPatch);
 
-  const userPatch = Diff.structuredPatch(
-    fileName,
-    fileName,
-    aiStr,
-    userStr,
-    'Proposed',
-    'User',
-    DEFAULT_DIFF_OPTIONS,
-  );
-  const { added: userAddedLines, removed: userRemovedLines } =
-    countLines(userPatch);
+  const userStats =
+    aiStr === userStr
+      ? {
+          addedLines: 0,
+          removedLines: 0,
+          addedChars: 0,
+          removedChars: 0,
+        }
+      : getStats(
+          structuredPatchSmart(fileName, aiStr, userStr, 'Proposed', 'User'),
+        );
 
   return {
-    ai_added_lines: aiAddedLines,
-    ai_removed_lines: aiRemovedLines,
-    user_added_lines: userAddedLines,
-    user_removed_lines: userRemovedLines,
+    model_added_lines: modelStats.addedLines,
+    model_removed_lines: modelStats.removedLines,
+    model_added_chars: modelStats.addedChars,
+    model_removed_chars: modelStats.removedChars,
+    user_added_lines: userStats.addedLines,
+    user_removed_lines: userStats.removedLines,
+    user_added_chars: userStats.addedChars,
+    user_removed_chars: userStats.removedChars,
   };
 }

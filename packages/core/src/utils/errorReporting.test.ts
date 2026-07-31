@@ -5,78 +5,124 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { reportError } from './errorReporting.js';
 
-// Use a type alias for SpyInstance as it's not directly exported
-type SpyInstance = ReturnType<typeof vi.spyOn>;
+const debugLoggerSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+}));
+
+// Mock the debugLogger
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    error: debugLoggerSpy.error,
+    warn: debugLoggerSpy.warn,
+    info: debugLoggerSpy.info,
+    debug: debugLoggerSpy.debug,
+  }),
+}));
 
 describe('reportError', () => {
-  let consoleErrorSpy: SpyInstance;
-  let testDir: string;
-  const MOCK_TIMESTAMP = '2025-01-01T00-00-00-000Z';
-
-  beforeEach(async () => {
-    // Create a temporary directory for logs
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemini-report-test-'));
+  beforeEach(() => {
     vi.resetAllMocks();
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(Date.prototype, 'toISOString').mockReturnValue(MOCK_TIMESTAMP);
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
-    // Clean up the temporary directory
-    await fs.rm(testDir, { recursive: true, force: true });
   });
 
-  const getExpectedReportPath = (type: string) =>
-    path.join(testDir, `gemini-client-error-${type}-${MOCK_TIMESTAMP}.json`);
-
-  it('should generate a report and log the path', async () => {
+  it('should not throw when called with a standard error', async () => {
     const error = new Error('Test error');
     error.stack = 'Test stack';
     const baseMessage = 'An error occurred.';
     const context = { data: 'test context' };
     const type = 'test-type';
-    const expectedReportPath = getExpectedReportPath(type);
 
-    await reportError(error, baseMessage, context, type, testDir);
+    await expect(
+      reportError(error, baseMessage, context, type),
+    ).resolves.not.toThrow();
+    expect(debugLoggerSpy.error).toHaveBeenCalled();
+    expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+      `${baseMessage} [${type}]`,
+      expect.any(String),
+    );
+  });
 
-    // Verify the file was written
-    const reportContent = await fs.readFile(expectedReportPath, 'utf-8');
-    const parsedReport = JSON.parse(reportContent);
+  it('summarizes context instead of logging raw prompt contents', async () => {
+    const error = new Error('API failed');
+    const baseMessage = 'Error generating text content via API.';
+    const context = [
+      {
+        role: 'user',
+        parts: [{ text: 'secret prompt that should not be in debug logs' }],
+      },
+    ];
 
-    expect(parsedReport).toEqual({
-      error: { message: 'Test error', stack: 'Test stack' },
-      context,
+    await reportError(error, baseMessage, context, 'generateText-api');
+
+    const report = String(debugLoggerSpy.error.mock.calls[0]?.[1]);
+    expect(report).not.toContain('secret prompt');
+    expect(report).not.toContain('"context"');
+    expect(report).toContain('"contextSummary"');
+    expect(report).toContain('"kind": "array"');
+    expect(report).toContain('"itemCount": 1');
+  });
+
+  it('summarizes object context without logging raw request contents', async () => {
+    const error = new Error('API failed');
+    const baseMessage = 'Error generating text content via API.';
+    const context = {
+      requestContents: [
+        {
+          role: 'user',
+          parts: [{ text: 'secret object prompt' }],
+        },
+      ],
+      requestConfig: { apiKey: 'secret-api-key' },
+    };
+
+    await reportError(error, baseMessage, context, 'generateText-api');
+
+    const report = String(debugLoggerSpy.error.mock.calls[0]?.[1]);
+    expect(report).not.toContain('secret object prompt');
+    expect(report).not.toContain('secret-api-key');
+    expect(report).not.toContain('"context"');
+    expect(report).toContain('"contextSummary"');
+    expect(report).toContain('"kind": "object"');
+    expect(report).toContain('"requestContents"');
+    expect(report).toContain('"requestConfig"');
+  });
+
+  it('preserves explicitly summarized context', async () => {
+    const error = new Error('API failed');
+    const context = {
+      history: { rawLength: 12, tail: [] },
+      request: { partCount: 1, textPreview: 'safe preview' },
+    };
+
+    await reportError(error, 'Error when talking to API', context, 'turn', {
+      contextAlreadySummarized: true,
     });
 
-    // Verify the console log
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Full report available at: ${expectedReportPath}`,
-    );
+    const report = String(debugLoggerSpy.error.mock.calls[0]?.[1]);
+    expect(report).toContain('"rawLength": 12');
+    expect(report).toContain('"textPreview": "safe preview"');
+    expect(report).not.toContain('"keys"');
   });
 
   it('should handle errors that are plain objects with a message property', async () => {
     const error = { message: 'Test plain object error' };
     const baseMessage = 'Another error.';
     const type = 'general';
-    const expectedReportPath = getExpectedReportPath(type);
 
-    await reportError(error, baseMessage, undefined, type, testDir);
-
-    const reportContent = await fs.readFile(expectedReportPath, 'utf-8');
-    const parsedReport = JSON.parse(reportContent);
-
-    expect(parsedReport).toEqual({
-      error: { message: 'Test plain object error' },
-    });
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Full report available at: ${expectedReportPath}`,
+    await expect(
+      reportError(error, baseMessage, undefined, type),
+    ).resolves.not.toThrow();
+    expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+      `${baseMessage} [${type}]`,
+      expect.any(String),
     );
   });
 
@@ -84,89 +130,28 @@ describe('reportError', () => {
     const error = 'Just a string error';
     const baseMessage = 'String error occurred.';
     const type = 'general';
-    const expectedReportPath = getExpectedReportPath(type);
 
-    await reportError(error, baseMessage, undefined, type, testDir);
-
-    const reportContent = await fs.readFile(expectedReportPath, 'utf-8');
-    const parsedReport = JSON.parse(reportContent);
-
-    expect(parsedReport).toEqual({
-      error: { message: 'Just a string error' },
-    });
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Full report available at: ${expectedReportPath}`,
+    await expect(
+      reportError(error, baseMessage, undefined, type),
+    ).resolves.not.toThrow();
+    expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+      `${baseMessage} [${type}]`,
+      expect.any(String),
     );
   });
 
-  it('should log fallback message if writing report fails', async () => {
-    const error = new Error('Main error');
-    const baseMessage = 'Failed operation.';
-    const context = ['some context'];
-    const type = 'general';
-    const nonExistentDir = path.join(testDir, 'non-existent-dir');
-
-    await reportError(error, baseMessage, context, type, nonExistentDir);
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Additionally, failed to write detailed error report:`,
-      expect.any(Error), // The actual write error
-    );
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Original error that triggered report generation:',
-      error,
-    );
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Original context:', context);
-  });
-
-  it('should handle stringification failure of report content (e.g. BigInt in context)', async () => {
+  it('should not stringify raw context when context contains unsupported values', async () => {
     const error = new Error('Main error');
     error.stack = 'Main stack';
     const baseMessage = 'Failed operation with BigInt.';
     const context = { a: BigInt(1) }; // BigInt cannot be stringified by JSON.stringify
-    const type = 'bigint-fail';
-    const stringifyError = new TypeError(
-      'Do not know how to serialize a BigInt',
-    );
-    const expectedMinimalReportPath = getExpectedReportPath(type);
 
-    // Simulate JSON.stringify throwing an error for the full report
-    const originalJsonStringify = JSON.stringify;
-    let callCount = 0;
-    vi.spyOn(JSON, 'stringify').mockImplementation((value, replacer, space) => {
-      callCount++;
-      if (callCount === 1) {
-        // First call is for the full report content
-        throw stringifyError;
-      }
-      // Subsequent calls (for minimal report) should succeed
-      return originalJsonStringify(value, replacer, space);
-    });
-
-    await reportError(error, baseMessage, context, type, testDir);
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Could not stringify report content (likely due to context):`,
-      stringifyError,
-    );
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Original error that triggered report generation:',
-      error,
-    );
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Original context could not be stringified or included in report.',
-    );
-
-    // Check that it writes a minimal report
-    const reportContent = await fs.readFile(expectedMinimalReportPath, 'utf-8');
-    const parsedReport = JSON.parse(reportContent);
-    expect(parsedReport).toEqual({
-      error: { message: error.message, stack: error.stack },
-    });
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Partial report (excluding context) available at: ${expectedMinimalReportPath}`,
+    await expect(
+      reportError(error, baseMessage, context, 'bigint-fail'),
+    ).resolves.not.toThrow();
+    expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+      `${baseMessage} [bigint-fail]`,
+      expect.stringContaining('"contextSummary"'),
     );
   });
 
@@ -175,19 +160,13 @@ describe('reportError', () => {
     error.stack = 'No context stack';
     const baseMessage = 'Simple error.';
     const type = 'general';
-    const expectedReportPath = getExpectedReportPath(type);
 
-    await reportError(error, baseMessage, undefined, type, testDir);
-
-    const reportContent = await fs.readFile(expectedReportPath, 'utf-8');
-    const parsedReport = JSON.parse(reportContent);
-
-    expect(parsedReport).toEqual({
-      error: { message: 'Error without context', stack: 'No context stack' },
-    });
-
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      `${baseMessage} Full report available at: ${expectedReportPath}`,
+    await expect(
+      reportError(error, baseMessage, undefined, type),
+    ).resolves.not.toThrow();
+    expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+      `${baseMessage} [${type}]`,
+      expect.any(String),
     );
   });
 });

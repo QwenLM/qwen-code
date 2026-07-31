@@ -4,18 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 import { listMcpServers } from './list.js';
 import { loadSettings } from '../../config/settings.js';
-import { loadExtensions } from '../../config/extension.js';
-import { createTransport } from '@qwen-code/qwen-code-core';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
+import { loadMcpApprovals } from '../../config/mcpApprovals.js';
+import { createTransport, ExtensionManager } from '@qwen-code/qwen-code-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
+}));
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn(),
 }));
-vi.mock('../../config/extension.js', () => ({
-  loadExtensions: vi.fn(),
+vi.mock('../../config/mcpServers.js', () => ({
+  assembleMcpServers: vi.fn((servers) => servers ?? {}),
+}));
+vi.mock('../../config/mcpApprovals.js', () => ({
+  loadMcpApprovals: vi.fn(() => ({
+    getState: vi.fn(() => 'approved'),
+  })),
+}));
+vi.mock('../../config/trustedFolders.js', () => ({
+  isWorkspaceTrusted: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createTransport: vi.fn(),
@@ -24,40 +43,42 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     CONNECTING: 'CONNECTING',
     DISCONNECTED: 'DISCONNECTED',
   },
-  Storage: vi.fn().mockImplementation((_cwd: string) => ({
-    getGlobalSettingsPath: () => '/tmp/qwen/settings.json',
-    getWorkspaceSettingsPath: () => '/tmp/qwen/workspace-settings.json',
-    getProjectTempDir: () => '/test/home/.qwen/tmp/mocked_hash',
-  })),
-  GEMINI_CONFIG_DIR: '.qwen',
+  ExtensionManager: vi.fn(),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+  isGatedMcpScope: (scope: string | undefined) =>
+    scope === 'project' || scope === 'workspace',
 }));
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
 
-const mockedLoadSettings = loadSettings as vi.Mock;
-const mockedLoadExtensions = loadExtensions as vi.Mock;
-const mockedCreateTransport = createTransport as vi.Mock;
-const MockedClient = Client as vi.Mock;
+const mockedLoadSettings = loadSettings as Mock;
+const mockedAssembleMcpServers = assembleMcpServers as Mock;
+const mockedLoadMcpApprovals = loadMcpApprovals as Mock;
+const mockedIsWorkspaceTrusted = isWorkspaceTrusted as Mock;
+const mockedCreateTransport = createTransport as Mock;
+const MockedExtensionManager = ExtensionManager as Mock;
+const MockedClient = Client as Mock;
 
 interface MockClient {
-  connect: vi.Mock;
-  ping: vi.Mock;
-  close: vi.Mock;
+  connect: Mock;
+  ping: Mock;
+  close: Mock;
 }
 
 interface MockTransport {
-  close: vi.Mock;
+  close: Mock;
 }
 
 describe('mcp list command', () => {
-  let consoleSpy: vi.SpyInstance;
   let mockClient: MockClient;
   let mockTransport: MockTransport;
+  let mockExtensionManager: {
+    refreshCache: Mock;
+    getLoadedExtensions: Mock;
+  };
 
   beforeEach(() => {
     vi.resetAllMocks();
-
-    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    mockWriteStdoutLine.mockClear();
 
     mockTransport = { close: vi.fn() };
     mockClient = {
@@ -66,13 +87,22 @@ describe('mcp list command', () => {
       close: vi.fn(),
     };
 
+    mockExtensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      getLoadedExtensions: vi.fn().mockReturnValue([]),
+    };
+
     MockedClient.mockImplementation(() => mockClient);
     mockedCreateTransport.mockResolvedValue(mockTransport);
-    mockedLoadExtensions.mockReturnValue([]);
-  });
-
-  afterEach(() => {
-    consoleSpy.mockRestore();
+    MockedExtensionManager.mockImplementation(() => mockExtensionManager);
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
+    mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
+    mockedLoadMcpApprovals.mockReturnValue({
+      getState: vi.fn(() => 'approved'),
+    });
   });
 
   it('should display message when no servers configured', async () => {
@@ -80,7 +110,25 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith('No MCP servers configured.');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No MCP servers configured.',
+    );
+  });
+
+  it('passes explicit untrusted workspace state to the extension manager', async () => {
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: false,
+      source: 'file',
+    });
+
+    await listMcpServers();
+
+    expect(MockedExtensionManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isWorkspaceTrusted: false,
+      }),
+    );
   });
 
   it('should display different server types with connected status', async () => {
@@ -99,18 +147,20 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith('Configured MCP servers:\n');
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Configured MCP servers:\n',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'stdio-server: /path/to/server arg1 (stdio) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'sse-server: https://example.com/sse (sse) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'http-server: https://example.com/http (http) - Connected',
       ),
@@ -130,7 +180,7 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'test-server: /test/server  (stdio) - Disconnected',
       ),
@@ -144,8 +194,9 @@ describe('mcp list command', () => {
       },
     });
 
-    mockedLoadExtensions.mockReturnValue([
+    mockExtensionManager.getLoadedExtensions.mockReturnValue([
       {
+        isActive: true,
         config: {
           name: 'test-extension',
           mcpServers: { 'extension-server': { command: '/ext/server' } },
@@ -158,14 +209,59 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'config-server: /config/server  (stdio) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'extension-server: /ext/server  (stdio) - Connected',
+      ),
+    );
+  });
+
+  it('shows a pending project server without connecting', async () => {
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+    mockedAssembleMcpServers.mockReturnValue({
+      'project-server': {
+        command: 'node',
+        args: ['server.js'],
+        scope: 'project',
+      },
+    });
+    mockedLoadMcpApprovals.mockReturnValue({
+      getState: vi.fn(() => 'pending'),
+    });
+
+    await listMcpServers();
+
+    expect(mockedCreateTransport).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'project-server: node server.js (stdio) - Pending approval',
+      ),
+    );
+  });
+
+  it('shows a rejected workspace server without connecting', async () => {
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+    mockedAssembleMcpServers.mockReturnValue({
+      'workspace-server': {
+        httpUrl: 'https://example.com/mcp',
+        scope: 'workspace',
+      },
+    });
+    mockedLoadMcpApprovals.mockReturnValue({
+      getState: vi.fn(() => 'rejected'),
+    });
+
+    await listMcpServers();
+
+    expect(mockedCreateTransport).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'workspace-server: https://example.com/mcp (http) - Rejected',
       ),
     );
   });

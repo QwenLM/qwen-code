@@ -50,6 +50,7 @@ export type VimAction = Extract<
   | { type: 'vim_delete_to_end_of_line' }
   | { type: 'vim_change_to_end_of_line' }
   | { type: 'vim_change_movement' }
+  | { type: 'vim_delete_movement' }
   | { type: 'vim_move_left' }
   | { type: 'vim_move_right' }
   | { type: 'vim_move_up' }
@@ -302,8 +303,8 @@ export function handleVimAction(
         }
 
         case 'j': {
-          // Down
-          const linesToChange = Math.min(count, totalLines - cursorRow);
+          // Down - change current line + count lines below (count + 1 total)
+          const linesToChange = Math.min(count + 1, totalLines - cursorRow);
           if (linesToChange > 0) {
             if (totalLines === 1) {
               const currentLine = state.lines[0] || '';
@@ -338,8 +339,8 @@ export function handleVimAction(
         }
 
         case 'k': {
-          // Up
-          const upLines = Math.min(count, cursorRow + 1);
+          // Up - change current line + count lines above (count + 1 total)
+          const upLines = Math.min(count + 1, cursorRow + 1);
           if (upLines > 0) {
             if (state.lines.length === 1) {
               const currentLine = state.lines[0] || '';
@@ -352,7 +353,7 @@ export function handleVimAction(
                 '',
               );
             } else {
-              const startRow = Math.max(0, cursorRow - count + 1);
+              const startRow = Math.max(0, cursorRow - count);
               const linesToChange = cursorRow - startRow + 1;
               const nextState = pushUndo(state);
               const { startOffset, endOffset } = getLineRangeOffsets(
@@ -391,6 +392,130 @@ export function handleVimAction(
         case 'l': {
           // Right
           // Change N characters to the right
+          return replaceRangeInternal(
+            pushUndo(state),
+            cursorRow,
+            cursorCol,
+            cursorRow,
+            Math.min(cpLen(lines[cursorRow] || ''), cursorCol + count),
+            '',
+          );
+        }
+
+        default:
+          return state;
+      }
+    }
+
+    case 'vim_delete_movement': {
+      const { movement, count } = action.payload;
+      const totalLines = lines.length;
+
+      switch (movement) {
+        case 'h': {
+          // Left
+          // Delete N characters to the left
+          const startCol = Math.max(0, cursorCol - count);
+          return replaceRangeInternal(
+            pushUndo(state),
+            cursorRow,
+            startCol,
+            cursorRow,
+            cursorCol,
+            '',
+          );
+        }
+
+        case 'j': {
+          // Down - delete current line + count lines below (count + 1 total)
+          const linesToDelete = Math.min(count + 1, totalLines - cursorRow);
+          if (linesToDelete > 0) {
+            if (totalLines === 1) {
+              const currentLine = state.lines[0] || '';
+              return replaceRangeInternal(
+                pushUndo(state),
+                0,
+                0,
+                0,
+                cpLen(currentLine),
+                '',
+              );
+            } else {
+              const nextState = pushUndo(state);
+              const { startOffset, endOffset } = getLineRangeOffsets(
+                cursorRow,
+                linesToDelete,
+                nextState.lines,
+              );
+              const { startRow, startCol, endRow, endCol } =
+                getPositionFromOffsets(startOffset, endOffset, nextState.lines);
+              return replaceRangeInternal(
+                nextState,
+                startRow,
+                startCol,
+                endRow,
+                endCol,
+                '',
+              );
+            }
+          }
+          return state;
+        }
+
+        case 'k': {
+          // Up - delete current line + count lines above (count + 1 total)
+          const upLines = Math.min(count + 1, cursorRow + 1);
+          if (upLines > 0) {
+            if (state.lines.length === 1) {
+              const currentLine = state.lines[0] || '';
+              return replaceRangeInternal(
+                pushUndo(state),
+                0,
+                0,
+                0,
+                cpLen(currentLine),
+                '',
+              );
+            } else {
+              const startRow = Math.max(0, cursorRow - count);
+              const linesToDelete = cursorRow - startRow + 1;
+              const nextState = pushUndo(state);
+              const { startOffset, endOffset } = getLineRangeOffsets(
+                startRow,
+                linesToDelete,
+                nextState.lines,
+              );
+              const {
+                startRow: newStartRow,
+                startCol,
+                endRow,
+                endCol,
+              } = getPositionFromOffsets(
+                startOffset,
+                endOffset,
+                nextState.lines,
+              );
+              const resultState = replaceRangeInternal(
+                nextState,
+                newStartRow,
+                startCol,
+                endRow,
+                endCol,
+                '',
+              );
+              return {
+                ...resultState,
+                cursorRow: startRow,
+                cursorCol: 0,
+              };
+            }
+          }
+          return state;
+        }
+
+        case 'l': {
+          // Right
+          // Delete N characters to the right
           return replaceRangeInternal(
             pushUndo(state),
             cursorRow,

@@ -5,14 +5,12 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
-import { Colors } from '../colors.js';
+import { Text } from 'ink';
+import { theme } from '../semantic-colors.js';
 
 export const ShellModeIndicator: React.FC = () => (
-  <Box>
-    <Text color={Colors.AccentYellow}>
-      shell mode enabled
-      <Text color={Colors.Gray}> (esc to disable)</Text>
-    </Text>
-  </Box>
+  <Text color={theme.ui.symbol}>
+    shell mode enabled
+    <Text color={theme.text.secondary}> (esc to disable)</Text>
+  </Text>
 );

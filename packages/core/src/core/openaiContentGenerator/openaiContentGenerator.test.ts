@@ -5,6 +5,27 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Mock the request tokenizer module BEFORE importing the class that uses it
+const mockTokenizer = {
+  calculateTokens: vi.fn().mockResolvedValue({
+    totalTokens: 50,
+    breakdown: {
+      textTokens: 50,
+      imageTokens: 0,
+      audioTokens: 0,
+      otherTokens: 0,
+    },
+    processingTime: 1,
+  }),
+  dispose: vi.fn(),
+};
+
+vi.mock('../../../utils/request-tokenizer/index.js', () => ({
+  RequestTokenEstimator: vi.fn(() => mockTokenizer),
+}));
+
+// Now import the modules that depend on the mocked modules
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
@@ -14,14 +35,6 @@ import type {
 } from '@google/genai';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import type OpenAI from 'openai';
-
-// Mock tiktoken
-vi.mock('tiktoken', () => ({
-  get_encoding: vi.fn().mockReturnValue({
-    encode: vi.fn().mockReturnValue(new Array(50)), // Mock 50 tokens
-    free: vi.fn(),
-  }),
-}));
 
 describe('OpenAIContentGenerator (Refactored)', () => {
   let generator: OpenAIContentGenerator;
@@ -76,6 +89,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
         },
       } as unknown as OpenAI),
       buildRequest: vi.fn().mockImplementation((req) => req),
+      getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
     };
 
     generator = new OpenAIContentGenerator(
@@ -110,7 +124,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
   });
 
   describe('countTokens', () => {
-    it('should count tokens using tiktoken', async () => {
+    it('should count tokens using character-based estimation', async () => {
       const request: CountTokensParameters = {
         contents: [{ role: 'user', parts: [{ text: 'Hello world' }] }],
         model: 'gpt-4',
@@ -118,26 +132,27 @@ describe('OpenAIContentGenerator (Refactored)', () => {
 
       const result = await generator.countTokens(request);
 
-      expect(result.totalTokens).toBe(50); // Mocked value
+      // 'Hello world' = 11 ASCII chars
+      // 11 / 4 = 2.75 -> ceil = 3 tokens
+      expect(result.totalTokens).toBe(3);
     });
 
-    it('should fall back to character approximation if tiktoken fails', async () => {
-      // Mock tiktoken to throw error
-      vi.doMock('tiktoken', () => ({
-        get_encoding: vi.fn().mockImplementation(() => {
-          throw new Error('Tiktoken failed');
-        }),
-      }));
-
+    it('should handle multimodal content', async () => {
       const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello world' }] }],
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'Hello' }, { text: ' world' }],
+          },
+        ],
         model: 'gpt-4',
       };
 
       const result = await generator.countTokens(request);
 
-      // Should use character approximation (content length / 4)
-      expect(result.totalTokens).toBeGreaterThan(0);
+      // Parts are combined for estimation:
+      // 'Hello world' = 11 ASCII chars -> 11/4 = 2.75 -> ceil = 3 tokens
+      expect(result.totalTokens).toBe(3);
     });
   });
 
@@ -146,20 +161,46 @@ describe('OpenAIContentGenerator (Refactored)', () => {
       // This test verifies the method exists and can be called
       expect(typeof generator.embedContent).toBe('function');
     });
+
+    it('should redact proxy credentials from embedding request errors', async () => {
+      const generatorWithClient = generator as unknown as {
+        pipeline: {
+          client: {
+            embeddings: {
+              create: ReturnType<typeof vi.fn>;
+            };
+          };
+        };
+      };
+      generatorWithClient.pipeline.client.embeddings.create.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+
+      await expect(
+        generator.embedContent({
+          model: 'text-embedding-ada-002',
+          contents: 'hello',
+        }),
+      ).rejects.toThrow(
+        'OpenAI API error: connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+    });
   });
 
   describe('shouldSuppressErrorLogging', () => {
-    it('should return false by default', () => {
-      // Create a test subclass to access the protected method
-      class TestGenerator extends OpenAIContentGenerator {
-        testShouldSuppressErrorLogging(
-          error: unknown,
-          request: GenerateContentParameters,
-        ): boolean {
-          return this.shouldSuppressErrorLogging(error, request);
-        }
+    // Create a test subclass to access the protected method
+    class TestGenerator extends OpenAIContentGenerator {
+      testShouldSuppressErrorLogging(
+        error: unknown,
+        request: GenerateContentParameters,
+      ): boolean {
+        return this.shouldSuppressErrorLogging(error, request);
       }
+    }
 
+    let testGenerator: TestGenerator;
+
+    beforeEach(() => {
       const contentGeneratorConfig = {
         model: 'gpt-4',
         apiKey: 'test-key',
@@ -188,14 +229,17 @@ describe('OpenAIContentGenerator (Refactored)', () => {
           },
         } as unknown as OpenAI),
         buildRequest: vi.fn().mockImplementation((req) => req),
+        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
       };
 
-      const testGenerator = new TestGenerator(
+      testGenerator = new TestGenerator(
         contentGeneratorConfig,
         mockConfig,
         mockProvider,
       );
+    });
 
+    it('should return false for regular errors', () => {
       const request: GenerateContentParameters = {
         contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
         model: 'gpt-4',
@@ -209,8 +253,114 @@ describe('OpenAIContentGenerator (Refactored)', () => {
       expect(result).toBe(false);
     });
 
+    it('should return true for AbortError when signal is also aborted (user cancellation)', () => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: {
+          abortSignal: abortController.signal,
+        },
+      };
+
+      // Create an AbortError with aborted signal - this is user-initiated
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        abortError,
+        request,
+      );
+
+      expect(result).toBe(true);
+    });
+
+    it('should return false for AbortError when signal is NOT aborted (network abort)', () => {
+      const abortController = new AbortController();
+      // Signal is NOT aborted - this simulates a network abort
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: {
+          abortSignal: abortController.signal,
+        },
+      };
+
+      // AbortError but signal not aborted - could be network issue
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        abortError,
+        request,
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for AbortError without any signal', () => {
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      // AbortError but no signal at all - unknown source
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        abortError,
+        request,
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for non-AbortError even when signal is aborted', () => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: {
+          abortSignal: abortController.signal,
+        },
+      };
+
+      // Regular error even though signal is aborted - should still be logged
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        new Error('Network error'),
+        request,
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for errors with non-aborted signal', () => {
+      const abortController = new AbortController();
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: {
+          abortSignal: abortController.signal,
+        },
+      };
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        new Error('Network error'),
+        request,
+      );
+
+      expect(result).toBe(false);
+    });
+
     it('should allow subclasses to override error suppression behavior', async () => {
-      class TestGenerator extends OpenAIContentGenerator {
+      class CustomTestGenerator extends OpenAIContentGenerator {
         testShouldSuppressErrorLogging(
           error: unknown,
           request: GenerateContentParameters,
@@ -254,9 +404,10 @@ describe('OpenAIContentGenerator (Refactored)', () => {
           },
         } as unknown as OpenAI),
         buildRequest: vi.fn().mockImplementation((req) => req),
+        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
       };
 
-      const testGenerator = new TestGenerator(
+      const customGenerator = new CustomTestGenerator(
         contentGeneratorConfig,
         mockConfig,
         mockProvider,
@@ -267,7 +418,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
         model: 'gpt-4',
       };
 
-      const result = testGenerator.testShouldSuppressErrorLogging(
+      const result = customGenerator.testShouldSuppressErrorLogging(
         new Error('Test error'),
         request,
       );

@@ -1,0 +1,11 @@
+{
+  "name": "toy-project",
+  "version": "1.0.0",
+  "description": "Minimal toy project for testing",
+  "scripts": {
+    "build": "echo 'Build complete!'"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT"
+}

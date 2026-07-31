@@ -1,0 +1,28 @@
+.status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+
+.spinner {
+  color: var(--foreground);
+}
+
+.label {
+  color: var(--streaming-label-color);
+}
+
+.meta {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+@media (max-width: 700px) {
+  .label {
+    display: none;
+  }
+}

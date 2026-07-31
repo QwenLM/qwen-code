@@ -6,15 +6,21 @@
 
 import { useState, useEffect } from 'react';
 import type { Storage } from '@qwen-code/qwen-code-core';
-import { sessionId, Logger } from '@qwen-code/qwen-code-core';
+import { Logger } from '@qwen-code/qwen-code-core';
 
 /**
  * Hook to manage the logger instance.
  */
-export const useLogger = (storage: Storage) => {
+export const useLogger = (storage: Storage, sessionId: string) => {
   const [logger, setLogger] = useState<Logger | null>(null);
 
   useEffect(() => {
+    if (!sessionId) {
+      return;
+    }
+
+    let cancelled = false;
+
     const newLogger = new Logger(sessionId, storage);
     /**
      * Start async initialization, no need to await. Using await slows down the
@@ -24,10 +30,16 @@ export const useLogger = (storage: Storage) => {
     newLogger
       .initialize()
       .then(() => {
-        setLogger(newLogger);
+        if (!cancelled) {
+          setLogger(newLogger);
+        }
       })
       .catch(() => {});
-  }, [storage]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storage, sessionId]);
 
   return logger;
 };

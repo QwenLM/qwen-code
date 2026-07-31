@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import mock from 'mock-fs';
 import * as path from 'node:path';
+import sharp from 'sharp';
 import { WorkspaceContext } from './workspaceContext.js';
 import { readPathFromWorkspace } from './pathReader.js';
 import type { Config } from '../config/config.js';
@@ -20,6 +21,10 @@ const createMockConfig = (
   cwd: string,
   otherDirs: string[] = [],
   mockFileService?: FileDiscoveryService,
+  fileFilteringOptions?: {
+    respectGitIgnore: boolean;
+    respectQwenIgnore: boolean;
+  },
 ): Config => {
   const workspace = new WorkspaceContext(cwd, otherDirs);
   const fileSystemService = new StandardFileSystemService();
@@ -29,6 +34,16 @@ const createMockConfig = (
     getTargetDir: () => cwd,
     getFileSystemService: () => fileSystemService,
     getFileService: () => mockFileService,
+    getFileFilteringOptions: () =>
+      fileFilteringOptions ?? {
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      },
+    getTruncateToolOutputThreshold: () => 2500,
+    getTruncateToolOutputLines: () => 500,
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, pdf: true, audio: true, video: true },
+    }),
   } as unknown as Config;
 };
 
@@ -90,11 +105,17 @@ describe('readPathFromWorkspace', () => {
     expect(result).toEqual(['hello from cwd']);
   });
 
-  it('should read an image file and return it as inlineData (Part object)', async () => {
-    // Use a real PNG header for robustness
-    const imageData = Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-    ]);
+  it('should read an image file as overview text and inlineData', async () => {
+    const imageData = await sharp({
+      create: {
+        width: 20,
+        height: 10,
+        channels: 3,
+        background: '#306090',
+      },
+    })
+      .png()
+      .toBuffer();
     mock({
       [CWD]: {
         'image.png': imageData,
@@ -105,12 +126,18 @@ describe('readPathFromWorkspace', () => {
     } as unknown as FileDiscoveryService;
     const config = createMockConfig(CWD, [], mockFileService);
     const result = await readPathFromWorkspace('image.png', config);
-    // Expect [Part] for image content
+    // Expect overview text immediately followed by the bounded image.
     expect(result).toEqual([
       {
+        text: expect.stringContaining(
+          'Image overview: 20x10; oriented source: 20x10',
+        ),
+      },
+      {
         inlineData: {
-          mimeType: 'image/png',
-          data: imageData.toString('base64'),
+          mimeType: 'image/jpeg',
+          data: expect.any(String),
+          displayName: 'image.png',
         },
       },
     ]);
@@ -221,9 +248,16 @@ describe('readPathFromWorkspace', () => {
     });
 
     it('should handle mixed content and include files from subdirectories', async () => {
-      const imageData = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const imageData = await sharp({
+        create: {
+          width: 8,
+          height: 8,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toBuffer();
       mock({
         [CWD]: {
           'mixed-dir': {
@@ -259,8 +293,9 @@ describe('readPathFromWorkspace', () => {
       );
       expect(imagePart).toEqual({
         inlineData: {
-          mimeType: 'image/png',
-          data: imageData.toString('base64'),
+          mimeType: 'image/jpeg',
+          data: expect.any(String),
+          displayName: 'photo.png',
         },
       });
     });
@@ -300,7 +335,7 @@ describe('readPathFromWorkspace', () => {
         ['ignored.txt'],
         {
           respectGitIgnore: true,
-          respectGeminiIgnore: true,
+          respectQwenIgnore: true,
         },
       );
     });
@@ -333,6 +368,29 @@ describe('readPathFromWorkspace', () => {
       expect(resultText).not.toContain('invisible');
       expect(mockFileService.filterFiles).toHaveBeenCalled();
     });
+
+    it('should pass respectGitIgnore: false from config to filterFiles', async () => {
+      mock({
+        [CWD]: {
+          'ignored.txt': 'ignored content',
+        },
+      });
+      const mockFileService = {
+        filterFiles: vi.fn((files) => files),
+      } as unknown as FileDiscoveryService;
+      const config = createMockConfig(CWD, [], mockFileService, {
+        respectGitIgnore: false,
+        respectQwenIgnore: true,
+      });
+      await readPathFromWorkspace('ignored.txt', config);
+      expect(mockFileService.filterFiles).toHaveBeenCalledWith(
+        ['ignored.txt'],
+        {
+          respectGitIgnore: false,
+          respectQwenIgnore: true,
+        },
+      );
+    });
   });
 
   it('should throw an error for an absolute path outside the workspace', async () => {
@@ -361,8 +419,10 @@ describe('readPathFromWorkspace', () => {
     ).rejects.toThrow('Path not found in workspace: not-found.txt');
   });
 
-  // mock-fs permission simulation is unreliable on Windows.
-  it.skipIf(process.platform === 'win32')(
+  // mock-fs permission simulation is unreliable on Windows and when running as root.
+  it.skipIf(
+    process.platform === 'win32' || (process.getuid && process.getuid() === 0),
+  )(
     'should return an error string if reading a file with no permissions',
     async () => {
       mock({
@@ -387,9 +447,8 @@ describe('readPathFromWorkspace', () => {
     },
   );
 
-  it('should return an error string for files exceeding the size limit', async () => {
-    // Mock a file slightly larger than the 20MB limit defined in fileUtils.ts
-    const largeContent = 'a'.repeat(21 * 1024 * 1024); // 21MB
+  it('should truncate text files exceeding 10MB instead of failing', async () => {
+    const largeContent = 'a'.repeat(11 * 1024 * 1024); // 11MB
     mock({
       [CWD]: {
         'large.txt': largeContent,
@@ -401,7 +460,7 @@ describe('readPathFromWorkspace', () => {
     const config = createMockConfig(CWD, [], mockFileService);
     const result = await readPathFromWorkspace('large.txt', config);
     const textResult = result[0] as string;
-    // The error message comes directly from processSingleFileContent
-    expect(textResult).toBe('File size exceeds the 20MB limit.');
+    expect(textResult).toContain('a'.repeat(100));
+    expect(textResult).toContain('... [truncated]');
   });
 });

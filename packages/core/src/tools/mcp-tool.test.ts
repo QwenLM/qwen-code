@@ -8,11 +8,27 @@
 import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { DiscoveredMCPTool, generateValidName } from './mcp-tool.js'; // Added getStringifiedResultForDisplay
+import {
+  DiscoveredMCPTool,
+  generateValidName,
+  type McpDirectClient,
+} from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js'; // Added ToolConfirmationOutcome
+import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
+import {
+  MCPServerStatus,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from './mcp-client.js';
+import {
+  INVOCATION_CONTEXT_META_KEY,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
+
+vi.mock('node:fs/promises');
 
 // Mock @google/genai mcpToTool and CallableTool
 // We only need to mock the parts of CallableTool that DiscoveredMCPTool uses.
@@ -31,19 +47,42 @@ describe('generateValidName', () => {
   });
 
   it('should replace invalid characters with underscores', () => {
-    expect(generateValidName('invalid-name with spaces')).toBe(
-      'invalid-name_with_spaces',
+    const normalized = generateValidName('invalid-name with spaces');
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).not.toBe('invalid-name with spaces');
+  });
+
+  it('should normalize dotted MCP names for strict providers', () => {
+    const normalized = generateValidName(
+      'mcp__zybio__literature.search_pubmed',
+    );
+
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).not.toContain('.');
+    expect(normalized).toBe(
+      generateValidName('mcp__zybio__literature.search_pubmed'),
+    );
+    expect(generateValidName(normalized)).toBe(normalized);
+  });
+
+  it('should not collide after replacing unsupported characters', () => {
+    expect(generateValidName('mcp__zybio__literature.search_pubmed')).not.toBe(
+      generateValidName('mcp__zybio__literature_search_pubmed'),
     );
   });
 
   it('should truncate long names', () => {
-    expect(generateValidName('x'.repeat(80))).toBe(
-      'xxxxxxxxxxxxxxxxxxxxxxxxxxxx___xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    );
+    const name = 'x'.repeat(80);
+    const normalized = generateValidName(name);
+
+    expect(normalized).toHaveLength(63);
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).toBe(generateValidName(name));
+    expect(normalized).not.toBe(generateValidName(`${name}y`));
   });
 
   it('should handle names with only invalid characters', () => {
-    expect(generateValidName('!@#$%^&*()')).toBe('__________');
+    expect(generateValidName('!@#$%^&*()')).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
   });
 
   it('should handle names that are exactly 63 characters long', () => {
@@ -71,6 +110,115 @@ describe('DiscoveredMCPTool', () => {
 
   let tool: DiscoveredMCPTool;
 
+  describe('invocation context metadata', () => {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      originatorClientId: 'client-1',
+    };
+
+    const createDirectTool = (
+      mcpClient: McpDirectClient,
+      allowInvocationContext: boolean,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        allowInvocationContext,
+      );
+
+    const successfulClient = () =>
+      ({
+        callTool: vi.fn<McpDirectClient['callTool']>(async () => ({
+          content: [{ type: 'text', text: 'ok' }],
+        })),
+      }) satisfies McpDirectClient;
+
+    it('injects trusted request metadata for an allowed stdio tool', async () => {
+      const mcpClient = successfulClient();
+      const modelArguments = {
+        param: 'test',
+        _meta: {
+          [INVOCATION_CONTEXT_META_KEY]: { forged: true },
+        },
+      };
+
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(mcpClient, true)
+          .build(modelArguments)
+          .execute(new AbortController().signal),
+      );
+
+      expect(mcpClient.callTool).toHaveBeenCalledWith(
+        {
+          name: serverToolName,
+          arguments: modelArguments,
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+          },
+        },
+        undefined,
+        expect.objectContaining({ onprogress: expect.any(Function) }),
+      );
+    });
+
+    it.each([
+      { allowInvocationContext: false, runWithContext: true },
+      { allowInvocationContext: true, runWithContext: false },
+    ])(
+      'omits request metadata for $allowInvocationContext/$runWithContext',
+      async ({ allowInvocationContext, runWithContext }) => {
+        const mcpClient = successfulClient();
+        const execute = () =>
+          createDirectTool(mcpClient, allowInvocationContext)
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+
+        if (runWithContext) {
+          await runWithInvocationContext(invocationContext, execute);
+        } else {
+          await execute();
+        }
+
+        expect(
+          Object.hasOwn(
+            vi.mocked(mcpClient.callTool).mock.calls[0][0],
+            '_meta',
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('preserves the policy through qualification and trust clones', async () => {
+      const mcpClient = successfulClient();
+      const clonedTool = createDirectTool(mcpClient, true)
+        .asFullyQualifiedTool()
+        .withTrust(true);
+
+      await runWithInvocationContext(invocationContext, () =>
+        clonedTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+      });
+    });
+  });
+
   beforeEach(() => {
     mockCallTool.mockClear();
     mockToolMethod.mockClear();
@@ -81,37 +229,22 @@ describe('DiscoveredMCPTool', () => {
       baseDescription,
       inputSchema,
     );
-    // Clear allowlist before each relevant test, especially for shouldConfirmExecute
-    const invocation = tool.build({ param: 'mock' }) as any;
-    invocation.constructor.allowlist.clear();
   });
 
   afterEach(() => {
+    removeMCPServerStatus(serverName);
     vi.restoreAllMocks();
   });
 
   describe('constructor', () => {
     it('should set properties correctly', () => {
-      expect(tool.name).toBe(serverToolName);
-      expect(tool.schema.name).toBe(serverToolName);
+      const expectedName = `mcp__${serverName}__${serverToolName}`;
+      expect(tool.name).toBe(expectedName);
+      expect(tool.schema.name).toBe(expectedName);
       expect(tool.schema.description).toBe(baseDescription);
       expect(tool.schema.parameters).toBeUndefined();
       expect(tool.schema.parametersJsonSchema).toEqual(inputSchema);
       expect(tool.serverToolName).toBe(serverToolName);
-      expect(tool.timeout).toBeUndefined();
-    });
-
-    it('should accept and store a custom timeout', () => {
-      const customTimeout = 5000;
-      const toolWithTimeout = new DiscoveredMCPTool(
-        mockCallableToolInstance,
-        serverName,
-        serverToolName,
-        baseDescription,
-        inputSchema,
-        customTimeout,
-      );
-      expect(toolWithTimeout.timeout).toBe(customTimeout);
     });
   });
 
@@ -156,7 +289,7 @@ describe('DiscoveredMCPTool', () => {
       expect(toolResult.returnDisplay).toBe(stringifiedResponseContent);
     });
 
-    it('should handle empty result from getStringifiedResultForDisplay', async () => {
+    it('should handle empty result from getDisplayFromParts', async () => {
       const params = { param: 'testValue' };
       const mockMcpToolResponsePartsEmpty: Part[] = [];
       mockCallTool.mockResolvedValue(mockMcpToolResponsePartsEmpty);
@@ -164,7 +297,9 @@ describe('DiscoveredMCPTool', () => {
       const toolResult: ToolResult = await invocation.execute(
         new AbortController().signal,
       );
-      expect(toolResult.returnDisplay).toBe('```json\n[]\n```');
+      expect(toolResult.returnDisplay).toBe(
+        '[Error: Could not parse tool response]',
+      );
       expect(toolResult.llmContent).toEqual([
         { text: '[Error: Could not parse tool response]' },
       ]);
@@ -225,6 +360,47 @@ describe('DiscoveredMCPTool', () => {
         );
       },
     );
+
+    it('preserves typed images returned with an MCP tool error', async () => {
+      const mockMcpToolResponseParts: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              error: { isError: true },
+              content: [
+                { type: 'text', text: 'failure context' },
+                {
+                  type: 'image',
+                  data: 'ERROR_IMAGE_DATA',
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+
+      const invocation = tool.build({ param: 'error-image' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.error?.message).toContain('failure context');
+      expect(result.error?.message).not.toContain('ERROR_IMAGE_DATA');
+      expect(result.llmContent).toEqual([
+        { text: 'failure context' },
+        {
+          text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+        },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'ERROR_IMAGE_DATA',
+          },
+        },
+      ]);
+    });
 
     it.each([
       { isErrorValue: false, description: 'false (bool)' },
@@ -348,7 +524,9 @@ describe('DiscoveredMCPTool', () => {
           },
         },
       ]);
-      expect(toolResult.returnDisplay).toBe('[Audio: audio/mp3]');
+      expect(toolResult.returnDisplay).toBe(
+        `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/mp3]\n[audio/mp3]`,
+      );
     });
 
     it('should handle a ResourceLinkBlock response', async () => {
@@ -381,7 +559,7 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        '[Link to My Resource: file:///path/to/thing]',
+        'Resource Link: My Resource at file:///path/to/thing',
       );
     });
 
@@ -455,7 +633,7 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        '[Embedded Resource: application/octet-stream]',
+        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]\n[application/octet-stream]`,
       );
     });
 
@@ -498,7 +676,7 @@ describe('DiscoveredMCPTool', () => {
         { text: 'Second part.' },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        'First part.\n[Image: image/jpeg]\nSecond part.',
+        `First part.\n[Tool '${serverToolName}' provided the following image data with mime-type: image/jpeg]\n[image/jpeg]\nSecond part.`,
       );
     });
 
@@ -523,9 +701,7 @@ describe('DiscoveredMCPTool', () => {
       const toolResult = await invocation.execute(new AbortController().signal);
 
       expect(toolResult.llmContent).toEqual([{ text: 'Valid part.' }]);
-      expect(toolResult.returnDisplay).toBe(
-        'Valid part.\n[Unknown content type: future_block]',
-      );
+      expect(toolResult.returnDisplay).toBe('Valid part.');
     });
 
     it('should handle a complex mix of content block types', async () => {
@@ -583,167 +759,350 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        'Here is a resource.\n[Link to My Resource: file:///path/to/resource]\nEmbedded text content.\n[Image: image/jpeg]',
+        `Here is a resource.\nResource Link: My Resource at file:///path/to/resource\nEmbedded text content.\n[Tool '${serverToolName}' provided the following image data with mime-type: image/jpeg]\n[image/jpeg]`,
       );
+    });
+
+    describe('AbortSignal support', () => {
+      it('should abort immediately if signal is already aborted', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        controller.abort();
+
+        const invocation = tool.build(params);
+
+        await expect(invocation.execute(controller.signal)).rejects.toThrow(
+          'Tool call aborted',
+        );
+
+        // Tool should not be called if signal is already aborted
+        expect(mockCallTool).not.toHaveBeenCalled();
+      });
+
+      it('should abort during tool execution', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+
+        // Mock a delayed response to simulate long-running tool
+        mockCallTool.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(() => {
+                resolve([
+                  {
+                    functionResponse: {
+                      name: serverToolName,
+                      response: {
+                        content: [{ type: 'text', text: 'Success' }],
+                      },
+                    },
+                  },
+                ]);
+              }, 1000);
+            }),
+        );
+
+        const invocation = tool.build(params);
+        const promise = invocation.execute(controller.signal);
+
+        // Abort after a short delay to simulate cancellation during execution
+        setTimeout(() => controller.abort(), 50);
+
+        await expect(promise).rejects.toThrow('Tool call aborted');
+      });
+
+      it('should complete successfully if not aborted', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const successResponse = [
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [{ type: 'text', text: 'Success' }],
+              },
+            },
+          },
+        ];
+
+        mockCallTool.mockResolvedValue(successResponse);
+
+        const invocation = tool.build(params);
+        const result = await invocation.execute(controller.signal);
+
+        expect(result.llmContent).toEqual([{ text: 'Success' }]);
+        expect(result.returnDisplay).toBe('Success');
+        expect(mockCallTool).toHaveBeenCalledWith([
+          { name: serverToolName, args: params },
+        ]);
+      });
+
+      it('should handle tool error even when abort signal is provided', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const errorResponse = [
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: { error: { isError: true } },
+            },
+          },
+        ];
+
+        mockCallTool.mockResolvedValue(errorResponse);
+
+        const invocation = tool.build(params);
+        const result = await invocation.execute(controller.signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+        expect(result.returnDisplay).toContain(
+          `Error: MCP tool '${serverToolName}' reported an error.`,
+        );
+      });
+
+      it('should handle callTool rejection with abort signal', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const expectedError = new Error('Network error');
+
+        mockCallTool.mockRejectedValue(expectedError);
+
+        const invocation = tool.build(params);
+
+        await expect(invocation.execute(controller.signal)).rejects.toThrow(
+          expectedError,
+        );
+      });
+
+      it('should cleanup event listeners properly on successful completion', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const successResponse = [
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [{ type: 'text', text: 'Success' }],
+              },
+            },
+          },
+        ];
+
+        mockCallTool.mockResolvedValue(successResponse);
+
+        const invocation = tool.build(params);
+        await invocation.execute(controller.signal);
+
+        controller.abort();
+        expect(controller.signal.aborted).toBe(true);
+      });
+
+      it('should cleanup event listeners properly on error', async () => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const expectedError = new Error('Tool execution failed');
+
+        mockCallTool.mockRejectedValue(expectedError);
+
+        const invocation = tool.build(params);
+
+        try {
+          await invocation.execute(controller.signal);
+        } catch (error) {
+          expect(error).toBe(expectedError);
+        }
+
+        // Verify cleanup by aborting after error
+        controller.abort();
+        expect(controller.signal.aborted).toBe(true);
+      });
     });
   });
 
-  describe('shouldConfirmExecute', () => {
-    it('should return false if trust is true', async () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
+    it('should return allow when trust is true', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
         true,
+        undefined,
+        { isTrustedFolder: () => true } as any,
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
+      expect(await invocation.getDefaultPermission()).toBe('allow');
     });
 
-    it('should return false if server is allowlisted', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      invocation.constructor.allowlist.add(serverName);
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
-    });
-
-    it('should return false if tool is allowlisted', async () => {
-      const toolAllowlistKey = `${serverName}.${serverToolName}`;
-      const invocation = tool.build({ param: 'mock' }) as any;
-      invocation.constructor.allowlist.add(toolAllowlistKey);
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
-    });
-
-    it('should return confirmation details if not trusted and not allowlisted', async () => {
+    it('should return ask if not trusted', async () => {
       const invocation = tool.build({ param: 'mock' });
-      const confirmation = await invocation.shouldConfirmExecute(
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
+    it('should return confirmation details when permission is ask', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
-      if (confirmation && confirmation.type === 'mcp') {
-        // Type guard for ToolMcpConfirmationDetails
-        expect(confirmation.type).toBe('mcp');
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
         expect(confirmation.serverName).toBe(serverName);
         expect(confirmation.toolName).toBe(serverToolName);
-      } else if (confirmation) {
-        // Handle other possible confirmation types if necessary, or strengthen test if only MCP is expected
-        throw new Error(
-          'Confirmation was not of expected type MCP or was false',
-        );
-      } else {
-        throw new Error(
-          'Confirmation details not in expected format or was false',
-        );
       }
     });
 
-    it('should add server to allowlist on ProceedAlwaysServer', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
+    it('should have onConfirm as a no-op', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
+      expect(confirmation).toHaveProperty('onConfirm');
       if (
-        confirmation &&
-        typeof confirmation === 'object' &&
         'onConfirm' in confirmation &&
         typeof confirmation.onConfirm === 'function'
       ) {
+        // onConfirm should not throw for any outcome
         await confirmation.onConfirm(
-          ToolConfirmationOutcome.ProceedAlwaysServer,
+          ToolConfirmationOutcome.ProceedAlwaysProject,
         );
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(true);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
-      }
-    });
-
-    it('should add tool to allowlist on ProceedAlwaysTool', async () => {
-      const toolAllowlistKey = `${serverName}.${serverToolName}`;
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlwaysTool);
-        expect(invocation.constructor.allowlist.has(toolAllowlistKey)).toBe(
-          true,
-        );
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
-      }
-    });
-
-    it('should handle Cancel confirmation outcome', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        // Cancel should not add anything to allowlist
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlwaysUser);
         await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(false);
-        expect(
-          invocation.constructor.allowlist.has(
-            `${serverName}.${serverToolName}`,
-          ),
-        ).toBe(false);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
       }
     });
 
-    it('should handle ProceedOnce confirmation outcome', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
+    it('should include permissionRules with mcp__server__tool format', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        // ProceedOnce should not add anything to allowlist
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(false);
-        expect(
-          invocation.constructor.allowlist.has(
-            `${serverName}.${serverToolName}`,
-          ),
-        ).toBe(false);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
+        expect(confirmation.permissionRules).toEqual([
+          `mcp__${serverName}__${serverToolName}`,
+        ]);
       }
+    });
+
+    it('should use the registered provider-safe name in permission rules', async () => {
+      const dottedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        'literature.search_pubmed',
+        baseDescription,
+        inputSchema,
+      );
+      const confirmation = await dottedTool
+        .build({ param: 'mock' })
+        .getConfirmationDetails(new AbortController().signal);
+
+      expect(dottedTool.name).not.toContain('.');
+      expect(dottedTool.schema.name).toBe(dottedTool.name);
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
+        expect(confirmation.permissionRules).toEqual([dottedTool.name]);
+      }
+    });
+  });
+
+  describe('getDefaultPermission with folder trust', () => {
+    const mockConfig = (isTrusted: boolean | undefined) => ({
+      isTrustedFolder: () => isTrusted,
+    });
+
+    it.each([
+      {
+        name: 'an untrusted server with readOnlyHint',
+        trust: undefined,
+        isTrustedFolder: true,
+        readOnlyHint: true,
+        expected: 'ask',
+      },
+      {
+        name: 'a trusted server with readOnlyHint in an untrusted folder',
+        trust: true,
+        isTrustedFolder: false,
+        readOnlyHint: true,
+        expected: 'ask',
+      },
+      {
+        name: 'a trusted server with readOnlyHint in a trusted folder',
+        trust: true,
+        isTrustedFolder: true,
+        readOnlyHint: true,
+        expected: 'allow',
+      },
+      {
+        name: 'an untrusted server with readOnlyHint disabled',
+        trust: undefined,
+        isTrustedFolder: true,
+        readOnlyHint: false,
+        expected: 'ask',
+      },
+    ])('should return $expected for $name', async (testCase) => {
+      const annotatedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        testCase.trust,
+        undefined,
+        mockConfig(testCase.isTrustedFolder) as any,
+        undefined,
+        undefined,
+        undefined,
+        { readOnlyHint: testCase.readOnlyHint },
+      );
+      const invocation = annotatedTool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe(testCase.expected);
+    });
+
+    it('should return allow when trust is true and folder is trusted', async () => {
+      const trustedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust = true
+        undefined,
+        mockConfig(true) as any, // isTrustedFolder = true
+      );
+      const invocation = trustedTool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe('allow');
+    });
+
+    it('should return ask if trust is true but folder is not trusted', async () => {
+      const trustedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust = true
+        undefined,
+        mockConfig(false) as any, // isTrustedFolder = false
+      );
+      const invocation = trustedTool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
+    it('should return ask if trust is false, even if folder is trusted', async () => {
+      const untrustedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        false, // trust = false
+        undefined,
+        mockConfig(true) as any, // isTrustedFolder = true
+      );
+      const invocation = untrustedTool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     });
   });
 
@@ -753,6 +1112,904 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('output truncation for large MCP results', () => {
+    const THRESHOLD = 1000;
+    const TRUNCATE_LINES = 50;
+
+    const mockConfigWithTruncation = {
+      getTruncateToolOutputThreshold: () => THRESHOLD,
+      getTruncateToolOutputLines: () => TRUNCATE_LINES,
+      getUsageStatisticsEnabled: () => false,
+      storage: {
+        getProjectTempDir: () => '/tmp/test-project',
+      },
+      isTrustedFolder: () => true,
+    } as any;
+
+    it('should truncate large text results from direct client execution', async () => {
+      const largeText = 'Line of text content\n'.repeat(25000); // ~525k chars, over the 500k MCP char budget
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: largeText }],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // The text part in llmContent should be truncated
+      const textParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.text,
+      );
+      const combinedText = textParts.map((p: Part) => p.text).join('');
+      expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
+      expect(combinedText).toContain('CONTENT TRUNCATED');
+      expect(result.persistedOutputFiles).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        `${largeText}\nOutput too long and was saved to:\n- ${result.persistedOutputFiles![0]}`,
+      );
+    });
+
+    it('should truncate large text results from callable tool execution', async () => {
+      const largeText = 'Line of text content\n'.repeat(25000);
+      const mockMcpToolResponseParts: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'text', text: largeText }],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      const textParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.text,
+      );
+      const combinedText = textParts.map((p: Part) => p.text).join('');
+      expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
+      expect(combinedText).toContain('CONTENT TRUNCATED');
+      expect(result.persistedOutputFiles).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        `${largeText}\nOutput too long and was saved to:\n- ${result.persistedOutputFiles![0]}`,
+      );
+    });
+
+    it('should not truncate small text results', async () => {
+      const smallText = 'Small response';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: smallText }],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: smallText }]);
+      expect(result.returnDisplay).not.toContain('Output too long');
+    });
+
+    it('should not truncate non-text content (images, audio)', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [
+            {
+              type: 'image',
+              data: 'x'.repeat(5000), // large base64 data
+              mimeType: 'image/png',
+            },
+          ],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Image data should not be truncated
+      const inlineDataParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.inlineData,
+      );
+      expect(inlineDataParts[0].inlineData!.data).toBe('x'.repeat(5000));
+    });
+
+    it('should truncate only text parts in mixed content', async () => {
+      const largeText = 'Line of text content\n'.repeat(25000);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [
+            { type: 'text', text: largeText },
+            {
+              type: 'image',
+              data: 'IMAGE_DATA',
+              mimeType: 'image/png',
+            },
+          ],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      // Text should be truncated
+      const textPart = parts.find(
+        (p: Part) => p.text && !p.text.startsWith('[Tool'),
+      );
+      expect(textPart!.text!.length).toBeLessThan(largeText.length);
+      expect(textPart!.text).toContain('CONTENT TRUNCATED');
+      // Image should be preserved
+      const imagePart = parts.find((p: Part) => p.inlineData);
+      expect(imagePart!.inlineData!.data).toBe('IMAGE_DATA');
+    });
+
+    it('should not truncate when config is not provided', async () => {
+      const largeText = 'Line of text content\n'.repeat(200);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: largeText }],
+        })),
+      };
+
+      // No cliConfig provided
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined, // no config
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Without config, should return untouched
+      expect(result.llmContent).toEqual([{ text: largeText }]);
+    });
+  });
+
+  describe('streaming progress for long-running MCP tools', () => {
+    it('should have canUpdateOutput set to true so the scheduler creates liveOutputCallback', () => {
+      // For long-running MCP tools (e.g., browseruse), the scheduler needs
+      // canUpdateOutput=true to create a liveOutputCallback. Without this,
+      // users see no progress during potentially minutes-long operations.
+      expect(tool.canUpdateOutput).toBe(true);
+    });
+
+    it('should forward MCP progress notifications to updateOutput callback during execution', async () => {
+      const params = { param: 'https://example.com' };
+
+      // Create a mock MCP direct client that simulates progress notifications.
+      // When callTool is called with an onprogress callback, it invokes
+      // the callback to simulate the MCP server sending progress updates.
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async (_params, _schema, options) => {
+          // Simulate 3 progress notifications from the MCP server
+          for (let i = 1; i <= 3; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            options?.onprogress?.({
+              progress: i,
+              total: 3,
+              message: `Step ${i} of 3`,
+            });
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Browser automation completed successfully.',
+              },
+            ],
+          };
+        }),
+      };
+
+      // Create a tool with the direct MCP client
+      const streamingTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // trust
+        undefined, // nameOverride
+        undefined, // cliConfig
+        mockMcpClient,
+      );
+
+      const invocation = streamingTool.build(params);
+      const updateOutputSpy = vi.fn();
+
+      const result = await invocation.execute(
+        new AbortController().signal,
+        updateOutputSpy,
+      );
+
+      // The final result should still be correct
+      expect(result.llmContent).toEqual([
+        { text: 'Browser automation completed successfully.' },
+      ]);
+
+      // The updateOutput callback SHOULD have been called at least once
+      // with intermediate progress, so users can see what's happening
+      // during the long wait.
+      expect(updateOutputSpy).toHaveBeenCalled();
+      expect(updateOutputSpy).toHaveBeenCalledTimes(3);
+      // Verify progress data contains structured MCP progress info
+      expect(updateOutputSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_tool_progress',
+          progress: 1,
+          total: 3,
+          message: 'Step 1 of 3',
+        }),
+      );
+      expect(updateOutputSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_tool_progress',
+          progress: 3,
+          total: 3,
+          message: 'Step 3 of 3',
+        }),
+      );
+    });
+
+    it('should show incremental progress for multi-step browser automation', async () => {
+      const params = { param: 'fill-form' };
+      const steps = [
+        'Navigating to page...',
+        'Filling username field...',
+        'Filling password field...',
+        'Clicking submit...',
+      ];
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async (_params, _schema, options) => {
+          for (let i = 0; i < steps.length; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            options?.onprogress?.({
+              progress: i + 1,
+              total: steps.length,
+              message: steps[i],
+            });
+          }
+          return {
+            content: [{ type: 'text', text: steps.join('\n') }],
+          };
+        }),
+      };
+
+      const streamingTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+
+      const invocation = streamingTool.build(params);
+      const receivedUpdates: unknown[] = [];
+      const updateOutputCallback = (output: unknown) => {
+        receivedUpdates.push(output);
+      };
+
+      await invocation.execute(
+        new AbortController().signal,
+        updateOutputCallback,
+      );
+
+      // User should have received one update per step
+      expect(receivedUpdates.length).toBeGreaterThan(0);
+      expect(receivedUpdates).toHaveLength(steps.length);
+      // Each update should be structured McpToolProgressData
+      expect(receivedUpdates[0]).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: steps.length,
+        message: 'Navigating to page...',
+      });
+      expect(receivedUpdates[3]).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 4,
+        total: steps.length,
+        message: 'Clicking submit...',
+      });
+    });
+  });
+
+  describe('auto-reconnect on connection error', () => {
+    it('should attempt reconnect and retry on connection error', async () => {
+      const params = { param: 'test' };
+      const reconnectServerToolName = 'literature.search_pubmed';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const successResult = {
+        content: [{ type: 'text', text: 'Success after reconnect' }],
+      };
+
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(successResult),
+      };
+
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        reconnectServerToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        newMockMcpClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(newTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      const connectionError = new Error('Connection closed');
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      (mockMcpClient.callTool as any).mockRejectedValueOnce(connectionError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        reconnectServerToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(newMockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
+      expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
+    });
+
+    it('should not retry on non-connection errors', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const toolError = new Error('Invalid parameters');
+      (mockMcpClient.callTool as any).mockRejectedValue(toolError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('Invalid parameters');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('should not retry aborted calls even when the server is disconnected', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      (mockMcpClient.callTool as any).mockRejectedValue(abortError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('The operation was aborted');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('should not retry after reconnection attempt fails', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const secondMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      };
+
+      const secondTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        secondMockMcpClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(secondTool),
+        }),
+      };
+
+      const connectionError = new Error('ECONNREFUSED');
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      (mockMcpClient.callTool as any).mockRejectedValue(connectionError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('ECONNREFUSED');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(secondMockMcpClient.callTool).toHaveBeenCalledTimes(3);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(3);
+    });
+
+    it('should detect various connection error patterns', async () => {
+      const connectionErrors = [
+        'ECONNREFUSED',
+        'ENOTFOUND',
+        'ECONNRESET',
+        'ETIMEDOUT',
+        'connection closed',
+        'Connection lost',
+        'Not connected',
+        'Disconnected',
+        'Transport closed',
+      ];
+
+      for (const errorMsg of connectionErrors) {
+        const params = { param: 'test' };
+        const mockMcpClient: McpDirectClient = {
+          callTool: vi.fn().mockRejectedValueOnce(new Error(errorMsg)),
+        };
+
+        const newMockMcpClient: McpDirectClient = {
+          callTool: vi
+            .fn()
+            .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+        };
+
+        const newTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          newMockMcpClient,
+        );
+
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({
+            discoverToolsForServer,
+            ensureTool: vi.fn().mockResolvedValue(newTool),
+          }),
+          getTruncateToolOutputThreshold: () => 0,
+          getTruncateToolOutputLines: () => 0,
+        };
+
+        const reconnectTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          mockConfig as any,
+          mockMcpClient,
+        );
+
+        const invocation = reconnectTool.build(params);
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await invocation.execute(new AbortController().signal);
+
+        expect(discoverToolsForServer).toHaveBeenCalled();
+      }
+    });
+
+    it('should reconnect when MCP error occurs and server is disconnected', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockRejectedValueOnce(
+            new Error('MCP error -32602: Invalid request'),
+          ),
+      };
+
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        newMockMcpClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(discoverToolsForServer).toHaveBeenCalled();
+    });
+  });
+
+  describe('MCP Tool Idle Timeout', () => {
+    it('should abort when MCP server does not respond within idle timeout', async () => {
+      vi.useFakeTimers();
+
+      const idleTimeoutMs = 1000; // 1 second for testing
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          (_params, _schema, options) =>
+            new Promise((_resolve, reject) => {
+              // Simulate SDK behavior: reject when signal is aborted
+              options?.signal?.addEventListener('abort', () => {
+                const error = new Error(
+                  (options?.signal as AbortSignal & { reason?: Error })?.reason
+                    ?.message ?? 'The operation was aborted',
+                );
+                error.name = 'AbortError';
+                reject(error);
+              });
+            }),
+        ),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        idleTimeoutMs,
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const abortController = new AbortController();
+      const executePromise = invocation.execute(abortController.signal);
+
+      // Advance time to trigger the idle timeout
+      vi.advanceTimersByTime(idleTimeoutMs + 100);
+
+      await expect(executePromise).rejects.toThrow(
+        /did not respond within.*idle timeout/,
+      );
+      // The external abort signal should not have been triggered
+      expect(abortController.signal.aborted).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('should reset idle timeout on progress updates', async () => {
+      vi.useFakeTimers();
+
+      const idleTimeoutMs = 1000;
+      let onProgressCallback: ((progress: any) => void) | undefined;
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation((_params, _schema, options) => {
+          onProgressCallback = options?.onprogress;
+          return new Promise((resolve, reject) => {
+            // Listen for abort signal to properly reject when timeout fires
+            options?.signal?.addEventListener('abort', () => {
+              reject(options.signal!.reason);
+            });
+            // Resolve after 2.5 seconds (would timeout without progress)
+            setTimeout(() => {
+              resolve({ content: [{ type: 'text', text: 'Success' }] });
+            }, 2500);
+          });
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        idleTimeoutMs,
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const executePromise = invocation.execute(new AbortController().signal);
+
+      // Send progress at 500ms, 1400ms, 2300ms to reset the timeout
+      // Each progress must arrive BEFORE the 1000ms idle timeout fires
+      vi.advanceTimersByTime(500);
+      onProgressCallback?.({ progress: 0.25 });
+
+      vi.advanceTimersByTime(900);
+      onProgressCallback?.({ progress: 0.5 });
+
+      vi.advanceTimersByTime(900);
+      onProgressCallback?.({ progress: 0.75 });
+
+      // Advance past the mock's 2500ms resolve time
+      vi.advanceTimersByTime(200);
+
+      const result = await executePromise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBeDefined();
+
+      vi.useRealTimers();
+    });
+
+    it('should not apply idle timeout when set to 0 or undefined', async () => {
+      vi.useFakeTimers();
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'Success' }],
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        undefined, // No idle timeout
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBeDefined();
+
+      vi.useRealTimers();
     });
   });
 });

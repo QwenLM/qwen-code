@@ -5,8 +5,14 @@
  */
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -37,10 +43,37 @@ if (!versionType) {
 run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
-const workspacesToExclude = [];
-const lsOutput = JSON.parse(
-  execSync('npm ls --workspaces --json --depth=0').toString(),
-);
+// We intend to maintain sdk and mobile-mcp versions independently.
+const workspacesToExclude = ['@qwen-code/sdk', '@qwen-code/mobile-mcp'];
+let lsOutput;
+try {
+  lsOutput = JSON.parse(
+    execSync('npm ls --workspaces --json --depth=0').toString(),
+  );
+} catch (e) {
+  // `npm ls` can exit with a non-zero status code if there are issues
+  // with dependencies, but it will still produce the JSON output we need.
+  // We'll try to parse the stdout from the error object.
+  if (e.stdout) {
+    console.warn(
+      'Warning: `npm ls` exited with a non-zero status code. Attempting to proceed with the output.',
+    );
+    try {
+      lsOutput = JSON.parse(e.stdout.toString());
+    } catch (parseError) {
+      console.error(
+        'Error: Failed to parse JSON from `npm ls` output even after `npm ls` failed.',
+      );
+      console.error('npm ls stderr:', e.stderr.toString());
+      console.error('Parse error:', parseError);
+      process.exit(1);
+    }
+  } else {
+    console.error('Error: `npm ls` failed with no output.');
+    console.error(e.stderr?.toString() || e);
+    process.exit(1);
+  }
+}
 const allWorkspaces = Object.keys(lsOutput.dependencies || {});
 const workspacesToVersion = allWorkspaces.filter(
   (wsName) => !workspacesToExclude.includes(wsName),
@@ -56,7 +89,7 @@ for (const workspaceName of workspacesToVersion) {
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 
-// 6. Update the sandboxImageUri in the root package.json
+// 5. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
 if (rootPackageJson.config?.sandboxImageUri) {
   rootPackageJson.config.sandboxImageUri =
@@ -65,7 +98,7 @@ if (rootPackageJson.config?.sandboxImageUri) {
   writeJson(rootPackageJsonPath, rootPackageJson);
 }
 
-// 7. Update the sandboxImageUri in the cli package.json
+// 6. Update the sandboxImageUri in the cli package.json
 const cliPackageJsonPath = resolve(process.cwd(), 'packages/cli/package.json');
 const cliPackageJson = readJson(cliPackageJsonPath);
 if (cliPackageJson.config?.sandboxImageUri) {
@@ -77,7 +110,42 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 8. Run `npm install` to update package-lock.json.
-run('npm install');
+// 7. Pin channel adapters' semver dependency on @qwen-code/channel-base to
+// the exact new version. A caret range like ^0.21.0 does not match a
+// prerelease bump (e.g. 0.21.1-preview.0), so npm would replace the workspace
+// link with the stale registry package and the release build would compile
+// against outdated types.
+const channelsDir = resolve(process.cwd(), 'packages/channels');
+for (const entry of readdirSync(channelsDir)) {
+  const pkgPath = join(channelsDir, entry, 'package.json');
+  if (!existsSync(pkgPath)) continue;
+  const pkg = readJson(pkgPath);
+  const dep = pkg.dependencies?.['@qwen-code/channel-base'];
+  if (dep && !dep.startsWith('file:')) {
+    pkg.dependencies['@qwen-code/channel-base'] = newVersion;
+    writeJson(pkgPath, pkg);
+    console.log(
+      `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,
+    );
+  }
+}
+
+// 8. Refresh node_modules and package-lock.json against the pinned exact
+// versions so the adapters resolve channel-base to the workspace link again.
+// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
+// redundant full build that fails with TS5055 when dist/ already exists from
+// the initial `npm ci` install.
+run('npm install --ignore-scripts');
+
+// 9. The per-workspace `npm version` reifies above nested a stale registry
+// copy of channel-base under each adapter while ranges briefly mismatched.
+// The install above cleans both lockfiles but can leave that directory on
+// disk, where it shadows the workspace link during tsc. Remove it.
+for (const entry of readdirSync(channelsDir)) {
+  rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
+    recursive: true,
+    force: true,
+  });
+}
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

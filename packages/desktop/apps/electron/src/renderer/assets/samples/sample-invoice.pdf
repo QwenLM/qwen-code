@@ -1,0 +1,197 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Length 2008 >>
+stream
+0.95 0.95 0.97 rg
+0 692 612 100 re f
+BT
+/F2 28 Tf
+0.15 0.15 0.2 rg
+50 732 Td
+(INVOICE) Tj
+/F1 11 Tf
+0.4 0.4 0.45 rg
+350 0 Td
+(INV-2026-0847) Tj
+0 -16 Td
+(February 9, 2026) Tj
+ET
+BT
+/F2 11 Tf
+0.15 0.15 0.2 rg
+50 650 Td
+(From) Tj
+/F1 10 Tf
+0.3 0.3 0.35 rg
+0 -18 Td
+(Craft Technologies, Inc.) Tj
+0 -15 Td
+(548 Market Street, Suite 42) Tj
+0 -15 Td
+(San Francisco, CA 94104) Tj
+ET
+BT
+/F2 11 Tf
+0.15 0.15 0.2 rg
+350 650 Td
+(Bill To) Tj
+/F1 10 Tf
+0.3 0.3 0.35 rg
+0 -18 Td
+(Acme Corporation) Tj
+0 -15 Td
+(1234 Innovation Blvd) Tj
+0 -15 Td
+(Austin, TX 78701) Tj
+ET
+0.93 0.93 0.96 rg
+50 540 512 22 re f
+BT
+/F2 10 Tf
+0.2 0.2 0.25 rg
+60 546 Td
+(Description) Tj
+300 0 Td
+(Qty) Tj
+60 0 Td
+(Rate) Tj
+70 0 Td
+(Amount) Tj
+ET
+0.85 0.85 0.88 rg
+50 540 512 0.5 re f
+BT /F1 10 Tf 0.3 0.3 0.35 rg
+60 516 Td (Enterprise License \(Annual\)) Tj
+300 0 Td (1) Tj
+60 0 Td ($24,000) Tj
+70 0 Td ($24,000.00) Tj
+ET
+BT /F1 10 Tf 0.3 0.3 0.35 rg
+60 494 Td (Professional Services - Setup) Tj
+300 0 Td (40 hrs) Tj
+60 0 Td ($200) Tj
+70 0 Td ($8,000.00) Tj
+ET
+BT /F1 10 Tf 0.3 0.3 0.35 rg
+60 472 Td (API Integration Package) Tj
+300 0 Td (1) Tj
+60 0 Td ($5,500) Tj
+70 0 Td ($5,500.00) Tj
+ET
+BT /F1 10 Tf 0.3 0.3 0.35 rg
+60 450 Td (Priority Support \(12 months\)) Tj
+300 0 Td (1) Tj
+60 0 Td ($3,600) Tj
+70 0 Td ($3,600.00) Tj
+ET
+0.8 0.8 0.85 rg
+50 436 512 0.5 re f
+BT /F1 10 Tf 0.4 0.4 0.45 rg
+400 414 Td (Subtotal:) Tj 60 0 Td ($41,100.00) Tj ET
+BT /F1 10 Tf 0.4 0.4 0.45 rg
+400 396 Td (Tax \(8.875%\):) Tj 60 0 Td ($3,647.63) Tj ET
+0.7 0.7 0.75 rg
+390 386 172 0.5 re f
+BT /F2 12 Tf 0.15 0.15 0.2 rg
+400 370 Td (Total Due:) Tj 52 0 Td ($44,747.63) Tj ET
+BT /F2 10 Tf 0.15 0.15 0.2 rg 50 320 Td (Payment Terms) Tj ET
+BT /F1 9 Tf 0.4 0.4 0.45 rg 50 304 Td (Net 30. Payment due by March 11, 2026.) Tj ET
+BT /F1 9 Tf 0.4 0.4 0.45 rg 50 288 Td (Wire transfer to: Craft Technologies, Inc. | Routing: 121000248 | Account: 4829-1056-7823) Tj ET
+0.92 0.92 0.95 rg
+0 30 612 40 re f
+BT /F1 8 Tf 0.5 0.5 0.55 rg 220 48 Td (Thank you for your business.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>
+endobj
+7 0 obj
+<< /Length 1926 >>
+stream
+0.95 0.95 0.97 rg
+0 732 612 60 re f
+BT /F2 22 Tf 0.15 0.15 0.2 rg 50 752 Td (Terms & Conditions) Tj ET
+BT /F1 10 Tf 0.3 0.3 0.35 rg
+50 700 Td
+(1. SCOPE OF SERVICES) Tj
+0 -20 Td
+(Craft Technologies shall provide the software license, professional services, and support) Tj
+0 -15 Td
+(described in the attached invoice for the term specified herein.) Tj
+0 -25 Td
+(2. PAYMENT TERMS) Tj
+0 -20 Td
+(All invoices are due within thirty \(30\) days of the invoice date. Late payments shall) Tj
+0 -15 Td
+(accrue interest at a rate of 1.5% per month on the outstanding balance.) Tj
+0 -25 Td
+(3. INTELLECTUAL PROPERTY) Tj
+0 -20 Td
+(All intellectual property rights in the software remain with Craft Technologies.) Tj
+0 -15 Td
+(The client receives a non-exclusive, non-transferable license to use the software.) Tj
+0 -25 Td
+(4. CONFIDENTIALITY) Tj
+0 -20 Td
+(Both parties agree to maintain the confidentiality of proprietary information) Tj
+0 -15 Td
+(disclosed during the course of this engagement for a period of five \(5\) years.) Tj
+0 -25 Td
+(5. WARRANTY) Tj
+0 -20 Td
+(Craft Technologies warrants that the software will perform substantially in) Tj
+0 -15 Td
+(accordance with the documentation for a period of twelve \(12\) months from delivery.) Tj
+0 -25 Td
+(6. LIMITATION OF LIABILITY) Tj
+0 -20 Td
+(In no event shall either party be liable for indirect, incidental, special, or) Tj
+0 -15 Td
+(consequential damages arising out of this agreement, regardless of cause.) Tj
+0 -25 Td
+(7. GOVERNING LAW) Tj
+0 -20 Td
+(This agreement shall be governed by the laws of the State of California.) Tj
+ET
+0.7 0.7 0.75 rg
+50 240 200 0.5 re f
+0.7 0.7 0.75 rg
+350 240 200 0.5 re f
+BT /F1 9 Tf 0.4 0.4 0.45 rg 50 224 Td (Craft Technologies, Inc.) Tj ET
+BT /F1 9 Tf 0.4 0.4 0.45 rg 350 224 Td (Client Signature) Tj ET
+BT /F1 8 Tf 0.5 0.5 0.55 rg 50 208 Td (Date: ________________) Tj ET
+BT /F1 8 Tf 0.5 0.5 0.55 rg 350 208 Td (Date: ________________) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000197 00000 n 
+0000000272 00000 n 
+0000002332 00000 n 
+0000002468 00000 n 
+0000004446 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+4582
+%%EOF

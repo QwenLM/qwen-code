@@ -4,79 +4,58 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
-import process from 'node:process';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { MessageType } from '../types.js';
-import { GIT_COMMIT_INFO } from '../../generated/git-commit.js';
-import { formatMemoryUsage } from '../utils/formatters.js';
-import { getCliVersion } from '../../utils/version.js';
-import { sessionId } from '@qwen-code/qwen-code-core';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
+import { MessageType, type HistoryItem } from '../types.js';
+import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
+import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
+import { t } from '../../i18n/index.js';
 
 export const bugCommand: SlashCommand = {
   name: 'bug',
-  description: 'submit a bug report',
+  get description() {
+    return t('submit a bug report');
+  },
   kind: CommandKind.BUILT_IN,
+  argumentHint: '<description>',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const bugDescription = (args || '').trim();
-    const { config } = context.services;
+    const systemInfo = await getExtendedSystemInfo(context);
 
-    const osVersion = `${process.platform} ${process.version}`;
-    let sandboxEnv = 'no sandbox';
-    if (process.env['SANDBOX'] && process.env['SANDBOX'] !== 'sandbox-exec') {
-      sandboxEnv = process.env['SANDBOX'].replace(/^qwen-(?:code-)?/, '');
-    } else if (process.env['SANDBOX'] === 'sandbox-exec') {
-      sandboxEnv = `sandbox-exec (${
-        process.env['SEATBELT_PROFILE'] || 'unknown'
-      })`;
-    }
-    const modelVersion = config?.getModel() || 'Unknown';
-    const cliVersion = await getCliVersion();
-    const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
-    const ideClient =
-      (context.services.config?.getIdeMode() &&
-        context.services.config?.getIdeClient()?.getDetectedIdeDisplayName()) ||
-      '';
+    const fields = getSystemInfoFields(systemInfo);
 
-    let info = `
-* **CLI Version:** ${cliVersion}
-* **Git Commit:** ${GIT_COMMIT_INFO}
-* **Session ID:** ${sessionId}
-* **Operating System:** ${osVersion}
-* **Sandbox Environment:** ${sandboxEnv}
-* **Model Version:** ${modelVersion}
-* **Memory Usage:** ${memoryUsage}
-`;
-    if (ideClient) {
-      info += `* **IDE Client:** ${ideClient}\n`;
-    }
+    const info = fields
+      .map((field) => `${field.label}: ${field.value}`)
+      .join('\n');
 
     let bugReportUrl =
       'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title={title}&info={info}';
 
-    const bugCommandSettings = config?.getBugCommand();
+    const bugCommandSettings = context.services.config?.getBugCommand();
     if (bugCommandSettings?.urlTemplate) {
       bugReportUrl = bugCommandSettings.urlTemplate;
     }
 
     bugReportUrl = bugReportUrl
       .replace('{title}', encodeURIComponent(bugDescription))
-      .replace('{info}', encodeURIComponent(info));
+      .replace('{info}', encodeURIComponent(`\n${info}\n`));
 
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: `To submit your bug report, please open the following URL in your browser:\n${bugReportUrl}`,
-      },
-      Date.now(),
-    );
+    const bugReportItem: Omit<Extract<HistoryItem, { type: 'info' }>, 'id'> = {
+      type: MessageType.INFO,
+      text: 'To submit your bug report, please open the following URL in your browser:',
+      linkUrl: bugReportUrl,
+      linkText: 'Open GitHub bug report form',
+    };
+
+    context.ui.addItem(bugReportItem, Date.now());
 
     try {
-      await open(bugReportUrl);
+      await openBrowserSecurely(bugReportUrl);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

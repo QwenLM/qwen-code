@@ -5,7 +5,7 @@
  */
 
 import { useReducer, useCallback, useMemo } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import { wizardReducer, initialWizardState } from '../reducers.js';
 import { LocationSelector } from './LocationSelector.js';
 import { GenerationMethodSelector } from './GenerationMethodSelector.js';
@@ -17,9 +17,10 @@ import { type WizardStepProps } from '../types.js';
 import { WIZARD_STEPS } from '../constants.js';
 import { getStepKind } from '../utils.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { Colors } from '../../../colors.js';
 import { theme } from '../../../semantic-colors.js';
 import { TextEntryStep } from './TextEntryStep.js';
+import { useKeypress } from '../../../hooks/useKeypress.js';
+import { t } from '../../../../i18n/index.js';
 
 interface AgentCreationWizardProps {
   onClose: () => void;
@@ -49,8 +50,12 @@ export function AgentCreationWizard({
   }, [onClose]);
 
   // Centralized ESC key handling for the entire wizard
-  useInput((input, key) => {
-    if (key.escape) {
+  useKeypress(
+    (key) => {
+      if (key.name !== 'escape') {
+        return;
+      }
+
       // LLM DescriptionInput handles its own ESC logic when generating
       const kind = getStepKind(state.generationMethod, state.currentStep);
       if (kind === 'LLM_DESC' && state.isGenerating) {
@@ -64,8 +69,9 @@ export function AgentCreationWizard({
         // On other steps, ESC goes back to previous step
         handlePrevious();
       }
-    }
-  });
+    },
+    { isActive: true },
+  );
 
   const stepProps: WizardStepProps = useMemo(
     () => ({
@@ -85,25 +91,25 @@ export function AgentCreationWizard({
       const n = state.currentStep;
       switch (kind) {
         case 'LOCATION':
-          return `Step ${n}: Choose Location`;
+          return t('Step {{n}}: Choose Location', { n: n.toString() });
         case 'GEN_METHOD':
-          return `Step ${n}: Choose Generation Method`;
+          return t('Step {{n}}: Choose Generation Method', { n: n.toString() });
         case 'LLM_DESC':
-          return `Step ${n}: Describe Your Subagent`;
+          return t('Step {{n}}: Describe Your Subagent', { n: n.toString() });
         case 'MANUAL_NAME':
-          return `Step ${n}: Enter Subagent Name`;
+          return t('Step {{n}}: Enter Subagent Name', { n: n.toString() });
         case 'MANUAL_PROMPT':
-          return `Step ${n}: Enter System Prompt`;
+          return t('Step {{n}}: Enter System Prompt', { n: n.toString() });
         case 'MANUAL_DESC':
-          return `Step ${n}: Enter Description`;
+          return t('Step {{n}}: Enter Description', { n: n.toString() });
         case 'TOOLS':
-          return `Step ${n}: Select Tools`;
+          return t('Step {{n}}: Select Tools', { n: n.toString() });
         case 'COLOR':
-          return `Step ${n}: Choose Background Color`;
+          return t('Step {{n}}: Choose Background Color', { n: n.toString() });
         case 'FINAL':
-          return `Step ${n}: Confirm and Save`;
+          return t('Step {{n}}: Confirm and Save', { n: n.toString() });
         default:
-          return 'Unknown Step';
+          return t('Unknown Step');
       }
     };
 
@@ -114,53 +120,16 @@ export function AgentCreationWizard({
     );
   }, [state.currentStep, state.generationMethod]);
 
-  const renderDebugContent = useCallback(() => {
-    if (process.env['NODE_ENV'] !== 'development') {
-      return null;
-    }
-
-    return (
-      <Box borderStyle="single" borderColor={theme.status.warning} padding={1}>
-        <Box flexDirection="column">
-          <Text color={theme.status.warning} bold>
-            Debug Info:
-          </Text>
-          <Text color={Colors.Gray}>Step: {state.currentStep}</Text>
-          <Text color={Colors.Gray}>
-            Can Proceed: {state.canProceed ? 'Yes' : 'No'}
-          </Text>
-          <Text color={Colors.Gray}>
-            Generating: {state.isGenerating ? 'Yes' : 'No'}
-          </Text>
-          <Text color={Colors.Gray}>Location: {state.location}</Text>
-          <Text color={Colors.Gray}>Method: {state.generationMethod}</Text>
-          {state.validationErrors.length > 0 && (
-            <Text color={theme.status.error}>
-              Errors: {state.validationErrors.join(', ')}
-            </Text>
-          )}
-        </Box>
-      </Box>
-    );
-  }, [
-    state.currentStep,
-    state.canProceed,
-    state.isGenerating,
-    state.location,
-    state.generationMethod,
-    state.validationErrors,
-  ]);
-
   const renderStepFooter = useCallback(() => {
     const getNavigationInstructions = () => {
       // Special case: During generation in description input step, only show cancel option
       const kind = getStepKind(state.generationMethod, state.currentStep);
       if (kind === 'LLM_DESC' && state.isGenerating) {
-        return 'Esc to cancel';
+        return t('Esc to cancel');
       }
 
       if (getStepKind(state.generationMethod, state.currentStep) === 'FINAL') {
-        return 'Press Enter to save, e to save and edit, Esc to go back';
+        return t('Press Enter to save, e to save and edit, Esc to go back');
       }
 
       // Steps that have ↑↓ navigation (RadioButtonSelect components)
@@ -170,14 +139,17 @@ export function AgentCreationWizard({
         kindForNav === 'GEN_METHOD' ||
         kindForNav === 'TOOLS' ||
         kindForNav === 'COLOR';
-      const navigationPart = hasNavigation ? '↑↓ to navigate, ' : '';
+      const navigationPart = hasNavigation ? t('↑↓ to navigate, ') : '';
 
       const escAction =
         state.currentStep === WIZARD_STEPS.LOCATION_SELECTION
-          ? 'cancel'
-          : 'go back';
+          ? t('cancel')
+          : t('go back');
 
-      return `Press Enter to continue, ${navigationPart}Esc to ${escAction}`;
+      return t('Press Enter to continue, {{navigation}}Esc to {{action}}', {
+        navigation: navigationPart,
+        action: escAction,
+      });
     };
 
     return (
@@ -203,16 +175,16 @@ export function AgentCreationWizard({
             state={state}
             dispatch={dispatch}
             onNext={handleNext}
-            description="Enter a clear, unique name for this subagent."
-            placeholder="e.g., Code Reviewer"
+            description={t('Enter a clear, unique name for this subagent.')}
+            placeholder={t('e.g., Code Reviewer')}
             height={1}
             initialText={state.generatedName}
-            onChange={(t) => {
-              const value = t; // keep raw, trim later when validating
+            onChange={(text) => {
+              const value = text; // keep raw, trim later when validating
               dispatch({ type: 'SET_GENERATED_NAME', name: value });
             }}
-            validate={(t) =>
-              t.trim().length === 0 ? 'Name cannot be empty.' : null
+            validate={(text) =>
+              text.trim().length === 0 ? t('Name cannot be empty.') : null
             }
           />
         );
@@ -223,18 +195,22 @@ export function AgentCreationWizard({
             state={state}
             dispatch={dispatch}
             onNext={handleNext}
-            description="Write the system prompt that defines this subagent's behavior. Be comprehensive for best results."
-            placeholder="e.g., You are an expert code reviewer..."
+            description={t(
+              "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.",
+            )}
+            placeholder={t('e.g., You are an expert code reviewer...')}
             height={10}
             initialText={state.generatedSystemPrompt}
-            onChange={(t) => {
+            onChange={(text) => {
               dispatch({
                 type: 'SET_GENERATED_SYSTEM_PROMPT',
-                systemPrompt: t,
+                systemPrompt: text,
               });
             }}
-            validate={(t) =>
-              t.trim().length === 0 ? 'System prompt cannot be empty.' : null
+            validate={(text) =>
+              text.trim().length === 0
+                ? t('System prompt cannot be empty.')
+                : null
             }
           />
         );
@@ -245,15 +221,24 @@ export function AgentCreationWizard({
             state={state}
             dispatch={dispatch}
             onNext={handleNext}
-            description="Describe when and how this subagent should be used."
-            placeholder="e.g., Reviews code for best practices and potential bugs."
+            description={t(
+              'Describe when and how this subagent should be used.',
+            )}
+            placeholder={t(
+              'e.g., Reviews code for best practices and potential bugs.',
+            )}
             height={6}
             initialText={state.generatedDescription}
-            onChange={(t) => {
-              dispatch({ type: 'SET_GENERATED_DESCRIPTION', description: t });
+            onChange={(text) => {
+              dispatch({
+                type: 'SET_GENERATED_DESCRIPTION',
+                description: text,
+              });
             }}
-            validate={(t) =>
-              t.trim().length === 0 ? 'Description cannot be empty.' : null
+            validate={(text) =>
+              text.trim().length === 0
+                ? t('Description cannot be empty.')
+                : null
             }
           />
         );
@@ -285,7 +270,9 @@ export function AgentCreationWizard({
         return (
           <Box>
             <Text color={theme.status.error}>
-              Invalid step: {state.currentStep}
+              {t('Invalid step: {{step}}', {
+                step: state.currentStep.toString(),
+              })}
             </Text>
           </Box>
         );
@@ -297,7 +284,7 @@ export function AgentCreationWizard({
       {/* Main content wrapped in bounding box */}
       <Box
         borderStyle="single"
-        borderColor={Colors.Gray}
+        borderColor={theme.border.default}
         flexDirection="column"
         padding={1}
         width="100%"
@@ -305,7 +292,6 @@ export function AgentCreationWizard({
       >
         {renderStepHeader()}
         {renderStepContent()}
-        {renderDebugContent()}
         {renderStepFooter()}
       </Box>
     </Box>

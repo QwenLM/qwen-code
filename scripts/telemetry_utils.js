@@ -10,31 +10,62 @@ import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const projectRoot = path.resolve(__dirname, '..');
-const projectHash = crypto
-  .createHash('sha256')
-  .update(projectRoot)
-  .digest('hex');
 
-// User-level .gemini directory in home
-const USER_GEMINI_DIR = path.join(os.homedir(), '.qwen');
-// Project-level .gemini directory in the workspace
-const WORKSPACE_GEMINI_DIR = path.join(projectRoot, '.qwen');
+bootstrapHomeEnv();
 
-// Telemetry artifacts are stored in a hashed directory under the user's ~/.qwen/tmp
-export const OTEL_DIR = path.join(USER_GEMINI_DIR, 'tmp', projectHash, 'otel');
+/**
+ * Generates a unique hash for a project based on its root path.
+ * On Windows, paths are case-insensitive, so we normalize to lowercase
+ * to ensure the same physical path always produces the same hash.
+ * This logic must match getProjectHash() in packages/core/src/utils/paths.ts
+ */
+function getProjectHash(projectRoot) {
+  // On Windows, normalize path to lowercase for case-insensitive matching
+  const normalizedPath =
+    os.platform() === 'win32' ? projectRoot.toLowerCase() : projectRoot;
+  return crypto.createHash('sha256').update(normalizedPath).digest('hex');
+}
+
+const projectHash = getProjectHash(projectRoot);
+
+// Runtime base directory for ephemeral data (tmp, otel, etc.)
+// Priority: QWEN_RUNTIME_DIR > QWEN_HOME > ~/.qwen
+function getRuntimeBaseDir() {
+  const runtimeDir = process.env.QWEN_RUNTIME_DIR;
+  if (runtimeDir) {
+    return resolvePath(runtimeDir);
+  }
+  const homeEnv = process.env.QWEN_HOME;
+  if (homeEnv) {
+    return resolvePath(homeEnv);
+  }
+  return path.join(os.homedir(), '.qwen');
+}
+
+// Project-level .qwen directory in the workspace
+const WORKSPACE_QWEN_DIR = path.join(projectRoot, '.qwen');
+
+// Telemetry artifacts are stored in a hashed directory under the runtime dir
+export const OTEL_DIR = path.join(
+  getRuntimeBaseDir(),
+  'tmp',
+  projectHash,
+  'otel',
+);
 export const BIN_DIR = path.join(OTEL_DIR, 'bin');
 
 // Workspace settings remain in the project's .gemini directory
 export const WORKSPACE_SETTINGS_FILE = path.join(
-  WORKSPACE_GEMINI_DIR,
+  WORKSPACE_QWEN_DIR,
   'settings.json',
 );
 
@@ -44,10 +75,14 @@ export function getJson(url) {
     `qwen-code-releases-${Date.now()}.json`,
   );
   try {
-    execSync(
-      `curl -sL -H "User-Agent: qwen-code-dev-script" -o "${tmpFile}" "${url}"`,
-      { stdio: 'pipe' },
+    const result = spawnSync(
+      'curl',
+      ['-sL', '-H', 'User-Agent: qwen-code-dev-script', '-o', tmpFile, url],
+      { stdio: 'pipe', encoding: 'utf-8' },
     );
+    if (result.status !== 0) {
+      throw new Error(result.stderr);
+    }
     const content = fs.readFileSync(tmpFile, 'utf-8');
     return JSON.parse(content);
   } catch (e) {
@@ -62,9 +97,13 @@ export function getJson(url) {
 
 export function downloadFile(url, dest) {
   try {
-    execSync(`curl -fL -sS -o "${dest}" "${url}"`, {
+    const result = spawnSync('curl', ['-fL', '-sS', '-o', dest, url], {
       stdio: 'pipe',
+      encoding: 'utf-8',
     });
+    if (result.status !== 0) {
+      throw new Error(result.stderr);
+    }
     return dest;
   } catch (e) {
     console.error(`Failed to download file from ${url}`);
@@ -252,10 +291,20 @@ export async function ensureBinary(
 
     const actualExt = asset.name.endsWith('.zip') ? 'zip' : 'tar.gz';
 
+    let result;
     if (actualExt === 'zip') {
-      execSync(`unzip -o "${archivePath}" -d "${tmpDir}"`, { stdio: 'pipe' });
+      result = spawnSync('unzip', ['-o', archivePath, '-d', tmpDir], {
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
     } else {
-      execSync(`tar -xzf "${archivePath}" -C "${tmpDir}"`, { stdio: 'pipe' });
+      result = spawnSync('tar', ['-xzf', archivePath, '-C', tmpDir], {
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
+    }
+    if (result.status !== 0) {
+      throw new Error(result.stderr);
     }
 
     const nameToFind = binaryNameInArchive || executableName;

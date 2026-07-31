@@ -72,9 +72,10 @@ export async function readPathFromWorkspace(
     const relativeFiles = files.map((p) =>
       path.relative(config.getTargetDir(), p),
     );
+    const filteringOptions = config.getFileFilteringOptions();
     const filteredFiles = fileService.filterFiles(relativeFiles, {
-      respectGitIgnore: true,
-      respectGeminiIgnore: true,
+      respectGitIgnore: filteringOptions.respectGitIgnore,
+      respectQwenIgnore: filteringOptions.respectQwenIgnore,
     });
     const finalFiles = filteredFiles.map((p) =>
       path.resolve(config.getTargetDir(), p),
@@ -83,12 +84,16 @@ export async function readPathFromWorkspace(
     for (const filePath of finalFiles) {
       const relativePathForDisplay = path.relative(absolutePath, filePath);
       allParts.push({ text: `--- ${relativePathForDisplay} ---\n` });
-      const result = await processSingleFileContent(
-        filePath,
-        config.getTargetDir(),
-        config.getFileSystemService(),
-      );
-      allParts.push(result.llmContent);
+      // `@`-attached reads reference large PDFs (guidance without a failed
+      // read), matching the readManyFiles `@` path.
+      const result = await processSingleFileContent(filePath, config, {
+        largePdfBehavior: 'reference',
+      });
+      if (Array.isArray(result.llmContent)) {
+        allParts.push(...result.llmContent);
+      } else {
+        allParts.push(result.llmContent);
+      }
       allParts.push({ text: '\n' }); // Add a newline for separation
     }
 
@@ -97,9 +102,10 @@ export async function readPathFromWorkspace(
   } else {
     // It's a single file, check if it's ignored.
     const relativePath = path.relative(config.getTargetDir(), absolutePath);
+    const singleFileFilteringOptions = config.getFileFilteringOptions();
     const filtered = fileService.filterFiles([relativePath], {
-      respectGitIgnore: true,
-      respectGeminiIgnore: true,
+      respectGitIgnore: singleFileFilteringOptions.respectGitIgnore,
+      respectQwenIgnore: singleFileFilteringOptions.respectQwenIgnore,
     });
 
     if (filtered.length === 0) {
@@ -108,11 +114,11 @@ export async function readPathFromWorkspace(
     }
 
     // It's a single file, process it directly.
-    const result = await processSingleFileContent(
-      absolutePath,
-      config.getTargetDir(),
-      config.getFileSystemService(),
-    );
-    return [result.llmContent];
+    const result = await processSingleFileContent(absolutePath, config, {
+      largePdfBehavior: 'reference',
+    });
+    return Array.isArray(result.llmContent)
+      ? result.llmContent
+      : [result.llmContent];
   }
 }

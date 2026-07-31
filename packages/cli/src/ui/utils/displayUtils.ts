@@ -4,7 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Colors } from '../colors.js';
+import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
+
+// --- Status Labels ---
+
+export interface StatusLabel {
+  icon: string;
+  text: string;
+  color: string;
+}
+
+export function getArenaStatusLabel(status: AgentStatus): StatusLabel {
+  switch (status) {
+    case AgentStatus.IDLE:
+      return { icon: '✓', text: 'Idle', color: theme.status.success };
+    case AgentStatus.COMPLETED:
+      return { icon: '✓', text: 'Done', color: theme.status.success };
+    case AgentStatus.CANCELLED:
+      return { icon: '⊘', text: 'Cancelled', color: theme.status.warning };
+    case AgentStatus.FAILED:
+      return { icon: '✗', text: 'Failed', color: theme.status.error };
+    case AgentStatus.RUNNING:
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: 'Running',
+        color: theme.text.secondary,
+      };
+    case AgentStatus.INITIALIZING:
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: 'Initializing',
+        color: theme.text.secondary,
+      };
+    default:
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: status,
+        color: theme.text.secondary,
+      };
+  }
+}
 
 // --- Thresholds ---
 export const TOOL_SUCCESS_RATE_HIGH = 95;
@@ -19,14 +60,27 @@ export const CACHE_EFFICIENCY_MEDIUM = 15;
 // --- Color Logic ---
 export const getStatusColor = (
   value: number,
-  thresholds: { green: number; yellow: number },
+  thresholds: { green: number; yellow: number; red?: number },
   options: { defaultColor?: string } = {},
 ) => {
   if (value >= thresholds.green) {
-    return Colors.AccentGreen;
+    return theme.status.success;
   }
   if (value >= thresholds.yellow) {
-    return Colors.AccentYellow;
+    return theme.status.warning;
   }
-  return options.defaultColor || Colors.AccentRed;
+  if (thresholds.red != null && value >= thresholds.red) {
+    return theme.status.error;
+  }
+  return options.defaultColor ?? theme.status.error;
 };
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}

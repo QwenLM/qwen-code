@@ -1,0 +1,194 @@
+.split {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: var(--foreground);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.backButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.backButton:hover {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.count {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.addWrap {
+  position: relative;
+  margin-left: auto;
+}
+
+.addButton {
+  appearance: none;
+  padding: 4px 12px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--background);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.addButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.pickerItem {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pickerItemLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which workspace a session lives in — only shown on a multi-workspace daemon,
+   so the single-workspace picker is unchanged. */
+.pickerItemWorkspace {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(
+    --muted-foreground,
+    color-mix(in srgb, var(--foreground) 55%, transparent)
+  );
+}
+
+.pickerItem:hover {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+/* Panes fill the remaining height and share the width; each pane scrolls its
+   own transcript. Below the fit width they keep a minimum and scroll sideways. */
+.panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.paneSlot {
+  flex: 1 1 0;
+  min-width: 340px;
+  height: 100%;
+  min-height: 0;
+}
+
+/* While one pane is maximized, its siblings are hidden (but stay mounted, so
+   their sessions keep streaming). The lone visible slot then fills the row. */
+.paneSlot[data-pane-hidden] {
+  display: none;
+}
+
+.empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.paneError {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  padding: 16px;
+  border: 1px solid var(--error-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error-color) 6%, transparent);
+  color: var(--foreground);
+  overflow: auto;
+}
+
+.paneErrorTitle {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.paneErrorMessage {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.paneErrorClose {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}

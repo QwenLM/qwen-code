@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type DetectedIde, getIdeInfo } from '@qwen-code/qwen-code-core';
+import type { IdeInfo } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import type { RadioSelectItem } from './components/shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from './components/shared/RadioButtonSelect.js';
 import { useKeypress } from './hooks/useKeypress.js';
+import { theme } from './semantic-colors.js';
 
 export type IdeIntegrationNudgeResult = {
   userSelection: 'yes' | 'no' | 'dismiss';
@@ -16,7 +17,7 @@ export type IdeIntegrationNudgeResult = {
 };
 
 interface IdeIntegrationNudgeProps {
-  ide: DetectedIde;
+  ide: IdeInfo;
   onComplete: (result: IdeIntegrationNudgeResult) => void;
 }
 
@@ -36,7 +37,8 @@ export function IdeIntegrationNudge({
     { isActive: true },
   );
 
-  const { displayName: ideName } = getIdeInfo(ide);
+  const { displayName: ideName } = ide;
+  const isInSandbox = !!process.env['SANDBOX'];
   // Assume extension is already installed if the env variables are set.
   const isExtensionPreInstalled =
     !!process.env['QWEN_CODE_IDE_SERVER_PORT'] &&
@@ -49,6 +51,7 @@ export function IdeIntegrationNudge({
         userSelection: 'yes',
         isExtensionPreInstalled,
       },
+      key: 'Yes',
     },
     {
       label: 'No (esc)',
@@ -56,6 +59,7 @@ export function IdeIntegrationNudge({
         userSelection: 'no',
         isExtensionPreInstalled,
       },
+      key: 'No (esc)',
     },
     {
       label: "No, don't ask again",
@@ -63,32 +67,35 @@ export function IdeIntegrationNudge({
         userSelection: 'dismiss',
         isExtensionPreInstalled,
       },
+      key: "No, don't ask again",
     },
   ];
 
-  const installText = isExtensionPreInstalled
-    ? `If you select Yes, the CLI will have access to your open files and display diffs directly in ${
-        ideName ?? 'your editor'
-      }.`
-    : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${
-        ideName ?? 'your editor'
-      }.`;
+  const installText = isInSandbox
+    ? `Note: In sandbox environments, IDE integration requires manual setup on the host system. If you select Yes, you'll receive instructions on how to set this up.`
+    : isExtensionPreInstalled
+      ? `If you select Yes, the CLI will connect to your ${
+          ideName ?? 'editor'
+        } and have access to your open files and display diffs directly.`
+      : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${
+          ideName ?? 'your editor'
+        }.`;
 
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor="yellow"
+      borderColor={theme.status.warning}
       padding={1}
       width="100%"
       marginLeft={1}
     >
       <Box marginBottom={1} flexDirection="column">
         <Text>
-          <Text color="yellow">{'> '}</Text>
+          <Text color={theme.status.warning}>{'> '}</Text>
           {`Do you want to connect ${ideName ?? 'your editor'} to Qwen Code?`}
         </Text>
-        <Text dimColor>{installText}</Text>
+        <Text color={theme.text.secondary}>{installText}</Text>
       </Box>
       <RadioButtonSelect items={OPTIONS} onSelect={onComplete} />
     </Box>

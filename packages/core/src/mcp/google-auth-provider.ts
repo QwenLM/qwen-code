@@ -13,6 +13,10 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { GoogleAuth } from 'google-auth-library';
 import type { MCPServerConfig } from '../config/config.js';
+import { MCP_OAUTH_CLIENT_NAME } from './constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MCP_GOOGLE_AUTH');
 
 const ALLOWED_HOSTS = [/^.+\.googleapis\.com$/, /^(.*\.)?luci\.app$/];
 
@@ -22,7 +26,7 @@ export class GoogleCredentialProvider implements OAuthClientProvider {
   // Properties required by OAuthClientProvider, with no-op values
   readonly redirectUrl = '';
   readonly clientMetadata: OAuthClientMetadata = {
-    client_name: 'Gemini CLI (Google ADC)',
+    client_name: MCP_OAUTH_CLIENT_NAME,
     redirect_uris: [],
     grant_types: [],
     response_types: [],
@@ -69,7 +73,7 @@ export class GoogleCredentialProvider implements OAuthClientProvider {
     const accessTokenResponse = await client.getAccessToken();
 
     if (!accessTokenResponse.token) {
-      console.error('Failed to get access token from Google ADC');
+      debugLogger.error('Failed to get access token from Google ADC');
       return undefined;
     }
 

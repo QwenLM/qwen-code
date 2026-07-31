@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * @license
  * Copyright 2025 Google LLC
@@ -32,7 +34,7 @@ execSync('node ./scripts/check-build-status.js', {
   cwd: root,
 });
 
-const nodeArgs = [];
+const nodeArgs = ['--expose-gc'];
 let sandboxCommand = undefined;
 try {
   sandboxCommand = execSync('node scripts/sandbox_command.js', {
@@ -62,15 +64,39 @@ const env = {
   ...process.env,
   CLI_VERSION: pkg.version,
   DEV: 'true',
+  // The entry a `qwen …` subprocess should call to reach THIS build. This
+  // launcher runs `node packages/cli` directly — no bin wrapper in the chain, so
+  // nothing else publishes it, and a /review run from `npm start` would fall
+  // back to whatever `qwen` PATH resolves to. Assignment, not `||=`, for the
+  // same reason as scripts/dev.js: an inherited value is another session's CLI.
+  QWEN_CODE_CLI: fileURLToPath(import.meta.url),
 };
 
 if (process.env.DEBUG) {
   // If this is not set, the debugger will pause on the outer process rather
   // than the relaunched process making it harder to debug.
-  env.GEMINI_CLI_NO_RELAUNCH = 'true';
+  env.QWEN_CODE_NO_RELAUNCH = 'true';
 }
-const child = spawn('node', nodeArgs, { stdio: 'inherit', env });
+// Use process.cwd() to inherit the working directory from launch.json cwd setting
+// This allows debugging from a specific directory (e.g., .todo)
+const workingDir = process.env.QWEN_WORKING_DIR || process.cwd();
+const child = spawn('node', nodeArgs, {
+  stdio: 'inherit',
+  env,
+  cwd: workingDir,
+});
 
-child.on('close', (code) => {
-  process.exit(code);
+child.on('close', (code, signal) => {
+  // Same contract as scripts/dev.js: this launcher is a QWEN_CODE_CLI entry, and
+  // a signal-killed child (`code === null`) must not exit 0 — `process.exit(null)`
+  // coerces to success. Re-raise the signal; fall back to a non-zero exit.
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+      return;
+    } catch {
+      process.exit(1);
+    }
+  }
+  process.exit(code ?? 1);
 });

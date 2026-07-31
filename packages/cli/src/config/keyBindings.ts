@@ -20,6 +20,7 @@ export enum Command {
   KILL_LINE_RIGHT = 'killLineRight',
   KILL_LINE_LEFT = 'killLineLeft',
   CLEAR_INPUT = 'clearInput',
+  DELETE_WORD_BACKWARD = 'deleteWordBackward',
 
   // Screen control
   CLEAR_SCREEN = 'clearScreen',
@@ -30,31 +31,67 @@ export enum Command {
   NAVIGATION_UP = 'navigationUp',
   NAVIGATION_DOWN = 'navigationDown',
 
+  // Selection list navigation (dialogs, menus)
+  SELECTION_UP = 'selectionUp',
+  SELECTION_DOWN = 'selectionDown',
+
   // Auto-completion
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
+  QUEUE_MESSAGE = 'queueMessage',
   NEWLINE = 'newline',
+  VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
   // External tools
   OPEN_EXTERNAL_EDITOR = 'openExternalEditor',
   PASTE_CLIPBOARD_IMAGE = 'pasteClipboardImage',
 
   // App level bindings
-  SHOW_ERROR_DETAILS = 'showErrorDetails',
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
+  RETRY_LAST = 'retryLast',
+  TOGGLE_RENDER_MODE = 'toggleRenderMode',
+  /**
+   * Promote the running foreground shell command to a background task.
+   * The child process keeps running and the agent's turn unblocks; the
+   * shell becomes a regular `BackgroundShellEntry` visible in `/tasks`,
+   * the Background tasks dialog, and stoppable via `task_stop`.
+   * No-op when no foreground shell is currently executing.
+   */
+  PROMOTE_SHELL_TO_BACKGROUND = 'promoteShellToBackground',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
   SUBMIT_REVERSE_SEARCH = 'submitReverseSearch',
   ACCEPT_SUGGESTION_REVERSE_SEARCH = 'acceptSuggestionReverseSearch',
+  TOGGLE_SHELL_INPUT_FOCUS = 'toggleShellInputFocus',
+
+  // Suggestion expansion
+  EXPAND_SUGGESTION = 'expandSuggestion',
+  COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Thinking expansion
+  TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
+
+  // Transcript full-detail screen (Ctrl+O)
+  TOGGLE_TRANSCRIPT = 'toggleTranscript',
+
+  // Scroll commands
+  SCROLL_UP = 'scrollUp',
+  SCROLL_DOWN = 'scrollDown',
+  PAGE_UP = 'pageUp',
+  PAGE_DOWN = 'pageDown',
+  SCROLL_HOME = 'scrollHome',
+  SCROLL_END = 'scrollEnd',
 }
 
 /**
@@ -73,6 +110,7 @@ export interface KeyBinding {
   command?: boolean;
   /** Paste operation requirement: true=must be paste, false=must not be paste, undefined=ignore */
   paste?: boolean;
+  meta?: boolean;
 }
 
 /**
@@ -89,46 +127,79 @@ export type KeyBindingConfig = {
 export const defaultKeyBindings: KeyBindingConfig = {
   // Basic bindings
   [Command.RETURN]: [{ key: 'return' }],
-  // Original: key.name === 'escape'
   [Command.ESCAPE]: [{ key: 'escape' }],
 
   // Cursor movement
-  // Original: key.ctrl && key.name === 'a'
   [Command.HOME]: [{ key: 'a', ctrl: true }],
-  // Original: key.ctrl && key.name === 'e'
   [Command.END]: [{ key: 'e', ctrl: true }],
 
   // Text deletion
-  // Original: key.ctrl && key.name === 'k'
   [Command.KILL_LINE_RIGHT]: [{ key: 'k', ctrl: true }],
-  // Original: key.ctrl && key.name === 'u'
   [Command.KILL_LINE_LEFT]: [{ key: 'u', ctrl: true }],
-  // Original: key.ctrl && key.name === 'c'
-  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true }],
+  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true, shift: false }],
+  // Added command (meta/alt/option) for mac compatibility
+  [Command.DELETE_WORD_BACKWARD]: [
+    { key: 'backspace', ctrl: true },
+    { key: 'backspace', command: true },
+    // MinTTY (Git Bash on Windows) emits the byte \x1f (ASCII Unit
+    // Separator, rendered as "^_" by `cat -v`) for Ctrl+Backspace under
+    // its standard Ctrl-modifies-meta-keys convention. The same byte is
+    // the historical Ctrl-mapping of the Unit Separator on traditional
+    // ANSI/VT terminals (Ctrl+_ and Ctrl+/ also emit it), but qwen-code
+    // doesn't bind those keystrokes elsewhere so this entry is additive
+    // and non-conflicting on every platform.
+    { sequence: '\x1f' },
+  ],
 
   // Screen control
-  // Original: key.ctrl && key.name === 'l'
   [Command.CLEAR_SCREEN]: [{ key: 'l', ctrl: true }],
 
   // History navigation
-  // Original: key.ctrl && key.name === 'p'
   [Command.HISTORY_UP]: [{ key: 'p', ctrl: true }],
-  // Original: key.ctrl && key.name === 'n'
   [Command.HISTORY_DOWN]: [{ key: 'n', ctrl: true }],
-  // Original: key.name === 'up'
-  [Command.NAVIGATION_UP]: [{ key: 'up' }],
-  // Original: key.name === 'down'
-  [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
+  [Command.NAVIGATION_UP]: [{ key: 'up', shift: false }],
+  [Command.NAVIGATION_DOWN]: [{ key: 'down', shift: false }],
+
+  // Selection-list nav: arrows + k/j + Ctrl+P/Ctrl+N
+  // ctrl: false on bare k/j skips Ctrl+K and Ctrl+J
+  [Command.SELECTION_UP]: [
+    { key: 'up', shift: false },
+    { key: 'k', ctrl: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.SELECTION_DOWN]: [
+    { key: 'down', shift: false },
+    { key: 'j', ctrl: false },
+    { key: 'n', ctrl: true },
+  ],
 
   // Auto-completion
-  // Original: key.name === 'tab' || (key.name === 'return' && !key.ctrl)
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
-  // Completion navigation (arrow or Ctrl+P/N)
-  [Command.COMPLETION_UP]: [{ key: 'up' }, { key: 'p', ctrl: true }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down' }, { key: 'n', ctrl: true }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
+  // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
+  [Command.COMPLETION_UP]: [
+    { key: 'up', shift: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.COMPLETION_DOWN]: [
+    { key: 'down', shift: false },
+    { key: 'n', ctrl: true },
+  ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to Ctrl+arrows rather than plain arrows so the bare arrow keys keep
+  // moving the caret in the editable input buffer (plain arrows only switch
+  // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
+  // perform word movement.
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: true, command: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: true, command: false },
+  ],
 
   // Text input
-  // Original: key.name === 'return' && !key.ctrl && !key.meta && !key.paste
   // Must also exclude shift to allow shift+enter for newline
   [Command.SUBMIT]: [
     {
@@ -139,7 +210,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       shift: false,
     },
   ],
-  // Original: key.name === 'return' && (key.ctrl || key.meta || key.paste)
+  [Command.QUEUE_MESSAGE]: [
+    { key: 'q', ctrl: true, command: false, shift: false, paste: false },
+  ],
   // Split into multiple data-driven bindings
   // Now also includes shift+enter for multi-line input
   [Command.NEWLINE]: [
@@ -149,36 +222,56 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'return', shift: true },
     { key: 'j', ctrl: true },
   ],
+  [Command.VOICE_PUSH_TO_TALK]: [{ key: 'space', ctrl: false, meta: false }],
 
   // External tools
-  // Original: key.ctrl && (key.name === 'x' || key.sequence === '\x18')
   [Command.OPEN_EXTERNAL_EDITOR]: [
     { key: 'x', ctrl: true },
     { sequence: '\x18', ctrl: true },
   ],
-  // Original: key.ctrl && key.name === 'v'
-  [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
+  [Command.PASTE_CLIPBOARD_IMAGE]:
+    process.platform === 'win32'
+      ? [
+          { key: 'v', command: true },
+          { key: 'v', meta: true },
+        ]
+      : [
+          { key: 'v', ctrl: true },
+          { key: 'v', command: true },
+        ],
 
   // App level bindings
-  // Original: key.ctrl && key.name === 'o'
-  [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],
-  // Original: key.ctrl && key.name === 't'
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
-  // Original: key.ctrl && key.name === 'g'
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
-  // Original: key.ctrl && (key.name === 'c' || key.name === 'C')
-  [Command.QUIT]: [{ key: 'c', ctrl: true }],
-  // Original: key.ctrl && (key.name === 'd' || key.name === 'D')
+  [Command.QUIT]: [{ key: 'c', ctrl: true, shift: false }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
-  // Original: key.ctrl && key.name === 's'
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
+  [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
+  [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
+  [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
   // Shell commands
-  // Original: key.ctrl && key.name === 'r'
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],
-  // Original: key.name === 'return' && !key.ctrl
   // Note: original logic ONLY checked ctrl=false, ignored meta/shift/paste
   [Command.SUBMIT_REVERSE_SEARCH]: [{ key: 'return', ctrl: false }],
-  // Original: key.name === 'tab'
   [Command.ACCEPT_SUGGESTION_REVERSE_SEARCH]: [{ key: 'tab' }],
+  [Command.TOGGLE_SHELL_INPUT_FOCUS]: [{ key: 'f', ctrl: true }],
+
+  // Suggestion expansion
+  [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
+  [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Thinking expansion
+  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
+
+  // Transcript full-detail screen
+  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+
+  // Scroll commands
+  [Command.SCROLL_UP]: [{ key: 'up', shift: true }],
+  [Command.SCROLL_DOWN]: [{ key: 'down', shift: true }],
+  [Command.PAGE_UP]: [{ key: 'pageup' }],
+  [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
+  [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
+  [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
 };

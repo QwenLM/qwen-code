@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
-import type { Settings, LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import {
   loadTrustedFolders,
@@ -13,6 +13,7 @@ import {
   isWorkspaceTrusted,
 } from '../../config/trustedFolders.js';
 import * as process from 'node:process';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 export const useFolderTrust = (
   settings: LoadedSettings,
@@ -23,18 +24,13 @@ export const useFolderTrust = (
   const [isRestarting, setIsRestarting] = useState(false);
 
   const folderTrust = settings.merged.security?.folderTrust?.enabled;
-  const folderTrustFeature =
-    settings.merged.security?.folderTrust?.featureEnabled;
 
   useEffect(() => {
-    const trusted = isWorkspaceTrusted({
-      folderTrust,
-      folderTrustFeature,
-    } as Settings);
+    const { isTrusted: trusted } = isWorkspaceTrusted(settings.merged);
     setIsTrusted(trusted);
     setIsFolderTrustDialogOpen(trusted === undefined);
     onTrustChange(trusted);
-  }, [onTrustChange, folderTrust, folderTrustFeature]);
+  }, [folderTrust, onTrustChange, settings.merged]);
 
   const handleFolderTrustSelect = useCallback(
     (choice: FolderTrustChoice) => {
@@ -58,14 +54,22 @@ export const useFolderTrust = (
           return;
       }
 
-      trustedFolders.setValue(cwd, trustLevel);
-      const newIsTrusted =
+      try {
+        trustedFolders.setValue(cwd, trustLevel);
+      } catch (error) {
+        writeStderrLineSafe('Error saving trusted folders file.');
+        writeStderrLineSafe(
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
+      const currentIsTrusted =
         trustLevel === TrustLevel.TRUST_FOLDER ||
         trustLevel === TrustLevel.TRUST_PARENT;
-      setIsTrusted(newIsTrusted);
-      onTrustChange(newIsTrusted);
+      setIsTrusted(currentIsTrusted);
+      onTrustChange(currentIsTrusted);
 
-      const needsRestart = wasTrusted !== newIsTrusted;
+      const needsRestart = wasTrusted !== currentIsTrusted;
       if (needsRestart) {
         setIsRestarting(true);
         setIsFolderTrustDialogOpen(true);

@@ -1,0 +1,23 @@
+.planner-sortable-item {
+  --sortable-shadow-base: none;
+  --sortable-shadow-active:
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+    rgba(var(--foreground-rgb), 0.13) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.18) 0px 8px 10px -2px,
+    rgba(0, 0, 0, 0.24) 0px 18px 24px -10px;
+  --sortable-scale-active: 1.025;
+
+  position: relative;
+  box-shadow: var(--sortable-shadow-base);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.planner-sortable-item--selected {
+  --sortable-shadow-base: var(--shadow-minimal);
+}
+
+.planner-sortable-item[aria-grabbed='true'] {
+  transform: scale(var(--sortable-scale-active));
+  box-shadow: var(--sortable-shadow-active);
+}

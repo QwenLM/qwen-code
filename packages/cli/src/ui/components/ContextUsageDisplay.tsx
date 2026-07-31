@@ -5,21 +5,54 @@
  */
 
 import { Text } from 'ink';
-import { Colors } from '../colors.js';
-import { tokenLimit } from '@qwen-code/qwen-code-core';
+import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
+
+/**
+ * Format percentage for display, showing ">100" when exceeding limit.
+ */
+function formatPercentageUsed(percentage: number): string {
+  if (percentage > 1) {
+    return '>100';
+  }
+  return (percentage * 100).toFixed(1);
+}
 
 export const ContextUsageDisplay = ({
   promptTokenCount,
-  model,
+  terminalWidth,
+  contextWindowSize,
 }: {
   promptTokenCount: number;
-  model: string;
+  terminalWidth: number;
+  contextWindowSize: number;
 }) => {
-  const percentage = promptTokenCount / tokenLimit(model);
+  if (promptTokenCount === 0) {
+    return null;
+  }
+
+  const percentage = promptTokenCount / contextWindowSize;
+  const percentageUsed = formatPercentageUsed(percentage);
+  const isOverLimit = percentage > 1;
+
+  const label = terminalWidth < 100 ? t('% used') : t('% context used');
+
+  // Show warning when over limit
+  if (isOverLimit) {
+    return (
+      <>
+        <Text color={theme.status.error}>
+          {percentageUsed}
+          {label}
+        </Text>
+      </>
+    );
+  }
 
   return (
-    <Text color={Colors.Gray}>
-      ({((1 - percentage) * 100).toFixed(0)}% context left)
+    <Text color={theme.text.secondary}>
+      {percentageUsed}
+      {label}
     </Text>
   );
 };

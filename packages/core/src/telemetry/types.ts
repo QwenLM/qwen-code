@@ -9,15 +9,20 @@ import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
-import type { DiffStat, FileDiff } from '../tools/tools.js';
-import { AuthType } from '../core/contentGenerator.js';
+import type { FileDiff } from '../tools/tools.js';
+import type { AuthType } from '../core/contentGenerator.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
 } from './tool-call-decision.js';
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import type { OutputFormat } from '../output/types.js';
+import type { RipgrepFailureKind } from '../utils/ripgrepUtils.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import type { SkillTool } from '../tools/skill.js';
+import type { AgentTool } from '../tools/agent/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -30,50 +35,64 @@ type CommonFields = keyof BaseTelemetryEvent;
 export class StartSessionEvent implements BaseTelemetryEvent {
   'event.name': 'cli_config';
   'event.timestamp': string;
+  session_id: string;
   model: string;
-  embedding_model: string;
   sandbox_enabled: boolean;
-  core_tools_enabled: string;
+  core_tools_enabled?: string;
   approval_mode: string;
-  api_key_enabled: boolean;
-  vertex_ai_enabled: boolean;
   debug_enabled: boolean;
+  truncate_tool_output_threshold: number;
+  truncate_tool_output_lines: number;
   mcp_servers: string;
   telemetry_enabled: boolean;
-  telemetry_log_user_prompts_enabled: boolean;
   file_filtering_respect_git_ignore: boolean;
   mcp_servers_count: number;
   mcp_tools_count?: number;
   mcp_tools?: string;
+  output_format: OutputFormat;
+  hooks?: string;
+  ide_enabled: boolean;
+  interactive_shell_enabled: boolean;
+  skills?: string;
+  subagents?: string;
 
-  constructor(config: Config, toolRegistry?: ToolRegistry) {
-    const generatorConfig = config.getContentGeneratorConfig();
+  constructor(config: Config) {
     const mcpServers = config.getMcpServers();
-
-    let useGemini = false;
-    let useVertex = false;
-    if (generatorConfig && generatorConfig.authType) {
-      useGemini = generatorConfig.authType === AuthType.USE_GEMINI;
-      useVertex = generatorConfig.authType === AuthType.USE_VERTEX_AI;
-    }
+    const toolRegistry = config.getToolRegistry();
 
     this['event.name'] = 'cli_config';
+    this.session_id = config.getSessionId();
     this.model = config.getModel();
-    this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    this.core_tools_enabled = (config.getCoreTools() ?? []).join(',');
+    this.core_tools_enabled = (
+      config.getPermissionManager?.()?.getAllowRawStrings() ??
+      config.getCoreTools() ??
+      []
+    ).join(',');
     this.approval_mode = config.getApprovalMode();
-    this.api_key_enabled = useGemini || useVertex;
-    this.vertex_ai_enabled = useVertex;
     this.debug_enabled = config.getDebugMode();
+    this.truncate_tool_output_threshold =
+      config.getTruncateToolOutputThreshold();
+    this.truncate_tool_output_lines = config.getTruncateToolOutputLines();
     this.mcp_servers = mcpServers ? Object.keys(mcpServers).join(',') : '';
     this.telemetry_enabled = config.getTelemetryEnabled();
-    this.telemetry_log_user_prompts_enabled =
-      config.getTelemetryLogPromptsEnabled();
     this.file_filtering_respect_git_ignore =
       config.getFileFilteringRespectGitIgnore();
     this.mcp_servers_count = mcpServers ? Object.keys(mcpServers).length : 0;
+    this.output_format = config.getOutputFormat();
+    this.ide_enabled = config.getIdeMode();
+    this.interactive_shell_enabled = config.getShouldUseNodePtyShell();
+
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const allHooks = hookSystem.getAllHooks();
+      const uniqueEventNames = [...new Set(allHooks.map((h) => h.eventName))];
+      if (uniqueEventNames.length > 0) {
+        this.hooks = uniqueEventNames.join(',');
+      }
+    }
+
     if (toolRegistry) {
       const mcpTools = toolRegistry
         .getAllTools()
@@ -82,6 +101,22 @@ export class StartSessionEvent implements BaseTelemetryEvent {
       this.mcp_tools = mcpTools
         .map((tool) => (tool as DiscoveredMCPTool).name)
         .join(',');
+
+      const skillTool = toolRegistry.getTool(ToolNames.SKILL) as
+        | SkillTool
+        | undefined;
+      const skillNames = skillTool?.getAvailableSkillNames?.();
+      if (skillNames && skillNames.length > 0) {
+        this.skills = skillNames.join(',');
+      }
+
+      const agentTool = toolRegistry.getTool(ToolNames.AGENT) as
+        | AgentTool
+        | undefined;
+      const subagentNames = agentTool?.getAvailableSubagentNames?.();
+      if (subagentNames && subagentNames.length > 0) {
+        this.subagents = subagentNames.join(',');
+      }
     }
   }
 }
@@ -105,12 +140,15 @@ export class UserPromptEvent implements BaseTelemetryEvent {
   prompt_id: string;
   auth_type?: string;
   prompt?: string;
+  /** Model that actually processed the prompt (e.g. an inline override). */
+  model?: string;
 
   constructor(
     prompt_length: number,
     prompt_Id: string,
     auth_type?: string,
     prompt?: string,
+    model?: string,
   ) {
     this['event.name'] = 'user_prompt';
     this['event.timestamp'] = new Date().toISOString();
@@ -118,6 +156,19 @@ export class UserPromptEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_Id;
     this.auth_type = auth_type;
     this.prompt = prompt;
+    this.model = model;
+  }
+}
+
+export class UserRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'user_retry';
+  'event.timestamp': string;
+  prompt_id: string;
+
+  constructor(prompt_id: string) {
+    this['event.name'] = 'user_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = prompt_id;
   }
 }
 
@@ -127,12 +178,16 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
-  success: boolean;
+  status: 'success' | 'error' | 'cancelled';
+  success: boolean; // Keep for backward compatibility
   decision?: ToolCallDecision;
   error?: string;
   error_type?: string;
   prompt_id: string;
+  response_id?: string;
   tool_type: 'native' | 'mcp';
+  content_length?: number;
+  mcp_server_name?: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
 
@@ -140,19 +195,41 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.function_name = call.request.name;
-    this.function_args = call.request.args;
+    // structured_output args ARE the user's final structured payload (the
+    // command's actual answer, already emitted in stdout `result` /
+    // `structured_result`). Recording them again as ordinary tool-call
+    // function_args duplicates that data into telemetry surfaces (OTLP
+    // exports, QwenLogger, ui-telemetry stream, the chat-recording UI
+    // event mirror) where it can leak off-device. Replace with a shared
+    // placeholder constant so consumers still see the call happened —
+    // duration, success, decision metrics are preserved — but the
+    // payload itself doesn't ride along. The same constant is used by
+    // `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+    // for the on-disk JSONL surface so neither side can silently drift.
+    this.function_args =
+      call.request.name === ToolNames.STRUCTURED_OUTPUT
+        ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
+        : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
-    this.success = call.status === 'success';
+    this.status = call.status;
+    this.success = call.status === 'success'; // Keep for backward compatibility
     this.decision = call.outcome
       ? getDecisionFromOutcome(call.outcome)
       : undefined;
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
-    this.tool_type =
-      typeof call.tool !== 'undefined' && call.tool instanceof DiscoveredMCPTool
-        ? 'mcp'
-        : 'native';
+    this.content_length = call.response.contentLength;
+    if (
+      typeof call.tool !== 'undefined' &&
+      call.tool instanceof DiscoveredMCPTool
+    ) {
+      this.tool_type = 'mcp';
+      this.mcp_server_name = call.tool.serverName;
+    } else {
+      this.tool_type = 'native';
+    }
+    this.response_id = call.request.response_id;
 
     if (
       call.status === 'success' &&
@@ -163,10 +240,14 @@ export class ToolCallEvent implements BaseTelemetryEvent {
       const diffStat = (call.response.resultDisplay as FileDiff).diffStat;
       if (diffStat) {
         this.metadata = {
-          ai_added_lines: diffStat.ai_added_lines,
-          ai_removed_lines: diffStat.ai_removed_lines,
+          model_added_lines: diffStat.model_added_lines,
+          model_removed_lines: diffStat.model_removed_lines,
+          model_added_chars: diffStat.model_added_chars,
+          model_removed_chars: diffStat.model_removed_chars,
           user_added_lines: diffStat.user_added_lines,
           user_removed_lines: diffStat.user_removed_lines,
+          user_added_chars: diffStat.user_added_chars,
+          user_removed_chars: diffStat.user_removed_chars,
         };
       }
     }
@@ -179,13 +260,24 @@ export class ApiRequestEvent implements BaseTelemetryEvent {
   model: string;
   prompt_id: string;
   request_text?: string;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
-  constructor(model: string, prompt_id: string, request_text?: string) {
+  constructor(
+    model: string,
+    prompt_id: string,
+    request_text?: string,
+    subagent_name?: string,
+  ) {
     this['event.name'] = 'api_request';
     this['event.timestamp'] = new Date().toISOString();
     this.model = model;
     this.prompt_id = prompt_id;
     this.request_text = request_text;
+    this.subagent_name = subagent_name;
   }
 }
 
@@ -194,33 +286,70 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.timestamp': string; // ISO 8601
   response_id?: string;
   model: string;
-  error: string;
-  error_type?: string;
-  status_code?: number | string;
   duration_ms: number;
   prompt_id: string;
   auth_type?: string;
+  // Human-readable error message (e.g. "Request failed with status 429")
+  error_message: string;
+  // Error class or category (e.g. "RateLimitError", "invalid_request_error")
+  error_type?: string;
+  // HTTP status code from the API response (e.g. 429, 500)
+  status_code?: number | string;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
-  constructor(
-    response_id: string | undefined,
-    model: string,
-    error: string,
-    duration_ms: number,
-    prompt_id: string,
-    auth_type?: string,
-    error_type?: string,
-    status_code?: number | string,
-  ) {
+  constructor(opts: {
+    responseId?: string;
+    model: string;
+    durationMs: number;
+    promptId: string;
+    authType?: string;
+    errorMessage: string;
+    errorType?: string;
+    statusCode?: number | string;
+    subagentName?: string;
+  }) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
-    this.response_id = response_id;
+    this.response_id = opts.responseId;
+    this.model = opts.model;
+    this.duration_ms = opts.durationMs;
+    this.prompt_id = opts.promptId;
+    this.auth_type = opts.authType;
+    this.error_message = opts.errorMessage;
+    this.error_type = opts.errorType;
+    this.status_code = opts.statusCode;
+    this.subagent_name = opts.subagentName;
+  }
+}
+
+export class ApiCancelEvent implements BaseTelemetryEvent {
+  'event.name': 'api_cancel';
+  'event.timestamp': string;
+  model: string;
+  prompt_id: string;
+  auth_type?: string;
+  // Pending self-paced /loop wakeups dropped by this abort, when any. Lets a
+  // user abort that ends a loop be told apart from an ordinary cancellation.
+  // Named for wakeups (not "loops") to avoid colliding with loop_type, the
+  // unrelated repetition-detection vocabulary in this file.
+  loop_wakeups_cancelled?: number;
+
+  constructor(
+    model: string,
+    prompt_id: string,
+    auth_type?: string,
+    loop_wakeups_cancelled?: number,
+  ) {
+    this['event.name'] = 'api_cancel';
+    this['event.timestamp'] = new Date().toISOString();
     this.model = model;
-    this.error = error;
-    this.error_type = error_type;
-    this.status_code = status_code;
-    this.duration_ms = duration_ms;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
+    this.loop_wakeups_cancelled = loop_wakeups_cancelled;
   }
 }
 
@@ -231,16 +360,21 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   model: string;
   status_code?: number | string;
   duration_ms: number;
-  error?: string;
   input_token_count: number;
   output_token_count: number;
   cached_content_token_count: number;
   thoughts_token_count: number;
-  tool_token_count: number;
   total_token_count: number;
   response_text?: string;
   prompt_id: string;
   auth_type?: string;
+  /** Time from stream dispatch to first user-visible content. */
+  ttft_ms?: number;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
   constructor(
     response_id: string,
@@ -250,7 +384,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     auth_type?: string,
     usage_data?: GenerateContentResponseUsageMetadata,
     response_text?: string,
-    error?: string,
+    subagent_name?: string,
+    ttft_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -262,12 +397,12 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.output_token_count = usage_data?.candidatesTokenCount ?? 0;
     this.cached_content_token_count = usage_data?.cachedContentTokenCount ?? 0;
     this.thoughts_token_count = usage_data?.thoughtsTokenCount ?? 0;
-    this.tool_token_count = usage_data?.toolUsePromptTokenCount ?? 0;
     this.total_token_count = usage_data?.totalTokenCount ?? 0;
     this.response_text = response_text;
-    this.error = error;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
+    this.subagent_name = subagent_name;
+    this.ttft_ms = ttft_ms;
   }
 }
 
@@ -283,10 +418,69 @@ export class FlashFallbackEvent implements BaseTelemetryEvent {
   }
 }
 
+export class RipgrepFallbackEvent implements BaseTelemetryEvent {
+  'event.name': 'ripgrep_fallback';
+  'event.timestamp': string;
+  use_ripgrep: boolean;
+  use_builtin_ripgrep: boolean;
+  error?: string;
+
+  constructor(
+    use_ripgrep: boolean,
+    use_builtin_ripgrep: boolean,
+    error?: string,
+  ) {
+    this['event.name'] = 'ripgrep_fallback';
+    this['event.timestamp'] = new Date().toISOString();
+    this.use_ripgrep = use_ripgrep;
+    this.use_builtin_ripgrep = use_builtin_ripgrep;
+    this.error = error;
+  }
+}
+
+export type RipgrepRuntimeRecoveryFailureKind = RipgrepFailureKind;
+
+export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
+  'event.name': 'ripgrep_runtime_recovery';
+  'event.timestamp': string;
+  selection_mode: 'builtin' | 'system';
+  retry_triggered: boolean;
+  retry_succeeded?: boolean;
+  failure_kind: RipgrepRuntimeRecoveryFailureKind;
+
+  constructor(params: {
+    selection_mode: 'builtin' | 'system';
+    retry_triggered: boolean;
+    retry_succeeded?: boolean;
+    failure_kind: RipgrepRuntimeRecoveryFailureKind;
+  }) {
+    this['event.name'] = 'ripgrep_runtime_recovery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.selection_mode = params.selection_mode;
+    this.retry_triggered = params.retry_triggered;
+    if (params.retry_succeeded !== undefined) {
+      this.retry_succeeded = params.retry_succeeded;
+    }
+    this.failure_kind = params.failure_kind;
+  }
+}
+
 export enum LoopType {
   CONSECUTIVE_IDENTICAL_TOOL_CALLS = 'consecutive_identical_tool_calls',
   CHANTING_IDENTICAL_SENTENCES = 'chanting_identical_sentences',
-  LLM_DETECTED_LOOP = 'llm_detected_loop',
+  REPETITIVE_THOUGHTS = 'repetitive_thoughts',
+  READ_FILE_LOOP = 'read_file_loop',
+  ACTION_STAGNATION = 'action_stagnation',
+  /** Similar read-only shell inspection commands repeat with varied args. */
+  SHELL_COMMAND_STAGNATION = 'shell_command_stagnation',
+  /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
+  GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
+  /** Two tools alternating in a fixed pattern (A B A B A B ...). */
+  ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
+  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
+  /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
+  INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -299,6 +493,18 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
     this['event.name'] = 'loop_detected';
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
+    this.prompt_id = prompt_id;
+  }
+}
+
+export class LoopDetectionDisabledEvent implements BaseTelemetryEvent {
+  'event.name': 'loop_detection_disabled';
+  'event.timestamp': string;
+  prompt_id: string;
+
+  constructor(prompt_id: string) {
+    this['event.name'] = 'loop_detection_disabled';
+    this['event.timestamp'] = new Date().toISOString();
     this.prompt_id = prompt_id;
   }
 }
@@ -351,17 +557,27 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   'event.timestamp': string;
   tokens_before: number;
   tokens_after: number;
+  compression_input_token_count?: number;
+  compression_output_token_count?: number;
 }
 
 export function makeChatCompressionEvent({
   tokens_before,
   tokens_after,
+  compression_input_token_count,
+  compression_output_token_count,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
     'event.timestamp': new Date().toISOString(),
     tokens_before,
     tokens_after,
+    ...(compression_input_token_count !== undefined
+      ? { compression_input_token_count }
+      : {}),
+    ...(compression_output_token_count !== undefined
+      ? { compression_output_token_count }
+      : {}),
   };
 }
 
@@ -430,7 +646,6 @@ export class FileOperationEvent implements BaseTelemetryEvent {
   lines?: number;
   mimetype?: string;
   extension?: string;
-  diff_stat?: DiffStat;
   programming_language?: string;
 
   constructor(
@@ -439,7 +654,6 @@ export class FileOperationEvent implements BaseTelemetryEvent {
     lines?: number,
     mimetype?: string,
     extension?: string,
-    diff_stat?: DiffStat,
     programming_language?: string,
   ) {
     this['event.name'] = 'file_operation';
@@ -449,7 +663,6 @@ export class FileOperationEvent implements BaseTelemetryEvent {
     this.lines = lines;
     this.mimetype = mimetype;
     this.extension = extension;
-    this.diff_stat = diff_stat;
     this.programming_language = programming_language;
   }
 }
@@ -473,17 +686,109 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
   attempt_number: number;
   error_type: string; // e.g., 'EmptyStreamError'
   retry_delay_ms: number;
+  model: string;
 
   constructor(
     attempt_number: number,
     error_type: string,
     retry_delay_ms: number,
+    model: string,
   ) {
     this['event.name'] = 'content_retry';
     this['event.timestamp'] = new Date().toISOString();
     this.attempt_number = attempt_number;
     this.error_type = error_type;
     this.retry_delay_ms = retry_delay_ms;
+    this.model = model;
+  }
+}
+
+export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
+  'event.name': 'protocol_tag_sanitized';
+  'event.timestamp': string;
+  model: string;
+  prompt_id?: string;
+  response_id?: string;
+  tag_name: 'think' | 'thinking';
+  tool_call_count: number;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    responseId?: string;
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  }) {
+    this['event.name'] = 'protocol_tag_sanitized';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.response_id = opts.responseId;
+    this.tag_name = opts.tagName;
+    this.tool_call_count = opts.toolCallCount;
+  }
+}
+
+/**
+ * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
+ * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
+ *
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * for-loop for `InvalidStreamError` retries that use
+ * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
+ * may fire BOTH event types; sum across event types to count total retries per
+ * prompt_id.
+ */
+export class ApiRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'api_retry';
+  'event.timestamp': string; // ISO 8601
+  model: string;
+  prompt_id?: string;
+  attempt_number: number; // 1-based monotonic counter (matches ALS retryContext.attempt)
+  error_type?: string;
+  error_message: string;
+  status_code?: number | string;
+  retry_delay_ms: number;
+  /**
+   * Reports the backoff delay following this failed attempt (NOT the attempt's
+   * own duration — that lives on the corresponding `qwen-code.llm_request`
+   * span's `duration_ms` attribute). Set equal to `retry_delay_ms` so the
+   * LogToSpanProcessor bridge span visualises the sleep window between the
+   * failed and next attempt in the trace timeline.
+   */
+  duration_ms: number;
+  /**
+   * Name of the subagent that issued the retrying request, or undefined when
+   * the request originates from the main conversation. Read from
+   * `subagentNameContext.getStore()` at the caller site (subagentNameContext
+   * is still active inside `retry.ts`'s catch block where `onRetry` fires).
+   */
+  subagent_name?: string;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    attemptNumber: number;
+    error: unknown;
+    statusCode?: number | string;
+    retryDelayMs: number;
+    subagentName?: string;
+  }) {
+    this['event.name'] = 'api_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.attempt_number = opts.attemptNumber;
+    this.error_message =
+      opts.error instanceof Error
+        ? opts.error.message
+        : String(opts.error ?? 'unknown error');
+    this.error_type =
+      opts.error instanceof Error ? opts.error.constructor.name : undefined;
+    this.status_code = opts.statusCode;
+    this.retry_delay_ms = opts.retryDelayMs;
+    this.duration_ms = opts.retryDelayMs;
+    this.subagent_name = opts.subagentName;
   }
 }
 
@@ -493,10 +798,12 @@ export class ContentRetryFailureEvent implements BaseTelemetryEvent {
   total_attempts: number;
   final_error_type: string;
   total_duration_ms?: number; // Optional: total time spent retrying
+  model: string;
 
   constructor(
     total_attempts: number,
     final_error_type: string,
+    model: string,
     total_duration_ms?: number,
   ) {
     this['event.name'] = 'content_retry_failure';
@@ -504,6 +811,155 @@ export class ContentRetryFailureEvent implements BaseTelemetryEvent {
     this.total_attempts = total_attempts;
     this.final_error_type = final_error_type;
     this.total_duration_ms = total_duration_ms;
+    this.model = model;
+  }
+}
+
+export class ExtensionInstallEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_install';
+  'event.timestamp': string;
+  extension_name: string;
+  extension_version: string;
+  extension_source: string;
+  status: 'success' | 'error';
+
+  constructor(
+    extension_name: string,
+    extension_version: string,
+    extension_source: string,
+    status: 'success' | 'error',
+  ) {
+    this['event.name'] = 'extension_install';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.extension_version = extension_version;
+    this.extension_source = extension_source;
+    this.status = status;
+  }
+}
+
+export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_output_truncated';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  original_content_length: number;
+  truncated_content_length: number;
+  threshold: number;
+  lines: number;
+  prompt_id: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      originalContentLength: number;
+      truncatedContentLength: number;
+      threshold: number;
+      lines: number;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.original_content_length = details.originalContentLength;
+    this.truncated_content_length = details.truncatedContentLength;
+    this.threshold = details.threshold;
+    this.lines = details.lines;
+  }
+}
+
+export class ToolResultPersistedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_result_persisted';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  bytes_written: number;
+  output_file: string;
+  prompt_id: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      bytesWritten: number;
+      outputFile: string;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.bytes_written = details.bytesWritten;
+    this.output_file = details.outputFile;
+  }
+}
+
+export class ExtensionUninstallEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_uninstall';
+  'event.timestamp': string;
+  extension_name: string;
+  status: 'success' | 'error';
+
+  constructor(extension_name: string, status: 'success' | 'error') {
+    this['event.name'] = 'extension_uninstall';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.status = status;
+  }
+}
+
+export class ExtensionUpdateEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_update';
+  'event.timestamp': string;
+  extension_name: string;
+  extension_id: string;
+  extension_previous_version: string;
+  extension_version: string;
+  extension_source: string;
+  status: 'success' | 'error';
+
+  constructor(
+    extension_name: string,
+    extension_id: string,
+    extension_version: string,
+    extension_previous_version: string,
+    extension_source: string,
+    status: 'success' | 'error',
+  ) {
+    this['event.name'] = 'extension_update';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.extension_id = extension_id;
+    this.extension_version = extension_version;
+    this.extension_previous_version = extension_previous_version;
+    this.extension_source = extension_source;
+    this.status = status;
+  }
+}
+
+export class ExtensionEnableEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_enable';
+  'event.timestamp': string;
+  extension_name: string;
+  setting_scope: string;
+
+  constructor(extension_name: string, settingScope: string) {
+    this['event.name'] = 'extension_enable';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.setting_scope = settingScope;
+  }
+}
+
+export class ModelSlashCommandEvent implements BaseTelemetryEvent {
+  'event.name': 'model_slash_command';
+  'event.timestamp': string;
+  model_name: string;
+
+  constructor(model_name: string) {
+    this['event.name'] = 'model_slash_command';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model_name = model_name;
   }
 }
 
@@ -535,6 +991,127 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
   }
 }
 
+export class AuthEvent implements BaseTelemetryEvent {
+  'event.name': 'auth';
+  'event.timestamp': string;
+  auth_type: AuthType;
+  action_type: 'auto' | 'manual' | 'coding-plan';
+  status: 'success' | 'error' | 'cancelled';
+  error_message?: string;
+
+  constructor(
+    auth_type: AuthType,
+    action_type: 'auto' | 'manual' | 'coding-plan',
+    status: 'success' | 'error' | 'cancelled',
+    error_message?: string,
+  ) {
+    this['event.name'] = 'auth';
+    this['event.timestamp'] = new Date().toISOString();
+    this.auth_type = auth_type;
+    this.action_type = action_type;
+    this.status = status;
+    this.error_message = error_message;
+  }
+}
+
+/** Hook type for telemetry */
+export type HookTelemetryType = 'command' | 'http' | 'function' | 'prompt';
+
+/**
+ * Hook call telemetry event
+ */
+export class HookCallEvent implements BaseTelemetryEvent {
+  'event.name': string;
+  'event.timestamp': string;
+  hook_event_name: string;
+  hook_type: HookTelemetryType;
+  hook_name: string;
+  hook_input: Record<string, unknown>;
+  hook_output?: Record<string, unknown>;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_ms: number;
+  success: boolean;
+  error?: string;
+
+  constructor(
+    hookEventName: string,
+    hookType: HookTelemetryType,
+    hookName: string,
+    hookInput: Record<string, unknown>,
+    durationMs: number,
+    success: boolean,
+    hookOutput?: Record<string, unknown>,
+    exitCode?: number,
+    stdout?: string,
+    stderr?: string,
+    error?: string,
+  ) {
+    this['event.name'] = 'hook_call';
+    this['event.timestamp'] = new Date().toISOString();
+    this.hook_event_name = hookEventName;
+    this.hook_type = hookType;
+    this.hook_name = hookName;
+    this.hook_input = hookInput;
+    this.hook_output = hookOutput;
+    this.exit_code = exitCode;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.duration_ms = durationMs;
+    this.success = success;
+    this.error = error;
+  }
+}
+
+export class SkillLaunchEvent implements BaseTelemetryEvent {
+  'event.name': 'skill_launch';
+  'event.timestamp': string;
+  skill_name: string;
+  success: boolean;
+  prompt_id: string;
+
+  constructor(skill_name: string, success: boolean, prompt_id: string = '') {
+    this['event.name'] = 'skill_launch';
+    this['event.timestamp'] = new Date().toISOString();
+    this.skill_name = skill_name;
+    this.success = success;
+    this.prompt_id = prompt_id;
+  }
+}
+
+export enum UserFeedbackRating {
+  BAD = 1,
+  FINE = 2,
+  GOOD = 3,
+}
+
+export class UserFeedbackEvent implements BaseTelemetryEvent {
+  'event.name': 'user_feedback';
+  'event.timestamp': string;
+  session_id: string;
+  rating: UserFeedbackRating;
+  model: string;
+  approval_mode: string;
+  prompt_id?: string;
+
+  constructor(
+    session_id: string,
+    rating: UserFeedbackRating,
+    model: string,
+    approval_mode: string,
+    prompt_id?: string,
+  ) {
+    this['event.name'] = 'user_feedback';
+    this['event.timestamp'] = new Date().toISOString();
+    this.session_id = session_id;
+    this.rating = rating;
+    this.model = model;
+    this.approval_mode = approval_mode;
+    this.prompt_id = prompt_id;
+  }
+}
+
 export type TelemetryEvent =
   | StartSessionEvent
   | EndSessionEvent
@@ -542,9 +1119,12 @@ export type TelemetryEvent =
   | ToolCallEvent
   | ApiRequestEvent
   | ApiErrorEvent
+  | ApiCancelEvent
   | ApiResponseEvent
   | FlashFallbackEvent
+  | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
+  | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent
   | KittySequenceOverflowEvent
   | MalformedJsonResponseEvent
@@ -554,5 +1134,405 @@ export type TelemetryEvent =
   | FileOperationEvent
   | InvalidChunkEvent
   | ContentRetryEvent
+  | ProtocolTagSanitizedEvent
   | ContentRetryFailureEvent
-  | SubagentExecutionEvent;
+  | ApiRetryEvent
+  | SubagentExecutionEvent
+  | ExtensionEnableEvent
+  | ExtensionInstallEvent
+  | ExtensionUninstallEvent
+  | ToolOutputTruncatedEvent
+  | ToolResultPersistedEvent
+  | ModelSlashCommandEvent
+  | AuthEvent
+  | HookCallEvent
+  | SkillLaunchEvent
+  | UserFeedbackEvent
+  | ArenaSessionStartedEvent
+  | ArenaAgentCompletedEvent
+  | ArenaSessionEndedEvent;
+
+// ─── Arena Telemetry Events ────────────────────────────────────
+
+export interface ArenaSessionStartedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_session_started';
+  arena_session_id: string;
+  model_ids: string[];
+  task_length: number;
+}
+
+export function makeArenaSessionStartedEvent({
+  arena_session_id,
+  model_ids,
+  task_length,
+}: Omit<ArenaSessionStartedEvent, CommonFields>): ArenaSessionStartedEvent {
+  return {
+    'event.name': 'arena_session_started',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    model_ids,
+    task_length,
+  };
+}
+
+export type ArenaAgentCompletedStatus = 'completed' | 'failed' | 'cancelled';
+
+export interface ArenaAgentCompletedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_agent_completed';
+  arena_session_id: string;
+  agent_session_id: string;
+  agent_model_id: string;
+  status: ArenaAgentCompletedStatus;
+  duration_ms: number;
+  rounds: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  tool_calls: number;
+  successful_tool_calls: number;
+  failed_tool_calls: number;
+}
+
+export function makeArenaAgentCompletedEvent({
+  arena_session_id,
+  agent_session_id,
+  agent_model_id,
+  status,
+  duration_ms,
+  rounds,
+  total_tokens,
+  input_tokens,
+  output_tokens,
+  tool_calls,
+  successful_tool_calls,
+  failed_tool_calls,
+}: Omit<ArenaAgentCompletedEvent, CommonFields>): ArenaAgentCompletedEvent {
+  return {
+    'event.name': 'arena_agent_completed',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    agent_session_id,
+    agent_model_id,
+    status,
+    duration_ms,
+    rounds,
+    total_tokens,
+    input_tokens,
+    output_tokens,
+    tool_calls,
+    successful_tool_calls,
+    failed_tool_calls,
+  };
+}
+
+export type ArenaSessionEndedStatus =
+  | 'selected'
+  | 'discarded'
+  | 'failed'
+  | 'cancelled';
+
+export interface ArenaSessionEndedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_session_ended';
+  arena_session_id: string;
+  status: ArenaSessionEndedStatus;
+  duration_ms: number;
+  display_backend?: string;
+  agent_count: number;
+  completed_agents: number;
+  failed_agents: number;
+  cancelled_agents: number;
+  winner_model_id?: string;
+}
+
+export function makeArenaSessionEndedEvent({
+  arena_session_id,
+  status,
+  duration_ms,
+  display_backend,
+  agent_count,
+  completed_agents,
+  failed_agents,
+  cancelled_agents,
+  winner_model_id,
+}: Omit<ArenaSessionEndedEvent, CommonFields>): ArenaSessionEndedEvent {
+  return {
+    'event.name': 'arena_session_ended',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    status,
+    duration_ms,
+    display_backend,
+    agent_count,
+    completed_agents,
+    failed_agents,
+    cancelled_agents,
+    winner_model_id,
+  };
+}
+
+export class ExtensionDisableEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_disable';
+  'event.timestamp': string;
+  extension_name: string;
+  setting_scope: string;
+
+  constructor(extension_name: string, settingScope: string) {
+    this['event.name'] = 'extension_disable';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.setting_scope = settingScope;
+  }
+}
+
+export class PromptSuggestionEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.prompt_suggestion';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'ignored' | 'suppressed';
+  prompt_id?: string;
+  accept_method?: 'tab' | 'enter' | 'right';
+  accept_source?: 'live' | 'fallback';
+  time_to_accept_ms?: number;
+  time_to_ignore_ms?: number;
+  time_to_first_keystroke_ms?: number;
+  suggestion_length?: number;
+  similarity?: number;
+  was_focused_when_shown?: boolean;
+  reason?: string;
+
+  constructor(params: {
+    outcome: 'accepted' | 'ignored' | 'suppressed';
+    prompt_id?: string;
+    accept_method?: 'tab' | 'enter' | 'right';
+    accept_source?: 'live' | 'fallback';
+    time_to_accept_ms?: number;
+    time_to_ignore_ms?: number;
+    time_to_first_keystroke_ms?: number;
+    suggestion_length?: number;
+    similarity?: number;
+    was_focused_when_shown?: boolean;
+    reason?: string;
+  }) {
+    this['event.name'] = 'qwen-code.prompt_suggestion';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.prompt_id = params.prompt_id ?? 'user_intent';
+    this.accept_method = params.accept_method;
+    this.accept_source = params.accept_source;
+    this.time_to_accept_ms = params.time_to_accept_ms;
+    this.time_to_ignore_ms = params.time_to_ignore_ms;
+    this.time_to_first_keystroke_ms = params.time_to_first_keystroke_ms;
+    this.suggestion_length = params.suggestion_length;
+    this.similarity = params.similarity;
+    this.was_focused_when_shown = params.was_focused_when_shown;
+    this.reason = params.reason;
+  }
+}
+
+export class SpeculationEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.speculation';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'aborted' | 'failed';
+  turns_used: number;
+  files_written: number;
+  tool_use_count: number;
+  duration_ms: number;
+  boundary_type?: string;
+  had_pipelined_suggestion: boolean;
+
+  constructor(params: {
+    outcome: 'accepted' | 'aborted' | 'failed';
+    turns_used: number;
+    files_written: number;
+    tool_use_count: number;
+    duration_ms: number;
+    boundary_type?: string;
+    had_pipelined_suggestion: boolean;
+  }) {
+    this['event.name'] = 'qwen-code.speculation';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.turns_used = params.turns_used;
+    this.files_written = params.files_written;
+    this.tool_use_count = params.tool_use_count;
+    this.duration_ms = params.duration_ms;
+    this.boundary_type = params.boundary_type;
+    this.had_pipelined_suggestion = params.had_pipelined_suggestion;
+  }
+}
+
+/** #4721 P-telemetry: the `workflow` keyword steered a turn toward the tool. */
+export class WorkflowKeywordEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_keyword';
+  'event.timestamp': string;
+
+  constructor() {
+    this['event.name'] = 'qwen-code.workflow_keyword';
+    this['event.timestamp'] = new Date().toISOString();
+  }
+}
+
+/** #4721 P-telemetry: a workflow run reached a terminal state. */
+export class WorkflowRunEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_run';
+  'event.timestamp': string;
+  status: string;
+  agents_dispatched: number;
+  agents_completed: number;
+  phase_count: number;
+  tokens_spent: number;
+  duration_ms: number;
+
+  constructor(params: {
+    status: string;
+    agents_dispatched: number;
+    agents_completed: number;
+    phase_count: number;
+    tokens_spent: number;
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.workflow_run';
+    this['event.timestamp'] = new Date().toISOString();
+    this.status = params.status;
+    this.agents_dispatched = params.agents_dispatched;
+    this.agents_completed = params.agents_completed;
+    this.phase_count = params.phase_count;
+    this.tokens_spent = params.tokens_spent;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Managed Auto-Memory Events
+// ---------------------------------------------------------------------------
+
+export class MemoryExtractEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.extract';
+  'event.timestamp': string;
+  /** 'auto' = triggered by session turn; 'manual' = user-initiated */
+  trigger: 'auto' | 'manual';
+  status: 'completed' | 'skipped' | 'failed';
+  skipped_reason?:
+    | 'already_running'
+    | 'queued'
+    | 'memory_tool'
+    | 'memory_pressure';
+  patches_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    skipped_reason?:
+      | 'already_running'
+      | 'queued'
+      | 'memory_tool'
+      | 'memory_pressure';
+    patches_count: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.extract';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.skipped_reason = params.skipped_reason;
+    this.patches_count = params.patches_count;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryDreamEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.dream';
+  'event.timestamp': string;
+  /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
+  trigger: 'auto' | 'manual';
+  status: 'updated' | 'noop' | 'failed' | 'cancelled';
+  deduped_entries: number;
+  touched_topics_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
+    deduped_entries: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.dream';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.deduped_entries = params.deduped_entries;
+    this.touched_topics_count = params.touched_topics.length;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryRecallEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall';
+  'event.timestamp': string;
+  query_length: number;
+  docs_scanned: number;
+  docs_selected: number;
+  strategy: 'none' | 'heuristic' | 'model';
+  duration_ms: number;
+
+  constructor(params: {
+    query_length: number;
+    docs_scanned: number;
+    docs_selected: number;
+    strategy: 'none' | 'heuristic' | 'model';
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall';
+    this['event.timestamp'] = new Date().toISOString();
+    this.query_length = params.query_length;
+    this.docs_scanned = params.docs_scanned;
+    this.docs_selected = params.docs_selected;
+    this.strategy = params.strategy;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
+export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
+export type MemoryRecallDiscardReason =
+  | 'no_safe_delivery_point'
+  | 'new_query'
+  | 'reset'
+  | 'abort'
+  | 'shutdown'
+  | 'no_relevant_results';
+
+export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall.delivery';
+  'event.timestamp': string;
+  phase: MemoryRecallDeliveryPhase;
+  delivery_point: MemoryRecallDeliveryPoint;
+  discard_reason?: MemoryRecallDiscardReason;
+  strategy: 'none' | 'heuristic' | 'model';
+  docs_selected: number;
+  latency_ms: number;
+
+  constructor(params: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+    docs_selected: number;
+    latency_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall.delivery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.phase = params.phase;
+    this.delivery_point = params.delivery_point;
+    this.discard_reason = params.discard_reason;
+    this.strategy = params.strategy;
+    this.docs_selected = params.docs_selected;
+    this.latency_ms = params.latency_ms;
+  }
+}

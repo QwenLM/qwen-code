@@ -1,7 +1,10 @@
 **
 !dist/
+!dist/**
 ../
 ../../
 !LICENSE
 !NOTICES.txt
 !assets/
+!schemas/
+!schemas/**

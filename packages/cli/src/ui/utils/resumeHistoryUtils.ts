@@ -1,0 +1,702 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Code
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as path from 'node:path';
+import type { Part, FunctionCall } from '@google/genai';
+import type {
+  ResumedSessionData,
+  ConversationRecord,
+  Config,
+  AnyDeclarativeTool,
+  ToolResultDisplay,
+  SlashCommandRecordPayload,
+  AtCommandRecordPayload,
+  HistoryGap,
+  UserPromptRecordPayload,
+} from '@qwen-code/qwen-code-core';
+import {
+  getToolResponseDisplayText,
+  stripTrailingUserPromptSubmitContextPart,
+} from '@qwen-code/qwen-code-core';
+import type {
+  HistoryItem,
+  HistoryItemInfo,
+  HistoryItemWithoutId,
+  IndividualToolCallDisplay,
+} from '../types.js';
+import { ToolCallStatus, MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
+import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from './history-gap-notice.js';
+
+/**
+ * Projects a plain user record to its display text.
+ *
+ * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
+ * the model-bound parts. For records that carry the reserved tag but no
+ * payload (written by other/newer writers), drops a trailing part that is
+ * entirely a tagged hook-context block. Legacy records with bare injected
+ * text fall back to the raw part concatenation.
+ */
+function extractUserRecordDisplayText(
+  record: ConversationRecord['messages'][number],
+): string {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText) {
+    return payload.displayText;
+  }
+  const parts = (record.message?.parts as Part[] | undefined) ?? [];
+  return extractTextFromParts([
+    ...stripTrailingUserPromptSubmitContextPart(parts),
+  ]);
+}
+
+/**
+ * Extracts text content from a Content object's parts (excluding thought parts).
+ */
+function extractTextFromParts(parts: Part[] | undefined): string {
+  if (!parts) return '';
+
+  const textParts: string[] = [];
+  for (const part of parts) {
+    if ('text' in part && part.text) {
+      // Skip thought parts - they have a 'thought' property
+      if (!('thought' in part && part.thought)) {
+        textParts.push(part.text);
+      }
+    }
+  }
+  return textParts.join('\n');
+}
+
+/**
+ * Extracts thought text content from a Content object's parts.
+ * Thought parts are identified by having `thought: true`.
+ */
+function extractThoughtTextFromParts(parts: Part[] | undefined): string {
+  if (!parts) return '';
+
+  const thoughtParts: string[] = [];
+  for (const part of parts) {
+    if ('text' in part && part.text && 'thought' in part && part.thought) {
+      thoughtParts.push(part.text);
+    }
+  }
+  return thoughtParts.join('\n');
+}
+
+/**
+ * Extracts function calls from a Content object's parts.
+ */
+function extractFunctionCalls(
+  parts: Part[] | undefined,
+): Array<{ id: string; name: string; args: Record<string, unknown> }> {
+  if (!parts) return [];
+
+  const calls: Array<{
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+  }> = [];
+  for (const part of parts) {
+    if ('functionCall' in part && part.functionCall) {
+      const fc = part.functionCall as FunctionCall;
+      calls.push({
+        id: fc.id || `call-${calls.length}`,
+        name: fc.name || 'unknown',
+        args: (fc.args as Record<string, unknown>) || {},
+      });
+    }
+  }
+  return calls;
+}
+
+function getTool(
+  config: Config | null,
+  name: string,
+): AnyDeclarativeTool | undefined {
+  if (!config) return undefined;
+  const toolRegistry = config.getToolRegistry();
+  return toolRegistry.getTool(name);
+}
+
+/**
+ * Formats a tool description from its name and arguments using actual tool instances.
+ * This ensures we get the exact same descriptions as during normal operation.
+ */
+function formatToolDescription(
+  tool: AnyDeclarativeTool,
+  args: Record<string, unknown>,
+): string {
+  try {
+    // Create tool invocation instance and get description
+    const invocation = tool.build(args);
+    return invocation.getDescription();
+  } catch {
+    // Fallback: use the description arg directly if available
+    if (typeof args['description'] === 'string') {
+      return args['description'];
+    }
+    return '';
+  }
+}
+
+/**
+ * Restores a HistoryItemWithoutId from the serialized shape stored in
+ * SlashCommandRecordPayload.outputHistoryItems.
+ */
+function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return;
+  }
+
+  const clone = { ...(raw as Record<string, unknown>) };
+  if ('timestamp' in clone) {
+    const ts = clone['timestamp'];
+    if (typeof ts === 'string' || typeof ts === 'number') {
+      clone['timestamp'] = new Date(ts);
+    }
+  }
+
+  if (typeof clone['type'] !== 'string') {
+    return;
+  }
+
+  return clone as unknown as HistoryItemWithoutId;
+}
+
+/**
+ * INFO divider shown at a detected history gap: an earlier segment of the
+ * session was physically lost (storage interruption) and could not be
+ * recovered. Mirrors the ACP replay notice so both surfaces read the same.
+ */
+function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
+  return {
+    type: MessageType.INFO,
+    text: formatHistoryGapNotice(gap),
+  };
+}
+
+/**
+ * Converts ChatRecord messages to UI history items for display.
+ *
+ * This function transforms the raw ChatRecords into a format suitable
+ * for the CLI's HistoryItemDisplay component.
+ *
+ * @param conversation The conversation record from a resumed session
+ * @param config The config object for accessing tool registry
+ * @returns Array of history items for UI display
+ */
+function convertToHistoryItems(
+  conversation: ConversationRecord,
+  config: Config | null,
+  historyGaps?: HistoryGap[],
+): HistoryItemWithoutId[] {
+  const items: HistoryItemWithoutId[] = [];
+  const gapByChildUuid = indexGapsByChild(historyGaps);
+  const pendingAtCommands: AtCommandRecordPayload[] = [];
+  let atCommandCounter = 0;
+
+  // Track pending tool calls for grouping with results
+  const pendingToolCalls = new Map<
+    string,
+    { name: string; args: Record<string, unknown> }
+  >();
+  let currentToolGroup: Array<{
+    callId: string;
+    name: string;
+    description: string;
+    resultDisplay: ToolResultDisplay | undefined;
+    visionBridgeNotice?: string;
+    detailedDisplay?: string;
+    status: ToolCallStatus;
+    confirmationDetails: undefined;
+  }> = [];
+
+  const buildAtCommandDisplays = (
+    payload: AtCommandRecordPayload,
+  ): IndividualToolCallDisplay[] => {
+    // Error case: single "Read File(s)" with error message
+    if (payload.status === 'error') {
+      atCommandCounter += 1;
+      const filesLabel = payload.filesRead?.length
+        ? payload.filesRead.join(', ')
+        : 'files';
+      return [
+        {
+          callId: `at-command-${atCommandCounter}`,
+          name: 'Read File(s)',
+          description: 'Error attempting to read files',
+          status: ToolCallStatus.Error,
+          resultDisplay:
+            payload.message || `Error reading files (${filesLabel})`,
+          confirmationDetails: undefined,
+        },
+      ];
+    }
+
+    // Success case: individual tool calls for each file
+    if (!payload.filesRead?.length) {
+      atCommandCounter += 1;
+      return [
+        {
+          callId: `at-command-${atCommandCounter}`,
+          name: 'Read File',
+          description: 'Read File(s)',
+          status: ToolCallStatus.Success,
+          resultDisplay: undefined,
+          confirmationDetails: undefined,
+        },
+      ];
+    }
+
+    return payload.filesRead.map((filePath) => {
+      atCommandCounter += 1;
+      const isDir = filePath.endsWith('/');
+      return {
+        callId: `at-command-${atCommandCounter}`,
+        name: isDir ? 'Read Directory' : 'Read File',
+        description: isDir
+          ? `Read directory ${path.basename(filePath)}`
+          : `Read file ${path.basename(filePath)}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      };
+    });
+  };
+
+  for (const record of conversation.messages) {
+    // A detected history gap begins at this record — surface a visible divider
+    // so the surviving turns below are not read as contiguous across the lost
+    // segment. Flush any pending tool group first so the divider is not
+    // swallowed into it.
+    const gap = gapByChildUuid.get(record.uuid);
+    if (gap) {
+      if (currentToolGroup.length > 0) {
+        items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+        currentToolGroup = [];
+      }
+      // Reset pending @-command state at the boundary as well: the divider
+      // means the records below begin a fresh reachable island, so an
+      // unconsumed pre-gap at_command must never be shift()-paired with the
+      // post-gap user turn (which would attach @file reads to a turn the user
+      // never wrote them on). Today reconstructHistory truncates to the tail,
+      // so the buffer is already empty here; this keeps the invariant if that
+      // ever changes.
+      pendingAtCommands.length = 0;
+      items.push(createHistoryGapItem(gap));
+    }
+
+    if (record.type === 'system') {
+      if (record.subtype === 'slash_command') {
+        // Flush any pending tool group to avoid mixing contexts.
+        if (currentToolGroup.length > 0) {
+          items.push({
+            type: 'tool_group',
+            tools: [...currentToolGroup],
+          });
+          currentToolGroup = [];
+        }
+        const payload = record.systemPayload as
+          | SlashCommandRecordPayload
+          | undefined;
+        if (!payload) continue;
+        if (payload.phase === 'invocation' && payload.rawCommand) {
+          const sentToModel =
+            typeof payload.sentToModel === 'boolean'
+              ? payload.sentToModel
+              : undefined;
+          items.push({
+            type: 'user',
+            text: payload.rawCommand,
+            ...(sentToModel === undefined ? {} : { sentToModel }),
+          });
+        }
+        if (payload.phase === 'result') {
+          const outputs = payload.outputHistoryItems ?? [];
+          for (const raw of outputs) {
+            const restored = restoreHistoryItem(raw);
+            if (restored) {
+              items.push(restored);
+            }
+          }
+        }
+      }
+      if (record.subtype === 'at_command') {
+        const payload = record.systemPayload as
+          | AtCommandRecordPayload
+          | undefined;
+        if (!payload) continue;
+        pendingAtCommands.push(payload);
+      }
+      if (record.subtype === 'rewind') {
+        items.push({ type: 'info', text: 'Conversation rewound.' });
+      }
+      continue;
+    }
+    switch (record.type) {
+      case 'user': {
+        // Restore notification items (background agent completions and cron fires)
+        if (record.subtype === 'notification' || record.subtype === 'cron') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const fallback =
+            record.subtype === 'cron'
+              ? 'Cron job fired'
+              : 'Background agent completed';
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]) ||
+            fallback;
+          items.push({ type: 'notification', text });
+          break;
+        }
+        if (record.subtype === 'mid_turn_user_message') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            items.push({ type: MessageType.USER, text, sentToModel: false });
+          }
+          break;
+        }
+        if (pendingAtCommands.length > 0) {
+          // Flush any pending tool group before user message
+          if (currentToolGroup.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: [...currentToolGroup],
+            });
+            currentToolGroup = [];
+          }
+
+          const payload = pendingAtCommands.shift()!;
+          const text = payload.userText || extractUserRecordDisplayText(record);
+          if (text) {
+            items.push({ type: 'user', text });
+          }
+
+          const toolDisplays = buildAtCommandDisplays(payload);
+          if (toolDisplays.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: toolDisplays,
+            });
+          }
+          break;
+        }
+        // Flush any pending tool group before user message
+        if (currentToolGroup.length > 0) {
+          items.push({
+            type: 'tool_group',
+            tools: [...currentToolGroup],
+          });
+          currentToolGroup = [];
+        }
+
+        const text = extractUserRecordDisplayText(record);
+        if (text) {
+          items.push({ type: 'user', text });
+        }
+        break;
+      }
+
+      case 'assistant': {
+        const parts = record.message?.parts as Part[] | undefined;
+
+        // The interactive TUI treats thinking as transient live state, so
+        // resumed history should not reintroduce thought rows into scrollback.
+        // With no config (standalone picker preview), keep showing thoughts
+        // verbatim because there is no live loading area in that view.
+        const thoughtText = !config ? extractThoughtTextFromParts(parts) : '';
+
+        // Extract text content (non-function-call, non-thought)
+        const text = extractTextFromParts(parts);
+
+        // Extract function calls
+        const functionCalls = extractFunctionCalls(parts);
+
+        // If there's thought content, add it as a gemini_thought message
+        if (thoughtText) {
+          // Flush any pending tool group before thought
+          if (currentToolGroup.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: [...currentToolGroup],
+            });
+            currentToolGroup = [];
+          }
+          items.push({ type: 'gemini_thought', text: thoughtText });
+        }
+
+        // If there's text content, add it as a gemini message
+        if (text) {
+          // Flush any pending tool group before text
+          if (currentToolGroup.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: [...currentToolGroup],
+            });
+            currentToolGroup = [];
+          }
+          items.push({
+            type: 'gemini',
+            text,
+            timestamp: new Date(record.timestamp).getTime(),
+          });
+        }
+
+        // Track function calls for pairing with results
+        for (const fc of functionCalls) {
+          const tool = getTool(config, fc.name);
+
+          pendingToolCalls.set(fc.id, { name: fc.name, args: fc.args });
+
+          // Add placeholder tool call to current group
+          currentToolGroup.push({
+            callId: fc.id,
+            name: tool?.displayName || fc.name,
+            description: tool ? formatToolDescription(tool, fc.args) : '',
+            resultDisplay: undefined,
+            status: ToolCallStatus.Success, // Will be updated by tool_result
+            confirmationDetails: undefined,
+          });
+        }
+        break;
+      }
+
+      case 'tool_result': {
+        // Update the corresponding tool call in the current group
+        if (record.toolCallResult) {
+          const callId = record.toolCallResult.callId;
+          const toolCall = currentToolGroup.find((t) => t.callId === callId);
+          if (toolCall) {
+            // Preserve the resultDisplay as-is - it can be a string or structured object
+            const rawDisplay = record.toolCallResult.resultDisplay;
+            toolCall.resultDisplay = rawDisplay;
+            if (record.toolCallResult.visionBridgeNotice !== undefined) {
+              toolCall.visionBridgeNotice =
+                record.toolCallResult.visionBridgeNotice;
+            }
+            // Check if status exists and use it
+            const rawStatus = (
+              record.toolCallResult as Record<string, unknown>
+            )['status'] as string | undefined;
+            toolCall.status =
+              rawStatus === 'error'
+                ? ToolCallStatus.Error
+                : ToolCallStatus.Success;
+            // Full detail for the Ctrl+O transcript (§4.9): the complete
+            // functionResponse parts are persisted on the tool_result record
+            // (only resultDisplay is sanitized), so resume yields full detail
+            // too. Fall back to message.parts for older records. Only derive it
+            // for SUCCESS + collapsible (read/search/list) tools, mirroring the
+            // live path's gate in useReactToolScheduler — the renderer's
+            // `usingDetailedDisplay` only consumes it for collapsible tools, so
+            // extracting it for edit/write/command/agent calls would store a
+            // large (~25K char) string the transcript never reads. Errored /
+            // cancelled tools are excluded so raw output never surfaces.
+            if (
+              toolCall.status === ToolCallStatus.Success &&
+              isCollapsibleTool(toolCall.name)
+            ) {
+              toolCall.detailedDisplay = getToolResponseDisplayText(
+                (record.toolCallResult.responseParts as Part[] | undefined) ??
+                  (record.message?.parts as Part[] | undefined),
+              );
+            }
+          }
+          pendingToolCalls.delete(callId || '');
+        }
+        break;
+      }
+
+      default:
+        // Skip unknown record types
+        break;
+    }
+  }
+
+  if (pendingAtCommands.length > 0) {
+    for (const payload of pendingAtCommands) {
+      // Flush any pending tool group before standalone @-command
+      if (currentToolGroup.length > 0) {
+        items.push({
+          type: 'tool_group',
+          tools: [...currentToolGroup],
+        });
+        currentToolGroup = [];
+      }
+
+      const text = payload.userText;
+      if (text) {
+        items.push({ type: 'user', text });
+      }
+      const toolDisplays = buildAtCommandDisplays(payload);
+      if (toolDisplays.length > 0) {
+        items.push({
+          type: 'tool_group',
+          tools: toolDisplays,
+        });
+      }
+    }
+  }
+
+  // Flush any remaining tool group
+  if (currentToolGroup.length > 0) {
+    items.push({
+      type: 'tool_group',
+      tools: currentToolGroup,
+    });
+  }
+
+  return items;
+}
+
+/**
+ * Builds the complete UI history items for a resumed session.
+ *
+ * This function takes the resumed session data, converts it to UI history format,
+ * and assigns unique IDs to each item for use with loadHistory.
+ *
+ * @param sessionData The resumed session data from SessionService
+ * @param config The config object for accessing tool registry. Pass `null`
+ *   to render in "preview" mode (no tool metadata lookup, thoughts shown
+ *   verbatim) — used by the standalone resume picker that runs before
+ *   `loadCliConfig`.
+ * @param baseTimestamp Base timestamp for generating unique IDs
+ * @returns Array of HistoryItem with proper IDs
+ */
+export function buildResumedHistoryItems(
+  sessionData: ResumedSessionData,
+  config: Config | null,
+  baseTimestamp: number = Date.now(),
+): HistoryItem[] {
+  const items: HistoryItem[] = [];
+  let idCounter = 1;
+
+  const getNextId = (): number => baseTimestamp + idCounter++;
+
+  // Convert conversation directly to history items
+  const historyItems = convertToHistoryItems(
+    sessionData.conversation,
+    config,
+    sessionData.historyGaps,
+  );
+  for (const item of historyItems) {
+    items.push({
+      ...item,
+      id: getNextId(),
+    } as HistoryItem);
+  }
+
+  return items;
+}
+
+/**
+ * Applies the quiet-restore display policy to resumed history items.
+ * Marks each item with `display.suppressOnRestore` so the rendering layer
+ * skips them while the canonical history (used by /rewind turn mapping) is preserved.
+ */
+function applyResumeDisplayPolicy(items: HistoryItem[]): HistoryItem[] {
+  return items.map((item) => ({
+    ...item,
+    display: { ...item.display, suppressOnRestore: true },
+  }));
+}
+
+/**
+ * Creates the summary INFO item shown when resume-time collapse suppresses
+ * the transcript display.
+ */
+function createHistoryCollapseSummaryItem(
+  messageCount: number,
+): HistoryItemInfo & { display: { kind: 'collapse-summary' } } {
+  const n = String(messageCount);
+  return {
+    type: MessageType.INFO,
+    text: t(
+      'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+      { n },
+    ),
+    display: { kind: 'collapse-summary' },
+  };
+}
+
+/**
+ * Strips the suppressOnRestore flag from a history item's display property.
+ * Used when rewinding into collapsed history to ensure rewound items remain visible.
+ */
+export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+  if (!item.display?.suppressOnRestore) return item;
+  const { suppressOnRestore: _, ...rest } = item.display;
+  return {
+    ...item,
+    display: Object.keys(rest).length > 0 ? rest : undefined,
+  };
+}
+
+/**
+ * Removes collapse-summary items and strips suppressOnRestore from the rest.
+ * Shared between the rewind path and the expand-now command.
+ */
+export function expandCollapsedHistory(items: HistoryItem[]): HistoryItem[] {
+  return items
+    .filter((item) => item.display?.kind !== 'collapse-summary')
+    .map(stripSuppressOnRestore);
+}
+
+/**
+ * Helper to apply the collapse policy and append the summary item if needed.
+ */
+export function applyCollapsePolicyAndSummary(
+  rawItems: HistoryItem[],
+  collapseOnResume: boolean,
+  collapsePreviewCount: number = 0,
+): HistoryItem[] {
+  if (!collapseOnResume) return rawItems;
+  if (collapsePreviewCount === -1) return rawItems;
+
+  let boundary = rawItems.length;
+  if (collapsePreviewCount > 0) {
+    let userTurnCount = 0;
+    for (let i = rawItems.length - 1; i >= 0; i--) {
+      const item = rawItems[i];
+      if (item.type === MessageType.USER && item.sentToModel !== false) {
+        userTurnCount++;
+        if (userTurnCount === collapsePreviewCount) {
+          boundary = i;
+          break;
+        }
+      }
+    }
+    if (userTurnCount < collapsePreviewCount) {
+      boundary = 0;
+    }
+  }
+
+  const hiddenItems = applyResumeDisplayPolicy(rawItems.slice(0, boundary));
+  const visibleItems = rawItems.slice(boundary);
+  const uiHistoryItems = [...hiddenItems, ...visibleItems];
+
+  if (boundary > 0) {
+    const nextId = rawItems[rawItems.length - 1].id + 1;
+    return [
+      ...uiHistoryItems,
+      { id: nextId, ...createHistoryCollapseSummaryItem(boundary) },
+    ];
+  }
+
+  return uiHistoryItems;
+}

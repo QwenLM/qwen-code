@@ -6,11 +6,12 @@
 
 import type React from 'react';
 import { Box, Text, useIsScreenReaderEnabled } from 'ink';
-import { Colors } from '../../colors.js';
 import crypto from 'node:crypto';
 import { colorizeCode, colorizeLine } from '../../utils/CodeColorizer.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
-import { theme } from '../../semantic-colors.js';
+import { theme as semanticTheme } from '../../semantic-colors.js';
+import type { Theme } from '../../themes/theme.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 
 interface DiffLine {
   type: 'add' | 'del' | 'context' | 'hunk' | 'other';
@@ -42,18 +43,9 @@ function parseDiffWithLineNumbers(diffContent: string): DiffLine[] {
     }
     if (!inHunk) {
       // Skip standard Git header lines more robustly
-      if (
-        line.startsWith('--- ') ||
-        line.startsWith('+++ ') ||
-        line.startsWith('diff --git') ||
-        line.startsWith('index ') ||
-        line.startsWith('similarity index') ||
-        line.startsWith('rename from') ||
-        line.startsWith('rename to') ||
-        line.startsWith('new file mode') ||
-        line.startsWith('deleted file mode')
-      )
+      if (line.startsWith('--- ')) {
         continue;
+      }
       // If it's not a hunk or header, skip (or handle as 'other' if needed)
       continue;
     }
@@ -93,8 +85,9 @@ interface DiffRendererProps {
   filename?: string;
   tabWidth?: number;
   availableTerminalHeight?: number;
-  terminalWidth: number;
-  theme?: import('../../themes/theme.js').Theme;
+  contentWidth: number;
+  theme?: Theme;
+  settings?: LoadedSettings;
 }
 
 const DEFAULT_TAB_WIDTH = 4; // Spaces per tab for normalization
@@ -104,19 +97,24 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
   filename,
   tabWidth = DEFAULT_TAB_WIDTH,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
   theme,
+  settings,
 }) => {
   const screenReaderEnabled = useIsScreenReaderEnabled();
   if (!diffContent || typeof diffContent !== 'string') {
-    return <Text color={Colors.AccentYellow}>No diff content.</Text>;
+    return <Text color={semanticTheme.status.warning}>No diff content.</Text>;
   }
 
   const parsedLines = parseDiffWithLineNumbers(diffContent);
 
   if (parsedLines.length === 0) {
     return (
-      <Box borderStyle="round" borderColor={Colors.Gray} padding={1}>
+      <Box
+        borderStyle="round"
+        borderColor={semanticTheme.border.default}
+        padding={1}
+      >
         <Text dimColor>No changes detected.</Text>
       </Box>
     );
@@ -160,8 +158,8 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       addedContent,
       language,
       availableTerminalHeight,
-      terminalWidth,
-      theme,
+      contentWidth,
+      { theme, settings, tabWidth },
     );
   } else {
     renderedOutput = renderDiffContent(
@@ -169,7 +167,8 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       filename,
       tabWidth,
       availableTerminalHeight,
-      terminalWidth,
+      contentWidth,
+      settings,
     );
   }
 
@@ -181,7 +180,8 @@ const renderDiffContent = (
   filename: string | undefined,
   tabWidth = DEFAULT_TAB_WIDTH,
   availableTerminalHeight: number | undefined,
-  terminalWidth: number,
+  contentWidth: number,
+  settings?: LoadedSettings,
 ) => {
   // 1. Normalize whitespace (replace tabs with spaces) *before* further processing
   const normalizedLines = parsedLines.map((line) => ({
@@ -196,11 +196,17 @@ const renderDiffContent = (
 
   if (displayableLines.length === 0) {
     return (
-      <Box borderStyle="round" borderColor={Colors.Gray} padding={1}>
+      <Box
+        borderStyle="round"
+        borderColor={semanticTheme.border.default}
+        padding={1}
+      >
         <Text dimColor>No changes detected.</Text>
       </Box>
     );
   }
+
+  const showLineNumbers = settings?.merged.ui?.showLineNumbers ?? true;
 
   const maxLineNumber = Math.max(
     0,
@@ -239,7 +245,7 @@ const renderDiffContent = (
   return (
     <MaxSizedBox
       maxHeight={availableTerminalHeight}
-      maxWidth={terminalWidth}
+      maxWidth={contentWidth}
       key={key}
     >
       {displayableLines.reduce<React.ReactNode[]>((acc, line, index) => {
@@ -260,8 +266,8 @@ const renderDiffContent = (
         ) {
           acc.push(
             <Box key={`gap-${index}`}>
-              <Text wrap="truncate" color={Colors.Gray}>
-                {'═'.repeat(terminalWidth)}
+              <Text wrap="truncate" color={semanticTheme.text.secondary}>
+                {'═'.repeat(contentWidth)}
               </Text>
             </Box>,
           );
@@ -300,18 +306,21 @@ const renderDiffContent = (
 
         acc.push(
           <Box key={lineKey} flexDirection="row">
-            <Text
-              color={theme.text.secondary}
-              backgroundColor={
-                line.type === 'add'
-                  ? theme.background.diff.added
-                  : line.type === 'del'
-                    ? theme.background.diff.removed
-                    : undefined
-              }
-            >
-              {gutterNumStr.padStart(gutterWidth)}{' '}
-            </Text>
+            {showLineNumbers && (
+              <Text
+                selectable={false}
+                color={semanticTheme.text.secondary}
+                backgroundColor={
+                  line.type === 'add'
+                    ? semanticTheme.background.diff.added
+                    : line.type === 'del'
+                      ? semanticTheme.background.diff.removed
+                      : undefined
+                }
+              >
+                {gutterNumStr.padStart(gutterWidth)}{' '}
+              </Text>
+            )}
             {line.type === 'context' ? (
               <>
                 <Text>{prefixSymbol} </Text>
@@ -323,16 +332,16 @@ const renderDiffContent = (
               <Text
                 backgroundColor={
                   line.type === 'add'
-                    ? theme.background.diff.added
-                    : theme.background.diff.removed
+                    ? semanticTheme.background.diff.added
+                    : semanticTheme.background.diff.removed
                 }
                 wrap="wrap"
               >
                 <Text
                   color={
                     line.type === 'add'
-                      ? theme.status.success
-                      : theme.status.error
+                      ? semanticTheme.status.success
+                      : semanticTheme.status.error
                   }
                 >
                   {prefixSymbol}

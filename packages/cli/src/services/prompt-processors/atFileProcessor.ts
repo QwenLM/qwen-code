@@ -7,6 +7,7 @@
 import {
   flatMapTextParts,
   readPathFromWorkspace,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type { CommandContext } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
@@ -16,6 +17,8 @@ import {
   type PromptPipelineContent,
 } from './types.js';
 import { extractInjections } from './injectionParser.js';
+
+const debugLogger = createDebugLogger('AT_FILE_PROCESSOR');
 
 export class AtFileProcessor implements IPromptProcessor {
   constructor(private readonly commandName?: string) {}
@@ -56,7 +59,7 @@ export class AtFileProcessor implements IPromptProcessor {
         try {
           const fileContentParts = await readPathFromWorkspace(pathStr, config);
           if (fileContentParts.length === 0) {
-            const uiMessage = `File '@{${pathStr}}' was ignored by .gitignore or .qwenignore and was not included in the prompt.`;
+            const uiMessage = `File '@{${pathStr}}' was ignored by .gitignore or configured Qwen ignore files and was not included in the prompt.`;
             context.ui.addItem(
               { type: MessageType.INFO, text: uiMessage },
               Date.now(),
@@ -68,7 +71,7 @@ export class AtFileProcessor implements IPromptProcessor {
             error instanceof Error ? error.message : String(error);
           const uiMessage = `Failed to inject content for '@{${pathStr}}': ${message}`;
 
-          console.error(
+          debugLogger.error(
             `[AtFileProcessor] ${uiMessage}. Leaving placeholder in prompt.`,
           );
           context.ui.addItem(

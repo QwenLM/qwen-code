@@ -4,31 +4,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as dns from 'node:dns';
 import * as fs from 'node:fs';
 import { isSubpath } from '../utils/paths.js';
-import { detectIde, type DetectedIde, getIdeInfo } from '../ide/detect-ide.js';
-import type { DiffUpdateResult } from '../ide/ideContext.js';
+import { detectIde, type IdeInfo } from '../ide/detect-ide.js';
+import { ideContextStore } from './ideContext.js';
+import { Storage } from '../config/storage.js';
 import {
-  ideContext,
   IdeContextNotificationSchema,
   IdeDiffAcceptedNotificationSchema,
   IdeDiffClosedNotificationSchema,
-  CloseDiffResponseSchema,
-} from '../ide/ideContext.js';
+  IdeDiffRejectedNotificationSchema,
+} from './types.js';
 import { getIdeProcessInfo } from './process-utils.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EnvHttpProxyAgent } from 'undici';
+import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { IDE_REQUEST_TIMEOUT_MS } from './constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { loadUndici } from '../utils/runtimeFetchOptions.js';
 
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) => console.debug('[DEBUG] [IDEClient]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) => console.error('[ERROR] [IDEClient]', ...args),
-};
+const debugLogger = createDebugLogger('IDE');
+
+export type DiffUpdateResult =
+  | {
+      status: 'accepted';
+      content?: string;
+    }
+  | {
+      status: 'rejected';
+      content: undefined;
+    };
 
 export type IDEConnectionState = {
   status: IDEConnectionStatus;
@@ -48,15 +58,32 @@ type StdioConfig = {
 
 type ConnectionConfig = {
   port?: string;
+  authToken?: string;
   stdio?: StdioConfig;
+};
+
+type IdeConnectionConfig = ConnectionConfig & {
+  workspacePath?: string;
+  ideInfo?: IdeInfo;
+  ppid?: number;
+};
+
+type ParsedConnectionLockFile = {
+  file: string;
+  fullPath: string;
+  mtimeMs: number;
+  parsed: IdeConnectionConfig;
+};
+
+type LegacyConnectionConfigResult = {
+  config: IdeConnectionConfig;
+  source: 'pid' | 'env-port';
 };
 
 function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
   } catch (_e) {
-    // If realpathSync fails, it might be because the path doesn't exist.
-    // In that case, we can fall back to the original path.
     return path;
   }
 }
@@ -65,34 +92,45 @@ function getRealPath(path: string): string {
  * Manages the connection to and interaction with the IDE server.
  */
 export class IdeClient {
-  private static instance: IdeClient;
+  private static instancePromise: Promise<IdeClient> | null = null;
   private client: Client | undefined = undefined;
   private state: IDEConnectionState = {
     status: IDEConnectionStatus.Disconnected,
     details:
       'IDE integration is currently disabled. To enable it, run /ide enable.',
   };
-  private currentIde: DetectedIde | undefined;
-  private currentIdeDisplayName: string | undefined;
+  private currentIde: IdeInfo | undefined;
   private ideProcessInfo: { pid: number; command: string } | undefined;
+  private connectionConfig: IdeConnectionConfig | undefined;
+  private workspaceRejectedPorts = new Set<string>();
+  private authToken: string | undefined;
   private diffResponses = new Map<string, (result: DiffUpdateResult) => void>();
   private statusListeners = new Set<(state: IDEConnectionState) => void>();
+  private trustChangeListeners = new Set<(isTrusted: boolean) => void>();
+  private availableTools: string[] = [];
+  /**
+   * A mutex to ensure that only one diff view is open in the IDE at a time.
+   * This prevents race conditions and UI issues in IDEs like VSCode that
+   * can't handle multiple diff views being opened simultaneously.
+   */
+  private diffMutex = Promise.resolve();
 
   private constructor() {}
 
-  static async getInstance(): Promise<IdeClient> {
-    if (!IdeClient.instance) {
-      const client = new IdeClient();
-      client.ideProcessInfo = await getIdeProcessInfo();
-      client.currentIde = detectIde(client.ideProcessInfo);
-      if (client.currentIde) {
-        client.currentIdeDisplayName = getIdeInfo(
-          client.currentIde,
-        ).displayName;
-      }
-      IdeClient.instance = client;
+  static getInstance(): Promise<IdeClient> {
+    if (!IdeClient.instancePromise) {
+      IdeClient.instancePromise = (async () => {
+        const client = new IdeClient();
+        client.ideProcessInfo = await getIdeProcessInfo();
+        client.connectionConfig = await client.getConnectionConfigFromFile();
+        client.currentIde = detectIde(
+          client.ideProcessInfo,
+          client.connectionConfig?.ideInfo,
+        );
+        return client;
+      })();
     }
-    return IdeClient.instance;
+    return IdeClient.instancePromise;
   }
 
   addStatusChangeListener(listener: (state: IDEConnectionState) => void) {
@@ -103,8 +141,16 @@ export class IdeClient {
     this.statusListeners.delete(listener);
   }
 
+  addTrustChangeListener(listener: (isTrusted: boolean) => void) {
+    this.trustChangeListeners.add(listener);
+  }
+
+  removeTrustChangeListener(listener: (isTrusted: boolean) => void) {
+    this.trustChangeListeners.delete(listener);
+  }
+
   async connect(): Promise<void> {
-    if (!this.currentIde || !this.currentIdeDisplayName) {
+    if (!this.currentIde) {
       this.setState(
         IDEConnectionStatus.Disconnected,
         `IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks`,
@@ -115,14 +161,16 @@ export class IdeClient {
 
     this.setState(IDEConnectionStatus.Connecting);
 
-    const configFromFile = await this.getConnectionConfigFromFile();
+    this.connectionConfig = await this.getConnectionConfigFromFile();
+    if (this.connectionConfig?.authToken) {
+      this.authToken = this.connectionConfig.authToken;
+    }
     const workspacePath =
-      configFromFile?.workspacePath ??
+      this.connectionConfig?.workspacePath ??
       process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
 
     const { isValid, error } = IdeClient.validateWorkspacePath(
       workspacePath,
-      this.currentIdeDisplayName,
       process.cwd(),
     );
 
@@ -131,18 +179,22 @@ export class IdeClient {
       return;
     }
 
-    if (configFromFile) {
-      if (configFromFile.port) {
+    if (this.connectionConfig) {
+      if (this.connectionConfig.port) {
         const connected = await this.establishHttpConnection(
-          configFromFile.port,
+          this.connectionConfig.port,
         );
         if (connected) {
           return;
         }
+        const fallbackConnected = await this.tryFallbackPorts();
+        if (fallbackConnected) {
+          return;
+        }
       }
-      if (configFromFile.stdio) {
+      if (this.connectionConfig.stdio) {
         const connected = await this.establishStdioConnection(
-          configFromFile.stdio,
+          this.connectionConfig.stdio,
         );
         if (connected) {
           return;
@@ -151,7 +203,7 @@ export class IdeClient {
     }
 
     const portFromEnv = this.getPortFromEnv();
-    if (portFromEnv) {
+    if (portFromEnv && !this.workspaceRejectedPorts.has(portFromEnv)) {
       const connected = await this.establishHttpConnection(portFromEnv);
       if (connected) {
         return;
@@ -166,72 +218,196 @@ export class IdeClient {
       }
     }
 
+    if (this.workspaceRejectedPorts.size > 0) {
+      this.setState(
+        IDEConnectionStatus.Disconnected,
+        `Found IDE companion extension, but its workspace does not match the current directory. Run Qwen Code from the workspace open in your IDE, or switch the IDE to this project.`,
+        true,
+      );
+      return;
+    }
+
     this.setState(
       IDEConnectionStatus.Disconnected,
-      `Failed to connect to IDE companion extension in ${this.currentIdeDisplayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      `Failed to connect to IDE companion extension in ${this.currentIde.displayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
       true,
     );
   }
 
   /**
-   * A diff is accepted with any modifications if the user performs one of the
-   * following actions:
-   * - Clicks the checkbox icon in the IDE to accept
-   * - Runs `command+shift+p` > "Gemini CLI: Accept Diff in IDE" to accept
-   * - Selects "accept" in the CLI UI
-   * - Saves the file via `ctrl/command+s`
+   * Opens a diff view in the IDE, allowing the user to review and accept or
+   * reject changes.
    *
-   * A diff is rejected if the user performs one of the following actions:
-   * - Clicks the "x" icon in the IDE
-   * - Runs "Gemini CLI: Close Diff in IDE"
-   * - Selects "no" in the CLI UI
-   * - Closes the file
+   * This method sends a request to the IDE to display a diff between the
+   * current content of a file and the new content provided. It then waits for
+   * a notification from the IDE indicating that the user has either accepted
+   * (potentially with manual edits) or rejected the diff.
+   *
+   * A mutex ensures that only one diff view can be open at a time to prevent
+   * race conditions.
+   *
+   * @param filePath The absolute path to the file to be diffed.
+   * @param newContent The proposed new content for the file.
+   * @returns A promise that resolves with a `DiffUpdateResult`, indicating
+   *   whether the diff was 'accepted' or 'rejected' and including the final
+   *   content if accepted.
    */
   async openDiff(
     filePath: string,
-    newContent?: string,
+    newContent: string,
   ): Promise<DiffUpdateResult> {
-    return new Promise<DiffUpdateResult>((resolve, reject) => {
+    const release = await this.acquireMutex();
+
+    const promise = new Promise<DiffUpdateResult>((resolve, reject) => {
+      if (!this.client) {
+        // The promise will be rejected, and the finally block below will release the mutex.
+        return reject(new Error('IDE client is not connected.'));
+      }
       this.diffResponses.set(filePath, resolve);
       this.client
-        ?.callTool({
-          name: `openDiff`,
-          arguments: {
-            filePath,
-            newContent,
+        .request(
+          {
+            method: 'tools/call',
+            params: {
+              name: `openDiff`,
+              arguments: {
+                filePath,
+                newContent,
+              },
+            },
           },
+          CallToolResultSchema,
+          { timeout: IDE_REQUEST_TIMEOUT_MS },
+        )
+        .then((parsedResultData) => {
+          if (parsedResultData.isError) {
+            const textPart = parsedResultData.content.find(
+              (part) => part.type === 'text',
+            );
+            const errorMessage =
+              textPart?.text ?? `Tool 'openDiff' reported an error.`;
+            debugLogger.debug(
+              `Request for openDiff ${filePath} failed with isError:`,
+              errorMessage,
+            );
+            this.diffResponses.delete(filePath);
+            reject(new Error(errorMessage));
+          }
         })
         .catch((err) => {
-          logger.debug(`callTool for ${filePath} failed:`, err);
+          debugLogger.debug(`Request for openDiff ${filePath} failed:`, err);
+          this.diffResponses.delete(filePath);
           reject(err);
         });
     });
+
+    // Ensure the mutex is released only after the diff interaction is complete.
+    promise.finally(release);
+
+    return promise;
   }
 
-  async closeDiff(filePath: string): Promise<string | undefined> {
-    try {
-      const result = await this.client?.callTool({
-        name: `closeDiff`,
-        arguments: {
-          filePath,
-        },
-      });
+  /**
+   * Acquires a lock to ensure sequential execution of critical sections.
+   *
+   * This method implements a promise-based mutex. It works by chaining promises.
+   * Each call to `acquireMutex` gets the current `diffMutex` promise. It then
+   * creates a *new* promise (`newMutex`) that will be resolved when the caller
+   * invokes the returned `release` function. The `diffMutex` is immediately
+   * updated to this `newMutex`.
+   *
+   * The method returns a promise that resolves with the `release` function only
+   * *after* the *previous* `diffMutex` promise has resolved. This creates a
+   * queue where each subsequent operation must wait for the previous one to release
+   * the lock.
+   *
+   * @returns A promise that resolves to a function that must be called to
+   *   release the lock.
+   */
+  private acquireMutex(): Promise<() => void> {
+    let release: () => void;
+    const newMutex = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const oldMutex = this.diffMutex;
+    this.diffMutex = newMutex;
+    return oldMutex.then(() => release);
+  }
 
-      if (result) {
-        const parsed = CloseDiffResponseSchema.parse(result);
-        return parsed.content;
+  async closeDiff(
+    filePath: string,
+    options?: { suppressNotification?: boolean },
+  ): Promise<string | undefined> {
+    try {
+      if (!this.client) {
+        return undefined;
+      }
+      const resultData = await this.client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: `closeDiff`,
+            arguments: {
+              filePath,
+              suppressNotification: options?.suppressNotification,
+            },
+          },
+        },
+        CallToolResultSchema,
+        { timeout: IDE_REQUEST_TIMEOUT_MS },
+      );
+
+      if (!resultData) {
+        return undefined;
+      }
+
+      if (resultData.isError) {
+        const textPart = resultData.content.find(
+          (part) => part.type === 'text',
+        );
+        const errorMessage =
+          textPart?.text ?? `Tool 'closeDiff' reported an error.`;
+        debugLogger.debug(
+          `Request for closeDiff ${filePath} failed with isError:`,
+          errorMessage,
+        );
+        return undefined;
+      }
+
+      const textPart = resultData.content.find((part) => part.type === 'text');
+
+      if (textPart?.text) {
+        try {
+          const parsedJson = JSON.parse(textPart.text);
+          if (parsedJson && typeof parsedJson.content === 'string') {
+            return parsedJson.content;
+          }
+          if (parsedJson && parsedJson.content === null) {
+            return undefined;
+          }
+        } catch (_e) {
+          debugLogger.debug(
+            `Invalid JSON in closeDiff response for ${filePath}:`,
+            textPart.text,
+          );
+        }
       }
     } catch (err) {
-      logger.debug(`callTool for ${filePath} failed:`, err);
+      debugLogger.debug(`Request for closeDiff ${filePath} failed:`, err);
     }
-    return;
+    return undefined;
   }
 
   // Closes the diff. Instead of waiting for a notification,
   // manually resolves the diff resolver as the desired outcome.
   async resolveDiffFromCli(filePath: string, outcome: 'accepted' | 'rejected') {
-    const content = await this.closeDiff(filePath);
     const resolver = this.diffResponses.get(filePath);
+    const content = await this.closeDiff(filePath, {
+      // Suppress notification to avoid race where closing the diff rejects the
+      // request.
+      suppressNotification: true,
+    });
+
     if (resolver) {
       if (outcome === 'accepted') {
         resolver({ status: 'accepted', content });
@@ -257,7 +433,7 @@ export class IdeClient {
     this.client?.close();
   }
 
-  getCurrentIde(): DetectedIde | undefined {
+  getCurrentIde(): IdeInfo | undefined {
     return this.currentIde;
   }
 
@@ -266,7 +442,52 @@ export class IdeClient {
   }
 
   getDetectedIdeDisplayName(): string | undefined {
-    return this.currentIdeDisplayName;
+    return this.currentIde?.displayName;
+  }
+
+  isDiffingEnabled(): boolean {
+    return (
+      !!this.client &&
+      this.state.status === IDEConnectionStatus.Connected &&
+      this.availableTools.includes('openDiff') &&
+      this.availableTools.includes('closeDiff')
+    );
+  }
+
+  private async discoverTools(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    try {
+      debugLogger.debug('Discovering tools from IDE...');
+      const response = await this.client.request(
+        { method: 'tools/list', params: {} },
+        ListToolsResultSchema,
+      );
+
+      this.availableTools = response.tools.map((tool) => tool.name);
+
+      if (this.availableTools.length > 0) {
+        debugLogger.debug(
+          `Discovered ${this.availableTools.length} tools from IDE: ${this.availableTools.join(', ')}`,
+        );
+      } else {
+        debugLogger.debug(
+          'IDE supports tool discovery, but no tools are available.',
+        );
+      }
+    } catch (error) {
+      // "Method not found" is expected for IDEs that don't support tool discovery.
+      if (
+        error instanceof Error &&
+        !error.message?.includes('Method not found')
+      ) {
+        debugLogger.error(`Error discovering tools from IDE: ${error.message}`);
+      } else {
+        debugLogger.debug('IDE does not support tool discovery.');
+      }
+      this.availableTools = [];
+    }
   }
 
   private setState(
@@ -287,40 +508,39 @@ export class IdeClient {
       }
       if (details) {
         if (logToConsole) {
-          logger.error(details);
+          debugLogger.error(details);
         } else {
           // We only want to log disconnect messages to debug
           // if they are not already being logged to the console.
-          logger.debug(details);
+          debugLogger.debug(details);
         }
       }
     }
 
     if (status === IDEConnectionStatus.Disconnected) {
-      ideContext.clearIdeContext();
+      ideContextStore.clear();
     }
   }
 
   static validateWorkspacePath(
     ideWorkspacePath: string | undefined,
-    currentIdeDisplayName: string | undefined,
     cwd: string,
   ): { isValid: boolean; error?: string } {
     if (ideWorkspacePath === undefined) {
       return {
         isValid: false,
-        error: `Failed to connect to IDE companion extension in ${currentIdeDisplayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
+        error: `Failed to connect to IDE companion extension. Please ensure the extension is running. To install the extension, run /ide install.`,
       };
     }
 
     if (ideWorkspacePath === '') {
       return {
         isValid: false,
-        error: `To use this feature, please open a workspace folder in ${currentIdeDisplayName} and try again.`,
+        error: `To use this feature, please open a workspace folder in your IDE and try again.`,
       };
     }
 
-    const ideWorkspacePaths = ideWorkspacePath.split(path.delimiter);
+    const ideWorkspacePaths = IdeClient.parseWorkspacePathEnv(ideWorkspacePath);
     const realCwd = getRealPath(cwd);
     const isWithinWorkspace = ideWorkspacePaths.some((workspacePath) => {
       const idePath = getRealPath(workspacePath);
@@ -330,7 +550,7 @@ export class IdeClient {
     if (!isWithinWorkspace) {
       return {
         isValid: false,
-        error: `Directory mismatch. Qwen Code is running in a different location than the open workspace in ${currentIdeDisplayName}. Please run the CLI from one of the following directories: ${ideWorkspacePaths.join(
+        error: `Directory mismatch. Qwen Code is running in a different location than the open workspace in the IDE. Please run the CLI from one of the following directories: ${ideWorkspacePaths.join(
           ', ',
         )}`,
       };
@@ -338,11 +558,48 @@ export class IdeClient {
     return { isValid: true };
   }
 
+  private static parseWorkspacePathEnv(value: string): string[] {
+    if (value.trimStart().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((item) => typeof item === 'string')
+        ) {
+          return parsed.filter(
+            (item) => item.length > 0 && path.isAbsolute(item),
+          );
+        }
+      } catch {
+        // Fall through to the legacy delimiter parser below.
+      }
+    }
+    return value
+      .split(path.delimiter)
+      .filter((item) => item.length > 0 && path.isAbsolute(item));
+  }
+
+  private static matchesCurrentWorkspace(
+    config: IdeConnectionConfig,
+    cwd: string,
+  ): boolean {
+    return (
+      config.workspacePath === undefined ||
+      IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
+    );
+  }
+
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
-    if (!port) {
+    if (!port || !/^\d+$/.test(port)) {
       return undefined;
     }
+
+    const portNumber = Number(port);
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      return undefined;
+    }
+
     return port;
   }
 
@@ -360,12 +617,15 @@ export class IdeClient {
         if (Array.isArray(parsedArgs)) {
           args = parsedArgs;
         } else {
-          logger.error(
+          debugLogger.error(
             'QWEN_CODE_IDE_SERVER_STDIO_ARGS must be a JSON array string.',
           );
         }
       } catch (e) {
-        logger.error('Failed to parse QWEN_CODE_IDE_SERVER_STDIO_ARGS:', e);
+        debugLogger.error(
+          'Failed to parse QWEN_CODE_IDE_SERVER_STDIO_ARGS:',
+          e,
+        );
       }
     }
 
@@ -373,38 +633,286 @@ export class IdeClient {
   }
 
   private async getConnectionConfigFromFile(): Promise<
-    (ConnectionConfig & { workspacePath?: string }) | undefined
+    IdeConnectionConfig | undefined
   > {
-    if (!this.ideProcessInfo) {
-      return {};
+    this.workspaceRejectedPorts.clear();
+    const portFromEnv = this.getPortFromEnv();
+    const cwd = process.cwd();
+
+    if (portFromEnv) {
+      try {
+        const ideDir = Storage.getGlobalIdeDir();
+        const lockFile = path.join(ideDir, `${portFromEnv}.lock`);
+        const lockFileContents = await fs.promises.readFile(lockFile, 'utf8');
+        const config = JSON.parse(lockFileContents) as IdeConnectionConfig;
+        if (IdeClient.matchesCurrentWorkspace(config, cwd)) {
+          return config;
+        }
+        this.workspaceRejectedPorts.add(config.port ?? portFromEnv);
+        debugLogger.debug(
+          `Ignoring IDE env lock file: workspace "${config.workspacePath}" does not match cwd "${cwd}".`,
+        );
+      } catch (_) {
+        // Fall through to legacy discovery.
+      }
     }
-    try {
-      const portFile = path.join(
-        os.tmpdir(),
-        `qwen-code-ide-server-${this.ideProcessInfo.pid}.json`,
+
+    // Legacy discovery for VSCode extension < v0.5.1.
+    const legacyResult = await this.getLegacyConnectionConfig(portFromEnv);
+    if (legacyResult) {
+      const legacyConfig = legacyResult.config;
+      if (IdeClient.matchesCurrentWorkspace(legacyConfig, cwd)) {
+        return legacyConfig;
+      }
+      if (legacyConfig.port) {
+        this.workspaceRejectedPorts.add(legacyConfig.port);
+      }
+      if (legacyResult.source === 'env-port' && portFromEnv) {
+        this.workspaceRejectedPorts.add(portFromEnv);
+      }
+      debugLogger.debug(
+        `Ignoring legacy IDE connection config: workspace "${legacyConfig.workspacePath}" does not match cwd "${cwd}".`,
       );
-      const portFileContents = await fs.promises.readFile(portFile, 'utf8');
-      return JSON.parse(portFileContents);
-    } catch (_) {
-      return undefined;
+    }
+
+    const ideDir = Storage.getGlobalIdeDir();
+    const configs = await this.getAllConnectionConfigs(ideDir);
+    for (const config of configs) {
+      if (config.workspacePath === undefined) {
+        continue;
+      }
+      if (IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid) {
+        return config;
+      }
+      if (config.port) {
+        this.workspaceRejectedPorts.add(config.port);
+      }
+    }
+    return undefined;
+  }
+
+  // Legacy connection files were written in the global temp directory.
+  private async getLegacyConnectionConfig(
+    portFromEnv?: string,
+  ): Promise<LegacyConnectionConfigResult | undefined> {
+    if (this.ideProcessInfo) {
+      try {
+        const portFile = path.join(
+          os.tmpdir(),
+          `qwen-code-ide-server-${this.ideProcessInfo.pid}.json`,
+        );
+        const portFileContents = await fs.promises.readFile(portFile, 'utf8');
+        return {
+          config: JSON.parse(portFileContents) as IdeConnectionConfig,
+          source: 'pid',
+        };
+      } catch (_) {
+        // For older/newer extension versions, the file name matches the pattern
+        // /^qwen-code-ide-server-${pid}-\d+\.json$/. If multiple IDE
+        // windows are open, multiple files matching the pattern are expected to
+        // exist.
+      }
+    }
+
+    if (portFromEnv) {
+      try {
+        const portFile = path.join(
+          os.tmpdir(),
+          `qwen-code-ide-server-${portFromEnv}.json`,
+        );
+        const portFileContents = await fs.promises.readFile(portFile, 'utf8');
+        return {
+          config: JSON.parse(portFileContents) as IdeConnectionConfig,
+          source: 'env-port',
+        };
+      } catch (_) {
+        // Ignore and fall through.
+      }
+    }
+
+    return undefined;
+  }
+
+  protected async getAllConnectionConfigs(
+    ideDir: string,
+  ): Promise<IdeConnectionConfig[]> {
+    const fileRegex = /^\d+\.lock$/;
+    let lockFiles: string[];
+    try {
+      lockFiles = (await fs.promises.readdir(ideDir))
+        .map((file) => file.toString())
+        .filter((file) => fileRegex.test(file));
+    } catch (e) {
+      // Silently return empty when the directory simply doesn't exist
+      // (common in CLI-only setups without an IDE companion extension).
+      if (
+        e instanceof Error &&
+        (e as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return [];
+      }
+      debugLogger.debug('Failed to read IDE connection directory:', e);
+      return [];
+    }
+
+    const fileContents = await Promise.all(
+      lockFiles.map(async (file) => {
+        const fullPath = path.join(ideDir, file);
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          const content = await fs.promises.readFile(fullPath, 'utf8');
+          try {
+            return {
+              file,
+              fullPath,
+              mtimeMs: stat.mtimeMs,
+              parsed: JSON.parse(content) as IdeConnectionConfig,
+            };
+          } catch (error) {
+            debugLogger.debug('Failed to parse JSON from lock file: ', error);
+            return undefined;
+          }
+        } catch (error) {
+          debugLogger.debug('Failed to read/stat IDE lock file:', error);
+          return undefined;
+        }
+      }),
+    );
+
+    const parsedLockFiles = fileContents.filter(
+      (lockFile): lockFile is ParsedConnectionLockFile =>
+        lockFile !== undefined,
+    );
+    const activeLockFiles = await Promise.all(
+      parsedLockFiles.map(async (lockFile) => ({
+        lockFile,
+        isStale: await this.cleanupStaleLockFile(lockFile),
+      })),
+    );
+
+    const staleCount = activeLockFiles.filter(({ isStale }) => isStale).length;
+    if (staleCount > 0) {
+      debugLogger.debug(
+        `[cleanupStaleLockFiles] Cleaned up ${staleCount} stale lock file(s)`,
+      );
+    }
+
+    return activeLockFiles
+      .filter(({ isStale }) => !isStale)
+      .map(({ lockFile }) => lockFile)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map(({ parsed }) => parsed);
+  }
+
+  private async cleanupStaleLockFile({
+    file,
+    fullPath,
+    parsed,
+  }: ParsedConnectionLockFile): Promise<boolean> {
+    try {
+      if (parsed.ppid) {
+        try {
+          process.kill(parsed.ppid, 0);
+          return false;
+        } catch {
+          debugLogger.debug(
+            `[cleanupStaleLockFiles] Removing lock file "${file}" - ppid ${parsed.ppid} no longer exists`,
+          );
+          await fs.promises.unlink(fullPath);
+          return true;
+        }
+      }
+
+      if (parsed.workspacePath) {
+        if (fs.existsSync(parsed.workspacePath)) {
+          return false;
+        }
+
+        debugLogger.debug(
+          `[cleanupStaleLockFiles] Removing lock file "${file}" - workspace doesn't exist`,
+        );
+        await fs.promises.unlink(fullPath);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      debugLogger.debug(
+        `[cleanupStaleLockFiles] Error checking lock file "${file}":`,
+        error,
+      );
+      return false;
     }
   }
 
-  private createProxyAwareFetch() {
-    // ignore proxy for 'localhost' by deafult to allow connecting to the ide mcp server
+  private async tryFallbackPorts(): Promise<boolean> {
+    const cwd = process.cwd();
+    const currentPort = this.connectionConfig?.port;
+    const configs = await this.getAllConnectionConfigs(
+      Storage.getGlobalIdeDir(),
+    );
+    const workspaceMatches: IdeConnectionConfig[] = [];
+    const otherConfigs: IdeConnectionConfig[] = [];
+
+    for (const config of configs) {
+      if (!config.port || config.port === currentPort) {
+        continue;
+      }
+
+      if (config.workspacePath === undefined) {
+        // Fallback keeps old extension locks usable after a stale primary port fails.
+        otherConfigs.push(config);
+      } else if (
+        IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
+      ) {
+        workspaceMatches.push(config);
+      }
+    }
+
+    for (const config of [...workspaceMatches, ...otherConfigs]) {
+      const port = config.port;
+      if (!port) {
+        continue;
+      }
+      if (config.authToken) {
+        this.authToken = config.authToken;
+      }
+      const connected = await this.establishHttpConnection(port);
+      if (connected) {
+        this.connectionConfig = config;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private createProxyAwareFetch(ideHost: string) {
+    // Ignore proxy for IDE server host to allow connecting to the ide mcp
+    // server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
-    const agent = new EnvHttpProxyAgent({
-      noProxy: [existingNoProxy, 'localhost'].filter(Boolean).join(','),
-    });
-    const undiciPromise = import('undici');
+    const noProxyHosts = [existingNoProxy, ideHost];
+    // undici loads behind a dynamic import to keep it out of the eager
+    // startup closure (issue #7264); the agent is built once on first use.
+    const undiciReady = loadUndici().then(
+      ({ EnvHttpProxyAgent, fetch: undiciFetch }) => ({
+        agent: new EnvHttpProxyAgent({
+          noProxy: noProxyHosts.filter(Boolean).join(','),
+        }),
+        undiciFetch,
+      }),
+    );
+    // Swallow an early rejection so it cannot become an unhandledRejection
+    // before the first fetch call awaits (and surfaces) it.
+    undiciReady.catch(() => {});
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
-      const { fetch: fetchFn } = await undiciPromise;
+      const { agent, undiciFetch } = await undiciReady;
       const fetchOptions: RequestInit & { dispatcher?: unknown } = {
         ...init,
         dispatcher: agent,
       };
       const options = fetchOptions as unknown as import('undici').RequestInit;
-      const response = await fetchFn(url, options);
+      const response = await undiciFetch(url, options);
       // Convert undici Headers to standard Headers for compatibility
       const standardHeaders = new Headers();
       for (const [key, value] of response.headers.entries()) {
@@ -414,7 +922,7 @@ export class IdeClient {
       return new Response(response.body as ReadableStream<unknown> | null, {
         status: response.status,
         statusText: response.statusText,
-        headers: standardHeaders,
+        headers: [...response.headers.entries()],
       });
     };
   }
@@ -427,20 +935,27 @@ export class IdeClient {
     this.client.setNotificationHandler(
       IdeContextNotificationSchema,
       (notification) => {
-        ideContext.setIdeContext(notification.params);
+        ideContextStore.set(notification.params);
+        const isTrusted = notification.params.workspaceState?.isTrusted;
+        if (isTrusted !== undefined) {
+          for (const listener of this.trustChangeListeners) {
+            listener(isTrusted);
+          }
+        }
       },
     );
     this.client.onerror = (_error) => {
+      const errorMessage = _error instanceof Error ? _error.message : `_error`;
       this.setState(
         IDEConnectionStatus.Disconnected,
-        `IDE connection error. The connection was lost unexpectedly. Please try reconnecting by running /ide enable`,
+        `IDE connection error. The connection was lost unexpectedly. Please try reconnecting by running /ide enable\n${errorMessage}`,
         true,
       );
     };
     this.client.onclose = () => {
       this.setState(
         IDEConnectionStatus.Disconnected,
-        `IDE connection error. The connection was lost unexpectedly. Please try reconnecting by running /ide enable`,
+        `IDE connection closed. To reconnect, run /ide enable.`,
         true,
       );
     };
@@ -453,11 +968,27 @@ export class IdeClient {
           resolver({ status: 'accepted', content });
           this.diffResponses.delete(filePath);
         } else {
-          logger.debug(`No resolver found for ${filePath}`);
+          debugLogger.debug(`No resolver found for ${filePath}`);
         }
       },
     );
 
+    this.client.setNotificationHandler(
+      IdeDiffRejectedNotificationSchema,
+      (notification) => {
+        const { filePath } = notification.params;
+        const resolver = this.diffResponses.get(filePath);
+        if (resolver) {
+          resolver({ status: 'rejected', content: undefined });
+          this.diffResponses.delete(filePath);
+        } else {
+          debugLogger.debug(`No resolver found for ${filePath}`);
+        }
+      },
+    );
+
+    // For backwards compatibility. Newer extension versions will only send
+    // IdeDiffRejectedNotificationSchema.
     this.client.setNotificationHandler(
       IdeDiffClosedNotificationSchema,
       (notification) => {
@@ -467,16 +998,41 @@ export class IdeClient {
           resolver({ status: 'rejected', content: undefined });
           this.diffResponses.delete(filePath);
         } else {
-          logger.debug(`No resolver found for ${filePath}`);
+          debugLogger.debug(`No resolver found for ${filePath}`);
         }
       },
     );
   }
 
   private async establishHttpConnection(port: string): Promise<boolean> {
+    // Always try localhost first. This covers the most common scenarios:
+    // non-container environments, and code-server where the extension runs
+    // inside the same container as the CLI.
+    const connected = await this.tryHttpConnect(port, LOCAL_HOST);
+    if (connected) {
+      return true;
+    }
+
+    // If localhost failed and we are inside a container, the IDE server may
+    // be running on the host machine (e.g. VS Code Dev Containers). Try
+    // host.docker.internal as a fallback when it is DNS-resolvable.
+    const ideHost = await getIdeServerHost();
+    if (ideHost === CONTAINER_HOST) {
+      debugLogger.debug(
+        `Connection to ${LOCAL_HOST}:${port} failed, retrying with ${CONTAINER_HOST}`,
+      );
+      return this.tryHttpConnect(port, CONTAINER_HOST);
+    }
+
+    return false;
+  }
+
+  private async tryHttpConnect(port: string, host: string): Promise<boolean> {
     let transport: StreamableHTTPClientTransport | undefined;
     try {
-      logger.debug('Attempting to connect to IDE via HTTP SSE');
+      debugLogger.debug(
+        `Attempting to connect to IDE via HTTP at ${host}:${port}`,
+      );
       this.client = new Client({
         name: 'streamable-http-client',
         // TODO(#3487): use the CLI version here.
@@ -484,9 +1040,14 @@ export class IdeClient {
       });
 
       transport = new StreamableHTTPClientTransport(
-        new URL(`http://${getIdeServerHost()}:${port}/mcp`),
+        new URL(`http://${host}:${port}/mcp`),
         {
-          fetch: this.createProxyAwareFetch(),
+          fetch: this.createProxyAwareFetch(host),
+          requestInit: {
+            headers: this.authToken
+              ? { Authorization: `Bearer ${this.authToken}` }
+              : {},
+          },
         },
       );
 
@@ -494,14 +1055,16 @@ export class IdeClient {
 
       await this.client.connect(transport);
       this.registerClientHandlers();
+      await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;
-    } catch (_error) {
+    } catch (error) {
+      debugLogger.debug(`HTTP connection to ${host}:${port} failed:`, error);
       if (transport) {
         try {
           await transport.close();
         } catch (closeError) {
-          logger.debug('Failed to close transport:', closeError);
+          debugLogger.debug('Failed to close transport:', closeError);
         }
       }
       return false;
@@ -514,7 +1077,7 @@ export class IdeClient {
   }: StdioConfig): Promise<boolean> {
     let transport: StdioClientTransport | undefined;
     try {
-      logger.debug('Attempting to connect to IDE via stdio');
+      debugLogger.debug('Attempting to connect to IDE via stdio');
       this.client = new Client({
         name: 'stdio-client',
         // TODO(#3487): use the CLI version here.
@@ -527,6 +1090,7 @@ export class IdeClient {
       });
       await this.client.connect(transport);
       this.registerClientHandlers();
+      await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;
     } catch (_error) {
@@ -534,7 +1098,7 @@ export class IdeClient {
         try {
           await transport.close();
         } catch (closeError) {
-          logger.debug('Failed to close transport:', closeError);
+          debugLogger.debug('Failed to close transport:', closeError);
         }
       }
       return false;
@@ -542,8 +1106,81 @@ export class IdeClient {
   }
 }
 
-function getIdeServerHost() {
+const CONTAINER_HOST = 'host.docker.internal';
+const LOCAL_HOST = '127.0.0.1';
+const DNS_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
+ * Cached promise for IDE server host. Caching the promise itself handles both
+ * result caching and concurrent-call deduplication in one mechanism: a resolved
+ * promise returns instantly, and a pending promise is shared across callers.
+ */
+let hostPromise: Promise<string> | undefined;
+
+/**
+ * Reset the cached host promise. Exported for testing only.
+ * @internal
+ */
+export function _resetCachedIdeServerHost(): void {
+  hostPromise = undefined;
+}
+
+/**
+ * Check if a hostname is DNS-resolvable, with a timeout guard.
+ * Uses callback-based dns.lookup() for better compatibility across
+ * different Node.js environments (e.g., VSCode, Cursor).
+ */
+async function isHostResolvable(hostname: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, DNS_LOOKUP_TIMEOUT_MS);
+    timeout.unref?.();
+
+    dns.lookup(hostname, (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Determine the IDE server host to connect to.
+ *
+ * In container environments (`/.dockerenv` or `/run/.containerenv`), verify
+ * `host.docker.internal` is DNS-resolvable and use it if reachable.
+ * Otherwise fall back to `127.0.0.1`.
+ *
+ * Results are cached; concurrent calls share a single lookup.
+ */
+async function resolveIdeServerHost(): Promise<string> {
   const isInContainer =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
-  return isInContainer ? 'host.docker.internal' : 'localhost';
+
+  if (!isInContainer) {
+    return LOCAL_HOST;
+  }
+
+  const reachable = await isHostResolvable(CONTAINER_HOST);
+  if (reachable) {
+    debugLogger.debug('Container detected, host.docker.internal is reachable');
+    return CONTAINER_HOST;
+  }
+
+  debugLogger.debug(
+    'Container detected, but host.docker.internal is NOT reachable, falling back to 127.0.0.1',
+  );
+  return LOCAL_HOST;
+}
+
+export async function getIdeServerHost(): Promise<string> {
+  if (!hostPromise) {
+    hostPromise = resolveIdeServerHost();
+  }
+  return hostPromise;
 }

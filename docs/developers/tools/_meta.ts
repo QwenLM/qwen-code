@@ -1,0 +1,14 @@
+export default {
+  introduction: 'Introduction',
+  'file-system': 'File System',
+  'multi-file': 'Multi-File Read',
+  shell: 'Shell',
+  monitor: 'Monitor',
+  'todo-write': 'Todo Write',
+  task: 'Task',
+  'exit-plan-mode': 'Exit Plan Mode',
+  'web-fetch': 'Web Fetch',
+  'web-search': 'Web Search',
+  'mcp-server': 'MCP Servers',
+  sandbox: 'Sandboxing',
+};

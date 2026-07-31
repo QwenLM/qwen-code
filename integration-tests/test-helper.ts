@@ -5,13 +5,15 @@
  */
 
 import { execSync, spawn } from 'node:child_process';
-import { parse } from 'shell-quote';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
 import fs from 'node:fs';
 import { EOL } from 'node:os';
+import * as pty from '@lydell/node-pty';
+import stripAnsi from 'strip-ansi';
+import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -112,21 +114,88 @@ export function validateModelOutput(
   return true;
 }
 
+// Simulates typing a string one character at a time to avoid paste detection.
+export async function type(ptyProcess: pty.IPty, text: string) {
+  const delay = 5;
+  for (const char of text) {
+    ptyProcess.write(char);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+
+export const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+
+export const CONTAINER_SANDBOX_NO_PROXY =
+  '127.0.0.1,localhost,host.docker.internal';
+
+export function fakeServerHostOptions(): FakeOpenAIServerOptions | undefined {
+  return IS_CONTAINER_SANDBOX
+    ? { listenHost: '0.0.0.0', baseUrlHost: 'host.docker.internal' }
+    : undefined;
+}
+
+// Sets NO_PROXY so a containerized CLI reaches the host-side fake server, and
+// returns a restorer for the previous values. No-op outside a container sandbox.
+export function applyContainerSandboxNoProxy(): () => void {
+  if (!IS_CONTAINER_SANDBOX) {
+    return () => {};
+  }
+  const savedNoProxy = process.env['NO_PROXY'];
+  const savedNoProxyLower = process.env['no_proxy'];
+  process.env['NO_PROXY'] = CONTAINER_SANDBOX_NO_PROXY;
+  process.env['no_proxy'] = CONTAINER_SANDBOX_NO_PROXY;
+  return () => {
+    if (savedNoProxy === undefined) {
+      delete process.env['NO_PROXY'];
+    } else {
+      process.env['NO_PROXY'] = savedNoProxy;
+    }
+    if (savedNoProxyLower === undefined) {
+      delete process.env['no_proxy'];
+    } else {
+      process.env['no_proxy'] = savedNoProxyLower;
+    }
+  };
+}
+
+interface ParsedLog {
+  attributes?: {
+    'event.name'?: string;
+    function_name?: string;
+    function_args?: string;
+    success?: boolean;
+    duration_ms?: number;
+    status?: string;
+    'error.message'?: string;
+  };
+  scopeMetrics?: {
+    metrics: {
+      descriptor: {
+        name: string;
+      };
+    }[];
+  }[];
+}
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
   testName?: string;
   _lastRunStdout?: string;
+  _interactiveOutput = '';
 
   constructor() {
-    this.bundlePath = join(__dirname, '..', 'bundle/gemini.js');
+    this.bundlePath = join(__dirname, '..', 'dist/cli.js');
     this.testDir = null;
   }
 
   // Get timeout based on environment
   getDefaultTimeout() {
     if (env['CI']) return 60000; // 1 minute in CI
-    if (env['GEMINI_SANDBOX']) return 30000; // 30s in containers
+    if (env['QWEN_SANDBOX']) return 30000; // 30s in containers
     return 15000; // 15s locally
   }
 
@@ -137,11 +206,16 @@ export class TestRig {
     this.testName = testName;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
+    // Two cases that set up under the same name share this directory, and
+    // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
+    // sets. Reset it so a case never inherits the previous one's files; see the
+    // SDK helper, where exactly that made a suite pass locally and fail in CI.
+    rmSync(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
-    const geminiDir = join(this.testDir, '.qwen');
-    mkdirSync(geminiDir, { recursive: true });
+    const qwenDir = join(this.testDir, '.qwen');
+    mkdirSync(qwenDir, { recursive: true });
     // In sandbox mode, use an absolute path for telemetry inside the container
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
@@ -153,12 +227,11 @@ export class TestRig {
         otlpEndpoint: '',
         outfile: telemetryPath,
       },
-      sandbox:
-        env['GEMINI_SANDBOX'] !== 'false' ? env['GEMINI_SANDBOX'] : false,
+      sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
     };
     writeFileSync(
-      join(geminiDir, 'settings.json'),
+      join(qwenDir, 'settings.json'),
       JSON.stringify(settings, null, 2),
     );
   }
@@ -178,13 +251,32 @@ export class TestRig {
     execSync('sync', { cwd: this.testDir! });
   }
 
+  /**
+   * The command and args to use to invoke Qwen Code CLI. Allows us to switch
+   * between using the bundled gemini.js (the default) and using the installed
+   * 'qwen' (used to verify npm bundles).
+   */
+  private _getCommandAndArgs(extraInitialArgs: string[] = []): {
+    command: string;
+    initialArgs: string[];
+  } {
+    const isNpmReleaseTest =
+      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
+    const command = isNpmReleaseTest ? 'qwen' : 'node';
+    const initialArgs = isNpmReleaseTest
+      ? ['--no-chat-recording', ...extraInitialArgs]
+      : [this.bundlePath, '--no-chat-recording', ...extraInitialArgs];
+    return { command, initialArgs };
+  }
+
   run(
     promptOrOptions:
       | string
       | { prompt?: string; stdin?: string; stdinDoesNotEnd?: boolean },
     ...args: string[]
   ): Promise<string> {
-    let command = `node ${this.bundlePath} --yolo`;
+    const { command, initialArgs } = this._getCommandAndArgs(['--yolo']);
+    const commandArgs = [...initialArgs];
     const execOptions: {
       cwd: string;
       encoding: 'utf-8';
@@ -195,27 +287,25 @@ export class TestRig {
     };
 
     if (typeof promptOrOptions === 'string') {
-      command += ` --prompt ${JSON.stringify(promptOrOptions)}`;
+      commandArgs.push('--prompt', promptOrOptions);
     } else if (
       typeof promptOrOptions === 'object' &&
       promptOrOptions !== null
     ) {
       if (promptOrOptions.prompt) {
-        command += ` --prompt ${JSON.stringify(promptOrOptions.prompt)}`;
+        commandArgs.push('--prompt', promptOrOptions.prompt);
       }
       if (promptOrOptions.stdin) {
         execOptions.input = promptOrOptions.stdin;
       }
     }
 
-    command += ` ${args.join(' ')}`;
+    commandArgs.push(...args);
 
-    const commandArgs = parse(command);
-    const node = commandArgs.shift() as string;
-
-    const child = spawn(node, commandArgs as string[], {
+    const child = spawn(command, commandArgs, {
       cwd: this.testDir!,
       stdio: 'pipe',
+      env: process.env,
     });
 
     let stdout = '';
@@ -226,13 +316,13 @@ export class TestRig {
       child.stdin!.write(execOptions.input);
     }
 
-    if (
+    const keepStdinOpen =
       typeof promptOrOptions === 'object' &&
-      !promptOrOptions.stdinDoesNotEnd
-    ) {
+      promptOrOptions !== null &&
+      promptOrOptions.stdinDoesNotEnd === true;
+    if (!keepStdinOpen) {
       child.stdin!.end();
     }
-    child.stdin!.end();
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;
@@ -257,7 +347,7 @@ export class TestRig {
           // Filter out telemetry output when running with Podman
           // Podman seems to output telemetry to stdout even when writing to file
           let result = stdout;
-          if (env['GEMINI_SANDBOX'] === 'podman') {
+          if (env['QWEN_SANDBOX'] === 'podman') {
             // Remove telemetry JSON objects from output
             // They are multi-line JSON objects that start with { and contain telemetry fields
             const lines = result.split(EOL);
@@ -291,11 +381,87 @@ export class TestRig {
 
             result = filteredLines.join('\n');
           }
-          // If we have stderr output, include that also
-          if (stderr) {
+
+          // Check if this is a JSON output test - if so, don't include stderr
+          // as it would corrupt the JSON
+          const isJsonOutput =
+            commandArgs.includes('--output-format') &&
+            (commandArgs.includes('json') ||
+              commandArgs.includes('stream-json'));
+
+          // If we have stderr output and it's not a JSON test, include that also
+          if (stderr && !isJsonOutput) {
             result += `\n\nStdErr:\n${stderr}`;
           }
 
+          resolve(result);
+        } else {
+          // Check if this is a JSON output test - for JSON errors, the error is in stdout
+          const isJsonOutputOnError =
+            commandArgs.includes('--output-format') &&
+            (commandArgs.includes('json') ||
+              commandArgs.includes('stream-json'));
+
+          // For JSON output tests, include stdout in the error message
+          // as the error JSON is written to stdout
+          if (isJsonOutputOnError && stdout) {
+            reject(
+              new Error(
+                `Process exited with code ${code}:\nStdout:\n${stdout}\n\nStderr:\n${stderr}`,
+              ),
+            );
+          } else {
+            reject(new Error(`Process exited with code ${code}:\n${stderr}`));
+          }
+        }
+      });
+    });
+
+    return promise;
+  }
+
+  runCommand(
+    args: string[],
+    options: { stdin?: string } = {},
+  ): Promise<string> {
+    const { command, initialArgs } = this._getCommandAndArgs();
+    const commandArgs = [...initialArgs, ...args];
+
+    const child = spawn(command, commandArgs, {
+      cwd: this.testDir!,
+      stdio: 'pipe',
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    if (options.stdin) {
+      child.stdin!.write(options.stdin);
+      child.stdin!.end();
+    }
+
+    child.stdout!.on('data', (data: Buffer) => {
+      stdout += data;
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+        process.stdout.write(data);
+      }
+    });
+
+    child.stderr!.on('data', (data: Buffer) => {
+      stderr += data;
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+        process.stderr.write(data);
+      }
+    });
+
+    const promise = new Promise<string>((resolve, reject) => {
+      child.on('close', (code: number) => {
+        if (code === 0) {
+          this._lastRunStdout = stdout;
+          let result = stdout;
+          if (stderr) {
+            result += `\n\nStdErr:\n${stderr}`;
+          }
           resolve(result);
         } else {
           reject(new Error(`Process exited with code ${code}:\n${stderr}`));
@@ -363,37 +529,12 @@ export class TestRig {
 
     return this.poll(
       () => {
-        const logFilePath = join(this.testDir!, 'telemetry.log');
-
-        if (!logFilePath || !fs.existsSync(logFilePath)) {
-          return false;
-        }
-
-        const content = readFileSync(logFilePath, 'utf-8');
-        const jsonObjects = content
-          .split(/}\n{/)
-          .map((obj, index, array) => {
-            // Add back the braces we removed during split
-            if (index > 0) obj = '{' + obj;
-            if (index < array.length - 1) obj = obj + '}';
-            return obj.trim();
-          })
-          .filter((obj) => obj);
-
-        for (const jsonStr of jsonObjects) {
-          try {
-            const logData = JSON.parse(jsonStr);
-            if (
-              logData.attributes &&
-              logData.attributes['event.name'] === `gemini_cli.${eventName}`
-            ) {
-              return true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-        return false;
+        const logs = this._readAndParseTelemetryLog();
+        return logs.some(
+          (logData) =>
+            logData.attributes &&
+            logData.attributes['event.name'] === `qwen-code.${eventName}`,
+        );
       },
       timeout,
       100,
@@ -447,20 +588,34 @@ export class TestRig {
   ): Promise<boolean> {
     const startTime = Date.now();
     let attempts = 0;
+    let lastError: unknown;
     while (Date.now() - startTime < timeout) {
       attempts++;
-      const result = predicate();
-      if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
-        console.log(
-          `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
-        );
-      }
-      if (result) {
-        return true;
+      try {
+        const result = predicate();
+        if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
+          console.log(
+            `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
+          );
+        }
+        if (result) {
+          lastError = undefined;
+          return true;
+        }
+      } catch (err) {
+        lastError = err;
+        if (env['VERBOSE'] === 'true') {
+          console.log(`Poll attempt ${attempts}: predicate threw: ${err}`);
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, interval));
     }
-    if (env['VERBOSE'] === 'true') {
+    if (lastError) {
+      console.log(
+        `Poll timed out after ${attempts} attempts. Last error:`,
+        lastError,
+      );
+    } else if (env['VERBOSE'] === 'true') {
       console.log(`Poll timed out after ${attempts} attempts`);
     }
     return false;
@@ -474,6 +629,8 @@ export class TestRig {
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
@@ -566,7 +723,7 @@ export class TestRig {
                 }
               } else if (
                 obj.attributes &&
-                obj.attributes['event.name'] === 'gemini_cli.tool_call'
+                obj.attributes['event.name'] === 'qwen-code.tool_call'
               ) {
                 logs.push({
                   timestamp: obj.attributes['event.timestamp'],
@@ -590,10 +747,49 @@ export class TestRig {
     return logs;
   }
 
+  private _readAndParseTelemetryLog(): ParsedLog[] {
+    // Telemetry is always written to the test directory
+    const logFilePath = join(this.testDir!, 'telemetry.log');
+
+    if (!logFilePath || !fs.existsSync(logFilePath)) {
+      return [];
+    }
+
+    const content = readFileSync(logFilePath, 'utf-8');
+
+    // Split the content into individual JSON objects
+    // They are separated by "}\n{"
+    const jsonObjects = content
+      .split(/}\n{/)
+      .map((obj, index, array) => {
+        // Add back the braces we removed during split
+        if (index > 0) obj = '{' + obj;
+        if (index < array.length - 1) obj = obj + '}';
+        return obj.trim();
+      })
+      .filter((obj) => obj);
+
+    const logs: ParsedLog[] = [];
+
+    for (const jsonStr of jsonObjects) {
+      try {
+        const logData = JSON.parse(jsonStr);
+        logs.push(logData);
+      } catch (e) {
+        // Skip objects that aren't valid JSON
+        if (env.VERBOSE === 'true') {
+          console.error('Failed to parse telemetry object:', e);
+        }
+      }
+    }
+
+    return logs;
+  }
+
   readToolLogs() {
     // For Podman, first check if telemetry file exists and has content
     // If not, fall back to parsing from stdout
-    if (env['GEMINI_SANDBOX'] === 'podman') {
+    if (env['QWEN_SANDBOX'] === 'podman') {
       // Try reading from file first
       const logFilePath = join(this.testDir!, 'telemetry.log');
 
@@ -619,65 +815,35 @@ export class TestRig {
       }
     }
 
-    // Telemetry is always written to the test directory
-    const logFilePath = join(this.testDir!, 'telemetry.log');
-
-    if (!logFilePath) {
-      console.warn(`TELEMETRY_LOG_FILE environment variable not set`);
-      return [];
-    }
-
-    // Check if file exists, if not return empty array (file might not be created yet)
-    if (!fs.existsSync(logFilePath)) {
-      return [];
-    }
-
-    const content = readFileSync(logFilePath, 'utf-8');
-
-    // Split the content into individual JSON objects
-    // They are separated by "}\n{"
-    const jsonObjects = content
-      .split(/}\n{/)
-      .map((obj, index, array) => {
-        // Add back the braces we removed during split
-        if (index > 0) obj = '{' + obj;
-        if (index < array.length - 1) obj = obj + '}';
-        return obj.trim();
-      })
-      .filter((obj) => obj);
-
+    const parsedLogs = this._readAndParseTelemetryLog();
     const logs: {
       toolRequest: {
         name: string;
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
-    for (const jsonStr of jsonObjects) {
-      try {
-        const logData = JSON.parse(jsonStr);
-        // Look for tool call logs
-        if (
-          logData.attributes &&
-          logData.attributes['event.name'] === 'qwen-code.tool_call'
-        ) {
-          const toolName = logData.attributes.function_name;
-          logs.push({
-            toolRequest: {
-              name: toolName,
-              args: logData.attributes.function_args,
-              success: logData.attributes.success,
-              duration_ms: logData.attributes.duration_ms,
-            },
-          });
-        }
-      } catch (e) {
-        // Skip objects that aren't valid JSON
-        if (env['VERBOSE'] === 'true') {
-          console.error('Failed to parse telemetry object:', e);
-        }
+    for (const logData of parsedLogs) {
+      // Look for tool call logs
+      if (
+        logData.attributes &&
+        logData.attributes['event.name'] === 'qwen-code.tool_call'
+      ) {
+        const toolName = logData.attributes.function_name;
+        logs.push({
+          toolRequest: {
+            name: toolName,
+            args: logData.attributes.function_args,
+            success: logData.attributes.success,
+            duration_ms: logData.attributes.duration_ms,
+            status: logData.attributes.status,
+            error: logData.attributes['error.message'],
+          },
+        });
       }
     }
 
@@ -685,38 +851,79 @@ export class TestRig {
   }
 
   readLastApiRequest(): Record<string, unknown> | null {
-    // Telemetry is always written to the test directory
-    const logFilePath = join(this.testDir!, 'telemetry.log');
+    const logs = this._readAndParseTelemetryLog();
+    const apiRequests = logs.filter(
+      (logData) =>
+        logData.attributes &&
+        logData.attributes['event.name'] === 'qwen-code.api_request',
+    );
+    return apiRequests.pop() || null;
+  }
 
-    if (!logFilePath || !fs.existsSync(logFilePath)) {
-      return null;
-    }
-
-    const content = readFileSync(logFilePath, 'utf-8');
-    const jsonObjects = content
-      .split(/}\n{/)
-      .map((obj, index, array) => {
-        if (index > 0) obj = '{' + obj;
-        if (index < array.length - 1) obj = obj + '}';
-        return obj.trim();
-      })
-      .filter((obj) => obj);
-
-    let lastApiRequest = null;
-
-    for (const jsonStr of jsonObjects) {
-      try {
-        const logData = JSON.parse(jsonStr);
-        if (
-          logData.attributes &&
-          logData.attributes['event.name'] === 'gemini_cli.api_request'
-        ) {
-          lastApiRequest = logData;
+  readMetric(metricName: string): Record<string, unknown> | null {
+    const logs = this._readAndParseTelemetryLog();
+    for (const logData of logs) {
+      if (logData.scopeMetrics) {
+        for (const scopeMetric of logData.scopeMetrics) {
+          for (const metric of scopeMetric.metrics) {
+            if (metric.descriptor.name === `qwen-code.${metricName}`) {
+              return metric;
+            }
+          }
         }
-      } catch {
-        // ignore
       }
     }
-    return lastApiRequest;
+    return null;
+  }
+
+  async waitForText(text: string, timeout?: number): Promise<boolean> {
+    if (!timeout) {
+      timeout = this.getDefaultTimeout();
+    }
+    return this.poll(
+      () =>
+        stripAnsi(this._interactiveOutput)
+          .toLowerCase()
+          .includes(text.toLowerCase()),
+      timeout,
+      200,
+    );
+  }
+
+  runInteractive(...args: string[]): {
+    ptyProcess: pty.IPty;
+    promise: Promise<{ exitCode: number; signal?: number; output: string }>;
+  } {
+    const { command, initialArgs } = this._getCommandAndArgs(['--yolo']);
+    const commandArgs = [...initialArgs, ...args];
+
+    this._interactiveOutput = ''; // Reset output for the new run
+
+    const ptyProcess = pty.spawn(command, commandArgs, {
+      name: 'xterm-color',
+      cols: 80,
+      rows: 30,
+      cwd: this.testDir!,
+      env: process.env as { [key: string]: string },
+    });
+
+    ptyProcess.onData((data) => {
+      this._interactiveOutput += data;
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+        process.stdout.write(data);
+      }
+    });
+
+    const promise = new Promise<{
+      exitCode: number;
+      signal?: number;
+      output: string;
+    }>((resolve) => {
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        resolve({ exitCode, signal, output: this._interactiveOutput });
+      });
+    });
+
+    return { ptyProcess, promise };
   }
 }

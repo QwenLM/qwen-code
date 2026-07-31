@@ -9,11 +9,16 @@ import type {
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { PipelineConfig } from './pipeline.js';
+import type { PipelineConfig } from './types.js';
 import { ContentGenerationPipeline } from './pipeline.js';
-import { DefaultTelemetryService } from './telemetryService.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
+import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import { isAbortError } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+
+const debugLogger = createDebugLogger('OPENAI');
 
 export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;
@@ -28,10 +33,6 @@ export class OpenAIContentGenerator implements ContentGenerator {
       cliConfig,
       provider,
       contentGeneratorConfig,
-      telemetryService: new DefaultTelemetryService(
-        cliConfig,
-        contentGeneratorConfig.enableOpenAILogging,
-      ),
       errorHandler: new EnhancedErrorHandler(
         (error: unknown, request: GenerateContentParameters) =>
           this.shouldSuppressErrorLogging(error, request),
@@ -48,10 +49,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * @returns true if error logging should be suppressed, false otherwise
    */
   protected shouldSuppressErrorLogging(
-    _error: unknown,
-    _request: GenerateContentParameters,
+    error: unknown,
+    request: GenerateContentParameters,
   ): boolean {
-    return false; // Default behavior: never suppress error logging
+    // Only suppress error logging for user-initiated cancellations.
+    // We check that BOTH:
+    // 1. The error is an AbortError
+    // 2. AND our abort signal was explicitly aborted (user-initiated)
+    //
+    // This ensures we don't suppress network-related abort errors that
+    // the user should be aware of.
+    if (isAbortError(error) && request.config?.abortSignal?.aborted) {
+      return true;
+    }
+
+    return false;
   }
 
   async generateContent(
@@ -71,27 +83,28 @@ export class OpenAIContentGenerator implements ContentGenerator {
   async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    // Use tiktoken for accurate token counting
-    const content = JSON.stringify(request.contents);
-    let totalTokens = 0;
-
     try {
-      const { get_encoding } = await import('tiktoken');
-      const encoding = get_encoding('cl100k_base'); // GPT-4 encoding, but estimate for qwen
-      totalTokens = encoding.encode(content).length;
-      encoding.free();
+      // Use the request token estimator (character-based).
+      const estimator = new RequestTokenEstimator();
+      const result = await estimator.calculateTokens(request);
+
+      return {
+        totalTokens: result.totalTokens,
+      };
     } catch (error) {
-      console.warn(
-        'Failed to load tiktoken, falling back to character approximation:',
+      debugLogger.warn(
+        'Failed to calculate tokens with new tokenizer, falling back to simple method:',
         error,
       );
-      // Fallback: rough approximation using character count
-      totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
-    }
 
-    return {
-      totalTokens,
-    };
+      // Fallback to original simple method
+      const content = JSON.stringify(request.contents);
+      const totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
+
+      return {
+        totalTokens,
+      };
+    }
   }
 
   async embedContent(
@@ -143,10 +156,15 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ],
       };
     } catch (error) {
-      console.error('OpenAI API Embedding Error:', error);
+      const redactedError = redactProxyError(error);
+      debugLogger.error('OpenAI API Embedding Error:', redactedError);
       throw new Error(
-        `OpenAI API error: ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI API error: ${redactedError instanceof Error ? redactedError.message : String(redactedError)}`,
       );
     }
+  }
+
+  useSummarizedThinking(): boolean {
+    return false;
   }
 }

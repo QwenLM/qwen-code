@@ -4,6 +4,7 @@ export interface RumApp {
   env: string;
   version: string;
   type: 'cli' | 'extension';
+  channel?: string;
 }
 
 export interface RumUser {
@@ -17,6 +18,21 @@ export interface RumSession {
 export interface RumView {
   id: string;
   name: string;
+}
+
+export interface RumOS {
+  type?: string;
+  version?: string;
+  container?: string;
+  container_version?: string;
+}
+
+export interface RumDevice {
+  id?: string;
+  name?: string;
+  type?: string;
+  brand?: string;
+  model?: string;
 }
 
 export interface RumEvent {
@@ -78,6 +94,8 @@ export interface RumPayload {
   user: RumUser;
   session: RumSession;
   view: RumView;
+  os?: RumOS;
+  device?: RumDevice;
   events: RumEvent[];
   properties?: Record<string, unknown>;
   _v: string;

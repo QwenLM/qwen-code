@@ -5,9 +5,11 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
-import { Colors } from '../colors.js';
+import { Text } from 'ink';
+import { theme } from '../semantic-colors.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
+import { getApprovalModeIndicatorColor } from './approvalModeVisuals.js';
 
 interface AutoAcceptIndicatorProps {
   approvalMode: ApprovalMode;
@@ -16,32 +18,44 @@ interface AutoAcceptIndicatorProps {
 export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   approvalMode,
 }) => {
-  let textColor = '';
+  const textColor = getApprovalModeIndicatorColor(approvalMode) ?? '';
   let textContent = '';
   let subText = '';
 
+  const cycleText =
+    process.platform === 'win32'
+      ? ` ${t('(tab to cycle)')}`
+      : ` ${t('(shift + tab to cycle)')}`;
+
   switch (approvalMode) {
+    case ApprovalMode.PLAN:
+      textContent = t('plan mode');
+      subText = cycleText;
+      break;
     case ApprovalMode.AUTO_EDIT:
-      textColor = Colors.AccentGreen;
-      textContent = 'accepting edits';
-      subText = ' (shift + tab to toggle)';
+      textContent = t('auto-accept edits');
+      subText = cycleText;
+      break;
+    case ApprovalMode.AUTO:
+      textContent = t('Auto mode');
+      subText = cycleText;
       break;
     case ApprovalMode.YOLO:
-      textColor = Colors.AccentRed;
-      textContent = 'YOLO mode';
-      subText = ' (ctrl + y to toggle)';
+      textContent = t('YOLO mode');
+      subText = cycleText;
       break;
     case ApprovalMode.DEFAULT:
+      textContent = `⏸ ${t('Ask permissions')}`;
+      subText = cycleText;
+      break;
     default:
       break;
   }
 
   return (
-    <Box>
-      <Text color={textColor}>
-        {textContent}
-        {subText && <Text color={Colors.Gray}>{subText}</Text>}
-      </Text>
-    </Box>
+    <Text color={textColor}>
+      {textContent}
+      {subText && <Text color={theme.text.secondary}>{subText}</Text>}
+    </Text>
   );
 };

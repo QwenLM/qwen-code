@@ -1,0 +1,147 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { getAutoMemoryFilePath } from './paths.js';
+import {
+  parseAutoMemoryTopicDocument,
+  scanAutoMemoryTopicDocuments,
+} from './scan.js';
+import { ensureAutoMemoryScaffold } from './store.js';
+
+describe('auto-memory topic scanning', () => {
+  let tempDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-scan-'));
+    projectRoot = path.join(tempDir, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+    await ensureAutoMemoryScaffold(projectRoot);
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 10,
+    });
+  });
+
+  it('parses a CRLF (Windows checkout) topic document', () => {
+    // Team files are read raw (utf-8); a Windows checkout yields `---\r\n`,
+    // which the `^---\n` delimiter would reject — dropping the file from the
+    // shared index. The parser must normalize CRLF first.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/crlf.md',
+      [
+        '---',
+        'type: project',
+        'name: CRLF Memory',
+        'description: Windows line endings',
+        '---',
+        '',
+        'Body line one.',
+      ].join('\r\n'),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.type).toBe('project');
+    expect(parsed?.title).toBe('CRLF Memory');
+    expect(parsed?.description).toBe('Windows line endings');
+    // The body is normalized to LF, not left with stray carriage returns.
+    expect(parsed?.body).toBe('Body line one.');
+  });
+
+  it('parses a managed auto-memory topic document', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/project.md',
+      [
+        '---',
+        'type: project',
+        'title: Project Memory',
+        'description: Project context',
+        '---',
+        '',
+        '# Project Memory',
+        '',
+        '- Release freeze starts Friday.',
+      ].join('\n'),
+    );
+
+    expect(parsed).toEqual({
+      type: 'project',
+      filePath: '/tmp/project.md',
+      relativePath: 'project.md',
+      filename: 'project.md',
+      title: 'Project Memory',
+      description: 'Project context',
+      body: '# Project Memory\n\n- Release freeze starts Friday.',
+      mtimeMs: 0,
+    });
+  });
+
+  it('scans existing auto-memory files from nested topic folders', async () => {
+    const referencePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('reference', 'grafana.md'),
+    );
+    await fs.mkdir(path.dirname(referencePath), { recursive: true });
+    await fs.writeFile(
+      referencePath,
+      [
+        '---',
+        'type: reference',
+        'name: Reference Memory',
+        'description: External references',
+        '---',
+        '',
+        'Oncall dashboard: grafana.internal/d/api-latency',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const referenceDoc = docs.find((doc) => doc.type === 'reference');
+
+    expect(referenceDoc?.description).toBe('External references');
+    expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
+    expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
+  });
+
+  it('survives an unreadable file instead of dropping the whole index', async () => {
+    const goodPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('feedback', 'good.md'),
+    );
+    await fs.mkdir(path.dirname(goodPath), { recursive: true });
+    await fs.writeFile(
+      goodPath,
+      '---\ntype: feedback\nname: Good\ndescription: kept\n---\nbody',
+      'utf-8',
+    );
+    // A directory named like a `.md` file forces an EISDIR on readFile — a
+    // deterministic stand-in for a permission error or a TOCTOU delete during
+    // `git pull`. The good file must still be scanned.
+    await fs.mkdir(
+      getAutoMemoryFilePath(projectRoot, path.join('feedback', 'broken.md')),
+      { recursive: true },
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(
+      docs.find((d) => d.relativePath === 'feedback/good.md'),
+    ).toBeTruthy();
+    expect(docs.some((d) => d.relativePath === 'feedback/broken.md')).toBe(
+      false,
+    );
+  });
+});

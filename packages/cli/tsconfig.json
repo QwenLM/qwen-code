@@ -3,15 +3,38 @@
   "compilerOptions": {
     "outDir": "dist",
     "jsx": "react-jsx",
+    "baseUrl": ".",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/transcriptRecords": [
+        "../core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/*": ["../core/src/*"],
+      "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/transcriptReplay": [
+        "../acp-bridge/src/transcript-replay.ts"
+      ],
+      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
+      "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
+      "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],
+      "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/daemon/ui/transcript": [
+        "../sdk-typescript/src/daemon/ui/transcript.ts"
+      ],
+      "@qwen-code/sdk/daemon/types": ["../sdk-typescript/src/daemon/types.ts"],
+      "@qwen-code/sdk/*": ["../sdk-typescript/src/*"]
+    }
   },
   "include": [
     "index.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "src/**/*.json",
-    "./package.json"
+    "./package.json",
+    "../core/src/utils/toml-to-markdown-converter.test.ts",
+    "../core/src/utils/toml-to-markdown-converter.ts"
   ],
   "exclude": [
     "node_modules",
@@ -21,6 +44,7 @@
     "src/commands/mcp/add.test.ts",
     "src/commands/mcp/list.test.ts",
     "src/commands/mcp/remove.test.ts",
+    "src/commands/mcp/reconnect.test.ts",
     "src/config/config.integration.test.ts",
     "src/config/config.test.ts",
     "src/config/extension.test.ts",
@@ -28,6 +52,8 @@
     "src/nonInteractiveCli.test.ts",
     "src/services/FileCommandLoader.test.ts",
     "src/services/prompt-processors/argumentProcessor.test.ts",
+    "src/serve/auth.test.ts",
+    "src/serve/server.test.ts",
     "src/utils/cleanup.test.ts",
     "src/utils/handleAutoUpdate.test.ts",
     "src/utils/startupWarnings.test.ts",
@@ -38,7 +64,6 @@
     "src/ui/commands/clearCommand.test.ts",
     "src/ui/commands/compressCommand.test.ts",
     "src/ui/commands/copyCommand.test.ts",
-    "src/ui/commands/corgiCommand.test.ts",
     "src/ui/commands/docsCommand.test.ts",
     "src/ui/commands/editorCommand.test.ts",
     "src/ui/commands/extensionsCommand.test.ts",
@@ -50,7 +75,6 @@
     "src/ui/commands/directoryCommand.test.tsx",
     "src/ui/commands/ideCommand.test.ts",
     "src/ui/commands/initCommand.test.ts",
-    "src/ui/commands/privacyCommand.test.ts",
     "src/ui/commands/quitCommand.test.ts",
     "src/ui/commands/mcpCommand.test.ts",
     "src/ui/commands/memoryCommand.test.ts",
@@ -66,6 +90,7 @@
     "src/ui/components/shared/vim-buffer-actions.test.ts",
     "src/ui/components/StatsDisplay.test.tsx",
     "src/ui/components/ToolStatsDisplay.test.tsx",
+    "src/ui/components/WarningMessage.test.tsx",
     "src/ui/contexts/SessionContext.test.tsx",
     "src/ui/hooks/slashCommandProcessor.test.ts",
     "src/ui/hooks/useAtCompletion.test.ts",
@@ -76,11 +101,23 @@
     "src/ui/hooks/useGeminiStream.test.tsx",
     "src/ui/hooks/useKeypress.test.ts",
     "src/ui/hooks/usePhraseCycler.test.ts",
-    "src/ui/hooks/vim.test.ts",
     "src/ui/utils/computeStats.test.ts",
     "src/ui/themes/theme.test.ts",
     "src/validateNonInterActiveAuth.test.ts",
-    "src/services/prompt-processors/shellProcessor.test.ts"
+    "src/services/prompt-processors/shellProcessor.test.ts",
+    "src/commands/extensions/examples/**"
   ],
-  "references": [{ "path": "../core" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../acp-bridge" },
+    { "path": "../audio-capture" },
+    { "path": "../sdk-typescript/tsconfig.reference.json" },
+    { "path": "../channels/base" },
+    { "path": "../channels/telegram" },
+    { "path": "../channels/weixin" },
+    { "path": "../channels/dingtalk" },
+    { "path": "../channels/wecom" },
+    { "path": "../channels/feishu" },
+    { "path": "../channels/gitlab" }
+  ]
 }

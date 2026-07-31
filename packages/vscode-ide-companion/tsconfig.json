@@ -4,15 +4,15 @@
     "moduleResolution": "NodeNext",
     "target": "ES2022",
     "lib": ["ES2022", "dom"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
     "sourceMap": true,
-    /*
-     * skipLibCheck is necessary because the a2a-server package depends on
-     * @google-cloud/storage which pulls in @types/request which depends on
-     * tough-cookie@4.x while jsdom requires tough-cookie@5.x. This causes a
-     * type checking error in ../../node_modules/@types/request/index.d.ts.
-     */
+    "strict": true,
     "skipLibCheck": true,
-    "strict": true /* enable all strict type-checking options */
+    "paths": {
+      "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"],
+      "@qwen-code/qwen-code/export": ["../cli/src/export/index.ts"]
+    }
     /* Additional Checks */
     // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
     // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */

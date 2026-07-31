@@ -1,0 +1,511 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { ExtensionConfig } from './extensionManager.js';
+import type { ExtensionInstallMetadata } from '../config/config.js';
+import type { ClaudeMarketplaceConfig } from './claude-converter.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { ClientRequest, IncomingMessage } from 'node:http';
+import { stat } from 'node:fs/promises';
+import { isSupportedArchiveUrl, parseGitHubRepoForReleases } from './github.js';
+import { isScopedNpmPackage } from './npm.js';
+import { redactUrlCredentials } from './redaction.js';
+import { clientForUrl } from './http-client.js';
+import { resolveNetworkTarget } from './network-policy.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
+
+const debugLogger = createDebugLogger('EXT_MARKETPLACE');
+
+export interface MarketplaceInstallOptions {
+  marketplaceUrl: string;
+  pluginName: string;
+  tempDir: string;
+  requestConsent: (consent: string) => Promise<boolean>;
+}
+
+export interface MarketplaceInstallResult {
+  config: ExtensionConfig;
+  sourcePath: string;
+  installMetadata: ExtensionInstallMetadata;
+}
+
+/**
+ * Parse the install source string into repo and optional pluginName.
+ * Format: <repo>:<pluginName> where pluginName is optional
+ * The colon separator is only treated as a pluginName delimiter when:
+ * - It's not part of a URL scheme (http://, https://, git@, sso://)
+ * - It appears after the repo portion
+ */
+function parseSourceAndPluginName(source: string): {
+  repo: string;
+  pluginName?: string;
+} {
+  // Check if source contains a colon that could be a pluginName separator
+  // We need to handle URL schemes that contain colons
+  const urlSchemes = ['http://', 'https://', 'git@', 'sso://'];
+  // URL schemes are case-insensitive, so match against a lowercased copy while
+  // slicing from the original. Offsets stay valid because casing never changes length.
+  const lowerSource = source.toLowerCase();
+
+  let repoEndIndex = source.length;
+  let hasPluginName = false;
+
+  // For URLs, find the last colon after the scheme
+  for (const scheme of urlSchemes) {
+    if (lowerSource.startsWith(scheme)) {
+      const afterScheme = source.substring(scheme.length);
+      const lastColonIndex = afterScheme.lastIndexOf(':');
+      if (lastColonIndex !== -1) {
+        // Check if what follows the colon looks like a pluginName (not a port number or path)
+        const potentialPluginName = afterScheme.substring(lastColonIndex + 1);
+        // Plugin name should not contain '/' and should not be a number (port)
+        if (
+          potentialPluginName &&
+          !potentialPluginName.includes('/') &&
+          !/^\d+/.test(potentialPluginName)
+        ) {
+          repoEndIndex = scheme.length + lastColonIndex;
+          hasPluginName = true;
+        }
+      }
+      break;
+    }
+  }
+
+  // For non-URL sources (local paths or owner/repo format)
+  if (
+    repoEndIndex === source.length &&
+    !urlSchemes.some((s) => lowerSource.startsWith(s))
+  ) {
+    const lastColonIndex = source.lastIndexOf(':');
+    // On Windows, avoid treating drive letter as pluginName separator (e.g., C:\path)
+    if (lastColonIndex > 1) {
+      repoEndIndex = lastColonIndex;
+      hasPluginName = true;
+    }
+  }
+
+  if (hasPluginName) {
+    return {
+      repo: source.substring(0, repoEndIndex),
+      pluginName: source.substring(repoEndIndex + 1),
+    };
+  }
+
+  return { repo: source };
+}
+
+/**
+ * Check if a string matches the owner/repo format (e.g., "anthropics/skills")
+ */
+function isOwnerRepoFormat(source: string): boolean {
+  // owner/repo format: word/word, no slashes before, no protocol
+  const ownerRepoRegex = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+  return ownerRepoRegex.test(source);
+}
+
+/**
+ * Convert owner/repo format to GitHub HTTPS URL
+ */
+function convertOwnerRepoToGitHubUrl(ownerRepo: string): string {
+  return `https://github.com/${ownerRepo}`;
+}
+
+/**
+ * Check if source is a git URL
+ */
+function isGitUrl(source: string): boolean {
+  // URL schemes are case-insensitive (e.g. HTTPS://...), so compare lowercased.
+  const lower = source.toLowerCase();
+  return (
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('git@') ||
+    lower.startsWith('sso://')
+  );
+}
+
+/** Max time to wait for a single marketplace network request. */
+const MARKETPLACE_FETCH_TIMEOUT_MS = 10000;
+
+/** Max marketplace response body. A marketplace.json is tiny; this guards
+ * against a hostile source streaming unbounded data to exhaust memory. */
+const MARKETPLACE_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Fetch content from a URL. Resolves to null on non-200, error, timeout, or
+ * oversized body so a slow/unreachable/hostile marketplace can never hang
+ * discovery indefinitely or exhaust process memory.
+ */
+async function fetchUrl(
+  url: string,
+  headers: Record<string, string>,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<string | null> {
+  const deadlineController = new AbortController();
+  let req: ClientRequest | undefined;
+  let finish: ((value: string | null) => void) | undefined;
+  // `req.setTimeout` only fires on socket inactivity and resets on every
+  // chunk, so the absolute deadline must start before DNS resolution.
+  const hardDeadline = setTimeout(() => {
+    deadlineController.abort(
+      new Error(
+        `Marketplace request timed out after ${MARKETPLACE_FETCH_TIMEOUT_MS}ms`,
+      ),
+    );
+    req?.destroy();
+    finish?.(null);
+  }, MARKETPLACE_FETCH_TIMEOUT_MS);
+  hardDeadline.unref();
+  let target;
+  try {
+    target = await resolveNetworkTarget(
+      url,
+      networkPolicy,
+      deadlineController.signal,
+    );
+    deadlineController.signal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    debugLogger.debug(
+      `Failed to resolve marketplace network target: ${redactUrlCredentials(getErrorMessage(error))}`,
+    );
+    return null;
+  }
+  return new Promise((resolve) => {
+    let client: ReturnType<typeof clientForUrl>;
+    try {
+      client = clientForUrl(target.url.toString());
+    } catch {
+      clearTimeout(hardDeadline);
+      resolve(null);
+      return;
+    }
+
+    let settled = false;
+    const done = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      resolve(value);
+    };
+    finish = done;
+
+    const onResponse = (res: IncomingMessage) => {
+      if (res.statusCode !== 200) {
+        res.resume(); // drain so the socket can be freed
+        done(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      res.on('data', (chunk) => {
+        total += chunk.length;
+        if (total > MARKETPLACE_MAX_BODY_BYTES) {
+          req?.destroy();
+          done(null);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => done(Buffer.concat(chunks).toString()));
+      res.on('error', () => done(null));
+    };
+
+    try {
+      req = client.get(
+        url,
+        {
+          headers,
+          signal: deadlineController.signal,
+          ...(target.lookup
+            ? { lookup: target.lookup, agent: false as const }
+            : {}),
+        },
+        onResponse,
+      );
+    } catch {
+      done(null);
+      return;
+    }
+    req.on('error', () => done(null));
+    req.setTimeout(MARKETPLACE_FETCH_TIMEOUT_MS, () => {
+      req?.destroy();
+      done(null);
+    });
+  });
+}
+
+/**
+ * Fetch marketplace config from GitHub repository.
+ * Primary: GitHub API (supports private repos with token)
+ * Fallback: raw.githubusercontent.com (no rate limit for public repos)
+ */
+async function fetchGitHubMarketplaceConfig(
+  owner: string,
+  repo: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<ClaudeMarketplaceConfig | null> {
+  const token = process.env['GITHUB_TOKEN'];
+
+  // Primary: GitHub API (works for private repos, but has rate limits)
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.claude-plugin/marketplace.json`;
+  const apiHeaders: Record<string, string> = {
+    'User-Agent': 'qwen-code',
+    Accept: 'application/vnd.github.v3.raw',
+  };
+  if (token) {
+    apiHeaders['Authorization'] = `token ${token}`;
+  }
+
+  let content = await fetchUrl(apiUrl, apiHeaders, networkPolicy);
+
+  // Fallback: raw.githubusercontent.com (no rate limit, public repos only)
+  if (!content) {
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.claude-plugin/marketplace.json`;
+    const rawHeaders: Record<string, string> = {
+      'User-Agent': 'qwen-code',
+    };
+    content = await fetchUrl(rawUrl, rawHeaders, networkPolicy);
+  }
+
+  if (!content) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(content) as ClaudeMarketplaceConfig;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read marketplace config from local path
+ */
+async function readLocalMarketplaceConfig(
+  localPath: string,
+): Promise<ClaudeMarketplaceConfig | null> {
+  const marketplaceConfigPath = path.join(
+    localPath,
+    '.claude-plugin',
+    'marketplace.json',
+  );
+  try {
+    const content = await fs.promises.readFile(marketplaceConfigPath, 'utf-8');
+    return JSON.parse(content) as ClaudeMarketplaceConfig;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Loads a Claude-format marketplace config (`.claude-plugin/marketplace.json`)
+ * from any supported source string, without installing anything. Used by the
+ * marketplace registry / Discover view to enumerate installable plugins.
+ *
+ * Supported sources:
+ * - Local directory containing `.claude-plugin/marketplace.json`
+ * - Local path directly to a `marketplace.json` file
+ * - `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
+ * - Arbitrary `http(s)://host/.../marketplace.json` returning the JSON document
+ *
+ * Returns `null` when no marketplace config can be resolved.
+ */
+export async function loadMarketplaceConfigFromSource(
+  source: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<ClaudeMarketplaceConfig | null> {
+  const trimmed = source.trim();
+  const lowerTrimmed = trimmed.toLowerCase();
+
+  // Priority 1: local path (directory with .claude-plugin/marketplace.json,
+  // or a direct marketplace.json file).
+  try {
+    const stats = await stat(trimmed);
+    if (stats.isDirectory()) {
+      return await readLocalMarketplaceConfig(trimmed);
+    }
+    if (stats.isFile()) {
+      try {
+        const content = await fs.promises.readFile(trimmed, 'utf-8');
+        return JSON.parse(content) as ClaudeMarketplaceConfig;
+      } catch {
+        return null;
+      }
+    }
+  } catch {
+    // Not a local path; continue.
+  }
+
+  // Priority 2: http(s) URL — try GitHub repo first, then a direct JSON doc.
+  if (
+    lowerTrimmed.startsWith('http://') ||
+    lowerTrimmed.startsWith('https://')
+  ) {
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      const ghConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repo,
+        networkPolicy,
+      );
+      if (ghConfig) {
+        return ghConfig;
+      }
+    } catch {
+      // Not a github.com repo URL — fall through to direct-JSON fetch.
+    }
+    const content = await fetchUrl(
+      trimmed,
+      { 'User-Agent': 'qwen-code' },
+      networkPolicy,
+    );
+    if (!content) {
+      return null;
+    }
+    try {
+      return JSON.parse(content) as ClaudeMarketplaceConfig;
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
+  if (lowerTrimmed.startsWith('git@') || lowerTrimmed.startsWith('sso://')) {
+    // `git@github.com:owner/repo(.git)` isn't a parseable URL, so extract
+    // owner/repo directly before falling back to the URL-based parser.
+    const sshMatch = trimmed.match(
+      /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i,
+    );
+    if (sshMatch) {
+      return fetchGitHubMarketplaceConfig(
+        sshMatch[1],
+        sshMatch[2],
+        networkPolicy,
+      );
+    }
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      return await fetchGitHubMarketplaceConfig(owner, repo, networkPolicy);
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 4: owner/repo shorthand.
+  if (isOwnerRepoFormat(trimmed)) {
+    const [owner, repo] = trimmed.split('/');
+    return await fetchGitHubMarketplaceConfig(owner, repo, networkPolicy);
+  }
+
+  return null;
+}
+
+export async function parseInstallSource(
+  source: string,
+  options: {
+    networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+  } = {},
+): Promise<ExtensionInstallMetadata> {
+  // Step 1: Parse source into repo and optional pluginName
+  const { repo, pluginName } = parseSourceAndPluginName(source);
+
+  let installMetadata: ExtensionInstallMetadata;
+  let repoSource = repo;
+  let marketplaceConfig: ClaudeMarketplaceConfig | null = null;
+
+  // Step 2: Determine repo type with correct priority order
+  // Priority 1: Check if it's a local path that exists
+  let isLocalPath = false;
+  try {
+    await stat(repo);
+    isLocalPath = true;
+  } catch {
+    // Not a local path or doesn't exist, continue with other checks
+  }
+
+  if (isLocalPath) {
+    // Local path exists
+    installMetadata = {
+      source: repo,
+      type: 'local',
+      pluginName,
+    };
+
+    // Try to read marketplace config from local path
+    marketplaceConfig = await readLocalMarketplaceConfig(repo);
+  } else if (isSupportedArchiveUrl(repo)) {
+    installMetadata = {
+      source: repoSource,
+      type: 'archive-url',
+      pluginName,
+    };
+  } else if (isGitUrl(repo)) {
+    // Priority 2: Git URL (http://, https://, git@, sso://)
+    installMetadata = {
+      source: repoSource,
+      type: 'git',
+      pluginName,
+    };
+
+    // Try to fetch marketplace config from GitHub
+    try {
+      const { owner, repo: repoName } = parseGitHubRepoForReleases(repoSource);
+      marketplaceConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repoName,
+        options.networkPolicy,
+      );
+    } catch {
+      // Not a valid GitHub URL or failed to fetch, continue without marketplace config
+    }
+  } else if (isScopedNpmPackage(repo)) {
+    // Priority 3: Scoped npm package (@scope/name, optionally @version)
+    installMetadata = {
+      source: repo,
+      type: 'npm',
+      pluginName,
+    };
+  } else if (isOwnerRepoFormat(repo)) {
+    // Priority 3: owner/repo format - convert to GitHub URL
+    repoSource = convertOwnerRepoToGitHubUrl(repo);
+    installMetadata = {
+      source: repoSource,
+      type: 'git',
+      pluginName,
+    };
+
+    // Try to fetch marketplace config from GitHub
+    try {
+      const [owner, repoName] = repo.split('/');
+      marketplaceConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repoName,
+        options.networkPolicy,
+      );
+    } catch {
+      // Not a valid GitHub URL or failed to fetch, continue without marketplace config
+    }
+  } else {
+    // None of the above formats matched
+    throw new Error(`Install source not found: ${redactUrlCredentials(repo)}`);
+  }
+
+  // Step 3: If marketplace config exists, update type to marketplace
+  if (marketplaceConfig) {
+    installMetadata.marketplaceConfig = marketplaceConfig;
+    installMetadata.originSource = 'Claude';
+  }
+
+  if (options.networkPolicy) {
+    installMetadata.networkPolicy = options.networkPolicy;
+  }
+
+  return installMetadata;
+}

@@ -5,12 +5,9 @@
  */
 
 import { SubagentError, SubagentErrorCode } from './types.js';
-import type {
-  ModelConfig,
-  RunConfig,
-  SubagentConfig,
-  ValidationResult,
-} from './types.js';
+import type { SubagentConfig, ValidationResult } from './types.js';
+import type { RunConfig } from '../agents/runtime/agent-types.js';
+import { resolveModelId } from '../utils/modelId.js';
 
 /**
  * Validates subagent configurations to ensure they are well-formed
@@ -27,29 +24,25 @@ export class SubagentValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // Validate name
     const nameValidation = this.validateName(config.name);
     if (!nameValidation.isValid) {
       errors.push(...nameValidation.errors);
     }
 
-    // Validate description
     if (!config.description || config.description.trim().length === 0) {
       errors.push('Description is required and cannot be empty');
-    } else if (config.description.length > 500) {
+    } else if (config.description.length > 1000) {
       warnings.push(
-        'Description is quite long (>500 chars), consider shortening for better readability',
+        'Description is quite long (>1,000 chars), consider shortening for better readability',
       );
     }
 
-    // Validate system prompt
     const promptValidation = this.validateSystemPrompt(config.systemPrompt);
     if (!promptValidation.isValid) {
       errors.push(...promptValidation.errors);
     }
     warnings.push(...promptValidation.warnings);
 
-    // Validate tools if specified
     if (config.tools) {
       const toolsValidation = this.validateTools(config.tools);
       if (!toolsValidation.isValid) {
@@ -58,16 +51,22 @@ export class SubagentValidator {
       warnings.push(...toolsValidation.warnings);
     }
 
-    // Validate model config if specified
-    if (config.modelConfig) {
-      const modelValidation = this.validateModelConfig(config.modelConfig);
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      const disallowedValidation = this.validateTools(config.disallowedTools);
+      if (!disallowedValidation.isValid) {
+        errors.push(...disallowedValidation.errors);
+      }
+      warnings.push(...disallowedValidation.warnings);
+    }
+
+    if (config.model) {
+      const modelValidation = this.validateModel(config.model);
       if (!modelValidation.isValid) {
         errors.push(...modelValidation.errors);
       }
       warnings.push(...modelValidation.warnings);
     }
 
-    // Validate run config if specified
     if (config.runConfig) {
       const runValidation = this.validateRunConfig(config.runConfig);
       if (!runValidation.isValid) {
@@ -101,7 +100,6 @@ export class SubagentValidator {
 
     const trimmedName = name.trim();
 
-    // Check length constraints
     if (trimmedName.length < 2) {
       errors.push('Name must be at least 2 characters long');
     }
@@ -110,15 +108,13 @@ export class SubagentValidator {
       errors.push('Name must be 50 characters or less');
     }
 
-    // Check valid characters (alphanumeric, hyphens, underscores)
-    const validNameRegex = /^[a-zA-Z0-9_-]+$/;
+    const validNameRegex = /^[\p{L}\p{N}_-]+$/u;
     if (!validNameRegex.test(trimmedName)) {
       errors.push(
         'Name can only contain letters, numbers, hyphens, and underscores',
       );
     }
 
-    // Check that it doesn't start or end with special characters
     if (trimmedName.startsWith('-') || trimmedName.startsWith('_')) {
       errors.push('Name cannot start with a hyphen or underscore');
     }
@@ -127,7 +123,10 @@ export class SubagentValidator {
       errors.push('Name cannot end with a hyphen or underscore');
     }
 
-    // Check for reserved names
+    // Check for reserved names. `main` is the sentinel used by the /stats
+    // attribution pipeline to label the main (non-subagent) conversation;
+    // a subagent named `main` would collide with that sentinel and be
+    // silently merged into the main bucket.
     const reservedNames = [
       'self',
       'system',
@@ -136,13 +135,17 @@ export class SubagentValidator {
       'tool',
       'config',
       'default',
+      'main',
     ];
     if (reservedNames.includes(trimmedName.toLowerCase())) {
       errors.push(`"${trimmedName}" is a reserved name and cannot be used`);
     }
 
-    // Warnings for naming conventions
-    if (trimmedName !== trimmedName.toLowerCase()) {
+    // Only warn about naming conventions for names that contain case distinctions
+    if (
+      trimmedName !== trimmedName.toLowerCase() &&
+      /[a-zA-Z]/.test(trimmedName)
+    ) {
       warnings.push('Consider using lowercase names for consistency');
     }
 
@@ -176,17 +179,13 @@ export class SubagentValidator {
 
     const trimmedPrompt = prompt.trim();
 
-    // Check minimum length for meaningful prompts
     if (trimmedPrompt.length < 10) {
       errors.push('System prompt must be at least 10 characters long');
     }
 
-    // Check maximum length to prevent token issues
     if (trimmedPrompt.length > 10000) {
-      errors.push('System prompt is too long (>10,000 characters)');
-    } else if (trimmedPrompt.length > 5000) {
       warnings.push(
-        'System prompt is quite long (>5,000 characters), consider shortening',
+        'System prompt is quite long (>10,000 characters), consider shortening',
       );
     }
 
@@ -219,13 +218,11 @@ export class SubagentValidator {
       return { isValid: true, errors, warnings };
     }
 
-    // Check for duplicates
     const uniqueTools = new Set(tools);
     if (uniqueTools.size !== tools.length) {
       warnings.push('Duplicate tool names found in tools array');
     }
 
-    // Validate each tool name
     for (const tool of tools) {
       if (typeof tool !== 'string') {
         errors.push(`Tool name must be a string, got: ${typeof tool}`);
@@ -246,42 +243,34 @@ export class SubagentValidator {
   }
 
   /**
-   * Validates model configuration.
+   * Validates a subagent model selector.
    *
-   * @param modelConfig - Partial model configuration to validate
+   * @param model - Model selector to validate
    * @returns ValidationResult
    */
-  validateModelConfig(modelConfig: ModelConfig): ValidationResult {
+  validateModel(model: string): ValidationResult {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    if (modelConfig.model !== undefined) {
-      if (
-        typeof modelConfig.model !== 'string' ||
-        modelConfig.model.trim().length === 0
-      ) {
-        errors.push('Model name must be a non-empty string');
-      }
+    if (typeof model !== 'string' || model.trim().length === 0) {
+      errors.push('Model must be a non-empty string');
+      return {
+        isValid: false,
+        errors,
+        warnings,
+      };
     }
 
-    if (modelConfig.temp !== undefined) {
-      if (typeof modelConfig.temp !== 'number') {
-        errors.push('Temperature must be a number');
-      } else if (modelConfig.temp < 0 || modelConfig.temp > 2) {
-        errors.push('Temperature must be between 0 and 2');
-      } else if (modelConfig.temp > 1) {
-        warnings.push(
-          'High temperature (>1) may produce very creative but unpredictable results',
-        );
-      }
+    try {
+      resolveModelId(model);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : 'Invalid model');
     }
 
-    if (modelConfig.top_p !== undefined) {
-      if (typeof modelConfig.top_p !== 'number') {
-        errors.push('top_p must be a number');
-      } else if (modelConfig.top_p < 0 || modelConfig.top_p > 1) {
-        errors.push('top_p must be between 0 and 1');
-      }
+    if (model.trim() === 'inherit') {
+      warnings.push(
+        'Explicit "inherit" is optional because omitting the model uses the main conversation model',
+      );
     }
 
     return {

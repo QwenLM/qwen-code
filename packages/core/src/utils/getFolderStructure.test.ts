@@ -45,7 +45,7 @@ describe('getFolderStructure', () => {
     const structure = await getFolderStructure(testRootDir);
     expect(structure.trim()).toBe(
       `
-Showing up to 20 items (files + folders).
+Showing up to 20 items:
 
 ${testRootDir}${path.sep}
 ├───fileA1.ts
@@ -60,7 +60,7 @@ ${testRootDir}${path.sep}
     const structure = await getFolderStructure(testRootDir);
     expect(structure.trim()).toBe(
       `
-Showing up to 20 items (files + folders).
+Showing up to 20 items:
 
 ${testRootDir}${path.sep}
 `
@@ -81,7 +81,7 @@ ${testRootDir}${path.sep}
     const structure = await getFolderStructure(testRootDir);
     expect(structure.trim()).toBe(
       `
-Showing up to 20 items (files + folders). Folders or files indicated with ... contain more items not shown, were ignored, or the display limit (20 items) was reached.
+Showing up to 20 items:
 
 ${testRootDir}${path.sep}
 ├───.hiddenfile
@@ -108,7 +108,7 @@ ${testRootDir}${path.sep}
       ignoredFolders: new Set(['subfolderA', 'node_modules']),
     });
     const expected = `
-Showing up to 20 items (files + folders). Folders or files indicated with ... contain more items not shown, were ignored, or the display limit (20 items) was reached.
+Showing up to 20 items:
 
 ${testRootDir}${path.sep}
 ├───.hiddenfile
@@ -129,7 +129,7 @@ ${testRootDir}${path.sep}
       fileIncludePattern: /\.ts$/,
     });
     const expected = `
-Showing up to 20 items (files + folders).
+Showing up to 20 items:
 
 ${testRootDir}${path.sep}
 ├───fileA1.ts
@@ -147,12 +147,13 @@ ${testRootDir}${path.sep}
       maxItems: 3,
     });
     const expected = `
-Showing up to 3 items (files + folders).
+Showing up to 3 items:
 
 ${testRootDir}${path.sep}
 ├───fileA1.ts
 ├───fileA2.js
 └───subfolderB${path.sep}
+    └───...
 `.trim();
     expect(structure.trim()).toBe(expected);
   });
@@ -166,13 +167,17 @@ ${testRootDir}${path.sep}
       maxItems: 4,
     });
     const expectedRevised = `
-Showing up to 4 items (files + folders). Folders or files indicated with ... contain more items not shown, were ignored, or the display limit (4 items) was reached.
+Showing up to 4 items:
 
 ${testRootDir}${path.sep}
 ├───folder-0${path.sep}
+│   └───...
 ├───folder-1${path.sep}
+│   └───...
 ├───folder-2${path.sep}
+│   └───...
 ├───folder-3${path.sep}
+│   └───...
 └───...
 `.trim();
     expect(structure.trim()).toBe(expectedRevised);
@@ -187,7 +192,7 @@ ${testRootDir}${path.sep}
       maxItems: 1,
     });
     const expected = `
-Showing up to 1 items (files + folders). Folders or files indicated with ... contain more items not shown, were ignored, or the display limit (1 items) was reached.
+Showing up to 1 items:
 
 ${testRootDir}${path.sep}
 ├───fileA1.ts
@@ -212,7 +217,7 @@ ${testRootDir}${path.sep}
       maxItems: 10,
     });
     const expected = `
-Showing up to 10 items (files + folders).
+Showing up to 10 items:
 
 ${testRootDir}${path.sep}
 └───level1${path.sep}
@@ -230,14 +235,50 @@ ${testRootDir}${path.sep}
       maxItems: 3,
     });
     const expected = `
-Showing up to 3 items (files + folders).
+Showing up to 3 items:
 
 ${testRootDir}${path.sep}
 └───level1${path.sep}
     └───level2${path.sep}
         └───level3${path.sep}
+            └───...
 `.trim();
     expect(structure.trim()).toBe(expected);
+  });
+
+  // A folder queued but never expanded was rendered as a bare leaf, which is
+  // exactly how a genuinely empty folder renders. The same tree therefore
+  // described `withContents` as empty or not depending only on the budget.
+  it('marks a folder whose contents the budget never reached', async () => {
+    await createTestFile('a.txt');
+    await createTestFile('withContents', 'hidden.txt');
+
+    const truncated = await getFolderStructure(testRootDir, { maxItems: 2 });
+    const complete = await getFolderStructure(testRootDir, { maxItems: 50 });
+
+    expect(truncated).toContain(`withContents${path.sep}`);
+    expect(truncated).toContain('...');
+    // The file is out of budget either way; what matters is that the folder is
+    // not presented as fully known.
+    expect(truncated).not.toContain('hidden.txt');
+
+    // Guard against over-correcting: given room, the folder expands and no
+    // truncation indicator appears anywhere.
+    expect(complete).toContain('hidden.txt');
+    expect(complete).not.toContain('...');
+  });
+
+  // The other direction: a folder that really is empty and really was read
+  // must not gain a marker suggesting there is more to see.
+  it('does not mark an empty folder that was fully read', async () => {
+    await fsPromises.mkdir(path.join(testRootDir, 'genuinelyEmpty'), {
+      recursive: true,
+    });
+
+    const structure = await getFolderStructure(testRootDir, { maxItems: 50 });
+
+    expect(structure).toContain(`genuinelyEmpty${path.sep}`);
+    expect(structure).not.toContain('...');
   });
 
   describe('with gitignore', () => {
@@ -282,7 +323,7 @@ ${testRootDir}${path.sep}
       const structure = await getFolderStructure(testRootDir, {
         fileService,
         fileFilteringOptions: {
-          respectGeminiIgnore: false,
+          respectQwenIgnore: false,
           respectGitIgnore: false,
         },
       });
@@ -292,8 +333,8 @@ ${testRootDir}${path.sep}
     });
   });
 
-  describe('with geminiignore', () => {
-    it('should ignore geminiignore files by default', async () => {
+  describe('with qwenignore', () => {
+    it('should ignore qwenignore files by default', async () => {
       await fsPromises.writeFile(
         nodePath.join(testRootDir, '.qwenignore'),
         'ignored.txt\nnode_modules/\n.gemini/\n!/.gemini/config.yaml',
@@ -313,7 +354,7 @@ ${testRootDir}${path.sep}
       expect(structure).not.toContain('logs.json');
     });
 
-    it('should not ignore files if respectGeminiIgnore is false', async () => {
+    it('should not ignore files if respectQwenIgnore is false', async () => {
       await fsPromises.writeFile(
         nodePath.join(testRootDir, '.qwenignore'),
         'ignored.txt\nnode_modules/\n.gemini/\n!/.gemini/config.yaml',
@@ -328,7 +369,7 @@ ${testRootDir}${path.sep}
       const structure = await getFolderStructure(testRootDir, {
         fileService,
         fileFilteringOptions: {
-          respectGeminiIgnore: false,
+          respectQwenIgnore: false,
           respectGitIgnore: true, // Explicitly disable gemini ignore only
         },
       });

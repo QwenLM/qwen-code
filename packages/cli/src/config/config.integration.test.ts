@@ -15,7 +15,6 @@ import type {
 import { Config } from '@qwen-code/qwen-code-core';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-
 export const server = setupServer();
 
 // TODO(richieforeman): Consider moving this to test setup globally.
@@ -73,25 +72,26 @@ describe('Configuration Integration Tests', () => {
     it('should load default file filtering settings', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
-        fileFilteringRespectGitIgnore: undefined, // Should default to true
       };
 
       const config = new Config(configParams);
 
       expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+      expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+        '.agentignore',
+        '.aiignore',
+      ]);
     });
 
     it('should load custom file filtering settings from configuration', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
         fileFiltering: {
@@ -104,15 +104,35 @@ describe('Configuration Integration Tests', () => {
       expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
     });
 
+    it('should load custom ignore file settings from configuration', async () => {
+      const configParams: ConfigParameters = {
+        cwd: '/tmp',
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        embeddingModel: 'test-embedding-model',
+        targetDir: tempDir,
+        debugMode: false,
+        fileFiltering: {
+          customIgnoreFiles: ['.cursorignore'],
+        },
+      };
+
+      const config = new Config(configParams);
+
+      expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+        '.cursorignore',
+      ]);
+      expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+    });
+
     it('should merge user and workspace file filtering settings', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
-        fileFilteringRespectGitIgnore: true,
       };
 
       const config = new Config(configParams);
@@ -125,9 +145,8 @@ describe('Configuration Integration Tests', () => {
     it('should handle partial configuration objects gracefully', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
         fileFiltering: {
@@ -144,12 +163,10 @@ describe('Configuration Integration Tests', () => {
     it('should handle empty configuration objects gracefully', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
-        fileFilteringRespectGitIgnore: undefined,
       };
 
       const config = new Config(configParams);
@@ -161,9 +178,8 @@ describe('Configuration Integration Tests', () => {
     it('should handle missing configuration sections gracefully', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
         // Missing fileFiltering configuration
@@ -180,12 +196,10 @@ describe('Configuration Integration Tests', () => {
     it('should handle a security-focused configuration', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
-        fileFilteringRespectGitIgnore: true,
       };
 
       const config = new Config(configParams);
@@ -196,9 +210,8 @@ describe('Configuration Integration Tests', () => {
     it('should handle a CI/CD environment configuration', async () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
         fileFiltering: {
@@ -212,31 +225,12 @@ describe('Configuration Integration Tests', () => {
     });
   });
 
-  describe('Checkpointing Configuration', () => {
-    it('should enable checkpointing when the setting is true', async () => {
-      const configParams: ConfigParameters = {
-        cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
-        embeddingModel: 'test-embedding-model',
-        sandbox: false,
-        targetDir: tempDir,
-        debugMode: false,
-        checkpointing: true,
-      };
-
-      const config = new Config(configParams);
-
-      expect(config.getCheckpointingEnabled()).toBe(true);
-    });
-  });
-
   describe('Extension Context Files', () => {
     it('should have an empty array for extension context files by default', () => {
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
       };
@@ -244,32 +238,34 @@ describe('Configuration Integration Tests', () => {
       expect(config.getExtensionContextFilePaths()).toEqual([]);
     });
 
-    it('should correctly store and return extension context file paths', () => {
-      const contextFiles = ['/path/to/file1.txt', '/path/to/file2.js'];
+    it('should correctly store and return extension context file paths with outputLanguageFilePath', () => {
+      const outputLanguageFilePath = '/path/to/language.txt';
       const configParams: ConfigParameters = {
         cwd: '/tmp',
-        contentGeneratorConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
-        sandbox: false,
         targetDir: tempDir,
         debugMode: false,
-        extensionContextFilePaths: contextFiles,
+        outputLanguageFilePath,
       };
       const config = new Config(configParams);
-      expect(config.getExtensionContextFilePaths()).toEqual(contextFiles);
+      // outputLanguageFilePath should be included in extension context file paths
+      expect(config.getExtensionContextFilePaths()).toContain(
+        outputLanguageFilePath,
+      );
     });
   });
 
   describe('Approval Mode Integration Tests', () => {
-    let parseArguments: typeof import('./config').parseArguments;
+    let parseArguments: typeof import('./config.js').parseArguments;
 
     beforeEach(async () => {
       // Import the argument parsing function for integration testing
-      const { parseArguments: parseArgs } = await import('./config');
+      const { parseArguments: parseArgs } = await import('./config.js');
       parseArguments = parseArgs;
     });
 
-    it('should parse --approval-mode=auto_edit correctly through the full argument parsing flow', async () => {
+    it('should parse --approval-mode=auto-edit correctly through the full argument parsing flow', async () => {
       const originalArgv = process.argv;
 
       try {
@@ -277,15 +273,38 @@ describe('Configuration Integration Tests', () => {
           'node',
           'script.js',
           '--approval-mode',
-          'auto_edit',
+          'auto-edit',
           '-p',
           'test',
         ];
 
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
 
         // Verify that the argument was parsed correctly
-        expect(argv.approvalMode).toBe('auto_edit');
+        expect(argv.approvalMode).toBe('auto-edit');
+        expect(argv.prompt).toBe('test');
+        expect(argv.yolo).toBe(false);
+      } finally {
+        process.argv = originalArgv;
+      }
+    });
+
+    it('should parse --approval-mode=plan correctly through the full argument parsing flow', async () => {
+      const originalArgv = process.argv;
+
+      try {
+        process.argv = [
+          'node',
+          'script.js',
+          '--approval-mode',
+          'plan',
+          '-p',
+          'test',
+        ];
+
+        const argv = await parseArguments();
+
+        expect(argv.approvalMode).toBe('plan');
         expect(argv.prompt).toBe('test');
         expect(argv.yolo).toBe(false);
       } finally {
@@ -306,7 +325,7 @@ describe('Configuration Integration Tests', () => {
           'test',
         ];
 
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
 
         expect(argv.approvalMode).toBe('yolo');
         expect(argv.prompt).toBe('test');
@@ -329,7 +348,7 @@ describe('Configuration Integration Tests', () => {
           'test',
         ];
 
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
 
         expect(argv.approvalMode).toBe('default');
         expect(argv.prompt).toBe('test');
@@ -345,7 +364,7 @@ describe('Configuration Integration Tests', () => {
       try {
         process.argv = ['node', 'script.js', '--yolo', '-p', 'test'];
 
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
 
         expect(argv.yolo).toBe(true);
         expect(argv.approvalMode).toBeUndefined(); // Should NOT be set when using --yolo
@@ -362,7 +381,7 @@ describe('Configuration Integration Tests', () => {
         process.argv = ['node', 'script.js', '--approval-mode', 'invalid_mode'];
 
         // Should throw during argument parsing due to yargs validation
-        await expect(parseArguments({} as Settings)).rejects.toThrow();
+        await expect(parseArguments()).rejects.toThrow();
       } finally {
         process.argv = originalArgv;
       }
@@ -381,7 +400,7 @@ describe('Configuration Integration Tests', () => {
         ];
 
         // Should throw during argument parsing due to conflict validation
-        await expect(parseArguments({} as Settings)).rejects.toThrow();
+        await expect(parseArguments()).rejects.toThrow();
       } finally {
         process.argv = originalArgv;
       }
@@ -394,7 +413,7 @@ describe('Configuration Integration Tests', () => {
         // Test that no approval mode arguments defaults to no flags set
         process.argv = ['node', 'script.js', '-p', 'test'];
 
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
 
         expect(argv.approvalMode).toBeUndefined();
         expect(argv.yolo).toBe(false);
@@ -403,5 +422,67 @@ describe('Configuration Integration Tests', () => {
         process.argv = originalArgv;
       }
     });
+  });
+});
+
+describe('buildDisabledSkillNamesProvider', async () => {
+  const { buildDisabledSkillNamesProvider } = await import('./config.js');
+
+  function fakeSettings(
+    disabled: unknown,
+    defaultDisabled?: unknown,
+    enabled?: unknown,
+  ) {
+    return {
+      merged: { skills: { disabled, defaultDisabled, enabled } },
+      forScope: () => ({ settings: { skills: {} } }),
+    } as never;
+  }
+
+  it('returns a normalized set from a normal array', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['Foo', ' BAR ', 'baz']),
+    );
+    const result = provider();
+    expect(result).toEqual(new Set(['foo', 'bar', 'baz']));
+  });
+
+  it('returns empty set for non-array values (string)', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings('all'));
+    expect(provider()).toEqual(new Set());
+  });
+
+  it('returns empty set for non-array values (number)', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings(42));
+    expect(provider()).toEqual(new Set());
+  });
+
+  it('returns empty set for null/undefined', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings(null));
+    expect(provider()).toEqual(new Set());
+    const provider2 = buildDisabledSkillNamesProvider(fakeSettings(undefined));
+    expect(provider2()).toEqual(new Set());
+  });
+
+  it('filters non-string elements from a mixed-type array', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings([42, null, 'valid', undefined, true, '  TRIMMED  ']),
+    );
+    expect(provider()).toEqual(new Set(['valid', 'trimmed']));
+  });
+
+  it('excludes empty-after-trim strings', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['  ', '', 'keep']),
+    );
+    expect(provider()).toEqual(new Set(['keep']));
+  });
+
+  it('applies explicit enables between defaults and hard disables', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['hard'], ['soft', 'hard'], ['SOFT', 'HARD']),
+    );
+
+    expect(provider()).toEqual(new Set(['hard']));
   });
 });

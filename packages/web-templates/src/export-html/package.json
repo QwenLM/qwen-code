@@ -1,0 +1,14 @@
+{
+  "name": "@qwen-code/cli-export-html",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@qwen-code/webui": "latest"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

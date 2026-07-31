@@ -1,0 +1,139 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  ExtensionManager,
+  redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
+  type Extension,
+} from '@qwen-code/qwen-code-core';
+import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  requestConsentOrFail,
+  requestConsentNonInteractive,
+  requestChoicePluginNonInteractive,
+} from './consent.js';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import * as os from 'node:os';
+import chalk from 'chalk';
+import stripAnsi from 'strip-ansi';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
+
+export async function getExtensionManager(): Promise<ExtensionManager> {
+  const workspaceDir = process.cwd();
+  const extensionManager = new ExtensionManager({
+    workspaceDir,
+    locale: getCurrentLanguage(),
+    requestConsent: requestConsentOrFail.bind(
+      null,
+      requestConsentNonInteractive,
+    ),
+    requestChoicePlugin: requestChoicePluginNonInteractive,
+    isWorkspaceTrusted:
+      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+  });
+  await extensionManager.refreshCache();
+  return extensionManager;
+}
+
+const EXTENSION_COMMAND_SCOPES = [SettingScope.User, SettingScope.Workspace];
+
+function extensionCommandScopesList(): string {
+  return EXTENSION_COMMAND_SCOPES.map((s) => s.toLowerCase()).join(', ');
+}
+
+export function resolveExtensionCommandScope(
+  scope: string | undefined,
+): SettingScope {
+  if (!scope) {
+    return SettingScope.User;
+  }
+
+  const normalized = scope.toLowerCase();
+  const matched = EXTENSION_COMMAND_SCOPES.find(
+    (candidate) => candidate.toLowerCase() === normalized,
+  );
+  if (matched) {
+    return matched;
+  }
+
+  throw new Error(
+    t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
+      scope,
+      scopes: extensionCommandScopesList(),
+    }),
+  );
+}
+
+export function extensionToOutputString(
+  extension: Extension,
+  extensionManager: ExtensionManager,
+  workspaceDir: string,
+  inline = false,
+): string {
+  const cwd = workspaceDir;
+  const userEnabled = extensionManager.isEnabled(
+    extension.config.name,
+    os.homedir(),
+  );
+  const workspaceEnabled = extensionManager.isEnabled(
+    extension.config.name,
+    cwd,
+  );
+
+  const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
+  const locale = getCurrentLanguage();
+  const displayLabel = getExtensionDisplayName(extension, locale);
+  let output = `${inline ? '' : status} ${displayLabel} (${extension.config.version})`;
+  const desc = getExtensionDescription(extension, locale);
+  if (desc) {
+    output += `\n ${t('Description:')} ${stripAnsi(desc)}`;
+  }
+  output += `\n ${t('Path:')} ${extension.path}`;
+  if (extension.installMetadata) {
+    output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
+    if (extension.installMetadata.ref) {
+      output += `\n ${t('Ref:')} ${extension.installMetadata.ref}`;
+    }
+    if (extension.installMetadata.releaseTag) {
+      output += `\n ${t('Release tag:')} ${extension.installMetadata.releaseTag}`;
+    }
+  }
+  output += `\n ${t('Enabled (User):')} ${userEnabled}`;
+  output += `\n ${t('Enabled (Workspace):')} ${workspaceEnabled}`;
+  if (extension.contextFiles.length > 0) {
+    output += `\n ${t('Context files:')}`;
+    extension.contextFiles.forEach((contextFile) => {
+      output += `\n  ${contextFile}`;
+    });
+  }
+  if (extension.commands && extension.commands.length > 0) {
+    output += `\n ${t('Commands:')}`;
+    extension.commands.forEach((command) => {
+      output += `\n  /${command}`;
+    });
+  }
+  if (extension.skills && extension.skills.length > 0) {
+    output += `\n ${t('Skills:')}`;
+    extension.skills.forEach((skill) => {
+      output += `\n  ${skill.name}`;
+    });
+  }
+  if (extension.agents && extension.agents.length > 0) {
+    output += `\n ${t('Agents:')}`;
+    extension.agents.forEach((agent) => {
+      output += `\n  ${agent.name}`;
+    });
+  }
+  if (extension.config.mcpServers) {
+    output += `\n ${t('MCP servers:')}`;
+    Object.keys(extension.config.mcpServers).forEach((key) => {
+      output += `\n  ${key}`;
+    });
+  }
+  return output;
+}

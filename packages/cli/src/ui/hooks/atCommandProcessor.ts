@@ -6,29 +6,74 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { PartListUnion, PartUnion } from '@google/genai';
-import type { AnyToolInvocation, Config } from '@qwen-code/qwen-code-core';
+import type { Part, PartListUnion } from '@google/genai';
+import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
+  Storage,
+  isSubpath,
   unescapePath,
+  readManyFiles,
+  shouldRunVisionBridge,
+  emptyMcpResourceText,
+  formatMcpResourceContents,
+  summarizeMcpResource,
+  SessionService,
+  SessionReferenceService,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
+import type {
+  HistoryItemToolGroup,
+  HistoryItemWithoutId,
+  IndividualToolCallDisplay,
+} from '../types.js';
 import { ToolCallStatus } from '../types.js';
-import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import {
+  parseExtensionRef,
+  matchExtensionByRef,
+  buildExtensionRef,
+} from './extension-mention-ref.js';
+import { parseSessionRef, buildSessionRef } from './session-mention-ref.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  getExtensionDisplayName,
+} from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  buildMcpServerRef,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
-interface HandleAtCommandParams {
+export interface ResolveAtCommandParams {
   query: string;
   config: Config;
-  addItem: UseHistoryManagerReturn['addItem'];
   onDebugMessage: (message: string) => void;
   messageId: number;
   signal: AbortSignal;
 }
 
-interface HandleAtCommandResult {
+interface HandleAtCommandParams extends ResolveAtCommandParams {
+  addItem?: (item: HistoryItemWithoutId, baseTimestamp: number) => number;
+}
+
+export interface HandleAtCommandResult {
   processedQuery: PartListUnion | null;
   shouldProceed: boolean;
+  toolDisplays?: IndividualToolCallDisplay[];
+  filesRead?: string[];
+}
+
+export interface AtCommandRecording {
+  filesRead: string[];
+  status: 'success' | 'error';
+  message?: string;
+}
+
+export interface ResolveAtCommandResult extends HandleAtCommandResult {
+  recording?: AtCommandRecording;
 }
 
 interface AtCommandPart {
@@ -110,23 +155,50 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
   );
 }
 
+export function extractAtPathCommands(query: string): string[] {
+  return parseAllAtCommands(query).flatMap((part) =>
+    part.type === 'atPath' && part.content !== '@'
+      ? [part.content.substring(1)]
+      : [],
+  );
+}
+
+/**
+ * Detect an `@server:uri` MCP resource reference. Returns the parsed
+ * `{ serverName, uri }` ONLY when `pathName` is prefixed by a configured MCP
+ * server name followed by ':' (longest-prefix match via
+ * `matchMcpServerPrefix`, so a server name containing ':' resolves). This
+ * disambiguates resource refs from filesystem paths that legitimately contain
+ * ':' (e.g. a Windows `C:\...` path, or a URL pasted as a path). Anything not
+ * matching a known server — or a `@server:` with an empty URI — returns null
+ * and falls through to the existing filesystem handling unchanged.
+ */
+function parseMcpResourceRef(
+  pathName: string,
+  mcpServerNames: ReadonlySet<string>,
+): { serverName: string; uri: string } | null {
+  const match = matchMcpServerPrefix(pathName, mcpServerNames);
+  if (!match || !match.rest) return null;
+  return { serverName: match.serverName, uri: match.rest };
+}
+
 /**
  * Processes user input potentially containing one or more '@<path>' commands.
  * If found, it attempts to read the specified files/directories using the
- * 'read_many_files' tool. The user query is modified to include resolved paths,
- * and the content of the files is appended in a structured block.
+ * 'read_many_files' tool, and any `@server:uri` MCP resource references via
+ * the MCP server. The user query is modified to include resolved paths, and
+ * the content of the files/resources is appended in a structured block.
  *
  * @returns An object indicating whether the main hook should proceed with an
  *          LLM call and the processed query parts (including file content).
  */
-export async function handleAtCommand({
+export async function resolveAtCommandQuery({
   query,
   config,
-  addItem,
   onDebugMessage,
   messageId: userMessageTimestamp,
   signal,
-}: HandleAtCommandParams): Promise<HandleAtCommandResult> {
+}: ResolveAtCommandParams): Promise<ResolveAtCommandResult> {
   const commandParts = parseAllAtCommands(query);
   const atPathCommandParts = commandParts.filter(
     (part) => part.type === 'atPath',
@@ -146,21 +218,38 @@ export async function handleAtCommand({
   const contentLabelsForDisplay: string[] = [];
   const ignoredByReason: Record<string, string[]> = {
     git: [],
-    gemini: [],
+    qwen: [],
     both: [],
   };
 
-  const toolRegistry = config.getToolRegistry();
-  const readManyFilesTool = toolRegistry.getTool('read_many_files');
-  const globTool = toolRegistry.getTool('glob');
+  // MCP resource references (`@server:uri`) collected during the loop and
+  // read after it. Keyed by the configured MCP server names so a path that
+  // merely contains ':' is never mistaken for a resource.
+  const mcpServerNames = new Set(Object.keys(config.getMcpServers() || {}));
+  const mcpResourceRefs: Array<{
+    originalAtPath: string;
+    serverName: string;
+    uri: string;
+  }> = [];
+  const mcpServerMentions: Array<{
+    originalAtPath: string;
+    serverName: string;
+  }> = [];
 
-  if (!readManyFilesTool) {
-    addItem(
-      { type: 'error', text: 'Error: read_many_files tool not found.' },
-      userMessageTimestamp,
-    );
-    return { processedQuery: null, shouldProceed: false };
-  }
+  // Extension references (`@ext:<name>`) collected during the loop.
+  const activeExtensions = config.getActiveExtensions?.() ?? [];
+  const extensionMentions: Array<{
+    originalAtPath: string;
+    extension: Extension;
+  }> = [];
+
+  // Session references (`@session:<id|title>`) collected during the loop and
+  // resolved after it. Each resolves to a slimmed, read-only block of a prior
+  // session's history injected as reference context (never a fork/resume).
+  const sessionMentions: Array<{
+    originalAtPath: string;
+    ref: { id?: string; title?: string };
+  }> = [];
 
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
@@ -173,25 +262,101 @@ export async function handleAtCommand({
     }
 
     const pathName = originalAtPath.substring(1);
-    if (!pathName) {
-      // This case should ideally not be hit if parseAllAtCommands ensures content after @
-      // but as a safeguard:
-      addItem(
-        {
-          type: 'error',
-          text: `Error: Invalid @ command '${originalAtPath}'. No path specified.`,
-        },
-        userMessageTimestamp,
+
+    // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
+    // resolution. Only matches when the path starts with `ext:` and the name
+    // corresponds to an active extension.
+    const extRef = parseExtensionRef(pathName);
+    if (extRef) {
+      const extension = matchExtensionByRef(extRef.name, activeExtensions);
+      if (extension) {
+        if (
+          !extensionMentions.some((m) => m.extension.name === extension.name)
+        ) {
+          extensionMentions.push({ originalAtPath, extension });
+        }
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+      onDebugMessage(
+        `Extension "${extRef.name}" not found among active extensions. ` +
+          `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
       );
-      // Decide if this is a fatal error for the whole command or just skip this @ part
-      // For now, let's be strict and fail the command if one @path is malformed.
-      return { processedQuery: null, shouldProceed: false };
+      continue;
+    }
+
+    // Session reference (`@session:<id|title>`): detected BEFORE MCP and
+    // filesystem resolution so the ':' in the token isn't mistaken for a path
+    // or intercepted by an MCP server literally named "session". Resolution
+    // (load + slim) happens after the loop; here we only collect and keep the
+    // token verbatim in the prompt text.
+    const sessionRef = parseSessionRef(pathName);
+    if (sessionRef) {
+      if (
+        !sessionMentions.some(
+          (m) =>
+            (m.ref.id ?? m.ref.title) === (sessionRef.id ?? sessionRef.title),
+        )
+      ) {
+        sessionMentions.push({ originalAtPath, ref: sessionRef });
+      }
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
+
+    // MCP resource reference (`@server:uri`): detected BEFORE filesystem
+    // resolution so a resource URI containing ':' / '//' isn't mistaken for
+    // a path. Only matches when `server` is a configured MCP server; all
+    // other `@...` tokens fall through to the filesystem logic untouched.
+    const resourceRef = parseMcpResourceRef(pathName, mcpServerNames);
+    if (resourceRef) {
+      mcpResourceRefs.push({ originalAtPath, ...resourceRef });
+      // Keep `@server:uri` verbatim in the text sent to the model.
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
+
+    const mcpServerRef = parseMcpServerRef(pathName);
+    if (mcpServerRef) {
+      const matched = matchMcpServerByRef(
+        mcpServerRef.name,
+        config.getMcpServers() || {},
+      );
+      if (matched) {
+        if (
+          !mcpServerMentions.some((m) => m.serverName === matched.serverName)
+        ) {
+          mcpServerMentions.push({
+            originalAtPath,
+            serverName: matched.serverName,
+          });
+        }
+        atPathToResolvedSpecMap.set(
+          originalAtPath,
+          buildMcpServerRef(matched.serverName),
+        );
+        continue;
+      }
+      onDebugMessage(
+        `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
+          `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
+      );
+      continue;
     }
 
     // Check if path should be ignored based on filtering options
-
     const workspaceContext = config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(pathName)) {
+
+    // Check if path is in project temp directory
+    const projectTempDir = Storage.getGlobalTempDir();
+    const absolutePathName = path.isAbsolute(pathName)
+      ? pathName
+      : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
+
+    if (
+      !isSubpath(projectTempDir, absolutePathName) &&
+      !workspaceContext.isPathWithinWorkspace(pathName)
+    ) {
       onDebugMessage(
         `Path ${pathName} is not in the workspace and will be skipped.`,
       );
@@ -202,102 +367,50 @@ export async function handleAtCommand({
       respectFileIgnore.respectGitIgnore &&
       fileDiscovery.shouldIgnoreFile(pathName, {
         respectGitIgnore: true,
-        respectGeminiIgnore: false,
+        respectQwenIgnore: false,
       });
-    const geminiIgnored =
-      respectFileIgnore.respectGeminiIgnore &&
+    const qwenIgnored =
+      respectFileIgnore.respectQwenIgnore &&
       fileDiscovery.shouldIgnoreFile(pathName, {
         respectGitIgnore: false,
-        respectGeminiIgnore: true,
+        respectQwenIgnore: true,
       });
 
-    if (gitIgnored || geminiIgnored) {
+    if (gitIgnored || qwenIgnored) {
       const reason =
-        gitIgnored && geminiIgnored ? 'both' : gitIgnored ? 'git' : 'gemini';
+        gitIgnored && qwenIgnored ? 'both' : gitIgnored ? 'git' : 'qwen';
       ignoredByReason[reason].push(pathName);
       const reasonText =
         reason === 'both'
-          ? 'ignored by both git and gemini'
+          ? 'ignored by both git and qwen'
           : reason === 'git'
             ? 'git-ignored'
-            : 'gemini-ignored';
+            : 'qwen-ignored';
       onDebugMessage(`Path ${pathName} is ${reasonText} and will be skipped.`);
       continue;
     }
 
+    let resolvedSuccessfully = false;
+    let sawNotFound = false;
     for (const dir of config.getWorkspaceContext().getDirectories()) {
       let currentPathSpec = pathName;
-      let resolvedSuccessfully = false;
       try {
         const absolutePath = path.resolve(dir, pathName);
         const stats = await fs.stat(absolutePath);
         if (stats.isDirectory()) {
-          currentPathSpec =
-            pathName + (pathName.endsWith(path.sep) ? `**` : `/**`);
-          onDebugMessage(
-            `Path ${pathName} resolved to directory, using glob: ${currentPathSpec}`,
-          );
+          currentPathSpec = pathName;
+          onDebugMessage(`Path ${pathName} resolved to directory.`);
         } else {
           onDebugMessage(`Path ${pathName} resolved to file: ${absolutePath}`);
         }
         resolvedSuccessfully = true;
       } catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT') {
-          if (config.getEnableRecursiveFileSearch() && globTool) {
-            onDebugMessage(
-              `Path ${pathName} not found directly, attempting glob search.`,
-            );
-            try {
-              const globResult = await globTool.buildAndExecute(
-                {
-                  pattern: `**/*${pathName}*`,
-                  path: dir,
-                },
-                signal,
-              );
-              if (
-                globResult.llmContent &&
-                typeof globResult.llmContent === 'string' &&
-                !globResult.llmContent.startsWith('No files found') &&
-                !globResult.llmContent.startsWith('Error:')
-              ) {
-                const lines = globResult.llmContent.split('\n');
-                if (lines.length > 1 && lines[1]) {
-                  const firstMatchAbsolute = lines[1].trim();
-                  currentPathSpec = path.relative(dir, firstMatchAbsolute);
-                  onDebugMessage(
-                    `Glob search for ${pathName} found ${firstMatchAbsolute}, using relative path: ${currentPathSpec}`,
-                  );
-                  resolvedSuccessfully = true;
-                } else {
-                  onDebugMessage(
-                    `Glob search for '**/*${pathName}*' did not return a usable path. Path ${pathName} will be skipped.`,
-                  );
-                }
-              } else {
-                onDebugMessage(
-                  `Glob search for '**/*${pathName}*' found no files or an error. Path ${pathName} will be skipped.`,
-                );
-              }
-            } catch (globError) {
-              console.error(
-                `Error during glob search for ${pathName}: ${getErrorMessage(globError)}`,
-              );
-              onDebugMessage(
-                `Error during glob search for ${pathName}. Path ${pathName} will be skipped.`,
-              );
-            }
-          } else {
-            onDebugMessage(
-              `Glob tool not found. Path ${pathName} will be skipped.`,
-            );
-          }
+          sawNotFound = true;
+          continue;
         } else {
-          console.error(
-            `Error stating path ${pathName}: ${getErrorMessage(error)}`,
-          );
           onDebugMessage(
-            `Error stating path ${pathName}. Path ${pathName} will be skipped.`,
+            `Error stating path ${pathName}: ${getErrorMessage(error)}. Path ${pathName} will be skipped.`,
           );
         }
       }
@@ -307,6 +420,11 @@ export async function handleAtCommand({
         contentLabelsForDisplay.push(pathName);
         break;
       }
+    }
+    if (!resolvedSuccessfully && sawNotFound) {
+      onDebugMessage(
+        `Path ${pathName} not found. Path ${pathName} will be skipped.`,
+      );
     }
   }
 
@@ -356,7 +474,7 @@ export async function handleAtCommand({
   // Inform user about ignored paths
   const totalIgnored =
     ignoredByReason['git'].length +
-    ignoredByReason['gemini'].length +
+    ignoredByReason['qwen'].length +
     ignoredByReason['both'].length;
 
   if (totalIgnored > 0) {
@@ -364,20 +482,91 @@ export async function handleAtCommand({
     if (ignoredByReason['git'].length) {
       messages.push(`Git-ignored: ${ignoredByReason['git'].join(', ')}`);
     }
-    if (ignoredByReason['gemini'].length) {
-      messages.push(`Gemini-ignored: ${ignoredByReason['gemini'].join(', ')}`);
+    if (ignoredByReason['qwen'].length) {
+      messages.push(`Qwen-ignored: ${ignoredByReason['qwen'].join(', ')}`);
     }
     if (ignoredByReason['both'].length) {
       messages.push(`Ignored by both: ${ignoredByReason['both'].join(', ')}`);
     }
 
     const message = `Ignored ${totalIgnored} files:\n${messages.join('\n')}`;
-    console.log(message);
     onDebugMessage(message);
   }
 
-  // Fallback for lone "@" or completely invalid @-commands resulting in empty initialQueryText
-  if (pathSpecsToRead.length === 0) {
+  // Read all MCP resource references in parallel — each is an independent RPC
+  // to a (possibly different) server, mirroring how the file path batches via
+  // `readManyFiles`. Order is preserved so cards/labels line up with the refs.
+  // A failure surfaces as an error tool-card but does NOT abort the turn.
+  const resourceReads = await Promise.allSettled(
+    mcpResourceRefs.map((ref) =>
+      config
+        .getToolRegistry()
+        .readMcpResource(ref.serverName, ref.uri, { signal }),
+    ),
+  );
+
+  const resourceParts: Part[] = [];
+  const resourceDisplays: IndividualToolCallDisplay[] = [];
+  const resourceLabels: string[] = [];
+  for (let i = 0; i < mcpResourceRefs.length; i++) {
+    const ref = mcpResourceRefs[i];
+    const label = `${ref.serverName}:${ref.uri}`;
+    const callId = `client-mcp-resource-${userMessageTimestamp}-${i}`;
+    const outcome = resourceReads[i];
+
+    if (outcome.status === 'rejected') {
+      onDebugMessage(
+        `Failed to read MCP resource ${label}: ${getErrorMessage(outcome.reason)}`,
+      );
+      resourceDisplays.push({
+        callId,
+        name: 'Read MCP Resource',
+        description: `Read resource ${label}`,
+        status: ToolCallStatus.Error,
+        resultDisplay: `Failed to read resource ${label}: ${getErrorMessage(outcome.reason)}`,
+        confirmationDetails: undefined,
+      });
+      continue;
+    }
+
+    // Shared formatter (see `formatMcpResourceContents`): caps text/blob size,
+    // promotes blobs to media parts, and frames the content with attribution
+    // delimiters so the model gets a clear boundary around untrusted,
+    // server-supplied content. Kept identical to the `read_mcp_resource` tool.
+    const formatted = formatMcpResourceContents(outcome.value, label);
+    if (formatted.parts.length > 0) {
+      resourceParts.push(...formatted.parts);
+    } else {
+      // Empty read: inject the same attributed diagnostic the `read_mcp_resource`
+      // tool surfaces, so the model never gets a dangling `@server:uri` with zero
+      // content and zero explanation (the two paths must not diverge).
+      resourceParts.push({ text: emptyMcpResourceText(formatted, label) });
+    }
+    resourceLabels.push(label);
+
+    // Reflect what was actually injected so a success card never hides an
+    // empty/truncated read (no `contents`, or only non-text/non-blob entries
+    // such as resource links / metadata).
+    resourceDisplays.push({
+      callId,
+      name: 'Read MCP Resource',
+      description: `Read resource ${label}`,
+      status: ToolCallStatus.Success,
+      resultDisplay: summarizeMcpResource(formatted),
+      confirmationDetails: undefined,
+    });
+  }
+
+  // Fallback for lone "@" or completely invalid @-commands resulting in empty
+  // initialQueryText — only when there is nothing to read at all (no valid
+  // file paths, resource references, or extension mentions).
+  if (
+    pathSpecsToRead.length === 0 &&
+    mcpResourceRefs.length === 0 &&
+    mcpServerMentions.length === 0 &&
+    extensionMentions.length === 0 &&
+    sessionMentions.length === 0
+  ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -393,88 +582,357 @@ export async function handleAtCommand({
     };
   }
 
-  const processedQueryParts: PartUnion[] = [{ text: initialQueryText }];
+  // Build extension context parts and display cards for @-mentioned extensions.
+  // Processed BEFORE file reads so that extension labels/displays are available
+  // in the file-read error path (mirroring how resourceDisplays/resourceLabels
+  // are already built before the file read).
+  // Aggregate cap across all extensions to prevent unbounded context injection.
+  let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
 
-  const toolArgs = {
-    paths: pathSpecsToRead,
-    file_filtering_options: {
-      respect_git_ignore: respectFileIgnore.respectGitIgnore,
-      respect_gemini_ignore: respectFileIgnore.respectGeminiIgnore,
-    },
-    // Use configuration setting
-  };
-  let toolCallDisplay: IndividualToolCallDisplay;
+  const scopedMentionEntries: Array<{
+    originalAtPath: string;
+    part: Part;
+    label: string;
+    display: IndividualToolCallDisplay;
+  }> = [];
+  for (let i = 0; i < extensionMentions.length; i++) {
+    const { originalAtPath, extension } = extensionMentions[i];
+    const displayName = getExtensionDisplayName(extension);
+    const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
-  let invocation: AnyToolInvocation | undefined = undefined;
-  try {
-    invocation = readManyFilesTool.build(toolArgs);
-    const result = await invocation.execute(signal);
-    toolCallDisplay = {
-      callId: `client-read-${userMessageTimestamp}`,
-      name: readManyFilesTool.displayName,
-      description: invocation.getDescription(),
-      status: ToolCallStatus.Success,
-      resultDisplay:
-        result.returnDisplay ||
-        `Successfully read: ${contentLabelsForDisplay.join(', ')}`,
-      confirmationDetails: undefined,
-    };
+    const context = await buildExtensionMentionContext(extension, {
+      remainingBudget: extensionContextBudgetRemaining,
+      signal,
+      onDebugMessage,
+    });
+    extensionContextBudgetRemaining = context.remainingBudget;
 
-    if (Array.isArray(result.llmContent)) {
-      const fileContentRegex = /^--- (.*?) ---\n\n([\s\S]*?)\n\n$/;
-      processedQueryParts.push({
-        text: '\n--- Content from referenced files ---',
-      });
-      for (const part of result.llmContent) {
-        if (typeof part === 'string') {
-          const match = fileContentRegex.exec(part);
-          if (match) {
-            const filePathSpecInContent = match[1]; // This is a resolved pathSpec
-            const fileActualContent = match[2].trim();
-            processedQueryParts.push({
-              text: `\nContent from @${filePathSpecInContent}:\n`,
-            });
-            processedQueryParts.push({ text: fileActualContent });
-          } else {
-            processedQueryParts.push({ text: part });
-          }
-        } else {
-          // part is a Part object.
-          processedQueryParts.push(part);
-        }
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: context.text },
+      label: buildExtensionRef(extension.name),
+      display: {
+        callId,
+        name: 'Activate Extension',
+        description: `Activated extension ${displayName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  for (let i = 0; i < mcpServerMentions.length; i++) {
+    const { originalAtPath, serverName } = mcpServerMentions[i];
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: buildMcpServerContextText(config, serverName) },
+      label: buildMcpServerRef(serverName),
+      display: {
+        callId: `client-mcp-server-${userMessageTimestamp}-${i}`,
+        name: 'Activate MCP Server',
+        description: `Activated MCP server ${serverName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  // Resolve session references: load + deterministically slim a prior session
+  // and inject it as a read-only reference block. A miss (not-found / ambiguous
+  // title) surfaces an error card and leaves the `@session:` token as literal
+  // text (already retained above), never aborting the turn.
+  const resolvedSessionIds = new Set<string>();
+  for (let i = 0; i < sessionMentions.length; i++) {
+    const { originalAtPath, ref } = sessionMentions[i];
+    const callId = `client-session-${userMessageTimestamp}-${i}`;
+
+    let sessionId = ref.id;
+    if (!sessionId && ref.title) {
+      let matches: Array<{ sessionId: string }> = [];
+      try {
+        matches = await new SessionService(
+          config.getProjectRoot(),
+        ).findSessionsByTitle(ref.title);
+      } catch (error: unknown) {
+        const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (${getErrorMessage(error)}); try a session id instead.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title ?? originalAtPath),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title ?? ''}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
       }
-    } else {
-      onDebugMessage(
-        'read_many_files tool returned no content or empty content.',
-      );
+      if (matches.length === 1) {
+        sessionId = matches[0].sessionId;
+      } else {
+        const reason =
+          matches.length === 0
+            ? `No session matches "@${originalAtPath.substring(1)}".`
+            : `"@${originalAtPath.substring(1)}" is ambiguous (${matches.length} matches); use the picker or a session id.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
+      }
     }
 
-    addItem(
-      { type: 'tool_group', tools: [toolCallDisplay] } as Omit<
-        HistoryItem,
-        'id'
-      >,
-      userMessageTimestamp,
-    );
-    return { processedQuery: processedQueryParts, shouldProceed: true };
-  } catch (error: unknown) {
-    toolCallDisplay = {
-      callId: `client-read-${userMessageTimestamp}`,
-      name: readManyFilesTool.displayName,
-      description:
-        invocation?.getDescription() ??
-        'Error attempting to execute tool to read files',
-      status: ToolCallStatus.Error,
-      resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
-      confirmationDetails: undefined,
-    };
-    addItem(
-      { type: 'tool_group', tools: [toolCallDisplay] } as Omit<
-        HistoryItem,
-        'id'
-      >,
-      userMessageTimestamp,
-    );
-    return { processedQuery: null, shouldProceed: false };
+    if (!sessionId) {
+      const reason = `Session reference "@${originalAtPath.substring(1)}" could not be resolved.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(ref.title ?? ref.id ?? originalAtPath),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session "${ref.title ?? ref.id ?? ''}"`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    // Cross-form dedup: a UUID ref and a title ref may resolve to the
+    // same session — skip if already injected.
+    if (resolvedSessionIds.has(sessionId)) {
+      onDebugMessage(
+        `Session reference "@${originalAtPath.substring(1)}" resolves to session ${sessionId}, which was already referenced; skipping duplicate.`,
+      );
+      continue;
+    }
+    resolvedSessionIds.add(sessionId);
+
+    let resolved;
+    try {
+      resolved = await new SessionReferenceService(
+        config.getProjectRoot(),
+      ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+    } catch (error: unknown) {
+      const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    if ('notFound' in resolved) {
+      const reason = `Session "${sessionId}" not found in this project.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: resolved.text },
+      label: buildSessionRef(sessionId),
+      display: {
+        callId,
+        name: 'Referenced Session',
+        description: `Referenced session "${resolved.meta.title}"${
+          resolved.truncated ? ' (truncated)' : ''
+        }`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
   }
+
+  const scopedMentionOrder = new Map(
+    atPathCommandParts.map((part, index) => [part.content, index]),
+  );
+  scopedMentionEntries.sort(
+    (a, b) =>
+      (scopedMentionOrder.get(a.originalAtPath) ?? Number.MAX_SAFE_INTEGER) -
+      (scopedMentionOrder.get(b.originalAtPath) ?? Number.MAX_SAFE_INTEGER),
+  );
+  const scopedMentionParts = scopedMentionEntries.map((entry) => entry.part);
+  const scopedMentionLabels = scopedMentionEntries.map((entry) => entry.label);
+  const scopedMentionDisplays = scopedMentionEntries.map(
+    (entry) => entry.display,
+  );
+
+  // Read files (if any). A hard read error aborts the turn, as before — but
+  // any extension/resource tool-cards already gathered are still surfaced.
+  const fileParts: Part[] = [];
+  let fileDisplays: IndividualToolCallDisplay[] = [];
+  if (pathSpecsToRead.length > 0) {
+    try {
+      const result = await readManyFiles(config, {
+        paths: pathSpecsToRead,
+        signal,
+        preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
+      });
+
+      const parts = Array.isArray(result.contentParts)
+        ? result.contentParts
+        : [result.contentParts];
+
+      fileDisplays = result.files.map((file, index) => ({
+        callId: `client-read-${userMessageTimestamp}-${index}`,
+        name: file.isDirectory ? 'Read Directory' : 'Read File',
+        description: `@${path.basename(file.filePath)}`,
+        status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
+        resultDisplay: file.error
+          ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`
+          : undefined,
+        confirmationDetails: undefined,
+      }));
+
+      if (parts.length > 0 && !result.error) {
+        for (const part of parts) {
+          fileParts.push(typeof part === 'string' ? { text: part } : part);
+        }
+      } else {
+        onDebugMessage('readManyFiles returned no content or empty content.');
+      }
+    } catch (error: unknown) {
+      const errorToolCallDisplay: IndividualToolCallDisplay = {
+        callId: `client-read-${userMessageTimestamp}`,
+        name: 'Read File(s)',
+        description: 'Error attempting to read files',
+        status: ToolCallStatus.Error,
+        resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
+        confirmationDetails: undefined,
+      };
+      const errorMessage =
+        typeof errorToolCallDisplay.resultDisplay === 'string'
+          ? errorToolCallDisplay.resultDisplay
+          : undefined;
+      const labelsOnError = [
+        ...scopedMentionLabels,
+        ...contentLabelsForDisplay,
+        ...resourceLabels,
+      ];
+      return {
+        processedQuery: null,
+        shouldProceed: false,
+        toolDisplays: [
+          ...scopedMentionDisplays,
+          ...resourceDisplays,
+          errorToolCallDisplay,
+        ],
+        filesRead: labelsOnError,
+        recording: {
+          filesRead: labelsOnError,
+          status: 'error',
+          message: errorMessage,
+        },
+      };
+    }
+  }
+
+  // File and resource content are grouped by type, NOT interleaved by their
+  // position in the user's query. The model correlates each @-reference with
+  // its content block via the "--- Content from ... ---" delimiter labels (and
+  // the verbatim `@server:uri` / `@path` left in the prompt text), not by
+  // positional alignment, so grouping is safe.
+  const processedQueryParts: PartListUnion = [
+    { text: initialQueryText },
+    ...scopedMentionParts,
+    ...fileParts,
+    ...resourceParts,
+  ];
+  const allLabels = [
+    ...scopedMentionLabels,
+    ...contentLabelsForDisplay,
+    ...resourceLabels,
+  ];
+
+  return {
+    processedQuery: processedQueryParts,
+    shouldProceed: true,
+    toolDisplays: [
+      ...scopedMentionDisplays,
+      ...fileDisplays,
+      ...resourceDisplays,
+    ],
+    filesRead: allLabels,
+    recording: {
+      filesRead: allLabels,
+      status: 'success',
+    },
+  };
+}
+
+export async function handleAtCommand(
+  params: HandleAtCommandParams,
+): Promise<HandleAtCommandResult> {
+  const result = await resolveAtCommandQuery(params);
+
+  if (result.recording) {
+    const chatRecorder = params.config.getChatRecordingService?.();
+    chatRecorder?.recordAtCommand({
+      filesRead: result.recording.filesRead,
+      status: result.recording.status,
+      ...(result.recording.message
+        ? { message: result.recording.message }
+        : {}),
+      userText: params.query,
+    });
+  }
+
+  if (params.addItem && result.toolDisplays && result.toolDisplays.length > 0) {
+    const toolGroupItem: HistoryItemToolGroup = {
+      type: 'tool_group',
+      tools: result.toolDisplays,
+    };
+    params.addItem(toolGroupItem, params.messageId);
+  }
+
+  return {
+    processedQuery: result.processedQuery,
+    shouldProceed: result.shouldProceed,
+    toolDisplays: result.toolDisplays,
+    filesRead: result.filesRead,
+  };
 }

@@ -7,11 +7,13 @@
 import React, { Fragment, useEffect, useId } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import { Colors } from '../../colors.js';
+import { theme } from '../../semantic-colors.js';
 import { toCodePoints } from '../../utils/textUtils.js';
 import { useOverflowActions } from '../../contexts/OverflowContext.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 let enableDebugLog = false;
+const debugLogger = createDebugLogger('MAX_SIZED_BOX');
 
 /**
  * Minimum height for the MaxSizedBox component.
@@ -28,7 +30,7 @@ function debugReportError(message: string, element: React.ReactNode) {
   if (!enableDebugLog) return;
 
   if (!React.isValidElement(element)) {
-    console.error(
+    debugLogger.error(
       message,
       `Invalid element: '${String(element)}' typeof=${typeof element}`,
     );
@@ -44,10 +46,13 @@ function debugReportError(message: string, element: React.ReactNode) {
     const lineNumber = elementWithSource._source?.lineNumber;
     sourceMessage = fileName ? `${fileName}:${lineNumber}` : '<Unknown file>';
   } catch (error) {
-    console.error('Error while trying to get file name:', error);
+    debugLogger.error('Error while trying to get file name:', error);
   }
 
-  console.error(message, `${String(element.type)}. Source: ${sourceMessage}`);
+  debugLogger.error(
+    message,
+    `${String(element.type)}. Source: ${sourceMessage}`,
+  );
 }
 interface MaxSizedBoxProps {
   children?: React.ReactNode;
@@ -55,6 +60,10 @@ interface MaxSizedBoxProps {
   maxHeight: number | undefined;
   overflowDirection?: 'top' | 'bottom';
   additionalHiddenLinesCount?: number;
+  sourceBoundaries?: ReadonlyArray<{
+    kind: 'soft' | 'hard';
+    joiner: string;
+  }>;
 }
 
 /**
@@ -102,11 +111,15 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
   maxHeight,
   overflowDirection = 'top',
   additionalHiddenLinesCount = 0,
+  sourceBoundaries,
 }) => {
   const id = useId();
   const { addOverflowingId, removeOverflowingId } = useOverflowActions() || {};
 
   const laidOutStyledText: StyledText[][] = [];
+  const lineMetadata = new Map<StyledText[], LineMetadata>();
+  let rowIndex = 0;
+  let sourceBoundaryIndex = 0;
   const targetMaxHeight = Math.max(
     Math.round(maxHeight ?? Number.MAX_SAFE_INTEGER),
     MINIMUM_MAX_HEIGHT,
@@ -126,7 +139,14 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
     }
 
     if (element.type === Box) {
-      layoutInkElementAsStyledText(element, maxWidth!, laidOutStyledText);
+      layoutInkElementAsStyledText(
+        element,
+        maxWidth!,
+        laidOutStyledText,
+        lineMetadata,
+        `${id}:${rowIndex++}`,
+        () => sourceBoundaries?.[sourceBoundaryIndex++],
+      );
       return;
     }
 
@@ -169,31 +189,52 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
         : laidOutStyledText.slice(0, visibleContentHeight)
       : laidOutStyledText;
 
-  const visibleLines = visibleStyledText.map((line, index) => (
-    <Box key={index}>
-      {line.length > 0 ? (
-        line.map((segment, segIndex) => (
-          <Text key={segIndex} {...segment.props}>
-            {segment.text}
+  // Pin each rendered row to its natural height. Ink's default flexShrink is
+  // 1, so when an ancestor clamps this column's height (e.g. the pending-
+  // region maxHeight backstop) Yoga compresses the rows and stacks several at
+  // the same Y, leaving only every Nth line visible (#6809). flexShrink={0}
+  // keeps rows full-height and sequential under a clamped ancestor.
+  const visibleLines = visibleStyledText.map((line, index) => {
+    const metadata = lineMetadata.get(line)!;
+    return (
+      <Box key={index} flexShrink={0}>
+        {line.length > 0 ? (
+          line.map((segment, segIndex) => (
+            <Text
+              key={segIndex}
+              {...segment.props}
+              selectionFlow={metadata.flowKey}
+              selectionBreakAfter={metadata.breakAfter}
+              selectionJoiner={metadata.joiner}
+            >
+              {segment.text}
+            </Text>
+          ))
+        ) : (
+          <Text
+            selectable={false}
+            selectionFlow={metadata.flowKey}
+            selectionBreakAfter={metadata.breakAfter}
+            selectionJoiner={metadata.joiner}
+          >
+            {' '}
           </Text>
-        ))
-      ) : (
-        <Text> </Text>
-      )}
-    </Box>
-  ));
+        )}
+      </Box>
+    );
+  });
 
   return (
     <Box flexDirection="column" width={maxWidth} flexShrink={0}>
       {totalHiddenLines > 0 && overflowDirection === 'top' && (
-        <Text color={Colors.Gray} wrap="truncate">
+        <Text color={theme.text.secondary} wrap="truncate">
           ... first {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
           hidden ...
         </Text>
       )}
       {visibleLines}
       {totalHiddenLines > 0 && overflowDirection === 'bottom' && (
-        <Text color={Colors.Gray} wrap="truncate">
+        <Text color={theme.text.secondary} wrap="truncate">
           ... last {totalHiddenLines} line{totalHiddenLines === 1 ? '' : 's'}{' '}
           hidden ...
         </Text>
@@ -206,6 +247,12 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
 interface StyledText {
   text: string;
   props: Record<string, unknown>;
+}
+
+interface LineMetadata {
+  flowKey: string;
+  breakAfter: 'soft' | 'hard';
+  joiner: string;
 }
 
 /**
@@ -264,13 +311,12 @@ function visitBoxRow(element: React.ReactNode): Row {
 
   if (enableDebugLog) {
     const boxProps = element.props as {
-      children?: React.ReactNode | undefined;
+      children?: React.ReactNode;
       readonly flexDirection?:
         | 'row'
         | 'column'
         | 'row-reverse'
-        | 'column-reverse'
-        | undefined;
+        | 'column-reverse';
     };
     // Ensure the Box has no props other than the default ones and key.
     let maxExpectedProps = 4;
@@ -381,11 +427,24 @@ function layoutInkElementAsStyledText(
   element: React.ReactElement,
   maxWidth: number,
   output: StyledText[][],
+  lineMetadata: Map<StyledText[], LineMetadata>,
+  flowKey: string,
+  nextSourceBoundary: () =>
+    | { kind: 'soft' | 'hard'; joiner: string }
+    | undefined,
 ) {
+  const pushOutput = (
+    line: StyledText[],
+    breakAfter: 'soft' | 'hard',
+    joiner: string,
+  ) => {
+    output.push(line);
+    lineMetadata.set(line, { flowKey, breakAfter, joiner });
+  };
   const row = visitBoxRow(element);
   if (row.segments.length === 0 && row.noWrapSegments.length === 0) {
     // Return a single empty line if there are no segments to display
-    output.push([]);
+    pushOutput([], 'hard', '\n');
     return;
   }
 
@@ -424,7 +483,7 @@ function layoutInkElementAsStyledText(
       lines.push(currentLine);
     }
     for (const line of lines) {
-      output.push(line);
+      pushOutput(line, 'hard', '\n');
     }
     return;
   }
@@ -509,7 +568,7 @@ function layoutInkElementAsStyledText(
     }
 
     for (const line of lines) {
-      output.push(line);
+      pushOutput(line, 'hard', '\n');
     }
     return;
   }
@@ -518,19 +577,27 @@ function layoutInkElementAsStyledText(
   let wrappingPart: StyledText[] = [];
   let wrappingPartWidth = 0;
 
-  function addWrappingPartToLines() {
+  function addWrappingPartToLines(breakAfter: 'soft' | 'hard', joiner: string) {
+    let line: StyledText[];
     if (lines.length === 0) {
-      lines.push([...nonWrappingContent, ...wrappingPart]);
+      line = [...nonWrappingContent, ...wrappingPart];
     } else {
       if (noWrappingWidth > 0) {
-        lines.push([
-          ...[{ text: ' '.repeat(noWrappingWidth), props: {} }],
+        line = [
+          ...[
+            {
+              text: ' '.repeat(noWrappingWidth),
+              props: { selectable: false },
+            },
+          ],
           ...wrappingPart,
-        ]);
+        ];
       } else {
-        lines.push(wrappingPart);
+        line = wrappingPart;
       }
     }
+    lines.push(line);
+    lineMetadata.set(line, { flowKey, breakAfter, joiner });
     wrappingPart = [];
     wrappingPartWidth = 0;
   }
@@ -551,7 +618,11 @@ function layoutInkElementAsStyledText(
 
     linesFromSegment.forEach((lineText, lineIndex) => {
       if (lineIndex > 0) {
-        addWrappingPartToLines();
+        const boundary = nextSourceBoundary() ?? {
+          kind: 'hard' as const,
+          joiner: '\n',
+        };
+        addWrappingPartToLines(boundary.kind, boundary.joiner);
       }
 
       const words = lineText.split(/(\s+)/); // Split by whitespace
@@ -564,7 +635,7 @@ function layoutInkElementAsStyledText(
           wrappingPartWidth + wordWidth > availableWidth &&
           wrappingPartWidth > 0
         ) {
-          addWrappingPartToLines();
+          addWrappingPartToLines('soft', /^\s+$/u.test(word) ? word : '');
           if (/^\s+$/.test(word)) {
             return;
           }
@@ -600,7 +671,7 @@ function layoutInkElementAsStyledText(
             }
 
             if (remainingWordAsCodePoints.length > 0) {
-              addWrappingPartToLines();
+              addWrappingPartToLines('soft', '');
             }
           }
         } else {
@@ -611,12 +682,12 @@ function layoutInkElementAsStyledText(
     });
     // Split omits a trailing newline, so we need to handle it here
     if (segment.text.endsWith('\n')) {
-      addWrappingPartToLines();
+      addWrappingPartToLines('hard', '\n');
     }
   });
 
   if (wrappingPart.length > 0) {
-    addWrappingPartToLines();
+    addWrappingPartToLines('hard', '\n');
   }
   for (const line of lines) {
     output.push(line);

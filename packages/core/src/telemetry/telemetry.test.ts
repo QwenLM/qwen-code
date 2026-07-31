@@ -24,7 +24,6 @@ describe('telemetry', () => {
     vi.resetAllMocks();
 
     mockConfig = new Config({
-      sessionId: 'test-session-id',
       model: 'test-model',
       targetDir: '/test/dir',
       debugMode: false,
@@ -45,19 +44,19 @@ describe('telemetry', () => {
   afterEach(async () => {
     // Ensure we shut down telemetry even if a test fails.
     if (isTelemetrySdkInitialized()) {
-      await shutdownTelemetry(mockConfig);
+      await shutdownTelemetry();
     }
   });
 
-  it('should initialize the telemetry service', () => {
-    initializeTelemetry(mockConfig);
+  it('should initialize the telemetry service', async () => {
+    await initializeTelemetry(mockConfig);
     expect(NodeSDK).toHaveBeenCalled();
     expect(mockNodeSdk.start).toHaveBeenCalled();
   });
 
   it('should shutdown the telemetry service', async () => {
-    initializeTelemetry(mockConfig);
-    await shutdownTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
+    await shutdownTelemetry();
 
     expect(mockNodeSdk.shutdown).toHaveBeenCalled();
   });
