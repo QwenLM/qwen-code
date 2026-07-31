@@ -236,7 +236,7 @@ describe('startEventLoopLagMonitor', () => {
     monitor.dispose();
   });
 
-  it('resets a low-CPU gap at the configured suspend threshold', async () => {
+  it('reports a low-CPU gap just below the configured suspend threshold', async () => {
     const onNewMaxStall = vi.fn();
     histogram.max = 299_000_000_000;
     const monitor = startEventLoopLagMonitor({

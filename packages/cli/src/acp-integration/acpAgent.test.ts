@@ -18,6 +18,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -1399,7 +1400,9 @@ describe('runAcpAgent shutdown cleanup', () => {
     expect(snapshot).toHaveBeenCalledTimes(1);
 
     expect(startEventLoopLagMonitor).toHaveBeenCalledWith(
-      expect.objectContaining({ suspendThresholdMs: 5 * 60 * 1000 }),
+      expect.objectContaining({
+        suspendThresholdMs: ACP_EVENT_LOOP_STALL_RESTART_MS,
+      }),
     );
 
     mockConnectionState.resolve();
