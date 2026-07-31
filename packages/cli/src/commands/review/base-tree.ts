@@ -250,7 +250,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           buildOnly: true,
         });
 
-    if (!build.ok) {
+    // `ok: true` is not enough: `runBuildTest` returns `ok: true` for a handoff
+    // that built nothing — an `unsupported` toolchain (a changed dir the merge
+    // base maps to no package, e.g. a package this PR adds), or an npm scope with
+    // nothing to compile. Such a tree was never built, so it cannot be run against;
+    // stamping it `available` would let an A/B read the absence of a build as a
+    // behavioural difference.
+    if (!build.ok || build.toolchain !== 'npm' || build.build.length === 0) {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
       // bad trade — `cleanup` sweeps it at the end of the review either way.

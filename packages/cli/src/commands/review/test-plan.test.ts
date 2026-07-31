@@ -218,6 +218,29 @@ describe('extractClaims', () => {
     ).toBe(false);
   });
 
+  it('bails on the inline --root=./dir form too, not only --root ./dir', () => {
+    // The inline `=` form rebases paths exactly like the spaced one; before this
+    // bail it extracted them as repo-root-relative and filed false `contradicted`.
+    const claims = extractClaims(
+      '`npx vitest run --root=./integration-tests src/b.test.ts`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('src/b.test.ts')),
+    ).toBe(false);
+  });
+
+  it('still reads a positional path after an inline --flag=value', () => {
+    // `--reporter=verbose` carries its value in the same token and does NOT
+    // consume the next one, so the file after it is still a path claim. The old
+    // skip treated it as the flag's value and silently dropped the path.
+    const claims = extractClaims(
+      '`npx vitest run --reporter=verbose src/a.test.ts`',
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/a.test.ts' });
+  });
+
   it('does not read a bare parenthesised number as a count', () => {
     expect(
       extractClaims('Follows up on (#8176).').filter((c) => c.kind === 'count'),
@@ -336,6 +359,16 @@ describe('npmScriptOf', () => {
     expect(npmScriptOf('npm ci')).toBeNull();
     expect(npmScriptOf('npm install')).toBeNull();
     expect(npmScriptOf('make build')).toBeNull();
+  });
+
+  it('does not truncate a run-less `yarn test:unit` to `test`', () => {
+    // `\b` matched at the `:`, so a correct `test:unit` claim was ruled against
+    // the wrong script; anchored to a full token, it falls through to unchecked.
+    expect(npmScriptOf('yarn test:unit')).toBeNull();
+    expect(npmScriptOf('pnpm test:e2e')).toBeNull();
+    // The bare alias and the `run` form are unchanged.
+    expect(npmScriptOf('yarn test')).toBe('test');
+    expect(npmScriptOf('yarn run test:unit')).toBe('test:unit');
   });
 });
 
@@ -599,6 +632,54 @@ describe('runTestPlan', () => {
     it('does not rule on a non-npm runner', () => {
       const r = run('## Test Plan\n\nRan `make check`');
       expect(verdictOf(r.claims, 'make check')).toBe('unchecked');
+    });
+
+    it('rules a bare command contradicted when ANY scoped run failed', () => {
+      // build-test records one scoped command per package and does not stop on
+      // failure; the first match could be the green package that sorted first,
+      // stating the opposite of the authoritative `ok: false`.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: 'npm test --workspace="packages/a"',
+            exitCode: 0,
+            seconds: 1,
+            timedOut: false,
+            output: '',
+          },
+          {
+            command: 'npm test --workspace="packages/b"',
+            exitCode: 1,
+            seconds: 1,
+            timedOut: false,
+            output: 'fail',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
+    it('finds a root-only script when the root defines no build/test', () => {
+      // `readRootPackage` returns null when the root has neither build nor test,
+      // which used to drop a root-only `lint` and rule a correct claim contradicted.
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          workspaces: ['packages/*'],
+          scripts: { lint: 'eslint .' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { build: 'tsc' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run lint`');
+      expect(verdictOf(r.claims, 'npm run lint')).toBe('reproduces');
     });
   });
 

@@ -50,7 +50,7 @@ import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { diffHashOf } from './script-lint.js';
-import { readRootPackage, readWorkspacePackages } from './lib/workspaces.js';
+import { readWorkspacePackages } from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
 import type { FileMetric } from './lib/report.js';
 
@@ -294,7 +294,8 @@ export function extractClaims(section: string): Array<{
     // not the repo root. Bail like the exotic-`cd` case — the `cd` directory
     // above was already pushed.
     const rest = cd?.[2] ?? span;
-    if (/(?:^|\s)(?:--root|--prefix|--cwd|--project|-C)\s/.test(rest)) continue;
+    if (/(?:^|\s)(?:--root|--prefix|--cwd|--project|-C)(?:\s|=)/.test(rest))
+      continue;
     // Strip quoted arguments before tokenizing: `-t 'covers write/edit tools'`
     // is prose inside a flag value, not a path claim about the tree.
     const tokens = rest
@@ -304,8 +305,15 @@ export function extractClaims(section: string): Array<{
     for (let i = 0; i < tokens.length; i++) {
       // A token following a flag is that flag's VALUE (`--repo owner/repo`,
       // `-f infra/compose.yml`) — a claim about the tool's argument space,
-      // not about this tree.
-      if (i > 0 && tokens[i - 1].startsWith('-')) continue;
+      // not about this tree. The inline `--flag=value` form is the exception:
+      // it carries its value in the same token and does NOT consume the next
+      // one, so a positional path after it is still a claim about the tree.
+      if (
+        i > 0 &&
+        tokens[i - 1].startsWith('-') &&
+        !tokens[i - 1].includes('=')
+      )
+        continue;
       const t = tokens[i].replace(/[.,;:)'"]+$/, '');
       if (PATH_RE.test(t) && isPathClaim(t)) {
         push('path', base ? `${base}/${t}` : t);
@@ -421,9 +429,8 @@ export function npmScriptOf(command: string): string | null {
   // ("`npm run test:unit` was renamed") lives entirely in the allowed forms.
   const m = /^(?:npm|pnpm|yarn|bun)\s+run\s+([\w:.-]+)/.exec(command);
   if (m && !m[1].startsWith('-')) return m[1];
-  const alias = /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)\b/.exec(
-    command,
-  );
+  const alias =
+    /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)(?=\s|$)/.exec(command);
   return alias ? alias[1] : null;
 }
 
@@ -434,20 +441,29 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
-  const ran = [...(buildTest?.build ?? []), ...(buildTest?.test ?? [])].find(
-    (c) => {
-      const command = c.command.trim();
-      const claimed = text.trim();
-      // A workspace-scoped run (`npm run build --workspace=...`) still settles
-      // the plan's bare command, so match it plus any extra flags — not only an
-      // exact string. The space guard keeps `build` from matching `build:all`.
-      return (
-        command === claimed ||
-        (command.startsWith(claimed) && command[claimed.length] === ' ')
-      );
-    },
-  );
-  if (ran && !ran.timedOut) {
+  const matches = [
+    ...(buildTest?.build ?? []),
+    ...(buildTest?.test ?? []),
+  ].filter((c) => {
+    const command = c.command.trim();
+    const claimed = text.trim();
+    // A workspace-scoped run (`npm run build --workspace=...`) still settles
+    // the plan's bare command, so match it plus any extra flags — not only an
+    // exact string. The space guard keeps `build` from matching `build:all`.
+    return (
+      command === claimed ||
+      (command.startsWith(claimed) && command[claimed.length] === ' ')
+    );
+  });
+  // build-test records one scoped command per package and does not stop on
+  // failure, so a bare claim can match several runs. Prefer a failure: if ANY
+  // scoped run failed, the phase failed, and the bare claim must read
+  // `contradicted` — the first match could be a green package that merely
+  // sorted first, stating the opposite of the authoritative `ok: false`.
+  const ran =
+    matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
+    matches.find((c) => !c.timedOut);
+  if (ran) {
     return ran.exitCode === 0
       ? {
           kind: 'command',
@@ -474,8 +490,20 @@ function ruleCommand(
       note: 'not an npm script',
     };
   }
-  const root = readRootPackage(worktree);
-  const defined = new Set<string>(root?.scripts ?? []);
+  // The root manifest's scripts read directly: `readRootPackage` returns null
+  // when the root defines neither `build` nor `test` (it is scoped to those),
+  // which would drop a root-only `lint`/`format` from `defined` and rule a
+  // correct `npm run lint` claim `contradicted`.
+  let rootScripts: string[] = [];
+  try {
+    const rootPkg = JSON.parse(
+      readFileSync(join(worktree, 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, unknown> };
+    rootScripts = Object.keys(rootPkg.scripts ?? {});
+  } catch {
+    // No readable root manifest; workspace packages may still define scripts.
+  }
+  const defined = new Set<string>(rootScripts);
   for (const pkg of readWorkspacePackages(worktree)) {
     for (const s of pkg.scripts) defined.add(s);
   }

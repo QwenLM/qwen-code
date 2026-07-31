@@ -1223,6 +1223,24 @@ describe('splitDiffIntoHunks', () => {
     expect(splitDiffIntoHunks(DIFF).map((h) => h.startLine)).toEqual([2, 22]);
   });
 
+  it('does not let a "\\ No newline" marker inflate startLine', () => {
+    // The marker corresponds to no file line; counting it as context shifts
+    // startLine off by one per marker, while parseAddedLines already excludes it.
+    const d = [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      '@@ -1,2 +1,2 @@',
+      ' const same = 1;',
+      '-const old = 2;',
+      '\\ No newline at end of file',
+      '+const new = 2;',
+      '\\ No newline at end of file',
+      '',
+    ].join('\n');
+    expect(splitDiffIntoHunks(d).map((h) => h.startLine)).toEqual([2]);
+  });
+
   it('does not mistake a removed line whose text begins `@@` for a header', () => {
     // In a unified diff every body line is prefixed, so `-@@ x` is content.
     const d = [
@@ -1324,6 +1342,30 @@ describe('selectHunkProbes', () => {
     // over the whole hunk buys a coarser answer at the same price.
     const { selected } = selectHunkProbes([file({ mutantLines: [2] })]);
     expect(selected.map((c) => c.startLine)).toEqual([20]);
+  });
+
+  it('does not overshoot the hunk end into a later, unrelated mutant', () => {
+    // The overlap range is the header's new-side span [start, start+len). The
+    // old code anchored it at the first ADDED line (past leading context) and added
+    // the full new-side length, overshooting the real end by the context-line count
+    // — so a mutant just past the hunk wrongly skipped it and lost probe coverage.
+    const diff = [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      '@@ -1,3 +1,4 @@',
+      ' const a = 1;',
+      '+const added = 2;',
+      ' const b = 3;',
+      ' const c = 4;',
+      '',
+    ].join('\n');
+    // Hunk covers new-side lines 1-4; a mutant at 5 is outside it and must NOT
+    // cause the hunk to be skipped.
+    const { selected } = selectHunkProbes([
+      { file: 'f', diff, hasNewTests: false, mutantLines: [5] },
+    ]);
+    expect(selected).toHaveLength(1);
   });
 
   it('puts files whose collocated tests the diff also touches first', () => {

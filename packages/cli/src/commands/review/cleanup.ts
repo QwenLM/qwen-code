@@ -422,6 +422,21 @@ export function runCleanup(target: string): void {
     // reason: the suffix must not drift between creator and sweeper.
     report('base worktree', baseWorktreePath(wt));
 
+    // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
+    // not a git worktree, so `releaseWorktree` above does not touch it. A builder
+    // killed mid-build leaves it behind (its `finally` rmSync never runs), and every
+    // later base-tree probe for this PR then hits EEXIST and reports "another probe
+    // is building" until a manual rm. Sweep it here, at the end of the review when no
+    // builder is active. Best effort only — a lock that will not delete is an
+    // operational paper-cut, never a wrong verdict, so it does not fail the cleanup.
+    try {
+      rmSync(`${baseWorktreePath(wt)}.lock`, { recursive: true, force: true });
+    } catch (err) {
+      writeStderrLine(
+        `note: could not remove base lock ${baseWorktreePath(wt)}.lock: ${(err as Error).message}`,
+      );
+    }
+
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {
       try {

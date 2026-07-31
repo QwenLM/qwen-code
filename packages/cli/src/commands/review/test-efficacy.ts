@@ -1093,7 +1093,10 @@ export function splitDiffIntoHunks(
         startLine += offset;
         break;
       }
-      if (!lines[k].startsWith('-')) offset++;
+      // `\ No newline at end of file` marks no file line — exclude it like a
+      // removal, or startLine drifts off by one per marker (parseAddedLines
+      // already excludes it the same way).
+      if (!lines[k].startsWith('-') && !lines[k].startsWith('\\')) offset++;
     }
     out.push({
       header: header.trim(),
@@ -1142,8 +1145,15 @@ export function selectHunkProbes(
     if (f.diff.includes('\n+++ /dev/null')) continue;
     const hunks = splitDiffIntoHunks(f.diff);
     hunks.forEach((h, index) => {
-      const end = h.startLine + newSideLength(h.header);
-      if (f.mutantLines.some((n) => n >= h.startLine && n < end)) return;
+      // Range from the header's new-side start, not `startLine`: that anchor
+      // sits at the first ADDED line, past leading context, so adding the hunk's
+      // full new-side length to it overshoots the hunk's end by the context-line
+      // count and silently skips a mutant in a closely following hunk.
+      const hunkStart = Number(
+        /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(h.header)?.[1] ?? '0',
+      );
+      const end = hunkStart + newSideLength(h.header);
+      if (f.mutantLines.some((n) => n >= hunkStart && n < end)) return;
       (f.hasNewTests ? preferred : rest).push({
         file: f.file,
         index,
