@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
+import { isSessionDisconnectedError } from '../../utils/sessionErrors';
 import {
   computeAgentTreeInfo,
   computeUserBlockingIds,
@@ -11,7 +13,10 @@ import {
   TREE_INDENT_MAX_LEVELS,
   type AgentTreeInfo,
 } from './agentForest';
-import { useActions } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useActions,
+  type DaemonSessionActions,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
@@ -290,6 +295,10 @@ export function TasksStatusMessage({
           setRefreshError(false);
         })
         .catch((error: unknown) => {
+          if (isSessionDisconnectedError(error)) {
+            setRefreshError(false);
+            return;
+          }
           console.warn('[web-shell] failed to refresh tasks:', error);
           setRefreshError(true);
         })
@@ -751,11 +760,14 @@ function detailTitle(
 
 export function MonitorTaskDetail({
   task,
+  actions: providedActions,
 }: {
   task: DaemonSessionMonitorTaskStatus;
+  actions?: DaemonSessionActions;
 }) {
   const { t } = useI18n();
-  const actions = useActions();
+  const contextActions = useActions();
+  const actions = providedActions ?? contextActions;
   const [currentTask, setCurrentTask] = useState(task);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -883,6 +895,152 @@ export function MonitorTaskDetail({
       </div>
       {currentTask.error && (
         <div className={styles.monitorError}>
+          <div className={styles.monitorSectionLabel}>
+            {t('tasks.detail.error')}
+          </div>
+          <div>{currentTask.error}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ShellTaskDetail({
+  task,
+  actions: providedActions,
+}: {
+  task: DaemonSessionShellTaskStatus;
+  actions?: DaemonSessionActions;
+}) {
+  const { t } = useI18n();
+  const contextActions = useActions();
+  const actions = providedActions ?? contextActions;
+  const [currentTask, setCurrentTask] = useState(task);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCurrentTask((current) =>
+      current.id === task.id &&
+      current.status !== 'running' &&
+      task.status === 'running'
+        ? current
+        : task,
+    );
+  }, [task]);
+
+  useEffect(() => {
+    setActionError(null);
+  }, [task.id, task.status]);
+
+  const handleCancel = useCallback(async () => {
+    if (busy || currentTask.status !== 'running') return;
+    setActionError(null);
+    setBusy(true);
+    try {
+      const result = await actions.cancelTask(currentTask.id, 'shell');
+      if (!result.cancelled) {
+        setActionError(t('tasks.alreadyStopped'));
+        return;
+      }
+      setCurrentTask({
+        ...currentTask,
+        status: 'cancelled',
+        endTime: Date.now(),
+      });
+      try {
+        const snapshot = await actions.getTasks();
+        const updatedTask = snapshot.tasks.find(
+          (candidate): candidate is DaemonSessionShellTaskStatus =>
+            candidate.kind === 'shell' && candidate.id === currentTask.id,
+        );
+        if (updatedTask && updatedTask.status !== 'running') {
+          setCurrentTask(updatedTask);
+        }
+      } catch (error: unknown) {
+        console.warn(
+          '[web-shell] failed to refresh stopped shell task:',
+          error,
+        );
+      }
+    } catch (error: unknown) {
+      console.warn('[web-shell] failed to cancel shell task:', error);
+      setActionError(t('tasks.cancelFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [actions, busy, currentTask, t]);
+
+  return (
+    <div className={styles.monitorDetail}>
+      <div className={styles.monitorOverview}>
+        <div className={styles.monitorHeadingRow}>
+          <div className={styles.monitorDescription}>
+            {t('tasks.kind.shell')}
+          </div>
+          <div className={styles.monitorStatusActions}>
+            <Badge
+              variant="outline"
+              className={styles.monitorStatusTag}
+              data-status={currentTask.status}
+            >
+              {statusLabel(currentTask.status, t)}
+            </Badge>
+            {currentTask.status === 'running' && (
+              <button
+                type="button"
+                className={styles.monitorStopButton}
+                disabled={busy}
+                onClick={() => void handleCancel()}
+              >
+                {busy ? t('common.loading') : t('tasks.action.stop')}
+              </button>
+            )}
+          </div>
+        </div>
+        <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+        {actionError && (
+          <div className={styles.monitorActionError}>{actionError}</div>
+        )}
+        <div className={styles.monitorMetrics}>
+          <MonitorMetric
+            label={t('tasks.detail.runtime')}
+            value={formatRuntime(currentTask.runtimeMs)}
+          />
+          {currentTask.pid !== undefined && (
+            <MonitorMetric
+              label={t('tasks.detail.pid')}
+              value={String(currentTask.pid)}
+            />
+          )}
+          {currentTask.exitCode !== undefined && (
+            <MonitorMetric
+              label={t('tasks.detail.exitCode')}
+              value={String(currentTask.exitCode)}
+            />
+          )}
+        </div>
+      </div>
+      <div className={styles.shellFields}>
+        <div className={styles.monitorCommandSection}>
+          <div className={styles.monitorSectionLabel}>
+            {t('tasks.detail.workingDir')}
+          </div>
+          <div className={styles.shellFieldValue}>{currentTask.cwd}</div>
+        </div>
+        {currentTask.outputFile && (
+          <div className={styles.monitorCommandSection}>
+            <div className={styles.monitorSectionLabel}>
+              {t('tasks.detail.outputFile')}
+            </div>
+            <div className={styles.shellFieldValue}>
+              {currentTask.outputFile}
+            </div>
+          </div>
+        )}
+      </div>
+      {currentTask.error && (
+        <div className={`${styles.monitorError} ${styles.shellError}`}>
           <div className={styles.monitorSectionLabel}>
             {t('tasks.detail.error')}
           </div>
