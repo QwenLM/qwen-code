@@ -81,7 +81,7 @@ export function useAutoAcceptIndicator({
       // Handle Shift+Tab to cycle through all modes
       // On Windows, Shift+Tab is indistinguishable from Tab (\t) in some terminals,
       // so we allow Tab to switch modes as well to support the shortcut.
-      const isShiftTab = key.shift && key.name === 'tab';
+      const isShiftTab = key.shift && key.name === 'tab' && !key.ctrl;
       const isWindowsTab =
         process.platform === 'win32' &&
         key.name === 'tab' &&

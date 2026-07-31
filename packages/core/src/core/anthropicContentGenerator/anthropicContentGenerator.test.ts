@@ -1285,6 +1285,27 @@ describe('AnthropicContentGenerator', () => {
         'prompt-caching-scope-2026-01-05',
       );
     });
+
+    it('sends extended-cache-ttl-2025-04-11 when cacheRetention is "1h"', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+        cacheRetention: '1h',
+      });
+      expect(headers['anthropic-beta']).toContain(
+        'extended-cache-ttl-2025-04-11',
+      );
+    });
+
+    it('omits extended-cache-ttl-2025-04-11 when cacheRetention is unset (ephemeral default)', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+      });
+      expect(headers['anthropic-beta']).not.toContain(
+        'extended-cache-ttl-2025-04-11',
+      );
+    });
   });
 
   describe('generateContent', () => {

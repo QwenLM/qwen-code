@@ -192,11 +192,16 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // moving the caret in the editable input buffer (plain arrows only switch
   // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
   // perform word movement.
+  // Ctrl+←/→ is the primary binding but many terminals intercept it for
+  // word-jump. Ctrl+Tab / Ctrl+Shift+Tab are alternatives that are less
+  // commonly intercepted (#8069).
   [Command.COMPLETION_TAB_LEFT]: [
     { key: 'left', shift: false, ctrl: true, command: false },
+    { key: 'tab', shift: true, ctrl: true, command: false },
   ],
   [Command.COMPLETION_TAB_RIGHT]: [
     { key: 'right', shift: false, ctrl: true, command: false },
+    { key: 'tab', shift: false, ctrl: true, command: false },
   ],
 
   // Text input
