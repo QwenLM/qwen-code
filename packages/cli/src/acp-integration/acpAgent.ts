@@ -656,10 +656,25 @@ export function selectVisibleHistoryRecords(
     : records;
 }
 
-function isChannelSessionRequest(params: { _meta?: unknown }): boolean {
+interface SessionSource {
+  sourceType: string;
+  sourceId?: string;
+}
+
+function getSessionSource(params: {
+  _meta?: unknown;
+}): SessionSource | undefined {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   const value = meta?.[SESSION_SOURCE_META_KEY];
-  return isObjectRecord(value) && value['sourceType'] === 'channel';
+  if (!isObjectRecord(value) || typeof value['sourceType'] !== 'string') {
+    return undefined;
+  }
+  return {
+    sourceType: value['sourceType'],
+    ...(typeof value['sourceId'] === 'string'
+      ? { sourceId: value['sourceId'] }
+      : {}),
+  };
 }
 
 function shouldDeferMcpDiscovery(params: { _meta?: unknown }): boolean {
@@ -4407,7 +4422,7 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
       'qwen-code.daemon.session_start',
@@ -4429,7 +4444,7 @@ class QwenAgent implements Agent {
             cwd,
             mcpServers,
             settings,
-            isChannelSession,
+            sessionSource,
             undefined,
             undefined,
             shouldDeferMcpDiscovery(params)
@@ -4468,7 +4483,7 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
@@ -4561,7 +4576,7 @@ class QwenAgent implements Agent {
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -4661,7 +4676,7 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettingsCached(params.cwd);
     const liveSession = this.sessions.get(params.sessionId);
@@ -4699,7 +4714,7 @@ class QwenAgent implements Agent {
       params.cwd,
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -10860,7 +10875,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10877,7 +10892,7 @@ class QwenAgent implements Agent {
           cwd,
           mcpServers,
           settings,
-          isChannelSession,
+          sessionSource,
           sessionId,
           resume,
           initializeOptions,
@@ -10899,7 +10914,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10969,7 +10984,7 @@ class QwenAgent implements Agent {
       experimental: {
         ...settings.merged.experimental,
         sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
-        ...(isChannelSession ? { cron: false } : {}),
+        ...(sessionSource?.sourceType === 'channel' ? { cron: false } : {}),
       },
     };
 
@@ -11011,6 +11026,9 @@ class QwenAgent implements Agent {
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
     );
+    if (sessionSource) {
+      config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }

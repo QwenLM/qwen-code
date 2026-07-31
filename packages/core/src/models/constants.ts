@@ -27,6 +27,8 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'retryErrorCodes',
   'enableCacheControl',
   'forceGlobalCacheScope',
+  'cacheRetention',
+  'cacheRetentionByBlock',
   'schemaCompliance',
   'reasoning',
   'contextWindowSize',

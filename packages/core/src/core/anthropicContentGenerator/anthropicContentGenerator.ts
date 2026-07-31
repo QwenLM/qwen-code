@@ -547,6 +547,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('prompt-caching-scope-2026-01-05');
     }
 
+    // Sent defensively whenever the body carries `ttl: '1h'`. Live
+    // verification against the Anthropic Messages API (via Vertex AI)
+    // found this header has no observable effect there -- identical
+    // `ephemeral_1h_input_tokens` with and without it across every
+    // currently-active model -- but omitting it risks a hard 400 on any
+    // Anthropic-compatible backend that still enforces the beta gate.
+    if (this.hasExtendedCacheTtlOnWire(anthropicRequest)) {
+      betas.push('extended-cache-ttl-2025-04-11');
+    }
+
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
@@ -610,6 +620,51 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (Array.isArray(req.tools)) {
       for (const tool of req.tools) {
         if (isGlobalScope(tool)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether the assembled request body carries any
+   * `cache_control: { ..., ttl: '1h' }` entry. Scans the system block,
+   * tools array, and message content blocks — every place the converter
+   * attaches `cache_control` (system text, last tool, trailing user
+   * message). Used to gate the `extended-cache-ttl-2025-04-11` beta
+   * header defensively: live verification found the header has no
+   * observable effect on this proxy/Vertex backend (identical
+   * `ephemeral_1h_input_tokens` with and without it), but a hard
+   * requirement can't be ruled out for every Anthropic-compatible
+   * backend, so it is sent whenever the body actually requests the 1h
+   * tier -- same single-source-of-truth pattern as
+   * {@link hasGlobalCacheScopeOnWire}.
+   */
+  private hasExtendedCacheTtlOnWire(
+    req: MessageCreateParamsWithThinking,
+  ): boolean {
+    const hasTtl1h = (block: unknown): boolean => {
+      if (!block || typeof block !== 'object') return false;
+      const cc = (block as { cache_control?: unknown }).cache_control;
+      if (!cc || typeof cc !== 'object') return false;
+      return (cc as { ttl?: string }).ttl === '1h';
+    };
+
+    if (Array.isArray(req.system)) {
+      for (const block of req.system) {
+        if (hasTtl1h(block)) return true;
+      }
+    }
+    if (Array.isArray(req.tools)) {
+      for (const tool of req.tools) {
+        if (hasTtl1h(tool)) return true;
+      }
+    }
+    if (Array.isArray(req.messages)) {
+      for (const message of req.messages) {
+        if (!Array.isArray(message.content)) continue;
+        for (const block of message.content) {
+          if (hasTtl1h(block)) return true;
+        }
       }
     }
     return false;
@@ -692,6 +747,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const enableCacheControl =
       this.contentGeneratorConfig.enableCacheControl !== false;
     const useGlobalCacheScope = this.useGlobalCacheScope();
+    const cacheRetention = this.contentGeneratorConfig.cacheRetention;
+    const cacheRetentionByBlock =
+      this.contentGeneratorConfig.cacheRetentionByBlock;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
@@ -705,6 +763,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
+        cacheRetention,
+        cacheRetentionByBlock,
         // Read per request (not latched at construction): the client
         // re-records the prefix whenever it rebuilds the system prompt
         // (memory refresh, model change), and the converter fails open to
@@ -717,7 +777,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(
           request.config.tools,
-          { enableCacheControl, useGlobalCacheScope },
+          {
+            enableCacheControl,
+            useGlobalCacheScope,
+            cacheRetention,
+            cacheRetentionByBlock,
+          },
         )
       : undefined;
 
