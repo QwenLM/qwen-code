@@ -138,6 +138,15 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Ensure the latest assistant message starts with its first contiguous
+   * thinking/redacted-thinking run. Anthropic manual extended thinking
+   * requires the final assistant turn in a tool loop to begin with thinking;
+   * adaptive thinking does not. Gate this on the outgoing request's actual
+   * `thinking.type === 'enabled'` mode so adaptive histories keep their exact
+   * chronological block order.
+   */
+  ensureLeadingAssistantThinking?: boolean;
+  /**
    * Strip a trailing assistant message that would otherwise be sent as an
    * "assistant-turn prefill" (a request whose final message has
    * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
@@ -285,6 +294,9 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveUserMessages(messages);
     if (options.stripTrailingAssistantPrefill) {
       this.stripTrailingAssistantPrefill(messages);
+    }
+    if (options.ensureLeadingAssistantThinking) {
+      ensureLeadingThinkingOnLatestAssistantMessage(messages);
     }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
@@ -1397,6 +1409,60 @@ function mergeConsecutiveAssistantMessages(
   }
 
   return merged;
+}
+
+/**
+ * Relocate the most recent assistant message's first contiguous run of
+ * `thinking`/`redacted_thinking` blocks to the front of its content array,
+ * if it doesn't already start with one.
+ *
+ * See {@link ConvertGeminiRequestToAnthropicOptions.ensureLeadingAssistantThinking}
+ * for why this is needed: `mergeConsecutiveAssistantMessages`'s straight
+ * concatenation can leave a leading text block ahead of a later thinking
+ * run, which is chronologically correct but invalid on the wire for
+ * Anthropic's manual-mode extended thinking. Only the first thinking run
+ * moves; every other block -- including any later thinking blocks and
+ * their relative order -- is untouched, and nothing is fabricated when the
+ * message has no thinking block at all.
+ *
+ * Scoped to the single most recent assistant message: only the final turn
+ * actually sent on the wire is subject to Anthropic's leading-thinking
+ * requirement. Earlier turns are replay, not the active turn, and adaptive
+ * mode explicitly permits them not to start with thinking.
+ */
+function ensureLeadingThinkingOnLatestAssistantMessage(
+  messages: AnthropicMessageParam[],
+): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant') continue;
+    if (!Array.isArray(message.content)) return;
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    const isThinking = (b: AnthropicContentBlockParam) => {
+      const t = (b as { type?: string }).type;
+      return t === 'thinking' || t === 'redacted_thinking';
+    };
+
+    if (blocks.length === 0 || isThinking(blocks[0]!)) {
+      return;
+    }
+
+    const runStart = blocks.findIndex(isThinking);
+    if (runStart === -1) {
+      return;
+    }
+
+    let runEnd = runStart;
+    while (runEnd < blocks.length && isThinking(blocks[runEnd]!)) {
+      runEnd++;
+    }
+
+    const run = blocks.slice(runStart, runEnd);
+    const rest = [...blocks.slice(0, runStart), ...blocks.slice(runEnd)];
+    message.content = [...run, ...rest];
+    return;
+  }
 }
 
 /**
