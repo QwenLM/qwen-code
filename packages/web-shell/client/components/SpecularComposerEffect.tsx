@@ -192,7 +192,7 @@ export function SpecularComposerEffect({
     };
 
     const startLoop = () => {
-      if (!running) {
+      if (!running && canvas.isConnected) {
         running = true;
         lastFrame = performance.now();
         frameId = window.requestAnimationFrame(draw);
@@ -303,6 +303,14 @@ export function SpecularComposerEffect({
     };
 
     const resizeObserver = new ResizeObserver(resize);
+    const onContextLost = (event: Event) => {
+      event.preventDefault();
+      running = false;
+      window.cancelAnimationFrame(frameId);
+      resizeObserver.disconnect();
+      canvas.remove();
+    };
+    canvas.addEventListener('webglcontextlost', onContextLost);
     resizeObserver.observe(target);
     resize();
     window.addEventListener('pointermove', onPointerMove, { passive: true });
@@ -328,6 +336,7 @@ export function SpecularComposerEffect({
       );
       target.removeEventListener('focusin', onFocusIn);
       target.removeEventListener('focusout', onFocusOut);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
       canvas.remove();
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
