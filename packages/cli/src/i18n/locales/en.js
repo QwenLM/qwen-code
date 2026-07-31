@@ -2494,6 +2494,8 @@ export default {
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
     'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Get a second opinion on the current conversation from a reviewer model',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',

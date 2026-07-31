@@ -2221,6 +2221,8 @@ export default {
   // === Core: added from PR #3328 ===
   'Ask a quick side question without affecting the main conversation':
     '在不影响主对话的情况下快速问一个旁支问题',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '让审查模型对当前对话给出第二意见',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',

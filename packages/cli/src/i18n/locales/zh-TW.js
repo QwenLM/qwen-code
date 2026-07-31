@@ -2042,6 +2042,8 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
