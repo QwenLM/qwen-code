@@ -823,16 +823,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private removeReplyPendingInboundTask(delivery: PendingFinalDelivery): void {
-    const tasks = this.readInboundTasks();
-    const matching = tasks.filter(
-      (task) =>
-        task.state === 'reply_pending' &&
-        task.source.chatId === delivery.chatId &&
-        task.source.threadId === delivery.threadId &&
-        task.source.messageId === delivery.sourceMessageId,
-    );
-    for (const task of matching) {
-      this.removeInboundTask(task.id);
+    try {
+      const tasks = this.readInboundTasks();
+      const matching = tasks.filter(
+        (task) =>
+          task.state === 'reply_pending' &&
+          task.source.chatId === delivery.chatId &&
+          task.source.threadId === delivery.threadId &&
+          task.source.messageId === delivery.sourceMessageId,
+      );
+      for (const task of matching) {
+        this.removeInboundTask(task.id);
+      }
+    } catch (cleanupErr) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to clean up inbound task: ${sanitizeLogText(
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+          200,
+        )}\n`,
+      );
     }
   }
 
@@ -1023,8 +1032,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
     if (this.inboundRecoveryPending) {
-      await this.recoverInboundTasks();
-      this.inboundRecoveryPending = false;
+      try {
+        await this.recoverInboundTasks();
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${err}\n`,
+        );
+      } finally {
+        this.inboundRecoveryPending = false;
+      }
     }
 
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
@@ -1528,7 +1544,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${err}\n`,
       );
       if (err instanceof FinalPublicationError) {
-        if (this.hasPendingFinalDeliveryForTask(task)) {
+        if (this.cancelledInboundTaskIds.has(task.id)) {
+          // already persisted as 'cancelled' by onTaskLifecycle
+        } else if (this.hasPendingFinalDeliveryForTask(task)) {
           this.transitionInboundTask(task.id, 'reply_pending', {
             envelope: undefined,
             error,
@@ -1540,6 +1558,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'failed', { error, attempts });
         if (!task.errorCommentPosted) {
           await this.postErrorComment(envelope.chatId, task.issueNumber);
+          task.errorCommentPosted = true;
           this.transitionInboundTask(task.id, 'failed', {
             error,
             attempts,
@@ -1770,8 +1789,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     );
     if (!taskId) return;
     if (event.type === 'cancelled') {
-      this.transitionInboundTask(taskId, 'cancelled');
       this.cancelledInboundTaskIds.add(taskId);
+      this.transitionInboundTask(taskId, 'cancelled');
       return;
     }
     if (event.type === 'failed') {

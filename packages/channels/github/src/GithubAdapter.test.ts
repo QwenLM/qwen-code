@@ -2645,10 +2645,10 @@ describe('GithubChannel', () => {
         inboundRecoveryPending: boolean;
       };
       privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
 
-      await expect(pollOnce()).rejects.toThrow(
-        'invalid GitHub inbound task state',
-      );
+      await pollOnce();
+
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).not.toHaveBeenCalled();
@@ -2701,6 +2701,74 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalledWith(
         expect.objectContaining({ body: expect.stringContaining('Failed') }),
       );
+    });
+
+    it('does not transition a cancelled task to reply_pending on FinalPublicationError', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([task]);
+      const rateLimitError = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(rateLimitError);
+      channel.handleInboundHook = async (envelope) => {
+        channel.triggerTaskLifecycleForTest({
+          type: 'cancelled',
+          chatId: 'owner/repo',
+          messageId: '1001',
+        });
+        await (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse(
+          envelope.chatId,
+          envelope.threadId!,
+          'cancelled response',
+          'session-1',
+        );
+      };
+      channel.sourceMessageId = '1001';
+      channel.sourceSenderId = 'alice';
+      channel.sourceMetadata = 'Trigger: mention.';
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        abortableSleep: (ms: number) => Promise<void>;
+        runInboundTask: (task: Record<string, unknown>) => Promise<boolean>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
+
+      await privateChannel.runInboundTask(task);
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'cancelled' }),
+      ]);
+    });
+
+    it('continues polling after inbound recovery failure', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      mkdirSync(pendingPath, { recursive: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
+        '1001',
+      ]);
     });
 
     it('transitions a delivery-phase lifecycle failure to reply_pending', async () => {
@@ -2950,9 +3018,8 @@ describe('GithubChannel', () => {
       };
       privateChannel.octokit = mockOctokit as never;
 
-      await expect(privateChannel.pollOnce()).rejects.toThrow(
-        /illegal operation on a directory|EISDIR/,
-      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await privateChannel.pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(readInboundTasks()).toEqual([
@@ -2973,9 +3040,8 @@ describe('GithubChannel', () => {
       };
       privateChannel.octokit = mockOctokit as never;
 
-      await expect(privateChannel.pollOnce()).rejects.toThrow(
-        /illegal operation on a directory|EISDIR/,
-      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await privateChannel.pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(readInboundTasks()).toEqual([
