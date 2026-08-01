@@ -108,11 +108,16 @@ export function serializeLedger(ledger: Ledger): string {
   // body past the API's limit is no review at all. The count of what went
   // travels with it, because a list the next round reads as complete and
   // silently is not one is the failure this whole module is built against.
+  // Both caps count, not just the byte one. `dropped` exists so a truncated
+  // list cannot read as complete, and measuring it against `capped` rather than
+  // against what came IN made it under-report by exactly the count cap's share:
+  // 51 findings in, 24 kept, and it said 26 missing.
+  const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, 0);
+  let marker = render(capped, total - kept);
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), capped.length - kept);
+    marker = render(capped.slice(0, kept), total - kept);
   }
   return marker;
 }

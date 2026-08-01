@@ -55,6 +55,34 @@ describe('ledger marker', () => {
     expect(back!.dropped).toBeGreaterThan(0);
   });
 
+  it('counts BOTH caps as dropped, not just the byte one', () => {
+    // `LEDGER_MAX_FINDINGS` truncates before the byte cap ever runs. Measuring
+    // `dropped` against the already-sliced list made it under-report by
+    // exactly that share: 51 in, 24 kept, and it said 26 missing. The number
+    // the next round reads has to be the number that went missing.
+    const mk = (n: number, wide: boolean) => ({
+      v: 1 as const,
+      round: 2,
+      findings: Array.from({ length: n }, (_, i) => ({
+        id: `R2-${i}`,
+        sev: 'S' as const,
+        file: wide ? 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE) : 'a.ts',
+        line: i,
+        title: wide ? 'x'.repeat(LEDGER_MAX_TITLE) : 't',
+      })),
+    });
+    // count cap only, byte cap only, both at once, and neither
+    for (const [n, wide] of [
+      [LEDGER_MAX_FINDINGS + 1, false],
+      [LEDGER_MAX_FINDINGS, true],
+      [LEDGER_MAX_FINDINGS + 1, true],
+      [3, false],
+    ] as Array<[number, boolean]>) {
+      const back = parseLedger(serializeLedger(mk(n, wide)))!;
+      expect(back.findings.length + (back.dropped ?? 0)).toBe(n);
+    }
+  });
+
   it('leaves a realistic ledger whole — the cap is a bound, not a budget to spend', () => {
     // Fifty findings at realistic widths still fit, so the truncation path is
     // reached only by a ledger no round has produced.
