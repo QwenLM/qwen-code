@@ -33,7 +33,7 @@ describe('no-AK integration CI wiring', () => {
 
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
-        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2',
+        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --maxWorkers 2',
         './fake-openai-server.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
@@ -57,14 +57,24 @@ describe('no-AK integration CI wiring', () => {
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const gateStepMarker =
+      "      - name: 'Run required no-AK integration gate'";
+    const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
+    const gateStep = ubuntuJob.slice(
+      gateStepStart,
+      ubuntuJob.indexOf(
+        '\n      - name:',
+        gateStepStart + gateStepMarker.length,
+      ),
+    );
 
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
 
-    expect(ubuntuJob).toContain("name: 'Run required no-AK integration gate'");
-    expect(ubuntuJob).toContain("github.event_name == 'pull_request'");
-    expect(ubuntuJob).toContain("github.event_name == 'merge_group'");
-    expect(ubuntuJob).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStepStart).toBeGreaterThanOrEqual(0);
+    expect(gateStep).toContain("github.event_name == 'pull_request'");
+    expect(gateStep).toContain("github.event_name == 'merge_group'");
+    expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
