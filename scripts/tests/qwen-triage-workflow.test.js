@@ -2474,6 +2474,28 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'A surviving mutation needs a positive control before it becomes a',
     );
+
+    // #8132: a cookie->Authorization bridge was gated to the desktop shell
+    // on the MINTING side, while the accepting middleware was mounted
+    // unconditionally, so every server treated that cookie as a bearer. The
+    // tests were named after the gated end, which is what made the ungated
+    // end look covered.
+    expect(flat).toContain('A capability has two ends');
+    expect(flat).toContain('tests are named after the gated end');
+
+    // #8261: `emptyDiff` was set both for a genuinely empty PR and for a
+    // FAILED diff capture, and the consumer answered it by recommending the
+    // PR be closed as superseded — a transient fetch error closing live
+    // work. The flag is not the defect; the consumer is.
+    expect(flat).toContain('must be different values');
+    expect(flat).toContain('check what consumes them');
+
+    // #8261: the re-classifier that demotes a dead harness's findings ran
+    // after the findings list was assembled, so a harness proven dead still
+    // filed `mutant-survived`. A control that runs late is not a control.
+    expect(flat).toContain(
+      'A validity control must run before the artifact it invalidates',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
