@@ -402,12 +402,19 @@ async function initSession(
           // sessionUpdate notifications after the originating prompt has
           // already returned.
 
-          // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
+          // 3a: Check for the user_message_chunk echoing the cron prompt.
+          // Select it by _meta.source === 'cron' rather than a wall-clock
+          // `receivedAt > promptDoneAt` comparison: the Part 1 prompt text
+          // also contains CRONFIRE7742, and the cron notification races the
+          // Part 1 RPC response over the same stdout pipe, so a timestamp
+          // guard can non-deterministically exclude the one fast fire. The
+          // cron-sourced echo is the only user_message_chunk carrying
+          // _meta.source === 'cron' (see Session.#executeCronPromptInner).
           const cronUserMsg = await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'user_message_chunk' &&
               (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
-              u.receivedAt > promptDoneAt,
+              u.update?._meta?.source === 'cron',
             'cron-fired user_message_chunk with CRONFIRE7742',
             75_000,
           );
