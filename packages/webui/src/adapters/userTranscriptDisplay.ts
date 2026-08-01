@@ -66,5 +66,5 @@ export function getUserTranscriptDisplayText(
     .map((part) =>
       isRecord(part) && typeof part.text === 'string' ? part.text : '',
     )
-    .join('\n');
+    .join('');
 }

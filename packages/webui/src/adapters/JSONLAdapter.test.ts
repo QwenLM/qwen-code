@@ -83,7 +83,7 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('user prompt');
   });
 
-  it('preserves newlines between legacy bare parts without a reliable boundary', () => {
+  it('preserves legacy bare-part concatenation without a reliable boundary', () => {
     const [message] = adaptJSONLMessages([
       userMessage([
         { text: 'user prompt' },
@@ -91,7 +91,7 @@ describe('adaptJSONLMessages user display projection', () => {
       ]),
     ]);
 
-    expect(message?.content).toBe('user prompt\nlegacy bare hook context');
+    expect(message?.content).toBe('user promptlegacy bare hook context');
   });
 
   it('leaves non-Qwen user records to the existing format parser', () => {
