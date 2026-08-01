@@ -534,6 +534,58 @@ jobs:
 });
 
 describe('expressionsOf / invokedCommandsOf', () => {
+  it('ends a plain <<WORD heredoc only at column 0, as bash does', () => {
+    // An indented `EOF` inside a plain heredoc is still BODY. Ending there
+    // leaked the rest of the body into the command list, and the entry it
+    // produced was `rm` — a frightening thing to hand a reviewer with nothing
+    // behind it.
+    expect(invokedCommandsOf('cat <<EOF\n  EOF\n  rm -rf /\nEOF\nls')).toEqual([
+      'cat',
+      'ls',
+    ]);
+  });
+
+  it('ends a <<-WORD heredoc on an indented terminator', () => {
+    // Looser than bash (which strips tabs, not spaces) on purpose: looser can
+    // only end a body EARLY, which over-reports, and an under-report is the
+    // worse direction here.
+    expect(invokedCommandsOf('cat <<-EOF\n  body\n  EOF\nls')).toEqual([
+      'cat',
+      'ls',
+    ]);
+  });
+
+  it('does not read $(( )) arithmetic as a command substitution', () => {
+    // Measured across this repo's 434 run: steps — the single largest source
+    // of junk in the list. Nothing inside `$(( ))` runs, so an operand named
+    // like a variable is not a command anyone can stub.
+    expect(invokedCommandsOf('N=$((N + 1))')).toEqual([]);
+    expect(invokedCommandsOf('echo $((COUNT * 2))')).toEqual([]);
+    // ...and a real substitution on the same line is still found.
+    expect(invokedCommandsOf('N=$((N + 1)); gh api x')).toEqual(['gh']);
+  });
+
+  it('finds the OUTER command of a nested $( )', () => {
+    // `[^()]*` only ever matched the innermost pair, so this reported
+    // `build_url` and lost `gh` — a missed stub, and the extraction reaches
+    // the network.
+    expect(invokedCommandsOf('X=$(gh api $(build_url $(region)))')).toEqual([
+      'build_url',
+      'gh',
+      'region',
+    ]);
+  });
+
+  it('does not read a subcommand as a command when an assignment spans words', () => {
+    // The assignment-prefix skip stepped over `X=$(gh` and put `api` in
+    // command position. A closed assignment still steps over correctly.
+    expect(invokedCommandsOf('X=$(date) aws s3 cp a b')).toEqual([
+      'aws',
+      'date',
+    ]);
+    expect(invokedCommandsOf('FOO=1 BAR=2 aws s3 cp a b')).toEqual(['aws']);
+  });
+
   it('dedupes expression sites across script and env', () => {
     expect(expressionsOf('a ${{ x }} b ${{ x }}', '${{ y }}')).toEqual([
       '${{ x }}',

@@ -197,6 +197,18 @@ function maskExpressions(line: string): string {
 }
 
 /**
+ * KNOWN LIMIT, measured rather than assumed: the quote walk is FLAT, and shell
+ * quoting nests — a `"` inside `$( … )` inside a `"` string opens a fresh
+ * context the runner tracks and this does not. Over a long script the two
+ * drift, and past roughly 300 lines of this repo's own autofix workflow the
+ * drift starts reporting fragments of jq source as commands. Deliberately not
+ * papered over: inserting a separator where a blanked span was removes those
+ * fragments, but it also splits `a"X"b`, which is one word (`aXb`) to the
+ * shell, and no test short enough to be a test can pin the difference — the
+ * minimal reproducer is 296 lines. An over-report is the safe direction here
+ * and the script itself ships verbatim beside the list, so the junk costs a
+ * reviewer a glance; a scanner nobody can pin costs them the next bug.
+ *
  * Blank out quoted spans, carrying the quote across lines. Everything inside
  * quotes is DATA, and a line-based word split that runs through a quote reads
  * it as code: `EVIDENCE_SECTION=$'### Evidence images'` steps over the
@@ -207,12 +219,12 @@ function maskExpressions(line: string): string {
 function stripQuoted(
   line: string,
   open: '"' | "'" | null,
-): { live: string; open: '"' | "'" | null; heredocs: string[] } {
+): { live: string; open: '"' | "'" | null; heredocs: Heredoc[] } {
   let live = '';
   let quote = open;
   // `cat <<A <<B` opens two, and their bodies follow in order. Tracking only
   // the first leaves the second body — and its terminator — read as commands.
-  const heredocs: string[] = [];
+  const heredocs: Heredoc[] = [];
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote !== null) {
@@ -230,7 +242,10 @@ function stripQuoted(
     if (c === '<' && line[i + 1] === '<') {
       const m = HEREDOC_OPENER.exec(line.slice(i));
       if (m) {
-        heredocs.push((m[1] ?? m[2] ?? m[3]) as string);
+        heredocs.push({
+          word: (m[1] ?? m[2] ?? m[3]) as string,
+          dash: line[i + 2] === '-',
+        });
         i += m[0].length - 1;
         live += ' ';
         continue;
@@ -250,12 +265,71 @@ function stripQuoted(
   return { live, open: quote, heredocs };
 }
 
+/**
+ * A pending heredoc: the terminator word, and whether the opener was the
+ * indent-stripping `<<-` form.
+ *
+ * The form decides where the body ENDS, and getting that wrong leaks the body
+ * into the command list. Bash ends a plain `<<WORD` only on a line that is
+ * exactly WORD, so an indented `  EOF` inside the body is still body — matched
+ * loosely, an `rm -rf /` two lines further down got reported as an invoked
+ * command, which is a frightening entry for a reviewer to chase with nothing
+ * behind it. `<<-` is matched more loosely than bash on purpose (bash strips
+ * tabs, this strips any leading whitespace): looser can only end a body EARLY,
+ * which over-reports, and this file's stated priority is that an under-report
+ * is the worse direction — a missed command is a stub nobody writes.
+ */
+interface Heredoc {
+  word: string;
+  dash: boolean;
+}
+
 /** `<<WORD`, `<<-WORD`, `<<'WORD'` — the body that follows is data. */
 const HEREDOC_OPENER =
   /^<<-?\s*(?:'([A-Za-z_][\w-]*)'|"([A-Za-z_][\w-]*)"|([A-Za-z_][\w-]*))/;
 
 /** A line ending in an unescaped `\` continues into the next one. */
 const CONTINUES = /(?:^|[^\\])(?:\\\\)*\\$/;
+
+/**
+ * Every `$( … )` body in a line, OUTER ONES INCLUDED.
+ *
+ * A `[^()]*` pattern only ever matches the innermost pair, so
+ * `X=$(gh api $(build_url))` reported `build_url` and lost `gh` entirely — an
+ * under-report, and the direction this file treats as the dangerous one: a
+ * missed command is a stub the verifier never writes, so the extraction
+ * reaches the network. Depth-counted instead, and every nesting level is
+ * returned as its own body so each one's command word is found.
+ */
+function commandSubstitutionsOf(line: string): string[] {
+  const bodies: string[] = [];
+  for (let i = 0; i < line.length - 1; i++) {
+    if (line[i] !== '$' || line[i + 1] !== '(') continue;
+    // `$(( … ))` is ARITHMETIC, not a substitution, and nothing in it runs.
+    // Read as one, `N=$((N + 1))` reported `N` as a command to stub — measured
+    // across this repo's 434 run: steps, where it was the single largest
+    // source of all-caps junk in the list. Skipping past the whole construct
+    // costs the vanishingly rare `$( (a; b) )` subshell form, which is written
+    // with a space in practice.
+    if (line[i + 2] === '(') {
+      const close = line.indexOf('))', i + 3);
+      i = close === -1 ? line.length : close + 1;
+      continue;
+    }
+    let depth = 0;
+    for (let j = i + 1; j < line.length; j++) {
+      if (line[j] === '(') depth++;
+      else if (line[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          bodies.push(line.slice(i + 2, j));
+          break;
+        }
+      }
+    }
+  }
+  return bodies;
+}
 
 export function invokedCommandsOf(script: string): string[] {
   const seen = new Set<string>();
@@ -265,8 +339,18 @@ export function invokedCommandsOf(script: string): string[] {
       .replace(/^[\s(]+/, '')
       .split(/\s+/);
     for (const word of words) {
-      // Step over leading `name=value` assignment prefixes, any case.
-      if (/^[\w]+=/.test(word)) continue;
+      // Step over leading `name=value` assignment prefixes, any case — but
+      // only when the value is CLOSED. `X=$(gh api $(u))` splits into
+      // `X=$(gh`, `api`, …, and stepping over the first put `api` in command
+      // position, reporting a subcommand as a command to stub. An unbalanced
+      // `(` means the rest of this line is still inside the substitution, and
+      // `commandSubstitutionsOf` above already reported what runs in there.
+      if (/^[\w]+=/.test(word)) {
+        const opens = (word.match(/\(/g) ?? []).length;
+        const closes = (word.match(/\)/g) ?? []).length;
+        if (opens > closes) break;
+        continue;
+      }
       // ...and over a `case` pattern label, whose command follows it on the
       // same line: `blocked) gh api x ;;` invokes `gh`, and stopping at the
       // label loses it. An UNDER-report is the worse direction here — a
@@ -283,7 +367,7 @@ export function invokedCommandsOf(script: string): string[] {
     const masked = maskExpressions(rawLine);
     // Command substitutions first, on the unstripped text — `body="$(sanitize
     // < f)"` is an assignment whose real invocation lives inside the `$()`.
-    for (const m of masked.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
+    for (const body of commandSubstitutionsOf(masked)) scanSegment(body);
     const stripped = stripQuoted(masked, openQuote);
     const line = stripped.live.trim();
     if (line && !line.startsWith('#')) {
@@ -292,7 +376,9 @@ export function invokedCommandsOf(script: string): string[] {
     return stripped;
   };
 
-  const heredocQueue: string[] = [];
+  const heredocQueue: Heredoc[] = [];
+  const terminates = (rawLine: string, h: Heredoc): boolean =>
+    h.dash ? rawLine.trim() === h.word : rawLine === h.word;
   let openQuote: '"' | "'" | null = null;
   // A backslash-continued command is ONE command: scanning the continuation
   // as its own line puts the next argument in command position, which is how
@@ -301,7 +387,7 @@ export function invokedCommandsOf(script: string): string[] {
   for (const rawLine of script.split('\n')) {
     if (heredocQueue.length > 0) {
       // a heredoc body is input to a command, not a list of them
-      if (rawLine.trim() === heredocQueue[0]) heredocQueue.shift();
+      if (terminates(rawLine, heredocQueue[0])) heredocQueue.shift();
       continue;
     }
     // Annotated because the narrowing is loop-carried: `pending`'s type at
