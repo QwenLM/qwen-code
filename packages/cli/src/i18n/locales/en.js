@@ -1476,6 +1476,8 @@ export default {
     'Summary path already exists and is not a generated summary: {{path}}',
   'Summary path must be within the project root.':
     'Summary path must be within the project root.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Summary path resolves to an existing directory: {{path}}',
   'Summary path ends with a separator but is an existing file: {{path}}':
     'Summary path ends with a separator but is an existing file: {{path}}',
   'Failed to generate project context summary: {{error}}':

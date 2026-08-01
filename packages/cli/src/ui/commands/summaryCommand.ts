@@ -12,7 +12,6 @@ import {
   type SlashCommandActionReturn,
 } from './types.js';
 import {
-  createDebugLogger,
   getProjectSummaryPrompt,
   isSubpath,
   resolvePath,
@@ -20,8 +19,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
-
-const debugLogger = createDebugLogger('SUMMARY_COMMAND');
 
 // Resolves the real path of the nearest existing ancestor of targetPath. The
 // target file itself usually does not exist yet, but a symlinked parent
@@ -76,10 +73,36 @@ const assertLeafNotSymlinkEscape = async (
   }
 };
 
-const isGeneratedSummary = (content: string): boolean => {
-  const normalized = content.replace(/\r\n/g, '\n');
-  return /\n---\n\n## Summary Metadata\n\*\*Update time\*\*: /.test(normalized);
+// Static footer prefix shared by the writer (saveSummaryToDisk) and the
+// detector below, kept in one place so the two cannot drift apart.
+const SUMMARY_FOOTER_PREFIX = '\n---\n\n## Summary Metadata\n**Update time**: ';
+
+const buildSummaryFooter = (timestamp: string): string =>
+  `${SUMMARY_FOOTER_PREFIX}${timestamp}\n`;
+
+// Reads only the file tail: the footer always lives in the last ~90 bytes, so
+// a mistyped multi-GB path is not loaded fully into memory just to test for it.
+const readSummaryTail = async (p: string, bytes = 4096): Promise<string> => {
+  const handle = await fsPromises.open(p, 'r');
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, Math.max(0, size - length));
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
 };
+
+// Built from the same prefix the writer emits (escaped so the literal `**` is
+// not read as a quantifier) and anchored to end-of-file, so a document that
+// merely embeds a sample footer is not mistaken for a generated summary and
+// clobbered.
+const isGeneratedSummary = (content: string): boolean =>
+  new RegExp(
+    `${SUMMARY_FOOTER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*\\n?$`,
+  ).test(content.replace(/\r\n/g, '\n'));
 
 export const summaryCommand: SlashCommand = {
   name: 'summary',
@@ -273,14 +296,30 @@ export const summaryCommand: SlashCommand = {
           : path.relative(projectRoot, summaryPath)
       ).replaceAll(path.sep, '/');
 
-      // Refuse to clobber a pre-existing file that is not a generated summary
-      // (e.g. a mistyped path such as `package.json`). A generated summary
-      // carries a `## Summary Metadata` footer, so regenerating one is allowed.
+      // Compute the default-target flag before the guards so an explicitly
+      // spelled default path (`.qwen/PROJECT_SUMMARY.md` or `.qwen/`) behaves
+      // exactly like the no-arg command and always overwrites.
+      const isDefaultTarget = summaryPath === defaultSummaryPath;
+
       const existingStat = await fsPromises.stat(summaryPath).catch(() => null);
-      if (existingStat?.isFile() && existingStat.size > 0) {
-        const existing = await fsPromises
-          .readFile(summaryPath, 'utf8')
-          .catch(() => '');
+
+      // Reject an existing directory at the leaf (e.g. `/summary docs` where
+      // docs/PROJECT_SUMMARY.md is itself a directory) before the LLM call,
+      // instead of surfacing a raw EISDIR only at write time.
+      if (existingStat?.isDirectory()) {
+        throw new Error(
+          t('Summary path resolves to an existing directory: {{path}}', {
+            path: filePathForDisplay,
+          }),
+        );
+      }
+
+      // For any non-default path, refuse to clobber a pre-existing file that is
+      // not a generated summary (e.g. a mistyped `package.json`). A generated
+      // summary carries a `## Summary Metadata` footer, so regenerating one is
+      // allowed.
+      if (!isDefaultTarget && existingStat?.isFile() && existingStat.size > 0) {
+        const existing = await readSummaryTail(summaryPath).catch(() => '');
         if (!isGeneratedSummary(existing)) {
           throw new Error(
             t(
@@ -294,7 +333,7 @@ export const summaryCommand: SlashCommand = {
       return {
         summaryPath,
         filePathForDisplay,
-        isDefaultTarget: summaryPath === defaultSummaryPath,
+        isDefaultTarget,
         realProjectRoot,
       };
     };
@@ -311,13 +350,9 @@ export const summaryCommand: SlashCommand = {
       filePathForDisplay: string;
       fullPath: string;
     }> => {
-      const summaryContent = `${markdownSummary}
-
----
-
-## Summary Metadata
-**Update time**: ${new Date().toISOString()}
-`;
+      const summaryContent = `${markdownSummary}\n${buildSummaryFooter(
+        new Date().toISOString(),
+      )}`;
 
       // Re-check the leaf right before writing to narrow the TOCTOU window
       // between resolveSummaryTarget (pre-LLM) and the write (post-LLM).
@@ -341,9 +376,9 @@ export const summaryCommand: SlashCommand = {
         preWriteStat?.isFile() &&
         preWriteStat.size > 0
       ) {
-        const existing = await fsPromises
-          .readFile(target.summaryPath, 'utf8')
-          .catch(() => '');
+        const existing = await readSummaryTail(target.summaryPath).catch(
+          () => '',
+        );
         if (!isGeneratedSummary(existing)) {
           throw new Error(
             t(
@@ -358,20 +393,12 @@ export const summaryCommand: SlashCommand = {
         recursive: true,
         ...(target.isDefaultTarget ? { mode: 0o700 } : {}),
       });
+      // writeFile's mode applies at creation; for an existing file the user may
+      // have relaxed, the mode argument is ignored and permissions are kept.
       await fsPromises.writeFile(target.summaryPath, summaryContent, {
         encoding: 'utf8',
         mode: 0o600,
       });
-      // writeFile's mode only applies at creation; skip the explicit chmod
-      // on pre-existing files the user may have relaxed.
-      if (!preWriteStat) {
-        await fsPromises.chmod(target.summaryPath, 0o600).catch((error) => {
-          debugLogger.debug(
-            'Failed to tighten summary file permissions:',
-            error,
-          );
-        });
-      }
 
       return {
         filePathForDisplay: target.filePathForDisplay,

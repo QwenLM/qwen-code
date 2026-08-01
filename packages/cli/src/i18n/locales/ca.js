@@ -1124,6 +1124,8 @@ export default {
     'El camí del resum ja existeix i no és un resum generat: {{path}}',
   'Summary path must be within the project root.':
     'El camí del resum ha de ser dins de la arrel del projecte.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'El camí del resum es resol a un directori existent: {{path}}',
   'Summary path ends with a separator but is an existing file: {{path}}':
     'El camí del resum acaba amb un separador però és un fitxer existent: {{path}}',
   'Failed to generate project context summary: {{error}}':

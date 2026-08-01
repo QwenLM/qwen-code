@@ -770,6 +770,8 @@ export default {
     'サマリーパスは既に存在し、生成されたサマリーではありません: {{path}}',
   'Summary path must be within the project root.':
     'サマリーパスはプロジェクトルート内にある必要があります',
+  'Summary path resolves to an existing directory: {{path}}':
+    'サマリーパスは既存のディレクトリに解決されます: {{path}}',
   'Summary path ends with a separator but is an existing file: {{path}}':
     'サマリーパスは区切り文字で終わっていますが、既存のファイルです: {{path}}',
   'Failed to generate project context summary: {{error}}':

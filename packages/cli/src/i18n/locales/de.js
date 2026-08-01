@@ -999,6 +999,8 @@ export default {
     'Der Zusammenfassungspfad existiert bereits und ist keine generierte Zusammenfassung: {{path}}',
   'Summary path must be within the project root.':
     'Der Zusammenfassungspfad muss sich im Projektstammverzeichnis befinden.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Der Zusammenfassungspfad verweist auf ein vorhandenes Verzeichnis: {{path}}',
   'Summary path ends with a separator but is an existing file: {{path}}':
     'Der Zusammenfassungspfad endet mit einem Trennzeichen, ist aber eine vorhandene Datei: {{path}}',
   'Failed to generate project context summary: {{error}}':

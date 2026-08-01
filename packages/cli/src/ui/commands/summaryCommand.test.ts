@@ -488,6 +488,62 @@ describe('summaryCommand custom export path', () => {
     },
   );
 
+  it('overwrites a hand-written file when the default path is spelled explicitly', async () => {
+    const qwenDir = path.join(projectRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenDir, 'PROJECT_SUMMARY.md'),
+      'hand-written notes',
+      'utf8',
+    );
+    const result = await run('.qwen/PROJECT_SUMMARY.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(
+      path.join(qwenDir, 'PROJECT_SUMMARY.md'),
+      'utf8',
+    );
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).not.toContain('hand-written notes');
+  });
+
+  it('rejects an existing directory at the leaf before generating', async () => {
+    await fs.mkdir(path.join(projectRoot, 'docs', 'PROJECT_SUMMARY.md'), {
+      recursive: true,
+    });
+    const result = await run('docs');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('existing directory');
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overwrite a file that embeds a full footer mid-document', async () => {
+    const target = path.join(projectRoot, 'ARCHIVE.md');
+    await fs.writeFile(
+      target,
+      'intro\n\n---\n\n## Summary Metadata\n**Update time**: old\n\ntrailing prose\n',
+      'utf8',
+    );
+    const result = await run('ARCHIVE.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('already exists');
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('detects the footer in a file larger than the tail window', async () => {
+    const target = path.join(projectRoot, 'big-summary.md');
+    const padding = 'x'.repeat(8192);
+    await fs.writeFile(
+      target,
+      `${padding}\n\n---\n\n## Summary Metadata\n**Update time**: old\n`,
+      'utf8',
+    );
+    const result = await run('big-summary.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(target, 'utf8');
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).not.toContain(padding);
+  });
+
   it('returns empty content in interactive mode errors to avoid double rendering', async () => {
     const chat = {
       getHistoryShallow: () => [
