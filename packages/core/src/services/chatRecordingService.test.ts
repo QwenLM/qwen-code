@@ -159,6 +159,32 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
     });
 
+    it('stores hook display provenance in systemPayload only when provided', async () => {
+      const taggedParts: Part[] = [
+        { text: 'my prompt' },
+        {
+          text: '<qwen:user-prompt-submit-context>\nextra\n</qwen:user-prompt-submit-context>',
+        },
+      ];
+      chatRecordingService.recordUserMessage(taggedParts, undefined, {
+        displayText: 'my prompt',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
+      await chatRecordingService.flush();
+
+      const calls = vi.mocked(jsonl.writeLine).mock.calls;
+      const augmented = calls[0][1] as ChatRecord;
+      const plain = calls[1][1] as ChatRecord;
+
+      // The model-bound parts are stored verbatim; the user-authored
+      // projection travels separately in the payload.
+      expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
+      expect(augmented.systemPayload).toEqual({
+        displayText: 'my prompt',
+      });
+      expect(plain.systemPayload).toBeUndefined();
+    });
+
     it('blocks later turns after a generic durable write failure', async () => {
       const failure = new Error('disk full');
       vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);

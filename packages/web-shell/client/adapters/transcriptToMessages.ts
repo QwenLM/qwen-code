@@ -581,6 +581,7 @@ export function transcriptBlocksToDaemonMessages(
         const existingPermission = toolsByCallId.get(permissionToolCall.callId);
         if (existingPermission) {
           const previousStatus = existingPermission.status;
+          const previousEndTime = existingPermission.endTime;
           permissionToolCall.toolName = existingPermission.toolName;
           if (permBlock.resolved) {
             if (isApprovedPermissionResolution(permBlock.resolved)) {
@@ -594,11 +595,13 @@ export function transcriptBlocksToDaemonMessages(
           }
           mergeToolCall(existingPermission, permissionToolCall);
           if (
-            permBlock.resolved &&
-            isSubAgentPermission &&
-            isApprovedPermissionResolution(permBlock.resolved)
+            isTerminalToolStatus(previousStatus) ||
+            (permBlock.resolved &&
+              isSubAgentPermission &&
+              isApprovedPermissionResolution(permBlock.resolved))
           ) {
             existingPermission.status = previousStatus;
+            existingPermission.endTime = previousEndTime;
           }
           break;
         }
@@ -821,6 +824,10 @@ function mergeToolCall(
   target.locations = source.locations ?? target.locations;
 }
 
+function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
+  return status === 'completed' || status === 'failed';
+}
+
 function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'agent' || name === 'task') return true;
@@ -1006,6 +1013,7 @@ function isApprovalToken(token: string): boolean {
     token === 'confirmed' ||
     token === 'proceed' ||
     token === 'proceed_once' ||
+    token === 'proceed_once_and_switch_to_default' ||
     token === 'proceed_always_project' ||
     token === 'proceed_always_user' ||
     token === 'allow_once' ||

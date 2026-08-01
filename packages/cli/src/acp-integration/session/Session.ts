@@ -86,6 +86,7 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
+  wrapUserPromptSubmitContext,
   generateToolUseId,
   MessageBusType,
   MessageDisplayDispatcher,
@@ -96,6 +97,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -2852,10 +2854,15 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
 
-              // Add additional context from hooks to the request
+              // Add additional context from hooks to the request, wrapped in
+              // the reserved tag so it stays distinguishable from
+              // user-authored text (same shape as the interactive path).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (additionalContext) {
-                parts = [...parts, { text: additionalContext }];
+                parts = [
+                  ...parts,
+                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                ];
               }
             }
 
@@ -6167,8 +6174,15 @@ export class Session implements SessionContext {
     }
   }
 
-  async refreshSkillsFromSettings(): Promise<void> {
-    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+  async refreshSkillsFromSettings(
+    options: {
+      reloadSettings?: boolean;
+      notifyConfigChanged?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (options.reloadSettings ?? true) {
+      this.reloadSkillSettings();
+    }
     const skillManager = this.config.getSkillManager();
     let updateFailed = false;
     let updateError: unknown;
@@ -6178,7 +6192,7 @@ export class Session implements SessionContext {
       updateFailed = true;
       updateError = error;
     }
-    if (skillManager) {
+    if (skillManager && (options.notifyConfigChanged ?? true)) {
       try {
         skillManager.suppressNextSlashReload();
         await skillManager.notifyConfigChanged();
@@ -6191,6 +6205,10 @@ export class Session implements SessionContext {
       }
     }
     if (updateFailed) throw updateError;
+  }
+
+  reloadSkillSettings(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
@@ -7131,7 +7149,9 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
       opts?: {
+        errorType?: ToolErrorType;
         recordInvalidToolParams?: boolean;
+        status?: 'error' | 'cancelled';
         stopAfterPermissionCancel?: boolean;
       },
     ) => {
@@ -7148,10 +7168,10 @@ export class Session implements SessionContext {
         responseParts: errorParts,
         metadata: {
           callId,
-          status: 'error',
+          status: opts?.status ?? 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType: opts?.errorType,
         },
       });
       const loopDetected =
@@ -7984,6 +8004,33 @@ export class Session implements SessionContext {
             if (preHookResult.additionalContext) {
               debugLogger.debug(
                 `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
+              );
+            }
+          }
+
+          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+              },
+            );
+            if (activeToolAbortSignal.aborted) {
+              return earlyErrorResponse(
+                new Error('Tool invocation was cancelled'),
+                toolName,
+                { status: 'cancelled' },
+              );
+            }
+            if (!guardDecision.allowed) {
+              return earlyErrorResponse(
+                new Error(guardDecision.reason),
+                toolName,
+                { errorType: ToolErrorType.EXECUTION_DENIED },
               );
             }
           }

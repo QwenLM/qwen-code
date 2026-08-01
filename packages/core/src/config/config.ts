@@ -165,6 +165,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -1004,6 +1005,11 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional host policy evaluated with final tool arguments immediately
+   * before execution. A configured guard fails closed.
+   */
+  toolInvocationGuard?: ToolInvocationGuard;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1667,12 +1673,26 @@ export type SubSessionSpawner = (
 
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
+function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
+  return (
+    error === candidate ||
+    (error instanceof Error &&
+      error.cause instanceof AggregateError &&
+      error.cause.errors.includes(candidate))
+  );
+}
+
 export class Config {
   private sessionId: string;
+  private sessionSourceType?: string;
+  private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  private pendingSessionWriterRelease:
+    | { lease: SessionWriterLease; promise: Promise<void> }
+    | undefined;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
   private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
@@ -1725,6 +1745,7 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -2090,6 +2111,7 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -2528,6 +2550,9 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (containsErrorByIdentity(error, closeError)) {
+          throw error;
+        }
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
             [error, closeError],
@@ -3046,6 +3071,9 @@ export class Config {
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
+          if (this.sessionWriterShutdownRequested) {
+            this.startPendingSessionWriterRelease(acquiredLease);
+          }
         },
       });
       if (this.sessionWriterShutdownRequested) {
@@ -3092,12 +3120,19 @@ export class Config {
       }
       try {
         const ownedLease = lease ?? this.pendingSessionWriterLease;
-        await ownedLease?.release();
+        await this.startPendingSessionWriterRelease(ownedLease);
         if (
           this.pendingSessionWriterLease === ownedLease &&
           (ownedLease?.isReleased ?? true)
         ) {
           this.pendingSessionWriterLease = undefined;
+        }
+        if (
+          this.sessionWriterShutdownRequested &&
+          failure instanceof SessionWriterLostError &&
+          ownedLease?.isReleased
+        ) {
+          failure = new SessionWriterShutdownError();
         }
       } catch (releaseError) {
         if (
@@ -3105,7 +3140,7 @@ export class Config {
           (lease ?? this.pendingSessionWriterLease)?.isReleased
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else {
+        } else if (!containsErrorByIdentity(failure, releaseError)) {
           failure = new SessionWriterUnavailableError({
             cause: new AggregateError(
               [failure, releaseError],
@@ -3638,6 +3673,19 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  setSessionSource(sourceType: string, sourceId?: string): void {
+    this.sessionSourceType = sourceType;
+    this.sessionSourceId = sourceId;
+  }
+
+  getSessionSourceType(): string | undefined {
+    return this.sessionSourceType;
+  }
+
+  getSessionSourceId(): string | undefined {
+    return this.sessionSourceId;
   }
 
   /**
@@ -4278,6 +4326,9 @@ export class Config {
         config.enableCacheControl;
       this.contentGeneratorConfig.forceGlobalCacheScope =
         config.forceGlobalCacheScope;
+      this.contentGeneratorConfig.cacheRetention = config.cacheRetention;
+      this.contentGeneratorConfig.cacheRetentionByBlock =
+        config.cacheRetentionByBlock;
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
@@ -4304,6 +4355,14 @@ export class Config {
       if ('forceGlobalCacheScope' in sources) {
         this.contentGeneratorConfigSources['forceGlobalCacheScope'] =
           sources['forceGlobalCacheScope'];
+      }
+      if ('cacheRetention' in sources) {
+        this.contentGeneratorConfigSources['cacheRetention'] =
+          sources['cacheRetention'];
+      }
+      if ('cacheRetentionByBlock' in sources) {
+        this.contentGeneratorConfigSources['cacheRetentionByBlock'] =
+          sources['cacheRetentionByBlock'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -4565,7 +4624,10 @@ export class Config {
     newDir: string,
     expectedCanonicalDir?: string,
     opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
-  ): Promise<{ memoryRefreshError?: unknown }> {
+  ): Promise<{
+    memoryRefreshError?: unknown;
+    mcpRefreshError?: unknown;
+  }> {
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -4630,12 +4692,25 @@ export class Config {
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 
+    let memoryRefreshError: unknown;
     try {
       await this.refreshHierarchicalMemory();
-      return {};
     } catch (error) {
-      return { memoryRefreshError: error };
+      memoryRefreshError = error;
     }
+
+    let mcpRefreshError: unknown;
+    try {
+      await this.waitForMcpReady();
+      await this.refreshMcpServers();
+    } catch (error) {
+      mcpRefreshError = error;
+    }
+
+    return {
+      ...(memoryRefreshError !== undefined && { memoryRefreshError }),
+      ...(mcpRefreshError !== undefined && { mcpRefreshError }),
+    };
   }
 
   /**
@@ -4816,6 +4891,7 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
@@ -5332,6 +5408,10 @@ export class Config {
         this.recentlyRemovedMcpServers.add(name);
       }
     }
+    await this.refreshMcpServers();
+  }
+
+  private async refreshMcpServers(): Promise<void> {
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -5339,13 +5419,12 @@ export class Config {
       );
       return;
     }
+
     if (this.mcpReconcileInProgress) {
       // Coalesce: a pass is already running. Mark that the desired state
       // advanced so its drain loop runs again with the latest config, and
       // await that in-flight pass — NOT a resolved promise — so this caller
-      // does not proceed (e.g. the hot-reload listener emitting approval events
-      // and logging "complete") before its coalesced change is actually
-      // reconciled, and so it observes a shared reconcile failure.
+      // does not proceed before its coalesced change is actually reconciled.
       this.mcpReconcilePending = true;
       this.debugLogger.debug(
         '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
@@ -5354,8 +5433,7 @@ export class Config {
     }
     this.mcpReconcileInProgress = true;
     const registry = this.getToolRegistry();
-    // Run pass 1 + its drain loop as a single promise, assigned BEFORE the
-    // first await so a coalesced caller arriving mid-flight can await it.
+    // Assign before the first await so a coalesced caller can await this pass.
     const runReconcile = (async () => {
       try {
         this.debugLogger.debug(
@@ -5364,9 +5442,8 @@ export class Config {
         await registry
           .getMcpClientManager()
           .discoverAllMcpToolsIncremental(this);
-        // Drain any change that arrived while this pass was in flight. The pool
-        // path returns the in-flight promise rather than queuing, so awaiting
-        // is not enough — re-run once more to pick up the latest config.
+        // The pool path returns an in-flight promise, so re-run after any
+        // coalesced change to ensure the latest effective config is applied.
         let pass = 1;
         while (this.mcpReconcilePending) {
           this.mcpReconcilePending = false;
@@ -5390,17 +5467,13 @@ export class Config {
         throw err;
       } finally {
         this.mcpReconcileInProgress = false;
-        // Clear the coalesce flag too: if a pass threw, a pending follow-up
-        // would otherwise stay stuck `true` and make the next (unrelated)
-        // reconcile run an extra no-op drain pass. The next real settings
-        // change re-triggers reconcile anyway.
+        // A failed pass must not leak a pending drain into the next reconcile.
         this.mcpReconcilePending = false;
         this.mcpReconcilePromise = undefined;
       }
     })();
     this.mcpReconcilePromise = runReconcile;
-    // Propagate failure to this caller (and, via the shared promise, to any
-    // coalesced callers). Existing callers rely on the throw.
+    // Propagate failure to this caller and every coalesced caller.
     await runReconcile;
   }
 
@@ -7273,14 +7346,16 @@ export class Config {
     this.chatRecordingService?.beginClose({
       handoff: this.sessionWriterHandoffRequested,
     });
+    this.startPendingSessionWriterRelease();
     this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
     return this.sessionWriterClosePromise;
   }
 
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
+    const activation = this.sessionWriterActivationPromise;
     try {
-      await this.sessionWriterActivationPromise;
+      await activation;
     } catch (error) {
       if (!(error instanceof SessionWriterShutdownError)) {
         failures.push(error);
@@ -7293,10 +7368,12 @@ export class Config {
     } catch (error) {
       failures.push(error);
     }
-    const pendingLease = this.pendingSessionWriterLease;
+    const pendingLease = activation
+      ? undefined
+      : this.pendingSessionWriterLease;
     if (pendingLease) {
       try {
-        await pendingLease.release();
+        await this.startPendingSessionWriterRelease(pendingLease);
         if (
           this.pendingSessionWriterLease === pendingLease &&
           pendingLease.isReleased
@@ -7319,6 +7396,18 @@ export class Config {
     if (failures.length > 1) {
       throw new AggregateError(failures, 'Session writer shutdown failed');
     }
+  }
+
+  private startPendingSessionWriterRelease(
+    lease = this.pendingSessionWriterLease,
+  ): Promise<void> | undefined {
+    if (!lease) return undefined;
+    const existing = this.pendingSessionWriterRelease;
+    if (existing?.lease === lease) return existing.promise;
+    const promise = lease.release();
+    this.pendingSessionWriterRelease = { lease, promise };
+    void promise.catch(() => undefined);
+    return promise;
   }
 
   getSessionRuntimeBaseDir(): string {
@@ -7561,6 +7650,10 @@ export class Config {
 
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
+  }
+
+  getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    return this.toolInvocationGuard;
   }
 
   /**

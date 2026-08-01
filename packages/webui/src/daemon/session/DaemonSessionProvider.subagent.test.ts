@@ -16,6 +16,7 @@ describe('on-demand subagent transcript projection', () => {
         },
         rawOutput: {
           type: 'task_execution',
+          subagentColor: 'red',
           status: 'completed',
           terminateReason: 'max_turns',
           result: 'large result',
@@ -57,6 +58,7 @@ describe('on-demand subagent transcript projection', () => {
       rawInput: { subagent_type: 'explore' },
       rawOutput: {
         type: 'task_execution',
+        subagentColor: 'red',
         status: 'completed',
         terminateReason: 'max_turns',
         executionSummary: {

@@ -206,9 +206,14 @@ implement — satisfying a nit is never a reason to bloat the code.
   `Deferred non-Critical feedback` section, the PR has already completed five
   suggestion-capable, change-producing rounds. That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
-  those items. Act only on Critical feedback and formally requested changes
-  rendered in the actionable sections, failed checks, and the requested
-  base-conflict resolution.
+  those items. Everything rendered in the actionable sections IS in scope —
+  the deterministic filter defers the automated reviewer's non-Critical
+  suggestions and, past a small per-window budget of already-addressed
+  batches, a human author's untagged feedback too (an account can host an
+  automated reviewer loop, so the brake keys on measured regeneration, not
+  identity). A maintainer writing "fix X before merge" after round five
+  means exactly that when it reaches you — plus failed checks and the
+  requested base-conflict resolution.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -257,8 +262,16 @@ Finish with exactly one outcome:
   finding that is RESOLVED IN THE CODE. That is the test, not "did I edit a
   file this round": a finding you implemented now, and one an earlier commit
   already fixed that you re-verified still holds, are both resolved and both
-  belong here. The workflow resolves exactly those review threads
-  after the push, so a human re-reviewing sees only what is still open — an
+  belong here. After the push, the workflow resolves exactly those review
+  threads only while the live PR head is still the exact commit covered by
+  deterministic verification. The workflow checks the live head and thread
+  state around each mutation and stops resolving more threads if the result
+  cannot be proven. It does not automatically reopen a thread because GitHub
+  cannot atomically prove which actor resolved it. If uncertainty is detected,
+  remaining threads stay open for a later round. This minimizes the chance of
+  hiding a finding after unverified code lands, while acknowledging that GitHub
+  provides no atomic head-SHA precondition for the resolution mutation. A human
+  re-reviewing can focus on what is still open — an
   already-fixed Critical left open reads as an unaddressed Critical. A
   finding you declined, deferred,
   or escalated for a maintainer's decision must stay unresolved so its recorded

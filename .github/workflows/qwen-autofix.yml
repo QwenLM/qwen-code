@@ -113,12 +113,23 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a young PR, but continuing to implement them after
-  # five change-producing rounds expands the diff and creates fresh review
-  # churn. From round 6 onward, only Critical findings, formally requested
-  # changes, failed checks, and base conflicts may drive code changes;
-  # lower-severity feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '5'
+  # Suggestions may improve a PR, but continuing to implement them after ten
+  # change-producing rounds expands the diff and creates fresh review churn.
+  # From round 11 onward, only Critical findings, formally requested changes,
+  # failed checks, and base conflicts may drive code changes; lower-severity
+  # feedback is recorded and left open.
+  CRITICAL_ONLY_AFTER_ROUND: '10'
+  # Per-author tail budget inside Critical-only mode. An account is an
+  # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
+  # reviewer loop with the exact regeneration property the review bot has
+  # (feedback re-generated after every push, at zero marginal cost). So the
+  # brake keys on measured regeneration, not identity: every source gets a
+  # bounded number of untagged feedback batches per counting window once
+  # Critical-only engages — the review bot's budget is zero (all deferred),
+  # a human's is this many CONSUMED batches. Past it, continuing requires
+  # one conscious act (**[Critical]**, a Request changes review, or /retry),
+  # which is precisely what separates intent from automation.
+  CRITICAL_ONLY_HUMAN_BATCHES: '2'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -1689,6 +1700,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+          EVENT_NAME: '${{ github.event_name }}'
         run: |-
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
@@ -2247,43 +2259,85 @@ jobs:
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
               fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
-              # A MANAGED PR pausing at its cap deserves a visible reminder —
-              # maintainers otherwise learn about it only from workflow logs.
-              # Once per counting window: re-arming opens a fresh window and,
-              # if the cap is hit again, a fresh reminder. A failed post
-              # retries naturally on the next scan (marker still absent).
-              if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                # Dedup boundary = the current window key; with no engage ack
-                # yet (key 'none') fall back to LIFETIME dedup — created_at is
-                # never > 'none' lexically, which would flip this into posting
-                # every scan.
-                NOTICE_RT="${REARM_KEY}"
-                [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
-                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
-                  [ .[] | select((.user.login // "") == $ab)
-                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
-                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # A FORCED dispatch refused here answers OUT LOUD. Observed on
+              # #7836: the fleet shepherd detected a merge conflict, posted
+              # "dispatched the autofix loop to resolve it", and the dispatch
+              # died right here with only the log line above — the PR page
+              # showed a promise, the run showed green, and the conflict sat
+              # unhandled for hours. The shepherd also dedups per head SHA,
+              # and a capped PR gets no pushes, so its head never changes:
+              # silence here freezes conflict handling until a human notices
+              # by accident. Gate on workflow_dispatch — that is the explicit
+              # dispatch lever (the shepherd's `gh workflow run` or a human).
+              # FORCED_PR is ALSO set for every trusted pull_request_review
+              # (route emits pr_number for those), which is not an explicit
+              # dispatch: answering each one here spammed 7 refusals on
+              # #7836, so review submissions stay covered by the
+              # once-per-window pause notice below. No dedup on the dispatch
+              # itself: the shepherd sends at most one per head, and a human
+              # asking twice deserves two answers.
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
-                  echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
-                elif [[ "${CAP_NOTICED}" == "0" ]]; then
-                  # Consent may have moved since PR_META: a takeover label
-                  # removed (or skip added) moments ago must not receive a
-                  # stale 'paused' notice.
-                  LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
-                  if [[ " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* || " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
-                    echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
-                    continue
-                  fi
-                  # Convention: verify the PAT identity before ANY write. A
-                  # rotated PAT would post under a foreign login the dedup
-                  # (which counts AUTOFIX_BOT comments only) can never see —
-                  # reposting the notice every scan. Memoized per scan run.
+                  echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
+                else
                   if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
                     SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
-                    echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice failed for #${PR}"
+                  fi
+                fi
+              fi
+              # A MANAGED PR pausing at its cap deserves a visible reminder —
+              # maintainers otherwise learn about it only from workflow logs.
+              # ALL managed PRs, not just takeover: the takeover-only gate
+              # left standard bot PRs capping in silence (#7836 hit 10/10
+              # with zero PR-visible notice), which is the root of the
+              # frozen-conflict chain above. Once per counting window:
+              # re-arming opens a fresh window and, if the cap is hit again,
+              # a fresh reminder. A failed post retries naturally on the
+              # next scan (marker still absent).
+              # Dedup boundary = the current window key; with no engage ack
+              # or re-arm yet (key 'none') fall back to LIFETIME dedup —
+              # created_at is never > 'none' lexically, which would flip
+              # this into posting every scan.
+              NOTICE_RT="${REARM_KEY}"
+              [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
+              CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                  | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
+              elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                # Consent may have moved since PR_META: skip wins everywhere,
+                # and a takeover notice additionally requires the label to
+                # still be present — a label removed (or skip added) moments
+                # ago must not receive a stale 'paused' notice.
+                LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]] \
+                  || [[ "${HAS_TAKEOVER}" == "true" && " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
+                  echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
+                  continue
+                fi
+                # Convention: verify the PAT identity before ANY write. A
+                # rotated PAT would post under a foreign login the dedup
+                # (which counts AUTOFIX_BOT comments only) can never see —
+                # reposting the notice every scan. Memoized per scan run.
+                if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                  SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                fi
+                if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                  echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                else
+                  if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                    CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  else
+                    CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  fi
+                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
                     echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
                   fi
                 fi
@@ -2417,10 +2471,10 @@ jobs:
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
             # Per AGENTS.md's review policy, Suggestion-level findings are
-            # actionable during the first five change-producing rounds. The
-            # scan still selects later feedback so prepare can record and
-            # watermark its deferral; only the address job filters what may
-            # drive code changes.
+            # actionable during the initial change-producing rounds; takeover
+            # extends that window. The scan still selects later feedback so
+            # prepare can record and watermark its deferral; only the address
+            # job filters what may drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -2974,6 +3028,70 @@ jobs:
           if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
             CRITICAL_ONLY='true'
           fi
+          # Which trusted humans have exhausted their per-window regular
+          # feedback budget (see CRITICAL_ONLY_HUMAN_BATCHES). A batch is
+          # COUNTED only when a Critical-only round actually consumed it:
+          # feedback items are bucketed into the (prev marker ts, marker ts]
+          # span that evaluated them, spans are kept only for markers that
+          # ran in Critical-only territory (acted rounds numbered past the
+          # threshold, no-change rounds at it), and an author needs >= K
+          # distinct consumed spans to land here. Fresh, not-yet-evaluated
+          # feedback never counts against its own author, and everything is
+          # window-scoped so a /retry resets the budget with the window.
+          # Only feedback the deferred renderer below would actually defer is
+          # counted: Critical-tagged items, Request changes / APPROVED reviews,
+          # and inline comments rooted at a Critical comment or attached to a
+          # Request changes review are never deferrable, so they must not burn
+          # an author's budget — the item filter mirrors those predicates.
+          OVER_BUDGET_AUTHORS='[]'
+          if [[ "${CRITICAL_ONLY}" == "true" ]]; then
+            OVER_BUDGET_AUTHORS="$(jq -n \
+              --arg key "${LIVE_REARM_KEY}" --arg ab "${AUTOFIX_BOT}" --arg rb "${REVIEW_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" \
+              --argjson critical_after "${CRITICAL_ONLY_AFTER_ROUND}" \
+              --argjson k "${CRITICAL_ONLY_HUMAN_BATCHES}" \
+              --slurpfile rv "${WORKDIR}/rv.json" --slurpfile rc "${WORKDIR}/rc.json" --slurpfile ic "${WORKDIR}/ic.json" '
+              ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+                 | {ts: .[0], acted: .[1], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]
+               | map(select(.win == $key) | select(.ts != "9999-12-31T23:59:59Z"))
+               | sort_by(.at)) as $ms
+              | ([ range(0; ($ms | length)) as $i
+                   | ($ms[$i]
+                      | select((.acted == "true" and .round > $critical_after) or (.acted == "false" and .round >= $critical_after))
+                      | {lo: (if $i == 0 then "" else ($ms[$i - 1].ts) end), hi: .ts}) ]) as $spans
+              | ($rv | add) as $reviews
+              | ($rc | add) as $comments
+              | ([ $reviews[]
+                   | select((.state // "") == "COMMENTED")
+                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | {at: (.submitted_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
+                 + [ $comments[]
+                   | select((
+                       ((.body // "") | contains("**[Critical]**"))
+                       or ((.in_reply_to_id // null) as $root
+                         | $root != null
+                         and any($comments[]; .id == $root and ((.body // "") | contains("**[Critical]**"))))
+                       or ((.pull_request_review_id // null) as $review
+                         | $review != null
+                         and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")))
+                     ) | not)
+                   | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
+                 + [ ($ic | add)[]
+                   | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select((.body // "") | test("^\\s*@qwen-code /") | not)
+                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
+              | map(select(.login != "" and .login != $ab and .login != $rb) | select(.assoc | IN($trust[])))
+              | [ .[] | . as $c
+                  | ([ $spans[] | select($c.at > .lo and $c.at <= .hi) ] | .[0] // empty)
+                  | {login: $c.login, span: .hi} ]
+              | group_by(.login)
+              | map(select((map(.span) | unique | length) >= $k) | .[0].login)
+              ' || echo '[]')"
+            [[ -z "${OVER_BUDGET_AUTHORS}" ]] && OVER_BUDGET_AUTHORS='[]'
+            [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]] && echo "🚦 regular-feedback budget exhausted this window for: $(jq -r 'join(", ")' <<< "${OVER_BUDGET_AUTHORS}")"
+          fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
 
@@ -2983,27 +3101,27 @@ jobs:
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. Any items listed below stay open for human follow-up; do not modify code, resolve threads, or reply on their behalf."
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window's Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
                 .[]
                 | select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.state // "") == "COMMENTED")
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/rv.json"
               jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" \
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
                 --slurpfile reviews "${WORKDIR}/rv.json" '
                 add as $comments
                 | ($reviews | add) as $reviews
                 | $comments[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((
                     ((.body // "") | contains("**[Critical]**"))
                     or ((.in_reply_to_id // null) as $root
@@ -3020,21 +3138,25 @@ jobs:
                 | "- Inline rc:\(.id) \(.path // "?"):\(.line // "?"): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/rc.json"
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
                 .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/ic.json"
+              if [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]]; then
+                echo
+                jq -r '.[] | "- @" + . + " is at this window'"'"'s regular-feedback budget — to continue: tag **[Critical]**, submit a Request changes review, or comment `@qwen-code /retry` for a fresh window. / @" + . + " 本窗口常规反馈预算已用完——继续请标 **[Critical]**、提交 Request changes、或评论 `@qwen-code /retry` 开新窗口。"' <<< "${OVER_BUDGET_AUTHORS}"
+              fi
               echo
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后，进入仅处理 Critical 的模式。以上内容保持开放，留待人工跟进；不要为其修改代码、解决线程或代为回复。"
+              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式：以上为自动评审的非 Critical 建议，予以延后、保持开放并留待人工跟进——不要为其修改代码、解决线程或代为回复。维护者的反馈仅在其本人于本窗口 Critical-only 阶段已被处理 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈之后才会被延后——账号可能挂着自动评审循环，因此刹车依据实测的再生频度而非身份；达到预算的作者（如有）在下方点名。（如需解除该模式，评论 \`@qwen-code /retry\` 即可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"
@@ -3051,13 +3173,15 @@ jobs:
             echo
             echo "## Reviews"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
+              --argjson over "${OVER_BUDGET_AUTHORS}" '
               .[]
               | select((.submitted_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))
               | select(($critical_only | not)
+                  or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or (.state // "") == "CHANGES_REQUESTED"
                   or ((.body // "") | contains("**[Critical]**")))
               | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
@@ -3066,6 +3190,7 @@ jobs:
             echo "## Inline comments"
             jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
+              --argjson over "${OVER_BUDGET_AUTHORS}" \
               --slurpfile reviews "${WORKDIR}/rv.json" '
               add as $comments
               | ($reviews | add) as $reviews
@@ -3074,6 +3199,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
+                  or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or ((.body // "") | contains("**[Critical]**"))
                   or ((.in_reply_to_id // null) as $root
                     | $root != null
@@ -3090,7 +3216,8 @@ jobs:
             echo
             echo "## Issue-level comments"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
+              --argjson over "${OVER_BUDGET_AUTHORS}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
@@ -3098,6 +3225,7 @@ jobs:
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
+                  or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or ((.body // "") | contains("**[Critical]**")))
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
@@ -3412,7 +3540,9 @@ jobs:
             "${WORKDIR}/gate-rejection.md" \
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
-            "${WORKDIR}/agent-timeout"
+            "${WORKDIR}/agent-timeout" \
+            "${WORKDIR}/resolved-comments.txt" \
+            "${WORKDIR}/comment-replies.json"
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
@@ -3440,19 +3570,26 @@ jobs:
         env:
           FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
           FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
+          FIRST_VERIFIED_HEAD: '${{ steps.verify.outputs.verified_head }}'
           REPAIR_ATTEMPTED: '${{ steps.repair.outputs.attempted }}'
           REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
           REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
+          REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
+          VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
             OUTCOME="${REPAIR_OUTCOME}"
             COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
+            VERIFIED_HEAD="${REPAIR_VERIFIED_HEAD}"
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${COMMITTED}" ]]; then
             echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${VERIFIED_HEAD}" ]]; then
+            echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
             fixed|noop) ;;
@@ -3500,6 +3637,7 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -3541,9 +3679,67 @@ jobs:
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
               # PR branch when the author ticked the box).
-              git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"
+              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
             else
-              git push --no-verify origin "${BRANCH}"
+              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+            fi
+            # Salvage a race-lost push instead of discarding the run. The
+            # per-PR head-write concurrency group serialises THIS repo's
+            # workflows, but it cannot stop the PR author (or anything on the
+            # fork side) pushing during the agent's ~50-minute window —
+            # observed twice in one day (#7983, #7985): a one-shot push died
+            # `fetch first` and a full verified agent run was thrown away.
+            # On rejection, fetch the moved head and MERGE it into the local
+            # line (merge, not rebase: the agent's own conflict-resolution
+            # rounds create merge commits, and a rebase would flatten them
+            # and can silently re-introduce the conflicts it resolved). The
+            # merge result descends from the remote head, so the retried push
+            # is a fast-forward. A genuine content conflict aborts and falls
+            # through to the existing failure path — same as today.
+            PUSH_RACE_MERGED='false'
+            for push_attempt in 1 2 3; do
+              if git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+                break
+              fi
+              if [[ "${push_attempt}" == 3 ]]; then
+                echo "::error::push rejected ${push_attempt} times; giving up"
+                exit 1
+              fi
+              echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
+              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
+                exit 1
+              fi
+              # The disclosure flag keys on HEAD actually advancing: a push
+              # can fail transiently (upload timeout, 503) with the branch
+              # unmoved, and the merge then no-ops "Already up to date" —
+              # flagging that would tell the reviewer to re-check mid-run
+              # commits that never existed.
+              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+              if ! git -c user.name="${AUTOFIX_BOT}" \
+                -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
+                merge --no-edit FETCH_HEAD; then
+                git merge --abort || true
+                echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
+                exit 1
+              fi
+              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+                PUSH_RACE_MERGED='true'
+              fi
+            done
+            CAN_RESOLVE_THREADS='false'
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
+                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+                CAN_RESOLVE_THREADS='true'
+              else
+                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+              fi
             fi
             # Resolve the review threads whose findings the agent actually
             # IMPLEMENTED, so a human re-reviewing sees only what is still open
@@ -3573,8 +3769,15 @@ jobs:
                 echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
               fi
             fi
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              RESOLVED_N=0
+            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+              CONFIRMED_RESOLVED_N=0
+              read_thread_guard() {
+                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
+                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
+                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
+                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
+                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
+              }
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
                 rc_id="${rc_id%$'\r'}"
                 rc_id="${rc_id#rc:}"
@@ -3587,16 +3790,41 @@ jobs:
                   echo "::warning::comment ${rc_id} matched no open review thread"
                   continue
                 fi
+                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
+                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
+                  break
+                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
+                  continue
+                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
+                  break
+                fi
+                RESOLVE_SUCCEEDED='false'
                 if gh api graphql -f threadId="${thread_id}" -f query='
                   mutation($threadId:ID!){
                     resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
                   }' > /dev/null 2>&1; then
-                  RESOLVED_N=$(( RESOLVED_N + 1 ))
-                else
+                  RESOLVE_SUCCEEDED='true'
+                fi
+                POST_GUARD_OK='false'
+                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
+                  POST_GUARD_OK='true'
+                fi
+                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
+                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
+                  fi
+                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
+                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
                   echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                else
+                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
+                  break
                 fi
               done < "${WORKDIR}/resolved-comments.txt"
-              echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
             fi
             # The mirror of the resolve above: a finding the agent did NOT
             # resolve keeps its thread open, and this answers it IN that thread.
@@ -3660,6 +3888,10 @@ jobs:
               fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo
+                echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
+              fi
               echo
               echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
               echo
