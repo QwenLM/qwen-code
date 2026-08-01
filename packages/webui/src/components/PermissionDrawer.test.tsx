@@ -67,4 +67,44 @@ describe('PermissionDrawer', () => {
     expect(container?.textContent).not.toContain('Launch this agent?');
     expect(container?.textContent).toContain('Some tool');
   });
+
+  it('does not render a review-text block for normal diff-based edits', () => {
+    render({
+      kind: 'edit',
+      title: 'Edit example.ts',
+      locations: [{ path: '/repo/example.ts', line: 1 }],
+      content: [
+        {
+          type: 'diff',
+          path: '/repo/example.ts',
+          originalContent: 'unsafe',
+          newContent: 'safe',
+        },
+      ],
+    });
+
+    expect(container?.querySelector('pre')).toBeNull();
+    expect(container?.textContent).toContain('Make this edit to');
+  });
+
+  it('renders a restricted workflow edit diff carried as review text', () => {
+    render({
+      kind: 'edit',
+      title: 'Edit example.ts',
+      locations: [{ path: '/repo/example.ts', line: 1 }],
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: '@@ -1 +1 @@\n-unsafe\n+safe',
+          },
+        },
+      ],
+    });
+
+    expect(container?.textContent).toContain('@@ -1 +1 @@');
+    expect(container?.textContent).toContain('-unsafe');
+    expect(container?.textContent).toContain('+safe');
+  });
 });

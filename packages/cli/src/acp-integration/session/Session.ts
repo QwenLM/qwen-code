@@ -43,6 +43,7 @@ import type {
   MemoryWriteCandidate,
   CronTaskDelivery,
   InvocationContextV1,
+  WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -281,6 +282,10 @@ import {
 } from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const permissionRequestTails = new WeakMap<
+  AgentSideConnection,
+  Promise<void>
+>();
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -1314,6 +1319,7 @@ export class Session implements SessionContext {
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
+  private readonly workflowApprovalAbortController = new AbortController();
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1374,6 +1380,131 @@ export class Session implements SessionContext {
     this.installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
+    this.config
+      .getWorkflowRunRegistry?.()
+      .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
+        this.#requestWorkflowApproval(entry.runId, approval, rawArgs, signal),
+      );
+  }
+
+  async #requestWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void> {
+    const registry = this.config.getWorkflowRunRegistry();
+    const externalToolCallId = `workflow:${this.sessionId}:${runId}:${approval.approvalId}`;
+    const confirmationDetails = {
+      ...approval.confirmationDetails,
+      onConfirm: async () => {},
+    } as ToolCallConfirmationDetails;
+    const permissionOptions = toPermissionOptions(confirmationDetails, true);
+    const offeredPermissionOptions = permissionOptions.map((option) => ({
+      ...option,
+    }));
+    const content =
+      confirmationDetails.type === 'edit'
+        ? [
+            ...(confirmationDetails.warnings ?? []).map((warning) => ({
+              type: 'content' as const,
+              content: { type: 'text' as const, text: warning },
+            })),
+            ...(confirmationDetails.fileDiff
+              ? [
+                  {
+                    type: 'content' as const,
+                    content: {
+                      type: 'text' as const,
+                      text: confirmationDetails.fileDiff,
+                    },
+                  },
+                ]
+              : []),
+          ]
+        : buildPermissionRequestContent(confirmationDetails);
+    // Resolves against the parent session's registry; per-agent MCP tools
+    // fall back to the bare tool name (the mcp details still carry serverName).
+    const { title, locations, kind } = this.toolCallEmitter.resolveToolMetadata(
+      approval.name,
+      rawArgs,
+    );
+    const params: RequestPermissionRequest = {
+      sessionId: this.sessionId,
+      options: permissionOptions,
+      toolCall: {
+        toolCallId: externalToolCallId,
+        status: 'pending',
+        title,
+        content,
+        locations,
+        kind,
+        rawInput: rawArgs,
+        _meta: { toolName: approval.name, workflowApproval: true },
+      },
+    };
+    const signal = AbortSignal.any([
+      this.workflowApprovalAbortController.signal,
+      approvalSignal,
+    ]);
+
+    try {
+      const response = await this.#requestPermissionQueued(params, signal);
+      const outcome = resolvePermissionOutcome(
+        response,
+        offeredPermissionOptions,
+      );
+      const resolved = await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        outcome === ToolConfirmationOutcome.ProceedOnce
+          ? outcome
+          : ToolConfirmationOutcome.Cancel,
+        undefined,
+      );
+      await this.#finishWorkflowApprovalToolCall(
+        approval,
+        externalToolCallId,
+        resolved && outcome === ToolConfirmationOutcome.ProceedOnce,
+      );
+    } catch (error) {
+      debugLogger.error('Workflow permission request failed:', error);
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      await this.#finishWorkflowApprovalToolCall(
+        approval,
+        externalToolCallId,
+        false,
+      );
+    }
+  }
+
+  async #finishWorkflowApprovalToolCall(
+    approval: WorkflowApproval,
+    externalToolCallId: string,
+    success: boolean,
+  ): Promise<void> {
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: externalToolCallId,
+        status: success ? 'completed' : 'failed',
+        content: [],
+        _meta: {
+          toolName: approval.name,
+          workflowApproval: true,
+          approvalOutcome: success ? 'approved' : 'denied',
+        },
+      });
+    } catch (error) {
+      debugLogger.warn(
+        'Failed to finalize workflow approval tool call:',
+        error,
+      );
+    }
   }
 
   #prepareTodoStopGuardForPrompt(
@@ -1978,6 +2109,10 @@ export class Session implements SessionContext {
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
+    this.config
+      .getWorkflowRunRegistry?.()
+      .setApprovalRequestCallback(undefined);
+    this.workflowApprovalAbortController.abort(SESSION_DISPOSE_ABORT_REASON);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -6248,6 +6383,40 @@ export class Session implements SessionContext {
     return this.client.requestPermission(params);
   }
 
+  #requestPermissionQueued(
+    params: RequestPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<RequestPermissionResponse> {
+    const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
+    const transportRequest = prior.then(() =>
+      signal.aborted
+        ? requestPermissionWithAbort(this.client, params, signal)
+        : this.client.requestPermission(params),
+    );
+    // Advance the queue when the transport settles OR when the caller's
+    // signal aborts — an orphaned RPC must not wedge later requests.
+    let abortListener: (() => void) | undefined;
+    const tail = Promise.race([
+      transportRequest.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        if (signal.aborted) return resolve();
+        abortListener = () => resolve();
+        signal.addEventListener('abort', abortListener, { once: true });
+      }),
+    ]).finally(() => {
+      if (abortListener) signal.removeEventListener('abort', abortListener);
+    });
+    permissionRequestTails.set(this.client, tail);
+    return requestPermissionWithAbort(
+      { requestPermission: () => transportRequest },
+      params,
+      signal,
+    );
+  }
+
   /**
    * Sets the approval mode for the current session.
    * Maps ACP approval mode values to core ApprovalMode enum.
@@ -7321,6 +7490,7 @@ export class Session implements SessionContext {
                 agentToolAbortController?.abort(USER_CANCEL_ABORT_REASON);
                 onStopAfterPermissionCancel?.();
               },
+              (params, signal) => this.#requestPermissionQueued(params, signal),
             );
 
             // Set up sub-agent tool tracking
@@ -7818,8 +7988,7 @@ export class Session implements SessionContext {
               };
               let outcome: ToolConfirmationOutcome;
               try {
-                output = (await requestPermissionWithAbort(
-                  this.client,
+                output = (await this.#requestPermissionQueued(
                   params,
                   activeToolAbortSignal,
                 )) as RequestPermissionResponse & {
