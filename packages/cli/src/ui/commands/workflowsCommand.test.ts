@@ -44,16 +44,22 @@ describe('workflowsCommand', () => {
   let context: CommandContext;
   let listMock: ReturnType<typeof vi.fn>;
   let getMock: ReturnType<typeof vi.fn>;
+  let pauseMock: ReturnType<typeof vi.fn>;
+  let resumeMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     listMock = vi.fn().mockReturnValue([] as WorkflowTask[]);
     getMock = vi.fn().mockReturnValue(undefined);
+    pauseMock = vi.fn().mockReturnValue(true);
+    resumeMock = vi.fn().mockReturnValue(true);
     context = createMockCommandContext({
       services: {
         config: {
           getWorkflowRunRegistry: () => ({
             list: listMock,
             get: getMock,
+            pause: pauseMock,
+            resume: resumeMock,
           }),
         },
       },
@@ -70,7 +76,7 @@ describe('workflowsCommand', () => {
     });
   });
 
-  it('lists active + recent buckets with running first', async () => {
+  it('lists active + recent buckets with active runs first', async () => {
     listMock.mockReturnValue([
       entry({
         runId: 'wf_done',
@@ -89,7 +95,7 @@ describe('workflowsCommand', () => {
     ]);
     const result = await workflowsCommand.action!(context, '');
     if (!result || result.type !== 'message') throw new Error('no result');
-    expect(result.content).toContain('Workflow runs (2 total · 1 running)');
+    expect(result.content).toContain('Workflow runs (2 total · 1 active)');
     const activeIdx = result.content.indexOf('Active');
     const recentIdx = result.content.indexOf('Recent');
     // Active section comes before Recent in the output.
@@ -100,6 +106,33 @@ describe('workflowsCommand', () => {
     expect(result.content).toContain('1/2 agents');
     expect(result.content).toContain('wf_done');
     expect(result.content).toContain('capitals');
+  });
+
+  it('treats pausing and paused workflows as active and explains cooperative controls', async () => {
+    listMock.mockReturnValue([
+      entry({ runId: 'wf_pausing', status: 'pausing', startTime: 2 }),
+      entry({ runId: 'wf_paused', status: 'paused', startTime: 1 }),
+      entry({
+        runId: 'wf_done',
+        status: 'completed',
+        startTime: 3,
+        endTime: 4,
+      }),
+    ]);
+
+    const result = await workflowsCommand.action!(context, '');
+    if (!result || result.type !== 'message') throw new Error('no result');
+
+    expect(result.content).toContain('Workflow runs (3 total · 2 active)');
+    expect(result.content.indexOf('wf_pausing')).toBeLessThan(
+      result.content.indexOf('Recent'),
+    );
+    expect(result.content.indexOf('wf_paused')).toBeLessThan(
+      result.content.indexOf('Recent'),
+    );
+    expect(result.content).toContain('Background tasks');
+    expect(result.content).toContain('p');
+    expect(result.content).toContain('cooperative');
   });
 
   it('omits the interactive tip in non_interactive / acp modes', async () => {
@@ -116,6 +149,99 @@ describe('workflowsCommand', () => {
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).not.toMatch(/Tip:/);
   });
+
+  it('pauses a live running workflow with p <runId>', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_running', status: 'running' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_running');
+
+    expect(pauseMock).toHaveBeenCalledWith('wf_running');
+    expect(resumeMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Cooperative pause requested');
+  });
+
+  it('resumes a live paused workflow with p <runId>', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_paused', status: 'paused' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_paused');
+
+    expect(resumeMock).toHaveBeenCalledWith('wf_paused');
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Resume requested');
+  });
+
+  it.each([
+    ['pausing', 'still pausing'],
+    ['completed', 'cannot be paused or resumed'],
+  ] as const)('rejects p for a %s workflow', async (status, message) => {
+    getMock.mockReturnValue(entry({ runId: 'wf_target', status }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_target');
+
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message' });
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain(message);
+  });
+
+  it('rejects p for unknown or malformed targets without reading snapshots', async () => {
+    const unknown = await workflowsCommand.action!(context, 'p wf_missing');
+    const malformed = await workflowsCommand.action!(context, 'p');
+
+    expect(unknown).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Unknown live workflow runId: wf_missing',
+    });
+    expect(malformed).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['non_interactive', 'acp'] as const)(
+    'does not expose pause control in %s mode',
+    async (executionMode) => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getWorkflowRunRegistry: () => ({
+              list: listMock,
+              get: getMock,
+              pause: pauseMock,
+              resume: resumeMock,
+            }),
+          },
+        },
+        executionMode,
+      } as unknown as Parameters<typeof createMockCommandContext>[0]);
+      getMock.mockReturnValue(
+        entry({ runId: 'wf_running', status: 'running' }),
+      );
+
+      const result = await workflowsCommand.action!(ctx, 'p wf_running');
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+      });
+      expect(pauseMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('detail view: known runId returns full per-field dump', async () => {
     const detail = entry({
@@ -334,7 +460,7 @@ describe('workflowsCommand', () => {
       ]);
       const result = await workflowsCommand.action!(ctx, '');
       if (!result || result.type !== 'message') throw new Error('no result');
-      expect(result.content).toContain('Workflow runs (1 total · 0 running)');
+      expect(result.content).toContain('Workflow runs (1 total · 0 active)');
       expect(result.content).toContain('Recent');
       expect(result.content).toContain('wf_persisted');
       expect(result.content).toContain('oldrun');
@@ -355,7 +481,7 @@ describe('workflowsCommand', () => {
       const result = await workflowsCommand.action!(ctx, '');
       if (!result || result.type !== 'message') throw new Error('no result');
       // Exactly one entry total; the live entry's meta wins, disk is dropped.
-      expect(result.content).toContain('Workflow runs (1 total · 0 running)');
+      expect(result.content).toContain('Workflow runs (1 total · 0 active)');
       expect(result.content).toContain('live-name');
       expect(result.content).not.toContain('disk-name');
       expect(result.content.match(/wf_dup/g)?.length).toBe(1);

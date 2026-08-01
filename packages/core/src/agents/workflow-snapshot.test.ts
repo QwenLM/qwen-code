@@ -55,6 +55,15 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
 }
 
 describe('toSnapshot', () => {
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'rejects an active %s workflow',
+    (status) => {
+      expect(() => toSnapshot(task({ status }))).toThrow(
+        'Cannot snapshot active workflow wf_a.',
+      );
+    },
+  );
+
   it('flattens perPhaseTokens Map into [phaseOrNull, tokens] pairs', () => {
     const s = toSnapshot(task());
     expect(s.perPhaseTokens).toEqual([

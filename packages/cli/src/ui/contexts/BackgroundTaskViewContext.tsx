@@ -71,6 +71,8 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
+  /** Cooperatively pause or resume the selected workflow. */
+  toggleSelectedWorkflowPause(): void;
   enterDetailFromPanel(): void;
   setPillFocused(focused: boolean): void;
   setLivePanelFocused(focused: boolean): void;
@@ -111,6 +113,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
+  toggleSelectedWorkflowPause: noop,
   setPillFocused: noop,
   setLivePanelFocused: noop,
   setLivePanelSelectedIndex: noop,
@@ -220,8 +223,8 @@ export function BackgroundTaskViewProvider({
       config.abandonBackgroundAgent(target.agentId);
       return;
     }
-    // All three registries' cancel paths are no-ops on non-running
-    // entries, so no pre-check here. Shell cancel goes through
+    // Registry cancel paths are no-ops outside their actionable states,
+    // so no pre-check here. Shell cancel goes through
     // requestCancel — it triggers the AbortController only and lets the
     // spawn's settle path record the real terminal moment + outcome
     // (mirrors the task_stop tool path in #3687). Monitor cancel is
@@ -261,7 +264,8 @@ export function BackgroundTaskViewProvider({
       }
       case 'workflow':
         // Aborts the orchestrator + in-flight dispatches via the
-        // registry's cancel — flips status to 'cancelled' and signals
+        // registry's cancel — rejects queued work, flips status to
+        // 'cancelled', and signals
         // the AbortController the WorkflowTool wired into the run.
         // The tool's catch arm sees signal.aborted and records the
         // terminal in the registry; the registry.cancel here is the
@@ -289,6 +293,18 @@ export function BackgroundTaskViewProvider({
       return;
     }
     await config.resumeBackgroundAgent(target.agentId);
+  }, [config, entries, selectedIndex]);
+
+  const toggleSelectedWorkflowPause = useCallback(() => {
+    if (!config) return;
+    const target = entries[selectedIndex];
+    if (!target || target.kind !== 'workflow') return;
+    const registry = config.getWorkflowRunRegistry();
+    if (target.status === 'running') {
+      registry.pause(target.runId);
+    } else if (target.status === 'paused') {
+      registry.resume(target.runId);
+    }
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(
@@ -323,6 +339,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
@@ -338,6 +355,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,

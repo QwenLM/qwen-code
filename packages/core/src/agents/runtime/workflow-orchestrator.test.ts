@@ -21,6 +21,7 @@ import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
 import { WorkflowRunner } from './workflow-runner.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -554,7 +555,10 @@ describe('WorkflowOrchestrator', () => {
     // (the parallel() batch collapses them to `null`).
     const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
     const budget = new WorkflowBudgetImpl(100);
+    const scheduler = new WorkflowDispatchScheduler(1);
     let dispatchCalls = 0;
+    let dispatched = 0;
+    let completed = 0;
     const orchestrator = new WorkflowOrchestrator(async () => {
       dispatchCalls += 1;
       budget.recordSpent(40); // 3 successful dispatches saturate the cap
@@ -567,6 +571,11 @@ describe('WorkflowOrchestrator', () => {
       script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
       args: undefined,
       budget,
+      scheduler,
+      emitter: {
+        agentDispatched: () => dispatched++,
+        agentCompleted: () => completed++,
+      },
     });
     // parallel() treats budget rejections as errors-as-data → null per slot.
     expect(Array.isArray(outcome.result)).toBe(true);
@@ -582,8 +591,10 @@ describe('WorkflowOrchestrator', () => {
     // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
     // per=40, the soft cap is reached at 3 dispatches (spent=120). We
     // ASSERT it doesn't reach 10 (the without-fix overshoot value).
-    expect(dispatchCalls).toBeLessThan(10);
-    expect(successes).toBeLessThan(10);
+    expect(dispatchCalls).toBe(3);
+    expect(successes).toBe(3);
+    expect(dispatched).toBe(10);
+    expect(completed).toBe(dispatched);
   });
 
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
@@ -795,6 +806,39 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('keeps a nested agent result behind the shared pause gate', async () => {
+    let finishDispatch: ((value: string) => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+    const run = orchestrator.run({
+      script: `return await workflow('child');`,
+      args: undefined,
+      scheduler,
+      resolveSavedWorkflow: async () => ({
+        script: `return await agent('inner');`,
+      }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    scheduler.pause();
+    finishDispatch?.('nested result');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    void run.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'nested result' });
+  });
+
   it('P-nested: nested args are passed to the child script', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     const resolveSavedWorkflow = async () => ({
@@ -948,6 +992,85 @@ describe('WorkflowOrchestrator', () => {
     expect((results[1] as { result: unknown }).result).toBe('r:b');
   });
 
+  it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls++;
+      return prompt;
+    });
+
+    const run = orchestrator.run({
+      script: `return await parallel([
+        () => agent('a'),
+        () => agent('b'),
+        () => agent('c'),
+      ]);`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() =>
+      expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
+        3,
+      ),
+    );
+    const started = entries.filter((entry) => entry.type === 'started');
+    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
+    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    expect(dispatchCalls).toBe(0);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: ['a', 'b', 'c'] });
+  });
+
+  it('appends an in-flight result before the paused result gate opens', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let finish: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    scheduler.pause();
+    finish?.('done');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(1);
+    let settled = false;
+    void run.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'done' });
+  });
+
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.
@@ -975,12 +1098,23 @@ describe('WorkflowOrchestrator', () => {
     const journal2 = {
       append: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
-    const outcome = await orch2.run({
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    const run = orch2.run({
       script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
       args: undefined,
       journal: journal2,
       resumeReplay: buildReplay(entries),
+      scheduler,
     });
+    let settled = false;
+    void run.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    scheduler.resume();
+    const outcome = await run;
     expect(dispatchCalls).toBe(0); // fully cached
     expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
   });

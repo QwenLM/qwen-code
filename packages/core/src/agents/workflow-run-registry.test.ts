@@ -737,6 +737,59 @@ describe('WorkflowRunRegistry', () => {
     expect(e.agentsCompleted).toBe(1);
   });
 
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'treats %s workflows as active until a terminal transition',
+    (status) => {
+      const r = new WorkflowRunRegistry();
+      const entry = r.register(reg(`wf_${status}`));
+      if (status !== 'running') r.onDispatchStateChange(entry.runId, 'pausing');
+      if (status === 'paused') r.onDispatchStateChange(entry.runId, 'paused');
+
+      expect(r.hasRunningEntries()).toBe(true);
+      expect(() => r.register(reg(entry.runId))).toThrow(/already active/);
+      r.onPhaseStarted(entry.runId, 'Active phase');
+      r.onAgentDispatched(entry.runId);
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 12, 100);
+      r.setRecentLogs(entry.runId, ['active log']);
+      expect(entry).toMatchObject({
+        status,
+        currentPhase: 'Active phase',
+        agentsDispatched: 1,
+        agentsCompleted: 1,
+        tokensSpent: 12,
+        recentLogs: ['active log'],
+      });
+
+      if (status === 'running') r.complete(entry.runId, 'done', 2_000);
+      if (status === 'pausing') r.fail(entry.runId, 'boom', 2_000);
+      if (status === 'paused') r.cancel(entry.runId, 2_000);
+      expect(r.hasRunningEntries()).toBe(false);
+    },
+  );
+
+  it('does not resume a workflow until pausing has reached paused', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_resume_gate'));
+    const handle = {
+      runId: entry.runId,
+      abort: vi.fn(),
+      pause: vi.fn(() => true),
+      resume: vi.fn(() => true),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    expect(r.resume(entry.runId)).toBe(false);
+    expect(handle.resume).not.toHaveBeenCalled();
+    r.onDispatchStateChange(entry.runId, 'running');
+    expect(entry.status).toBe('pausing');
+
+    r.onDispatchStateChange(entry.runId, 'paused');
+    expect(r.resume(entry.runId)).toBe(true);
+    expect(handle.resume).toHaveBeenCalledOnce();
+  });
+
   it('setRecentLogs caps at 100 entries (keeps the tail)', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_1'));
@@ -803,15 +856,21 @@ describe('WorkflowRunRegistry', () => {
     expect(ids).not.toContain('wf_0');
   });
 
-  it('running entries are never evicted', () => {
+  it('active entries are never evicted', () => {
     const r = new WorkflowRunRegistry();
-    r.register(reg('runner')); // stays running
+    r.register(reg('runner'));
+    r.register(reg('pauser'));
+    r.onDispatchStateChange('pauser', 'pausing');
+    r.register(reg('paused'));
+    r.onDispatchStateChange('paused', 'pausing');
+    r.onDispatchStateChange('paused', 'paused');
     for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS + 3; i++) {
       r.register(reg(`done_${i}`));
       r.complete(`done_${i}`, null, 2_000 + i);
     }
-    expect(r.get('runner')).toBeDefined();
     expect(r.get('runner')!.status).toBe('running');
+    expect(r.get('pauser')!.status).toBe('pausing');
+    expect(r.get('paused')!.status).toBe('paused');
   });
 
   it('register callback fires synchronously inside register()', () => {
@@ -1037,34 +1096,46 @@ describe('WorkflowRunRegistry', () => {
     expect(ac1.signal.aborted).toBe(false);
   });
 
-  it('abortAll() aborts every running entry and marks them cancelled', () => {
+  it('abortAll() aborts every active entry and marks them cancelled', () => {
     const r = new WorkflowRunRegistry();
-    const ac1 = new AbortController();
-    const ac2 = new AbortController();
+    const acRunning = new AbortController();
+    const acPausing = new AbortController();
+    const acPaused = new AbortController();
     const acDone = new AbortController();
-    r.register(reg('wf_run1', { abortController: ac1 }));
-    r.register(reg('wf_run2', { abortController: ac2 }));
+    r.register(reg('wf_running', { abortController: acRunning }));
+    r.register(reg('wf_pausing', { abortController: acPausing }));
+    r.onDispatchStateChange('wf_pausing', 'pausing');
+    r.register(reg('wf_paused', { abortController: acPaused }));
+    r.onDispatchStateChange('wf_paused', 'pausing');
+    r.onDispatchStateChange('wf_paused', 'paused');
     r.register(reg('wf_done', { abortController: acDone }));
     r.complete('wf_done', null, 1_000);
     r.abortAll();
-    expect(ac1.signal.aborted).toBe(true);
-    expect(ac2.signal.aborted).toBe(true);
+    expect(acRunning.signal.aborted).toBe(true);
+    expect(acPausing.signal.aborted).toBe(true);
+    expect(acPaused.signal.aborted).toBe(true);
     // Already-terminal entry's controller is NOT re-aborted (no-op for
     // settled entries).
     expect(acDone.signal.aborted).toBe(false);
-    expect(r.get('wf_run1')!.status).toBe('cancelled');
-    expect(r.get('wf_run2')!.status).toBe('cancelled');
+    expect(r.get('wf_running')!.status).toBe('cancelled');
+    expect(r.get('wf_pausing')!.status).toBe('cancelled');
+    expect(r.get('wf_paused')!.status).toBe('cancelled');
     expect(r.get('wf_done')!.status).toBe('completed');
   });
 
-  it('hasRunningEntries() reflects the running subset', () => {
-    const r = new WorkflowRunRegistry();
-    expect(r.hasRunningEntries()).toBe(false);
-    r.register(reg('wf_1'));
-    expect(r.hasRunningEntries()).toBe(true);
-    r.complete('wf_1', null, 1_000);
-    expect(r.hasRunningEntries()).toBe(false);
-  });
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'hasRunningEntries() treats %s as active',
+    (status) => {
+      const r = new WorkflowRunRegistry();
+      expect(r.hasRunningEntries()).toBe(false);
+      r.register(reg('wf_1'));
+      if (status !== 'running') r.onDispatchStateChange('wf_1', 'pausing');
+      if (status === 'paused') r.onDispatchStateChange('wf_1', 'paused');
+      expect(r.hasRunningEntries()).toBe(true);
+      r.complete('wf_1', null, 1_000);
+      expect(r.hasRunningEntries()).toBe(false);
+    },
+  );
 
   // ── P5: budget + warning latch ─────────────────────────────────────
 

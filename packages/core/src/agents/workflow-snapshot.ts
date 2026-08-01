@@ -17,7 +17,11 @@ import { promises as fs } from 'node:fs';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
-import type { WorkflowStatus, WorkflowTask } from './workflow-run-registry.js';
+import {
+  isTerminalWorkflowStatus,
+  type WorkflowTask,
+  type WorkflowTerminalStatus,
+} from './workflow-run-registry.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -28,7 +32,7 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 export interface WorkflowSnapshot {
   runId: string;
   meta: WorkflowMeta | null;
-  status: WorkflowStatus;
+  status: WorkflowTerminalStatus;
   script: string;
   scriptPath?: string;
   phases: string[];
@@ -47,6 +51,9 @@ export interface WorkflowSnapshot {
 
 /** Project a (terminal) registry entry into a serializable snapshot. */
 export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
+  if (!isTerminalWorkflowStatus(task.status)) {
+    throw new Error(`Cannot snapshot active workflow ${task.runId}.`);
+  }
   return {
     runId: task.runId,
     meta: task.meta,

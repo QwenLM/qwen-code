@@ -7,7 +7,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import type { Config } from '../../config/config.js';
-import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import {
+  isTerminalWorkflowStatus,
+  WorkflowRunRegistry,
+} from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
@@ -65,7 +68,7 @@ function observeSettlement(registry: WorkflowRunRegistry): {
     );
   });
   registry.setStatusChangeCallback((entry) => {
-    if (entry && entry.status !== 'running') {
+    if (entry && isTerminalWorkflowStatus(entry.status)) {
       terminalStatuses.push(entry.status);
     }
   });
@@ -242,6 +245,176 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('completed');
     expect(observed.terminalStatuses).toEqual(['completed']);
     expect(observed.abortCount()).toBe(1);
+  });
+
+  it('holds an in-flight agent result until a paused run resumes', async () => {
+    const { config, registry } = configWithRegistry();
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+
+    expect(registry.pause(handle.runId)).toBe(true);
+    expect(registry.get(handle.runId)?.status).toBe('pausing');
+    resolveDispatch?.('done');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
+    let settled = false;
+    void handle.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    expect(registry.resume(handle.runId)).toBe(true);
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+  });
+
+  it('holds an in-flight agent rejection until a paused run resumes', async () => {
+    const { config, registry } = configWithRegistry();
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    registry.pause(handle.runId);
+    rejectDispatch?.(new Error('agent failed'));
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
+    let settled = false;
+    void handle.completion.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    registry.resume(handle.runId);
+    await expect(handle.completion).resolves.toMatchObject({ ok: false });
+    expect(registry.get(handle.runId)?.status).toBe('failed');
+  });
+
+  it('keeps queued agents stopped while pausing and starts them after resume', async () => {
+    const originalConcurrency =
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+    try {
+      const { config, registry } = configWithRegistry();
+      const started: string[] = [];
+      const finishes = new Map<string, (value: string) => void>();
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `return await parallel([
+          () => agent("first"),
+          () => agent("second"),
+        ])`,
+        args: undefined,
+        runInBackground: true,
+        dispatch: (prompt) =>
+          new Promise<string>((resolve) => {
+            started.push(prompt);
+            finishes.set(prompt, resolve);
+          }),
+      });
+      await vi.waitFor(() => expect(started).toEqual(['first']));
+
+      expect(registry.pause(handle.runId)).toBe(true);
+      finishes.get('first')?.('first done');
+      await vi.waitFor(() =>
+        expect(registry.get(handle.runId)?.status).toBe('paused'),
+      );
+      expect(started).toEqual(['first']);
+      expect(registry.get(handle.runId)).toMatchObject({
+        agentsDispatched: 2,
+        agentsCompleted: 1,
+      });
+      let settled = false;
+      void handle.completion.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      expect(registry.resume(handle.runId)).toBe(true);
+      await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
+      finishes.get('second')?.('second done');
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    } finally {
+      if (originalConcurrency === undefined) {
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      } else {
+        process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = originalConcurrency;
+      }
+    }
+  });
+
+  it('cancels a paused run without starting queued agents or deadlocking', async () => {
+    const originalConcurrency =
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+    try {
+      const { config, registry } = configWithRegistry();
+      const started: string[] = [];
+      let finishFirst: ((value: string) => void) | undefined;
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `return await parallel([
+          () => agent("first"),
+          () => agent("second"),
+        ])`,
+        args: undefined,
+        runInBackground: true,
+        dispatch: (prompt) =>
+          new Promise<string>((resolve) => {
+            started.push(prompt);
+            if (prompt === 'first') finishFirst = resolve;
+          }),
+      });
+      await vi.waitFor(() => expect(started).toEqual(['first']));
+      registry.pause(handle.runId);
+      finishFirst?.('first done');
+      await vi.waitFor(() =>
+        expect(registry.get(handle.runId)?.status).toBe('paused'),
+      );
+
+      registry.cancel(handle.runId, Date.now());
+
+      await expect(handle.completion).resolves.toMatchObject({ ok: false });
+      expect(registry.get(handle.runId)).toMatchObject({
+        status: 'cancelled',
+        agentsDispatched: 2,
+        agentsCompleted: 2,
+      });
+      expect(started).toEqual(['first']);
+    } finally {
+      if (originalConcurrency === undefined) {
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      } else {
+        process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = originalConcurrency;
+      }
+    }
   });
 
   it('rejects a concurrent resume while the original run is active', async () => {

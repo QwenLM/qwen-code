@@ -13,12 +13,14 @@ import {
   createChildAbortController,
 } from '../../utils/abortController.js';
 import {
+  isTerminalWorkflowStatus,
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
 import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
 import {
   createProductionDispatch,
+  resolveConcurrencyLimit,
   WorkflowExecutionError,
   WorkflowOrchestrator,
   type WorkflowAgentDispatch,
@@ -26,6 +28,7 @@ import {
   type WorkflowRunOutcome,
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import { resolveSavedWorkflowScript } from './workflow-saved.js';
 
@@ -53,6 +56,7 @@ export class WorkflowRunHandle {
     readonly budget: WorkflowBudgetImpl,
     readonly registry: WorkflowRunRegistry | undefined,
     private readonly controller: AbortController,
+    private readonly scheduler: WorkflowDispatchScheduler,
     start: () => Promise<WorkflowRunSettlement>,
   ) {
     this.completion = Promise.resolve().then(start);
@@ -60,6 +64,14 @@ export class WorkflowRunHandle {
 
   abort(): void {
     this.controller.abort();
+  }
+
+  pause(): boolean {
+    return this.scheduler.pause();
+  }
+
+  resume(): boolean {
+    return this.scheduler.resume();
   }
 }
 
@@ -156,11 +168,18 @@ export class WorkflowRunner {
       },
     };
 
+    const scheduler = new WorkflowDispatchScheduler(
+      resolveConcurrencyLimit(),
+      controller.signal,
+      ({ state }) => registry?.onDispatchStateChange(runId, state),
+    );
+
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
       runId,
       budget,
       registry,
       controller,
+      scheduler,
       async (): Promise<WorkflowRunSettlement> => {
         try {
           const outcome = await orchestrator.run({
@@ -174,6 +193,7 @@ export class WorkflowRunner {
               resolveSavedWorkflowScript(ref, config),
             journal,
             resumeReplay,
+            scheduler,
           });
           if (entry) {
             entry.meta = outcome.meta;
@@ -202,7 +222,7 @@ export class WorkflowRunner {
           return { ok: false, message, details };
         } finally {
           controller.abort();
-          if (entry && entry.status !== 'running') {
+          if (entry && isTerminalWorkflowStatus(entry.status)) {
             await writeWorkflowSnapshot(config, entry);
             try {
               logWorkflowRun(

@@ -113,6 +113,9 @@ interface Harness {
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
   workflowResolvePendingApproval: ReturnType<typeof vi.fn>;
+  workflowPause: ReturnType<typeof vi.fn>;
+  workflowResume: ReturnType<typeof vi.fn>;
+  workflowCancel: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
   pressKeyBroadcast: (key: {
@@ -141,6 +144,9 @@ function setup(
   const monitorCancel = vi.fn();
   const dreamCancelTask = vi.fn();
   const workflowResolvePendingApproval = vi.fn();
+  const workflowPause = vi.fn();
+  const workflowResume = vi.fn();
+  const workflowCancel = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -177,6 +183,9 @@ function setup(
     }),
     getWorkflowRunRegistry: () => ({
       resolvePendingApproval: workflowResolvePendingApproval,
+      pause: workflowPause,
+      resume: workflowResume,
+      cancel: workflowCancel,
     }),
     getIdeMode: () => false,
     isTrustedFolder: () => true,
@@ -232,6 +241,9 @@ function setup(
     monitorCancel,
     dreamCancelTask,
     workflowResolvePendingApproval,
+    workflowPause,
+    workflowResume,
+    workflowCancel,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -284,6 +296,54 @@ describe('BackgroundTasksDialog', () => {
     h.setEntries([{ ...running, status: 'completed' }]);
 
     expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
+  it('exits detail when active workflows reorder after the selected run completes', () => {
+    const first = workflowEntry({
+      runId: 'wf_first',
+      id: 'wf_first',
+      status: 'running',
+    });
+    const second = workflowEntry({
+      runId: 'wf_second',
+      id: 'wf_second',
+      status: 'running',
+    });
+    const h = setup([first, second]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.setEntries([
+      second,
+      { ...first, status: 'completed', endTime: Date.now() },
+    ]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+    expect(h.workflowPause).not.toHaveBeenCalled();
+    expect(h.workflowResume).not.toHaveBeenCalled();
+    expect(h.workflowCancel).not.toHaveBeenCalled();
+  });
+
+  it('exits detail when a non-workflow entry replaces the selected index', () => {
+    const workflow = workflowEntry({
+      runId: 'wf_selected',
+      id: 'wf_selected',
+      status: 'running',
+    });
+    const agent = entry({ agentId: 'agent-next', id: 'agent-next' });
+    const h = setup([workflow, agent]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    h.setEntries([
+      agent,
+      { ...workflow, status: 'completed', endTime: Date.now() },
+    ]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+    expect(h.cancel).not.toHaveBeenCalled();
   });
 
   it('exits to list mode after cancelling the running entry being viewed in detail', () => {
@@ -598,6 +658,56 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.selectedIndex).toBe(0);
   });
 
+  it('uses bare p to pause and resume workflows while Ctrl+P stays navigation', () => {
+    const running = workflowEntry({ status: 'running' });
+    const h = setup([running, entry({ agentId: 'a' })]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'p' });
+    expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
+    expect(h.workflowResume).not.toHaveBeenCalled();
+
+    h.setEntries([
+      workflowEntry({ status: 'paused' }),
+      entry({ agentId: 'a' }),
+    ]);
+    h.pressKey({ sequence: 'p' });
+    expect(h.workflowResume).toHaveBeenCalledWith('wf_test1234');
+
+    h.call(() => h.probe.current!.actions.moveSelectionDown());
+    h.pressKey({ name: 'p', sequence: '\u0010', ctrl: true });
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+    expect(h.workflowPause).toHaveBeenCalledTimes(1);
+    expect(h.workflowResume).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not toggle a workflow while it is cooperatively pausing', () => {
+    const h = setup([workflowEntry({ status: 'pausing' })]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'p' });
+
+    expect(h.workflowPause).not.toHaveBeenCalled();
+    expect(h.workflowResume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['running', 'pause'],
+    ['paused', 'resume'],
+  ] as const)(
+    'uses bare p to %s a workflow from detail mode',
+    (status, action) => {
+      const h = setup([workflowEntry({ status })]);
+
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      h.pressKey({ sequence: 'p' });
+
+      const expected = action === 'pause' ? h.workflowPause : h.workflowResume;
+      expect(expected).toHaveBeenCalledWith('wf_test1234');
+    },
+  );
+
   it('resumes a paused task with the r key', () => {
     const paused = entry({ agentId: 'a', status: 'paused' });
     const h = setup([paused]);
@@ -895,6 +1005,7 @@ describe('BackgroundTasksDialog', () => {
       tokenBudgetTotal: null,
       perPhaseTokens: new Map<string | null, number>(),
       pendingApprovals: [] as WorkflowApproval[],
+      script: '',
     };
     return { ...base, ...overrides } as unknown as DialogEntry;
   }
@@ -967,6 +1078,42 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('420t');
     });
   });
+
+  it.each(['pausing', 'paused'] as const)(
+    'keeps workflow detail open without save while %s',
+    (status) => {
+      const running = workflowEntry({
+        status: 'running',
+        script: 'await run();',
+      });
+      const h = setup([running]);
+
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      h.setEntries([
+        workflowEntry({ status, script: 'await run();', endTime: undefined }),
+      ]);
+
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+      expect(h.lastFrame()).not.toContain('s save');
+      expect(h.lastFrame()).toContain('cooperative');
+    },
+  );
+
+  it.each(['pausing', 'paused'] as const)(
+    'allows an active %s workflow to be stopped',
+    (status) => {
+      const h = setup([workflowEntry({ status })]);
+
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.pressKey({ sequence: 'x' });
+
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    },
+  );
 
   it('marks a workflow row when it needs approval', () => {
     const wf = workflowEntry({
