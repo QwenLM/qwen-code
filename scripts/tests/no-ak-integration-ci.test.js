@@ -82,6 +82,30 @@ describe('no-AK integration CI wiring', () => {
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStep).toContain(
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+    );
+    for (const key of [
+      'API_KEY',
+      'ANTHROPIC_API_KEY',
+      'BAILIAN_CODING_PLAN_API_KEY',
+      'BAILIAN_TOKEN_PLAN_API_KEY',
+      'DASHSCOPE_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'IDEALAB_API_KEY',
+      'MINIMAX_API_KEY',
+      'MODELSCOPE_API_KEY',
+      'OPENAI_API_KEY',
+      'OPENROUTER_API_KEY',
+      'QWEN_API_KEY',
+      'REQUESTY_API_KEY',
+      'XAI_API_KEY',
+      'ZAI_API_KEY',
+    ]) {
+      expect(gateStep).toContain(`${key}: ''`);
+    }
     expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
