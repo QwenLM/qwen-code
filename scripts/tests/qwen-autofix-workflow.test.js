@@ -8413,11 +8413,14 @@ describe('qwen-autofix workflow', () => {
     );
     expect(repairCapMin - repairMs / 60000).toBeGreaterThanOrEqual(1);
 
-    // The run block clamps QWEN_TIMEOUT_MS to the budget ceiling so a
-    // misconfigured repo variable degrades to a warning, not a misreport.
+    // The run block clamps QWEN_TIMEOUT_MS to a RANGE so a misconfigured repo
+    // variable degrades to a warning, not a misreport. Both bounds, because
+    // the floor guards the likelier mistake: this variable is the one place
+    // that wants milliseconds while everything around it says minutes.
     expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
+    expect(addressStep).toContain('BUDGET_FLOOR_MS=60000');
     expect(addressStep).toMatch(
-      /QWEN_TIMEOUT_MS.*exceeds the budget ceiling; clamping/,
+      /QWEN_TIMEOUT_MS.*MILLISECONDS in \[.*\].*clamping to/,
     );
     // The clamp ceiling must stay under the step backstop with the SAME margin
     // rule as the fallback above, or the cap fires first and the internal kill
@@ -8446,8 +8449,8 @@ describe('qwen-autofix workflow', () => {
         .trim()
         .split('\n')
         .pop();
-    // In-range values pass through untouched; the cap itself is inclusive.
-    expect(runClamp('100')).toBe('100');
+    // In-range values pass through untouched; both bounds are inclusive.
+    expect(runClamp('60000')).toBe('60000');
     expect(runClamp('7200000')).toBe('7200000');
     // Over-cap, malformed, zero-padded (octal), and int64-overflowing values
     // all clamp to the ceiling instead of reaching run-agent.mjs unclamped.
@@ -8455,6 +8458,36 @@ describe('qwen-autofix workflow', () => {
     expect(runClamp('abc')).toBe('7200000');
     expect(runClamp('09999999')).toBe('7200000');
     expect(runClamp('9223372036854775808')).toBe('7200000');
+
+    // The FLOOR, and the reason it exists: every comment, the PR body and the
+    // operator message speak in minutes while this variable wants
+    // milliseconds. `120` is not a contrived input — it is what a maintainer
+    // told to "raise the agent time budget" types. Unclamped it arms a 120 ms
+    // timer, so every round SIGTERMs instantly and reports a timeout until
+    // TIMEOUT_WINDOW_CAP stops AutoFix on the PR, advising the human to raise
+    // the budget they just raised, with no warning anywhere in that loop.
+    for (const minutesShaped of ['1', '30', '60', '120', '999']) {
+      expect(runClamp(minutesShaped)).toBe('7200000');
+    }
+    // `0` and `000` passed the bare regex while the message claimed the value
+    // had to be positive.
+    expect(runClamp('0')).toBe('7200000');
+    expect(runClamp('000')).toBe('7200000');
+    // Just under and just over the floor, so the boundary is pinned in both
+    // directions rather than only from inside.
+    expect(runClamp('59999')).toBe('7200000');
+    expect(runClamp('60001')).toBe('60001');
+
+    // The message has to name the units, since a units confusion is the whole
+    // failure mode this branch exists for.
+    const warned = execFileSync('bash', ['-c', `${clampBlock}\n:`], {
+      env: { ...process.env, QWEN_TIMEOUT_MS: '120' },
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    expect(warned).toContain('::warning::');
+    expect(warned).toContain('MILLISECONDS');
+    expect(warned).toContain('120 means 120ms, not 120 minutes');
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {

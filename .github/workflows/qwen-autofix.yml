@@ -3491,9 +3491,23 @@ jobs:
           # wraps negative in (( )) and slips past the comparison unclamped.
           # 10# forces base-10: a zero-padded value is octal in (( )) and would
           # error past the guard the same way.
+          # A FLOOR, not just a ceiling — and the floor guards the likelier
+          # mistake. Every comment here, the PR body and the operator message
+          # all speak in MINUTES; this one variable wants MILLISECONDS. A
+          # maintainer told to "raise the agent time budget" who sets
+          # QWEN_AUTOFIX_TIMEOUT_MS=120 arms a 120 ms timer: every round
+          # SIGTERMs instantly, writes agent-timeout, and reports "ran out of
+          # time (timeout (120ms))" until TIMEOUT_WINDOW_CAP trips and AutoFix
+          # stops on the PR — advising the human to raise the budget they just
+          # raised, with no ::warning:: anywhere in that loop. 60000 rejects
+          # every minutes-shaped value (1..999) and every 0/000, which the
+          # bare regex admitted while the message claimed positivity.
           BUDGET_CAP_MS=7200000
-          if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] || (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
-            echo "::warning::QWEN_TIMEOUT_MS=${QWEN_TIMEOUT_MS} is not a positive integer or exceeds the budget ceiling; clamping to ${BUDGET_CAP_MS}"
+          BUDGET_FLOOR_MS=60000
+          if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] ||
+             (( 10#${QWEN_TIMEOUT_MS} < BUDGET_FLOOR_MS )) ||
+             (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
+            echo "::warning::QWEN_TIMEOUT_MS=${QWEN_TIMEOUT_MS} is not an integer of MILLISECONDS in [${BUDGET_FLOOR_MS}, ${BUDGET_CAP_MS}] (120 means 120ms, not 120 minutes); clamping to ${BUDGET_CAP_MS}"
             QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
           fi
           export QWEN_TIMEOUT_MS
