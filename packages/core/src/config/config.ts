@@ -98,6 +98,8 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
+import type { SkillLevel } from '../skills/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -963,6 +965,11 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
+   * Skill discovery levels that should not be loaded. Sourced from
+   * `settings.skills.disabledLevels`.
+   */
+  disabledSkillLevels?: readonly SkillLevel[];
+  /**
    * Additional directories to scan for skills (SKILL.md files).
    * Sourced from `settings.skills.directories`. Paths are raw
    * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
@@ -1785,6 +1792,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
@@ -2098,6 +2106,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
@@ -2853,6 +2862,22 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
+      if (this.getAutoSkillEnabled() && this.isTrustedFolder()) {
+        try {
+          const curatorResult = await maybeRunAutoSkillCurator(
+            this.getProjectRoot(),
+          );
+          if (curatorResult.status === 'ran') {
+            this.debugLogger.debug(
+              `Auto-skill curator checked ${curatorResult.result.checked} skill(s) and archived ${curatorResult.result.archived.length}.`,
+            );
+          }
+        } catch (error) {
+          this.debugLogger.warn(
+            `Auto-skill curator skipped: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       this.skillManager = new SkillManager(this);
       if (this.getBareMode() || this.isSafeMode()) {
         await this.skillManager.refreshCache();
@@ -5007,6 +5032,14 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  /**
+   * Returns skill discovery levels excluded through
+   * `settings.skills.disabledLevels`.
+   */
+  getDisabledSkillLevels(): ReadonlySet<SkillLevel> {
+    return this.disabledSkillLevels;
   }
 
   /**

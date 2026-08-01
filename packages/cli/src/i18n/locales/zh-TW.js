@@ -261,7 +261,7 @@ export default {
   'to search history': '搜索歷史',
   'to paste images': '粘貼圖片',
   'for external editor': '外部編輯器',
-  'to view transcript': '檢視完整記錄',
+  'to expand details': '展開詳情',
   'Jump through words in the input': '在輸入中按單詞跳轉',
   'Close dialogs, cancel requests, or quit application':
     '關閉對話框、取消請求或退出應用程序',
@@ -464,9 +464,6 @@ export default {
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
   Transcript: '完整記錄',
-  'to close': '關閉',
-  'to scroll': '捲動',
-  'Failed to render transcript.': '無法呈現完整記錄。',
   'Read {{count}} file': '讀取了 {{count}} 個檔案',
   'Read {{count}} files': '讀取了 {{count}} 個檔案',
   'Reading {{count}} file': '正在讀取 {{count}} 個檔案',
@@ -2328,4 +2325,55 @@ export default {
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
+  'Maintain project auto-skills based on recent use.':
+    '根據最近的使用情況維護專案自動技能。',
+  'Show project auto-skill lifecycle status.':
+    '顯示專案自動技能的生命週期狀態。',
+  'Run project auto-skill lifecycle maintenance.':
+    '執行專案自動技能的生命週期維護。',
+  'Restore an archived project auto-skill.': '還原已封存的專案自動技能。',
+  'Auto-skill curator': '自動技能管理器',
+  'Last run: {{time}}': '上次執行：{{time}}',
+  'Active: {{count}}': '使用中：{{count}}',
+  'Stale: {{count}}': '陳舊：{{count}}',
+  'Archived: {{count}}': '已封存：{{count}}',
+  'Stale skills:': '陳舊技能：',
+  'Pinned skills:': '固定技能：',
+  'Archived skills:': '已封存技能：',
+  'Dry run complete.': '試執行完成。',
+  'Curator run complete.': '維護執行完成。',
+  'Checked: {{count}}': '已檢查：{{count}}',
+  'First observed: {{count}}': '首次發現：{{count}}',
+  'Marked stale: {{count}}': '已標記為陳舊：{{count}}',
+  'Reactivated: {{count}}': '已重新啟用：{{count}}',
+  'Skipped archive collisions: {{count}}': '已略過封存衝突：{{count}}',
+  'Archive candidates:': '待封存技能：',
+  'Skipped archive collisions:': '已略過的封存衝突：',
+  'Skipped rename errors: {{count}}': '已略過重新命名錯誤：{{count}}',
+  'Skipped rename errors:': '已略過的重新命名錯誤：',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': '將封存',
+  Archived: '已封存',
+  'Failed to read auto-skill curator status: {{message}}':
+    '讀取自動技能管理器狀態失敗：{{message}}',
+  'Usage: /curator run [--dry-run]': '用法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '執行自動技能管理器失敗：{{message}}',
+  'Usage: /curator restore <directory>': '用法：/curator restore <directory>',
+  'Restored auto-skill: {{name}}': '已還原自動技能：{{name}}',
+  'Failed to restore auto-skill: {{message}}': '還原自動技能失敗：{{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    '將自動技能排除於自動維護之外。',
+  'Return a pinned auto-skill to automatic maintenance.':
+    '讓固定的自動技能重新接受自動維護。',
+  'Usage: /curator pin <directory>': '用法：/curator pin <directory>',
+  'Usage: /curator unpin <directory>': '用法：/curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': '已固定自動技能：{{name}}',
+  'Unpinned auto-skill: {{name}}': '已取消固定自動技能：{{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    '更新自動技能固定狀態失敗：{{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    '安全模式下禁止變更自動技能管理器。',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
 };

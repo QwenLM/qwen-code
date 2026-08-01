@@ -18,14 +18,21 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  chmodSync,
   rmSync,
   existsSync,
   symlinkSync,
+  statSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runOneMutant, testEfficacyCommand } from './test-efficacy.js';
+import { pathToFileURL } from 'node:url';
+import {
+  runOneMutant,
+  runOneHunkProbe,
+  splitDiffIntoHunks,
+  testEfficacyCommand,
+} from './test-efficacy.js';
 
 type Handler = (args: {
   report: string;
@@ -98,16 +105,19 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
   return { wt, base };
 }
 
+function vitestScript(): string {
+  return join(repo, 'node_modules', 'vitest', 'vitest.mjs');
+}
+
 /**
  * Swap the fake runner for one that reports every test file as FAILED. Used to
  * drive the unmutated baseline red, so the mutant phase must skip wholesale.
  */
 function installFailingVitest(): void {
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
   writeFileSync(
-    bin,
+    vitestScript(),
     `#!/usr/bin/env node
-const path = require('path');
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   numPassedTests: 0,
@@ -119,7 +129,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 }
 
 /**
@@ -129,11 +138,10 @@ process.stdout.write(JSON.stringify({
  * `inconclusive`, not red, and must not disable the mutant phase.
  */
 function installMixedVitest(): void {
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
   writeFileSync(
-    bin,
+    vitestScript(),
     `#!/usr/bin/env node
-const path = require('path');
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
@@ -143,30 +151,48 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 }
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   git(repo, 'init', '-q', '-b', 'main', '.');
+  git(repo, 'config', 'core.autocrlf', 'false');
+  const hooksDir = join(repo, '.git-hooks-disabled');
+  mkdirSync(hooksDir);
+  git(repo, 'config', 'core.hooksPath', hooksDir);
   // Keep the fake vitest out of git: `commitAll` runs `git add -A`, and a
   // committed bin would be checked out into the probe worktree — the stale
   // passing copy, not the file `installFailingVitest` overwrites.
   writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
 
-  // A fake `vitest` on the up-tree bin path so `npx vitest` in the probe tree
-  // resolves locally — fast, deterministic, no network. It echoes each test
-  // file it is handed back as PASSED, so a probe over reverted source reads as
-  // `inert` without a real runner. `npx` walks node_modules upward, and the
-  // probe tree is a direct child of `repo`, so this bin is what it finds.
-  mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
+  // Put a fake vitest entry in the repo parent so the probe is independent of
+  // npm's platform-specific bin wrappers. It reports every test file as passed.
+  const vitestDir = join(repo, 'node_modules', 'vitest');
+  mkdirSync(vitestDir, { recursive: true });
+  // A package.json with a `bin` entry so the probe resolves the fake through the
+  // same `vitest/package.json` + `bin.vitest` path it uses for the real package,
+  // not a hard-coded entry the finder and the fake merely agree on by
+  // construction.
   writeFileSync(
-    bin,
+    join(vitestDir, 'package.json'),
+    JSON.stringify({
+      name: 'vitest',
+      version: '0.0.0',
+      bin: { vitest: './vitest.mjs' },
+    }),
+  );
+  const script = join(vitestDir, 'vitest.mjs');
+  writeFileSync(
+    script,
     `#!/usr/bin/env node
-const path = require('path');
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+import path from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] !== 'run' || args[1] !== '--reporter=json') {
+  process.stderr.write('unexpected vitest argv: ' + JSON.stringify(args));
+  process.exit(1);
+}
+const files = args.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   numPassedTests: files.length,
   numFailedTests: 0,
@@ -177,7 +203,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 });
 
 afterEach(() => {
@@ -276,6 +301,157 @@ describe('test-efficacy probe isolation (#6832)', () => {
     // Shared tree untouched, probe tree discarded.
     expect(treeState(wt)).toBe(before);
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('probes hunks end-to-end on a diff with NO mutant candidates', async () => {
+    // The gating bug this pins: hunk probes once lived inside the mutant
+    // branch, so they ran only on a diff that already had a safety-verb
+    // candidate — exactly inverting their purpose. This diff changes a return
+    // value and a condition. `SAFETY_VERB_RE` matches neither, so there are
+    // zero mutants, and before the fix there were zero hunk probes too: the
+    // one class of diff per-hunk probing exists for got nothing at all.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export function price(n: number) {\n' +
+        '  if (n < 0) return 0;\n' +
+        '  return n * 2;\n' +
+        '}\n' +
+        '\n'.repeat(12) +
+        'export function label() {\n' +
+        '  return "old";\n' +
+        '}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export function price(n: number) {\n' +
+        '  if (n <= 0) return 0;\n' +
+        '  return n * 3;\n' +
+        '}\n' +
+        '\n'.repeat(12) +
+        'export function label() {\n' +
+        '  return "new";\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { price } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof price).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([]);
+    // Two well-separated changes, so two hunks — and the fake vitest is green
+    // whatever the tree holds, so both changes ship with nothing gating them.
+    expect(out.hunks.probed).toHaveLength(2);
+    expect(out.hunks.survived).toBe(2);
+    expect(
+      out.findings.filter((f: { kind: string }) => f.kind === 'hunk-survived'),
+    ).toHaveLength(2);
+    // The mutation happened only in the disposable tree.
+    expect(treeState(wt)).toEqual(before);
+  });
+
+  it('scores a hunk inconclusive when its OWN collocated test dropped out of the baseline', async () => {
+    // The false survivor this exists to remove. The probe tree resolves
+    // `node_modules` by walking up to the repo root, so a probe file that
+    // transitively imports a workspace-NESTED dependency collects nothing in the
+    // probe tree and is dropped from the green baseline set. Before the fix the
+    // hunk probe then ran the OTHER (green) probes, they passed, and the hunk
+    // was scored `survived` — a false finding, since the one test that covers
+    // the hunk never ran. Here `price.test.ts` (collocated with the changed
+    // `price.ts`) collects nothing while an unrelated `other.test.ts` is green.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/price.ts',
+      'export function price(n: number) {\n  return n * 2;\n}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/price.ts',
+      'export function price(n: number) {\n  return n * 3;\n}\n',
+    );
+    write(
+      'packages/lib/src/price.test.ts',
+      'import { price } from "./price.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof price).toBe("function"));\n',
+    );
+    write(
+      'packages/lib/src/other.test.ts',
+      'import { it, expect } from "vitest"; it("t", () => expect(1).toBe(1));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/price.ts', kind: 'source' },
+          { path: 'packages/lib/src/price.test.ts', kind: 'test' },
+          { path: 'packages/lib/src/other.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // The baseline drops the collocated test: `price.test.ts` collects nothing
+    // (the probe-tree import-error shape); every other file passes.
+    // Override the fake PACKAGE entry — post-#8050 the probe resolves the
+    // runner through vitest/package.json's bin, so a node_modules/.bin file
+    // is dead weight it never reads. price.test.ts collects nothing; every
+    // other file passes.
+    writeFileSync(
+      join(repo, 'node_modules', 'vitest', 'vitest.mjs'),
+      `#!/usr/bin/env node
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults:
+      path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    // The hunk in price.ts is NOT scored survived: its collocated test never ran
+    // green, so the green run of the other probe proves nothing about it.
+    expect(out.hunks.survived).toBe(0);
+    expect(out.hunks.inconclusive).toBe(1);
+    expect(out.hunks.probed[0].verdict).toBe('inconclusive');
+    expect(out.hunks.probed[0].detail).toContain('collocated test');
+    expect(
+      (out.findings as Array<{ kind: string }>).some(
+        (f) => f.kind === 'hunk-survived',
+      ),
+    ).toBe(false);
   });
 
   it('runs a deletion mutant end-to-end and reports the survivor', async () => {
@@ -397,12 +573,11 @@ describe('test-efficacy probe isolation (#6832)', () => {
     // The fake runner reads the source: green when `state.clear()` is present,
     // red when it is gone. The baseline passes; the mutant (statement deleted)
     // fails — KILLED.
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const src = fs.readFileSync(path.join(process.cwd(), 'packages/lib/src/f.ts'), 'utf8');
 const failed = src.includes('state.clear()') ? 0 : 1;
@@ -416,7 +591,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     const before = treeState(wt);
     await runHandler({
@@ -640,12 +814,11 @@ process.stdout.write(JSON.stringify({
     // The fake runner appends one line per invocation; the injected clock
     // reads the log, so it moves only when a suite actually runs.
     const runsLog = join(repo, 'runs.log');
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 fs.appendFileSync(${JSON.stringify(runsLog)}, 'run\\n');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
@@ -658,7 +831,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
     const suiteRuns = () =>
       existsSync(runsLog)
         ? readFileSync(runsLog, 'utf8').split('\n').filter(Boolean).length
@@ -802,12 +974,11 @@ process.stdout.write(JSON.stringify({
       }),
     );
     const callsFile = join(repo, 'calls.txt');
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 let n = 0;
 try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) || 0; } catch {}
 n += 1;
@@ -828,7 +999,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     await runHandler({
       report: join(repo, 'report.json'),
@@ -1047,6 +1217,100 @@ process.stdout.write(JSON.stringify({
     expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
   });
 
+  it('runs tests with dependencies from the source worktree', () => {
+    const dependencyRoot = join(repo, 'source-worktree');
+    const probeTree = join(repo, 'separate-probe');
+    mkdirSync(dependencyRoot);
+    mkdirSync(join(probeTree, 'src'), { recursive: true });
+    const sourceVitestDir = join(dependencyRoot, 'node_modules', 'vitest');
+    const sourceDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      'probe-dependency',
+    );
+    const sourceScopedDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      '@probe',
+      'scoped-dependency',
+    );
+    mkdirSync(sourceVitestDir, { recursive: true });
+    mkdirSync(sourceDependencyDir);
+    mkdirSync(sourceScopedDependencyDir, { recursive: true });
+    writeFileSync(
+      join(sourceVitestDir, 'package.json'),
+      JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
+    );
+    const sourceBinDir = join(dependencyRoot, 'node_modules', '.bin');
+    mkdirSync(sourceBinDir);
+    writeFileSync(
+      join(dependencyRoot, 'node_modules', '.package-lock.json'),
+      '{}\n',
+    );
+    writeFileSync(
+      join(sourceVitestDir, 'vitest.mjs'),
+      `import '${pathToFileURL(join(probeTree, 'src/x.test.mjs')).href}';
+process.stdout.write(JSON.stringify({
+  testResults: [{
+    name: ${JSON.stringify(join(probeTree, 'src/x.test.mjs'))},
+    assertionResults: [{ status: 'passed' }],
+  }],
+}));
+`,
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'index.mjs'),
+      'export default 1;\n',
+    );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'index.mjs'),
+      'export default 2;\n',
+    );
+    const brokenLink = join(dependencyRoot, 'node_modules', 'broken-link');
+    if (process.platform !== 'win32') {
+      symlinkSync(
+        join(dependencyRoot, 'node_modules', 'missing-package'),
+        brokenLink,
+      );
+    }
+    writeFileSync(join(sourceBinDir, 'probe-tool'), 'available');
+    writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
+    writeFileSync(
+      join(probeTree, 'src/x.test.mjs'),
+      "import fs from 'node:fs'; import value from 'probe-dependency'; import scopedValue from '@probe/scoped-dependency'; if (value !== 1 || scopedValue !== 2 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
+    );
+
+    const result = runOneMutant(
+      probeTree,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.mjs'],
+      undefined,
+      Date.now,
+      dependencyRoot,
+    );
+
+    const probeModules = join(probeTree, 'node_modules');
+    expect(statSync(probeModules).isDirectory()).toBe(true);
+    expect(lstatSync(probeModules).isSymbolicLink()).toBe(false);
+    writeFileSync(join(probeModules, '.vite-probe'), 'local cache');
+    expect(
+      existsSync(join(dependencyRoot, 'node_modules', '.vite-probe')),
+    ).toBe(false);
+    if (process.platform !== 'win32') {
+      expect(() => lstatSync(join(probeModules, 'broken-link'))).toThrow();
+    }
+
+    expect(result.verdict).toBe('survived');
+  });
+
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
     const { wt, base } = scaffoldModifiedPr();
     // A prior probe crashed after `worktree add` but before its cleanup, leaving
@@ -1105,5 +1369,195 @@ process.stdout.write(JSON.stringify({
       'packages/lib/src/f.test.ts',
     );
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+});
+
+describe('per-hunk probes against real git', () => {
+  // The risky half is the patch, not the verdict: a single-hunk patch has to be
+  // something `git apply --reverse` accepts, and reverse-applying hunk N has to
+  // change hunk N's lines and nothing else. A wrong patch here does not fail
+  // loudly — it neutralises the wrong change and attributes the run's verdict
+  // to code it never touched, which is the exact failure the mutants' own
+  // line-mismatch guard exists to prevent.
+  //
+  // `runProbeSuite` is not the subject. With an empty probe list it collects
+  // nothing and the verdict is `inconclusive` by the third-outcome rule, which
+  // leaves the patch application and the restore as what these assert.
+  const FILE = 'src/x.ts';
+  const BEFORE =
+    Array.from({ length: 30 }, (_, i) => `line${i + 1};`).join('\n') + '\n';
+  let base: string;
+
+  const contents = () => readFileSync(join(repo, FILE), 'utf8');
+
+  const hunkPatches = () => {
+    const diff = git(
+      repo,
+      'diff',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      base,
+      'HEAD',
+      '--',
+      FILE,
+    );
+    return splitDiffIntoHunks(diff);
+  };
+
+  beforeEach(() => {
+    write(FILE, BEFORE);
+    base = commitAll('base');
+    // Two well-separated changes, so they land in two distinct hunks.
+    const after = BEFORE.split('\n');
+    after[1] = 'line2_CHANGED;';
+    after[24] = 'line25_CHANGED;';
+    write(FILE, after.join('\n'));
+    commitAll('head');
+  });
+
+  it('produces two patches git accepts, one per change', () => {
+    const hunks = hunkPatches();
+    expect(hunks).toHaveLength(2);
+    for (const h of hunks) {
+      // `--check` applies nothing; it asks git whether the patch is well-formed
+      // and would apply. A patch this rejects would be `inconclusive` forever.
+      expect(() =>
+        execFileSync('git', ['apply', '--reverse', '--check', '-'], {
+          cwd: repo,
+          input: h.patch,
+          encoding: 'utf8',
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it('reverting ONE hunk restores only that change', () => {
+    const [first, second] = hunkPatches();
+
+    runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: first.header,
+        startLine: first.startLine,
+        patch: first.patch,
+      },
+      [],
+    );
+    // Restored afterwards — the probe must leave the tree as it found it.
+    expect(contents()).toContain('line2_CHANGED;');
+
+    // Apply by hand to observe the mid-probe state the probe itself hides.
+    execFileSync('git', ['apply', '--reverse', '-'], {
+      cwd: repo,
+      input: second.patch,
+      encoding: 'utf8',
+    });
+    const reverted = contents();
+    // The second change is undone…
+    expect(reverted).toContain('line25;');
+    expect(reverted).not.toContain('line25_CHANGED;');
+    // …and the first is untouched. This is what `git checkout base -- <file>`
+    // cannot do, and the whole reason the probe is per-hunk.
+    expect(reverted).toContain('line2_CHANGED;');
+  });
+
+  it('restores a hunk-ADDED file whose parent directory the reverse apply removed', () => {
+    // Reviewed live on this PR: reverse-applying a `new file` hunk deletes the
+    // directories it emptied, and the old restore threw ENOENT from finally —
+    // losing the verdict and marking every remaining hunk inconclusive.
+    write('src/newdir/added.ts', 'export const fresh = 1;\n');
+    commitAll('adds a file in a new dir');
+    const diff = git(
+      repo,
+      'diff',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      'HEAD~1',
+      'HEAD',
+      '--',
+      'src/newdir/added.ts',
+    );
+    const [h] = splitDiffIntoHunks(diff);
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: 'src/newdir/added.ts',
+        index: 0,
+        header: h.header,
+        startLine: h.startLine,
+        patch: h.patch,
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive'); // no probe files collected — honest
+    expect(readFileSync(join(repo, 'src/newdir/added.ts'), 'utf8')).toBe(
+      'export const fresh = 1;\n',
+    );
+  });
+
+  it('restores the file after the run, verdict notwithstanding', () => {
+    const [first] = hunkPatches();
+    const before = contents();
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: first.header,
+        startLine: first.startLine,
+        patch: first.patch,
+      },
+      [],
+    );
+    expect(contents()).toBe(before);
+    // No probe file collected anything, so the honest verdict is the
+    // third outcome — never `killed`.
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.header).toBe(first.header);
+    // …and it is inconclusive because nothing was COLLECTED, not because the
+    // patch bounced. Without this the assertion above passes just as well on a
+    // probe that never applied anything, which is the state it exists to rule
+    // out: a silent no-op reads exactly like a clean restore.
+    expect(got.detail).toContain('no clean verdict');
+    expect(got.detail).not.toContain('could not be reverse-applied');
+  });
+
+  it('is inconclusive and leaves the tree ALONE when the patch will not apply', () => {
+    const before = contents();
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: '@@ -1,3 +1,3 @@',
+        startLine: 1,
+        patch:
+          'diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,3 @@\n-nope;\n+also nope;\n context;\n',
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.detail).toContain('could not be reverse-applied');
+    expect(contents()).toBe(before);
+  });
+
+  it('is inconclusive when the probe tree does not hold the file at all', () => {
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: 'src/gone.ts',
+        index: 0,
+        header: '@@ -1 +1 @@',
+        startLine: 1,
+        patch: 'x',
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.detail).toContain('does not hold');
   });
 });

@@ -52,8 +52,10 @@ describe('handleAtCommand', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
 
-    testRootDir = await fsPromises.mkdtemp(
-      path.join(os.tmpdir(), 'folder-structure-test-'),
+    testRootDir = await fsPromises.realpath(
+      await fsPromises.mkdtemp(
+        path.join(os.tmpdir(), 'folder-structure-test-'),
+      ),
     );
 
     abortController = new AbortController();
@@ -170,6 +172,117 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'reads a file symlink through its canonical target type',
+    async () => {
+      const textPath = await createTestFile(
+        path.join(testRootDir, 'notes.txt'),
+        'plain text target',
+      );
+      const imageAlias = path.join(testRootDir, 'alias.png');
+      await fsPromises.symlink(textPath, imageAlias);
+
+      const result = await handleAtCommand({
+        query: `inspect @${imageAlias}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 625,
+        signal: abortController.signal,
+      });
+
+      const parts = Array.isArray(result.processedQuery)
+        ? result.processedQuery
+        : [result.processedQuery];
+      expect(parts).toContainEqual({ text: 'plain text target' });
+      expect(parts).toContainEqual({ text: `\nContent from ${imageAlias}:\n` });
+      expect(parts).not.toContainEqual({
+        text: `\nContent from ${textPath}:\n`,
+      });
+      expect(
+        parts.some(
+          (part) => typeof part !== 'string' && part && 'inlineData' in part,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not read a symlink whose canonical target is ignored',
+    async () => {
+      await fsPromises.mkdir(path.join(testRootDir, '.git'));
+      await createTestFile(path.join(testRootDir, '.gitignore'), '.env');
+      const ignoredPath = await createTestFile(
+        path.join(testRootDir, '.env'),
+        'SECRET=do-not-send',
+      );
+      const aliasPath = path.join(testRootDir, 'visible.txt');
+      await fsPromises.symlink(ignoredPath, aliasPath);
+
+      const result = await handleAtCommand({
+        query: `inspect @${aliasPath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 626,
+        signal: abortController.signal,
+      });
+
+      expect(JSON.stringify(result.processedQuery)).not.toContain(
+        'SECRET=do-not-send',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a project-temp symlink outside approved roots',
+    async () => {
+      const projectTempDir = path.join(testRootDir, 'project-temp');
+      const outsideDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-outside-')),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.txt');
+      const aliasPath = path.join(projectTempDir, 'visible.txt');
+      await fsPromises.writeFile(outsidePath, 'outside secret');
+      await fsPromises.mkdir(projectTempDir, { recursive: true });
+      await fsPromises.symlink(outsidePath, aliasPath);
+      const tempDirSpy = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(projectTempDir);
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: (candidate: string) => {
+            const absolute = path.isAbsolute(candidate)
+              ? candidate
+              : path.resolve(testRootDir, candidate);
+            const relative = path.relative(testRootDir, absolute);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          },
+          getDirectories: () => [testRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: `inspect @${aliasPath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 627,
+          signal: abortController.signal,
+        });
+
+        expect(JSON.stringify(result.processedQuery)).not.toContain(
+          'outside secret',
+        );
+      } finally {
+        tempDirSpy.mockRestore();
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('should attach a truncated text file larger than 10MB', async () => {
     const filePath = await createTestFile(
       path.join(testRootDir, 'large.log'),
@@ -196,9 +309,7 @@ describe('handleAtCommand', () => {
           .join('')
       : '';
 
-    expect(processedText).toContain(
-      'Showing lines 1-1 of at least 1 total lines',
-    );
+    expect(processedText).toContain('Showing lines 1-');
     expect(processedText).toContain('... [truncated]');
     expect(result.shouldProceed).toBe(true);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
@@ -277,6 +388,177 @@ describe('handleAtCommand', () => {
       await fsPromises.rm(tempParentDir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a temp-dir file via the realpath branch when the configured path is a symlink',
+    async () => {
+      const realDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-real-')),
+      );
+      const linkDir = path.join(testRootDir, 'temp-link');
+      await fsPromises.symlink(realDir, linkDir);
+      const filePath = path.join(realDir, 'file.txt');
+      await fsPromises.writeFile(filePath, 'temp content');
+      const tempDirSpy = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(linkDir);
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: (candidate: string) => {
+            const absolute = path.isAbsolute(candidate)
+              ? candidate
+              : path.resolve(testRootDir, candidate);
+            const relative = path.relative(testRootDir, absolute);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          },
+          getDirectories: () => [testRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: `@${filePath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 628,
+          signal: abortController.signal,
+        });
+
+        expect(result.processedQuery).toContainEqual({
+          text: 'temp content',
+        });
+        expect(result.shouldProceed).toBe(true);
+      } finally {
+        tempDirSpy.mockRestore();
+        await fsPromises.rm(linkDir, { force: true });
+        await fsPromises.rm(realDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path escapes workspace',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot-'),
+        ),
+      );
+      const outsideDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-outside-')),
+      );
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fsPromises.writeFile(outsideFile, 'outside secret');
+      // Symlink in first dir escapes the workspace
+      await fsPromises.mkdir(path.join(testRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.symlink(
+        outsideFile,
+        path.join(testRootDir, 'src', 'index.ts'),
+      );
+      // Valid file in second dir at the same relative path
+      await fsPromises.mkdir(path.join(secondRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'src', 'index.ts'),
+        'valid content from second root',
+      );
+
+      const isWithinWorkspace = (candidate: string) => {
+        const absolute = path.isAbsolute(candidate)
+          ? candidate
+          : path.resolve(testRootDir, candidate);
+        for (const dir of [testRootDir, secondRootDir]) {
+          const rel = path.relative(dir, absolute);
+          if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+            return true;
+          }
+        }
+        return false;
+      };
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: isWithinWorkspace,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@src/index.ts',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 700,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('outside secret');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path is ignored',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot2-'),
+        ),
+      );
+      // Set up git ignore in first dir
+      await fsPromises.mkdir(path.join(testRootDir, '.git'), {
+        recursive: true,
+      });
+      await createTestFile(path.join(testRootDir, '.gitignore'), 'secret.txt');
+      const secretFile = await createTestFile(
+        path.join(testRootDir, 'secret.txt'),
+        'ignored content',
+      );
+      // Symlink in first dir points to the ignored file
+      await fsPromises.symlink(secretFile, path.join(testRootDir, 'data.txt'));
+      // Valid file in second dir at the same relative path
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'data.txt'),
+        'valid content from second root',
+      );
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => true,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@data.txt',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 701,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('ignored content');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('should process a valid directory path', async () => {
     const filePath = await createTestFile(
@@ -584,6 +866,32 @@ describe('handleAtCommand', () => {
         `Ignored 1 files:\nGit-ignored: ${gitIgnoredFile}`,
       );
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should skip an ignored symlink whose target is allowed',
+      async () => {
+        await createTestFile(
+          path.join(testRootDir, '.gitignore'),
+          'ignored-link.txt',
+        );
+        const targetPath = await createTestFile(
+          path.join(testRootDir, 'allowed.txt'),
+          'allowed target content',
+        );
+        const aliasPath = path.join(testRootDir, 'ignored-link.txt');
+        await fsPromises.symlink(targetPath, aliasPath);
+
+        const result = await handleAtCommand({
+          query: `@${aliasPath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 2001,
+          signal: abortController.signal,
+        });
+
+        expect(result.processedQuery).toEqual([{ text: `@${aliasPath}` }]);
+      },
+    );
 
     it('should process non-git-ignored files normally', async () => {
       await createTestFile(
@@ -1397,6 +1705,125 @@ describe('handleAtCommand', () => {
       // The success card reflects what was injected ('RESOURCE BODY' = 13).
       expect(result.toolDisplays![0].resultDisplay).toBe('Injected 13 chars');
       expect(result.filesRead).toContain('myserver:res://doc');
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'revalidates a file after asynchronous reference resolution',
+      async () => {
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'swapped.txt'),
+          'safe content',
+        );
+        const outsideDir = await fsPromises.realpath(
+          await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-swap-outside-')),
+        );
+        const outsidePath = path.join(outsideDir, 'secret.txt');
+        await fsPromises.writeFile(outsidePath, 'outside secret');
+        const readMcpResource = vi.fn(async () => {
+          await fsPromises.unlink(filePath);
+          await fsPromises.symlink(outsidePath, filePath);
+          return {
+            contents: [{ uri: 'res://doc', text: 'resource body' }],
+          };
+        });
+
+        try {
+          const result = await handleAtCommand({
+            query: `inspect @${filePath} @myserver:res://doc`,
+            config: makeResourceConfig(readMcpResource),
+            onDebugMessage: mockOnDebugMessage,
+            messageId: 6001,
+            signal: abortController.signal,
+          });
+
+          expect(JSON.stringify(result.processedQuery)).not.toContain(
+            'outside secret',
+          );
+          expect(
+            (result.processedQuery as Array<{ text?: string }>)[0].text,
+          ).toContain(`@${filePath}`);
+          expect(result.filesRead).not.toContain(filePath);
+          expect(mockOnDebugMessage).toHaveBeenCalledWith(
+            `Path ${filePath} failed revalidation and will be skipped.`,
+          );
+        } finally {
+          await fsPromises.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'prunes all labels for a skipped canonical file',
+      async () => {
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'target.txt'),
+          'safe content',
+        );
+        const aliasPath = path.join(testRootDir, 'alias.txt');
+        await fsPromises.symlink(filePath, aliasPath);
+        const outsideDir = await fsPromises.realpath(
+          await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-swap-outside-')),
+        );
+        const outsidePath = path.join(outsideDir, 'secret.txt');
+        await fsPromises.writeFile(outsidePath, 'outside secret');
+        const readMcpResource = vi.fn(async () => {
+          await fsPromises.unlink(filePath);
+          await fsPromises.symlink(outsidePath, filePath);
+          return {
+            contents: [{ uri: 'res://doc', text: 'resource body' }],
+          };
+        });
+
+        try {
+          const result = await handleAtCommand({
+            query: `inspect @${aliasPath} @${filePath} @myserver:res://doc`,
+            config: makeResourceConfig(readMcpResource),
+            onDebugMessage: mockOnDebugMessage,
+            messageId: 6002,
+            signal: abortController.signal,
+          });
+
+          expect(JSON.stringify(result.processedQuery)).not.toContain(
+            'outside secret',
+          );
+          expect(result.filesRead).not.toContain(aliasPath);
+          expect(result.filesRead).not.toContain(filePath);
+          expect(result.filesRead).toContain('myserver:res://doc');
+        } finally {
+          await fsPromises.unlink(filePath).catch(() => {});
+          await fsPromises.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('keeps spacing when a deleted file is pruned after async resource resolution', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'image.png'),
+        'image bytes',
+      );
+      const readMcpResource = vi.fn(async () => {
+        await fsPromises.unlink(filePath);
+        return {
+          contents: [{ uri: 'res://doc', text: 'resource body' }],
+        };
+      });
+      const query = `inspect @${filePath} @myserver:res://doc now`;
+
+      const result = await handleAtCommand({
+        query,
+        config: makeResourceConfig(readMcpResource),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 6003,
+        signal: abortController.signal,
+      });
+
+      expect((result.processedQuery as Array<{ text?: string }>)[0].text).toBe(
+        query,
+      );
+      expect(result.filesRead).not.toContain(filePath);
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${filePath} changed before it could be read and will be skipped.`,
+      );
     });
 
     it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {

@@ -47,6 +47,7 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
       ['Plan', 200],
       [null, 50],
     ]),
+    pendingApprovals: [],
     script: 'return 1;',
     result: { answer: 42 },
     ...overrides,
@@ -76,6 +77,39 @@ describe('toSnapshot', () => {
     const s = toSnapshot(t);
     t.phases.push('Mutated');
     expect(s.phases).toEqual(['Plan', 'Build']);
+  });
+
+  it('never projects live pending approval data', () => {
+    const live = task({
+      pendingApprovals: [
+        {
+          approvalId: 'APPROVAL_ID_SENTINEL',
+          subagentId: 'agent-a',
+          callId: 'call-1',
+          name: 'Edit',
+          description: 'PRIVATE_DESCRIPTION_SENTINEL',
+          confirmationDetails: {
+            type: 'edit',
+            title: 'Edit?',
+            fileName: 'secret.ts',
+            filePath: '/private/secret.ts',
+            fileDiff: 'PRIVATE_DIFF_SENTINEL',
+            originalContent: null,
+            newContent: '',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            skipIdeDiff: true,
+          },
+          at: 1,
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(toSnapshot(live));
+    expect(serialized).not.toContain('APPROVAL_ID_SENTINEL');
+    expect(serialized).not.toContain('PRIVATE_DESCRIPTION_SENTINEL');
+    expect(serialized).not.toContain('PRIVATE_DIFF_SENTINEL');
+    expect(toSnapshot(live)).not.toHaveProperty('pendingApprovals');
   });
 });
 
