@@ -320,64 +320,77 @@ describe('qwen-triage tmux workflow', () => {
   // Execute the real classifier rather than matching its text: the states are
   // the contract, and a jq edit that silently reclassifies one is invisible to
   // a string assertion.
-  it('classifies a deferring COMMENTED review apart from a missing one', () => {
-    const notifyStep = step('Notify silent triage re-run');
-    const program = notifyStep.match(
-      /--arg sha "\$HEAD_SHA" \\\n\s*'([\s\S]*?)'\n/,
-    )?.[1];
-    expect(program).toBeTruthy();
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'classifies a deferring COMMENTED review apart from a missing one',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      const program = notifyStep.match(
+        /--arg sha "\$HEAD_SHA" \\\n\s*'([\s\S]*?)'\n/,
+      )?.[1];
+      expect(program).toBeTruthy();
 
-    const dir = mkdtempSync(join(tmpdir(), 'rerun-standing-'));
-    const progFile = join(dir, 'standing.jq');
-    writeFileSync(progFile, program);
-    const classify = (reviews) => {
-      const r = spawnSync(
-        'jq',
-        ['-rs', '--arg', 'bot', 'bot', '--arg', 'sha', 'HEAD', '-f', progFile],
-        { input: JSON.stringify(reviews), encoding: 'utf8' },
-      );
-      expect(r.status, r.stderr).toBe(0);
-      return r.stdout.trim();
-    };
-    const rev = (state, login = 'bot', commit = 'HEAD') => ({
-      user: { login },
-      commit_id: commit,
-      state,
-    });
+      const dir = mkdtempSync(join(tmpdir(), 'rerun-standing-'));
+      const progFile = join(dir, 'standing.jq');
+      writeFileSync(progFile, program);
+      const classify = (reviews) => {
+        const r = spawnSync(
+          'jq',
+          [
+            '-rs',
+            '--arg',
+            'bot',
+            'bot',
+            '--arg',
+            'sha',
+            'HEAD',
+            '-f',
+            progFile,
+          ],
+          { input: JSON.stringify(reviews), encoding: 'utf8' },
+        );
+        expect(r.status, r.stderr).toBe(0);
+        return r.stdout.trim();
+      };
+      const rev = (state, login = 'bot', commit = 'HEAD') => ({
+        user: { login },
+        commit_id: commit,
+        state,
+      });
 
-    try {
-      // A vote of either kind stands.
-      expect(classify([rev('APPROVED')])).toBe('own');
-      expect(classify([rev('CHANGES_REQUESTED')])).toBe('own');
+      try {
+        // A vote of either kind stands.
+        expect(classify([rev('APPROVED')])).toBe('own');
+        expect(classify([rev('CHANGES_REQUESTED')])).toBe('own');
 
-      // The defer path. The second arm is the real #7948/#8141 shape: the bot
-      // deferred and a maintainer approved, which must NOT read as the bot's
-      // own vote — `main` needs two, so the PR is still one short.
-      expect(classify([rev('COMMENTED')])).toBe('deferred');
-      expect(classify([rev('COMMENTED'), rev('APPROVED', 'wenshao')])).toBe(
-        'deferred',
-      );
+        // The defer path. The second arm is the real #7948/#8141 shape: the bot
+        // deferred and a maintainer approved, which must NOT read as the bot's
+        // own vote — `main` needs two, so the PR is still one short.
+        expect(classify([rev('COMMENTED')])).toBe('deferred');
+        expect(classify([rev('COMMENTED'), rev('APPROVED', 'wenshao')])).toBe(
+          'deferred',
+        );
 
-      // DISMISSED is NOT a deferral, and this is the distinction the first
-      // draft of this change got wrong. `dismiss_stale_reviews` voids the
-      // bot's approval on every push, which is exactly when a fresh one is
-      // required — reporting that as a routine defer would say the opposite
-      // of what the maintainer needs to know. Same for an unsubmitted PENDING.
-      expect(classify([rev('DISMISSED')])).toBe('none');
-      expect(classify([rev('PENDING')])).toBe('none');
-      // ...but a real COMMENTED alongside a DISMISSED one is still a defer.
-      expect(classify([rev('DISMISSED'), rev('COMMENTED')])).toBe('deferred');
+        // DISMISSED is NOT a deferral, and this is the distinction the first
+        // draft of this change got wrong. `dismiss_stale_reviews` voids the
+        // bot's approval on every push, which is exactly when a fresh one is
+        // required — reporting that as a routine defer would say the opposite
+        // of what the maintainer needs to know. Same for an unsubmitted PENDING.
+        expect(classify([rev('DISMISSED')])).toBe('none');
+        expect(classify([rev('PENDING')])).toBe('none');
+        // ...but a real COMMENTED alongside a DISMISSED one is still a defer.
+        expect(classify([rev('DISMISSED'), rev('COMMENTED')])).toBe('deferred');
 
-      // The original incident this whole probe exists for: a human approval
-      // with no bot review must stay `none`, not be read as the bot's own.
-      expect(classify([rev('APPROVED', 'wenshao')])).toBe('none');
-      // A vote on an earlier commit does not carry over.
-      expect(classify([rev('APPROVED', 'bot', 'OLD')])).toBe('none');
-      expect(classify([])).toBe('none');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        // The original incident this whole probe exists for: a human approval
+        // with no bot review must stay `none`, not be read as the bot's own.
+        expect(classify([rev('APPROVED', 'wenshao')])).toBe('none');
+        // A vote on an earlier commit does not carry over.
+        expect(classify([rev('APPROVED', 'bot', 'OLD')])).toBe('none');
+        expect(classify([])).toBe('none');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // Both notes are posted in both languages, matching the status comment
   // composer in the same step. The re-run summary was the one body in this
@@ -396,9 +409,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(notifyStep).toContain('"$NOTE_ZH"');
     expect(notifyStep).toMatch(/[一-鿿]/);
 
-    // The ::warning is the operator-facing signal, so it must fire on the
-    // genuinely-missing case and stay silent on the routine defer — otherwise
-    // every deferred PR raises an annotation nobody should act on.
+    // The ::warning is the operator-facing signal. Both no-vote states
+    // (deferred and none) fire it — see the note below for why silencing
+    // the defer case would be wrong.
     const noneBranch = notifyStep.slice(
       notifyStep.indexOf('none)'),
       notifyStep.indexOf('*)'),
@@ -802,6 +815,14 @@ describe('qwen-triage tmux workflow', () => {
             commit_id: 'head',
           },
         ],
+        botNone: [
+          {
+            user: { login: 'human' },
+            state: 'APPROVED',
+            submitted_at: '2026-01-01T00:00:00Z',
+            commit_id: 'head',
+          },
+        ],
       };
 
       const run = (reviews, head) => {
@@ -881,6 +902,14 @@ describe('qwen-triage tmux workflow', () => {
       expect(postedNow.status).toBe(0);
       expect(postedNow.log).toContain('no summary comment needed');
       expect(postedNow.comment).toBe('');
+
+      // A true none: the bot has no review at all on the head commit.
+      // This exercises the none) arm's bash, which the humanOnly fixture
+      // no longer reaches after its reclassification to deferred.
+      const botNone = run(REVIEWS.botNone, 'head');
+      expect(botNone.status).toBe(0);
+      expect(botNone.log).toContain('Triage re-run left no bot review');
+      expect(botNone.comment).toContain('neither a verdict nor a deferral');
 
       // An unreadable head SHA must not masquerade as either verdict.
       const noHead = run(REVIEWS.humanOnly, '');
