@@ -208,6 +208,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Adapter-owned persistent state directory. */
+  stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   channelMemoryRecallObserver?: (
@@ -218,6 +220,8 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  /** Return the active bridge recovery barrier, if recovery is in progress. */
+  bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
   observedContacts?: {
@@ -290,6 +294,7 @@ type ActivePrompt = {
   messageId?: string;
   senderId?: string;
   senderName?: string;
+  metadata?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -347,6 +352,10 @@ function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
+  /**
+   * Recovery invariant: session-resolution and prompt-capture paths must await
+   * waitForBridgeRecovery() immediately before that operation.
+   */
   protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
@@ -358,6 +367,8 @@ export abstract class ChannelBase {
   protected readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  /** Adapter-owned persistent state directory, when supplied by the runtime. */
+  protected readonly stateDir?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -378,6 +389,7 @@ export abstract class ChannelBase {
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private readonly registerBridgeEvents: boolean;
+  private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
    * Per-session generation, bumped by /clear. A queued followup turn captures the
    * generation when it enqueues and bails if /clear bumped it before the turn ran,
@@ -788,6 +800,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
@@ -803,6 +816,7 @@ export abstract class ChannelBase {
     );
     this.loopController = options?.loopController;
     this.observedContacts = options?.observedContacts;
+    this.bridgeRecovery = options?.bridgeRecovery;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
@@ -1460,6 +1474,7 @@ export abstract class ChannelBase {
       throw new Error(`Loop ${job.id} target is no longer authorized.`);
     }
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       job.target.senderId,
@@ -1610,6 +1625,7 @@ export abstract class ChannelBase {
         heldChunks.length = 0;
         this.onResponseBoundary(job.target.chatId, sessionId);
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
@@ -1777,6 +1793,7 @@ export abstract class ChannelBase {
   ): Promise<string | undefined> {
     const target = this.resolveWebhookTaskTarget(task);
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       target.senderId,
@@ -1905,6 +1922,7 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
 
@@ -2345,6 +2363,33 @@ export abstract class ChannelBase {
     const target = this.router.getTarget(sessionId);
     const threadId = active?.threadId ?? target?.threadId;
     await this.sendThreadMessage(chatId, threadId, text);
+  }
+
+  /**
+   * Adapter hook for delivery-only metadata. The response delivery path can read
+   * the active prompt while it exists; adapters must not retain its raw content.
+   */
+  protected getResponseMessageId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  protected getResponseSenderId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseMetadata(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.metadata;
+  }
+
+  /**
+   * Returns the active prompt's response thread while it remains available for
+   * adapter delivery. Falls back to the session target after prompt cleanup.
+   */
+  protected getResponseThreadId(sessionId: string): string | undefined {
+    return (
+      this.activePrompts.get(sessionId)?.threadId ??
+      this.router.getTarget(sessionId)?.threadId
+    );
   }
 
   /**
@@ -4876,6 +4921,17 @@ export abstract class ChannelBase {
     this.preflightedEnvelopes.add(envelope);
   }
 
+  /** Wait until the currently active bridge recovery, if any, has completed. */
+  private async waitForBridgeRecovery(): Promise<void> {
+    let completedRecovery: Promise<void> | undefined;
+    while (true) {
+      const bridgeRecovery = this.bridgeRecovery?.();
+      if (!bridgeRecovery || bridgeRecovery === completedRecovery) return;
+      await bridgeRecovery;
+      completedRecovery = bridgeRecovery;
+    }
+  }
+
   /**
    * Process an inbound message after preflight gates have passed.
    *
@@ -4884,6 +4940,7 @@ export abstract class ChannelBase {
    * already preflighted, such as during collect-buffer drain.
    */
   protected async processInbound(envelope: Envelope): Promise<void> {
+    await this.waitForBridgeRecovery();
     if (!this.preflightedEnvelopes.delete(envelope)) {
       throw new Error(
         'processInbound called without a successful preflightInbound check.',
@@ -4974,6 +5031,9 @@ export abstract class ChannelBase {
       }
     }
 
+    // Preprocessing above can await memory/command hooks; recovery may have
+    // started since the entry check. Recheck immediately before session routing.
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       envelope.senderId,
@@ -5377,6 +5437,7 @@ export abstract class ChannelBase {
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
+        metadata: envelope.metadata,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only
@@ -5458,6 +5519,9 @@ export abstract class ChannelBase {
         );
         streamer?.stop();
       };
+      // Queue wait and memory recall can outlive a bridge crash. Capture the
+      // bridge only after the latest recovery has restored session routing.
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);

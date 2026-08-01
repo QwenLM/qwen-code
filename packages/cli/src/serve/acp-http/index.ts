@@ -10,7 +10,10 @@ import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -548,6 +551,18 @@ export interface AcpHttpHandle {
     acpConnections: number;
     memoryTasks: number;
   };
+  /**
+   * Return the remember lane for a workspace, creating a secondary mount on
+   * demand for trusted non-primary runtimes. Returns undefined once the handle
+   * is disposed (callers answer 503) or for an unknown/untrusted runtime.
+   */
+  ensureWorkspaceRememberLane(
+    workspaceId: string,
+  ): WorkspaceRememberTaskLane | undefined;
+  /** Non-creating lane lookup for read routes; undefined when no mount exists. */
+  getWorkspaceRememberLane(
+    workspaceId: string,
+  ): WorkspaceRememberTaskLane | undefined;
   /** Commit memory teardown while sockets remain open for terminal events. */
   commitWorkspaceRemoval(workspaceId: string): void;
   disposeWorkspace(workspaceId: string): void;
@@ -792,6 +807,8 @@ export function mountAcpHttp(
       const guard = opts.workspaceRegistry?.primaryEntry.current?.guard;
       return guard ? () => guard.assertOpen() : undefined;
     },
+    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
+      Storage.getRuntimeBaseDir(),
   );
   dispatcherRef.current = dispatcher;
 
@@ -1271,6 +1288,7 @@ export function mountAcpHttp(
         const guard = rt.generationGuard;
         return guard ? () => guard.assertOpen() : undefined;
       },
+      rt.sessionRuntimeBaseDir,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -2330,6 +2348,20 @@ export function mountAcpHttp(
         memoryTasks: mount?.workspaceRememberLane.pendingCount() ?? 0,
       };
     },
+    ensureWorkspaceRememberLane: (workspaceId) => {
+      // Match every other entry point in this module: after dispose() the
+      // resolver's 503 is the right answer, and creating a mount here would
+      // leak a dispatcher/registry/lane nothing will ever tear down.
+      if (disposed) return undefined;
+      const existing = mountForWorkspace(workspaceId);
+      if (existing) return existing.workspaceRememberLane;
+      const rt = opts.workspaceRegistry?.getByWorkspaceId(workspaceId);
+      if (!rt) return undefined;
+      const mount = getOrCreateSecondaryMount(rt);
+      return mount?.workspaceRememberLane;
+    },
+    getWorkspaceRememberLane: (workspaceId) =>
+      mountForWorkspace(workspaceId)?.workspaceRememberLane,
     commitWorkspaceRemoval: (workspaceId) => {
       const mount = secondaryMounts.get(workspaceId);
       mount?.workspaceRememberLane.dispose();

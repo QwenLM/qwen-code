@@ -10,6 +10,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
   GROUP_COLOR_OPTIONS,
+  Storage,
   SessionService,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
@@ -60,6 +61,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import {
@@ -85,8 +87,8 @@ import {
   publicErrorStatus,
   type WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
-import { extractRememberErrorCode } from '../workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
+import { extractRememberErrorCode } from '../../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../../runtime/workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -102,7 +104,9 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
+  DaemonDrainingError,
   logSessionArchiveWarning,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
@@ -560,11 +564,18 @@ function pickSessionArtifactInput(
  * the operator-facing message is not a cross-tenant leak), and anything
  * unrecognized collapses to a generic INTERNAL_ERROR string.
  */
-function toRpcError(err: unknown): {
+export function toRpcError(err: unknown): {
   code: number;
   message: string;
   data?: Record<string, unknown>;
 } {
+  if (err instanceof DaemonDrainingError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'daemon_draining' },
+    };
+  }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
@@ -807,6 +818,7 @@ export class AcpDispatcher {
     private readonly captureGenerationAssertion: () =>
       | (() => void)
       | undefined = () => undefined,
+    private readonly sessionRuntimeBaseDir: string = Storage.getRuntimeBaseDir(),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -815,20 +827,21 @@ export class AcpDispatcher {
     sessionId: string,
     removePersistedSession = false,
   ): void {
-    void this.bridge
-      .killSession(sessionId, { requireZeroAttaches: true })
-      .then(async (killed) => {
-        if (killed && removePersistedSession) {
-          await new SessionService(this.boundWorkspace).removeSession(
-            sessionId,
-          );
-        }
-      })
-      .catch((err) =>
-        writeStderrLine(
-          `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
-        ),
-      );
+    const cleanup = removePersistedSession
+      ? deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+          bridge: this.bridge,
+          coordinator: this.archiveCoordinator,
+        })
+      : this.bridge.killSession(sessionId, { requireZeroAttaches: true });
+    void cleanup.catch((err) =>
+      writeStderrLine(
+        `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+      ),
+    );
   }
 
   /**
@@ -1158,6 +1171,18 @@ export class AcpDispatcher {
    * (it mints the connection) and never reaches here.
    */
   async handle(
+    conn: AcpConnection,
+    msg: JsonRpcInbound,
+    sessionHeader?: string,
+    reqLoopback?: boolean,
+  ): Promise<void> {
+    return Storage.runWithResolvedRuntimeBaseDir(
+      this.sessionRuntimeBaseDir,
+      () => this.handleInRuntime(conn, msg, sessionHeader, reqLoopback),
+    );
+  }
+
+  private async handleInRuntime(
     conn: AcpConnection,
     msg: JsonRpcInbound,
     sessionHeader?: string,
@@ -3334,8 +3359,31 @@ export class AcpDispatcher {
               );
             return;
           }
+          const rawCursor = params['cursor'];
+          if (
+            rawCursor !== undefined &&
+            (typeof rawCursor !== 'string' ||
+              rawCursor.length === 0 ||
+              rawCursor.length > MAX_TEXT_CURSOR_CHARS)
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`cursor\` must be a non-empty string of at most ${MAX_TEXT_CURSOR_CHARS} characters`,
+                ),
+              );
+            return;
+          }
+          const cursor = rawCursor as string | undefined;
           const resolved = await fs.resolve(p, 'read');
-          const out = await fs.readText(resolved, { maxBytes, line, limit });
+          const out = await fs.readText(resolved, {
+            maxBytes,
+            line,
+            limit,
+            cursor,
+          });
           this.replyConn(conn, id, {
             path: p,
             content: out.content,

@@ -62,18 +62,40 @@ export function estimateContentTokens(
  * (lastPromptTokenCount === 0) returns a pure estimate with no API-
  * authoritative anchor.
  */
+/**
+ * Multiplier applied to the char/4 estimate of NEWLY-added content when
+ * `conservative` is set. char/4 is documented (see file header) as varying
+ * ±30% against real tokenizers, but that band was measured against mixed
+ * English-heavy content; two independent real production failures
+ * (chatCompressionService's 400-overflow root cause doc and a main-turn
+ * `prompt + max_tokens > window` overflow, both 2026-07-28) traced back to
+ * char/4 under-counting CJK-dense tool output (design docs, large file
+ * reads) by 39-54% — beyond the documented band. 1.5x covers both observed
+ * cases with headroom without materially eating into the output budget for
+ * ordinary (non-CJK-heavy) content, since it only scales the incremental
+ * new-content term, not the API-authoritative running total.
+ */
+export const CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR = 1.5;
+
 export function estimatePromptTokens(
   history: Content[],
   userMessage: Content,
   lastPromptTokenCount: number,
   lastOutputTokenCount: number = 0,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  conservative: boolean = false,
 ): number {
   if (lastPromptTokenCount > 0) {
+    const newContentTokens = estimateContentTokens(
+      [userMessage],
+      imageTokenEstimate,
+    );
     return (
       lastPromptTokenCount +
       lastOutputTokenCount +
-      estimateContentTokens([userMessage], imageTokenEstimate)
+      (conservative
+        ? Math.ceil(newContentTokens * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR)
+        : newContentTokens)
     );
   }
   // First-send fallback (no API data yet): estimate from `history + userMessage`

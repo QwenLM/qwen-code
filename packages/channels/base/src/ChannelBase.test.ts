@@ -178,6 +178,10 @@ class TestChannel extends ChannelBase {
     );
   }
 
+  stateDirForTest(): string | undefined {
+    return this.stateDir;
+  }
+
   debugPayloadForTest(platform: string, payload: unknown): void {
     this.logDebugPayload(platform, payload);
   }
@@ -411,6 +415,12 @@ describe('ChannelBase', () => {
       options,
     );
   }
+
+  it('exposes runtime-owned state to adapters', () => {
+    expect(
+      createChannel({}, { stateDir: '/tmp/channel-state' }).stateDirForTest(),
+    ).toBe('/tmp/channel-state');
+  });
 
   describe('proactive delivery boundary', () => {
     it('recognizes typed delivery errors across module instances', () => {
@@ -9318,7 +9328,9 @@ describe('ChannelBase', () => {
       const firstCancel = ch.handleInbound(envelope({ text: '/cancel' }));
       const secondCancel = ch.handleInbound(envelope({ text: '/cancel' }));
 
-      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledTimes(1),
+      );
       resolveCancel();
       await Promise.all([firstCancel, secondCancel]);
       resolvePrompt('late response');
@@ -14961,6 +14973,44 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('rechecks bridge recovery before a queued followup prompt starts', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+      const ch = createChannel(
+        { dispatchMode: 'followup' },
+        { bridgeRecovery: () => recoveryState.current },
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'task one' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      const second = ch.handleInbound(envelope({ text: 'task two' }));
+      await Promise.resolve();
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      resolveFirst('response-1');
+      await first;
+      await Promise.resolve();
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      releaseRecovery!();
+      await second;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+    });
+
     it('steer is the default mode when dispatchMode not set', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
@@ -15910,7 +15960,7 @@ describe('ChannelBase', () => {
           title: 'CI failed again',
         });
         secondRun.catch(() => undefined);
-        await Promise.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
         (
           ch as unknown as {
             sessionGenerations: Map<string, number>;
@@ -16012,6 +16062,275 @@ describe('ChannelBase', () => {
           .calls[1][1] as string;
         expect(collectedPrompt).toContain('follow-up while webhook runs');
       });
+
+      it('waits for bridge recovery before resolving a webhook session', async () => {
+        let releaseBridge: (() => void) | undefined;
+        const bridgeReady = new Promise<void>((resolve) => {
+          releaseBridge = resolve;
+        });
+        const ch = createChannel(
+          { approvalMode: 'yolo', webhooks },
+          { bridgeRecovery: () => bridgeReady },
+        );
+        ch.proactiveSupported = true;
+
+        const run = ch.runWebhookTask(webhookTask);
+        // Absent the entry gate the (fully mocked) flow reaches bridge.prompt
+        // quickly; wait long enough that a missing gate would be caught.
+        await expect(
+          vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+            timeout: 500,
+            interval: 25,
+          }),
+        ).rejects.toThrow();
+        expect(bridge.newSession).not.toHaveBeenCalled();
+
+        releaseBridge!();
+        await expect(run).resolves.toBe('agent response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('rechecks bridge recovery before a webhook prompt starts', async () => {
+        const recoveryState: { current?: Promise<void> } = {};
+        let releaseRecovery: (() => void) | undefined;
+        let releaseMemoryRead: (() => void) | undefined;
+        const memoryRead = new Promise<string>((resolve) => {
+          releaseMemoryRead = () => resolve('');
+        });
+        const channelMemory = createChannelMemory();
+        channelMemory.readChannelMemory.mockReturnValue(memoryRead);
+        const ch = createChannel(
+          { approvalMode: 'yolo', webhooks },
+          { bridgeRecovery: () => recoveryState.current, channelMemory },
+        );
+        ch.proactiveSupported = true;
+
+        const run = ch.runWebhookTask(webhookTask);
+        await vi.waitFor(() =>
+          expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+        );
+        recoveryState.current = new Promise<void>((resolve) => {
+          releaseRecovery = resolve;
+        });
+        releaseMemoryRead!();
+        // Absent the recheck gate the (fully mocked) flow reaches bridge.prompt
+        // quickly; wait long enough that a missing gate would be caught, then
+        // confirm the gate held the prompt back until recovery resolved.
+        await expect(
+          vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+            timeout: 500,
+            interval: 25,
+          }),
+        ).rejects.toThrow();
+
+        releaseRecovery!();
+        await expect(run).resolves.toBe('agent response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('waits for bridge recovery before resolving an inbound session', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+
+      const inbound = ch.handleInbound(envelope());
+      await Promise.resolve();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for bridge recovery after adapter-specific preflight', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+
+      const inbound = ch.processAfterAdapterPreflight(envelope());
+      // Absent the gate the (fully mocked) flow reaches bridge.prompt quickly;
+      // wait long enough that a missing gate would be caught.
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for recovery barriers that replace one another', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let releaseSecond: (() => void) | undefined;
+      const recoveryState: { current?: Promise<void> } = {
+        current: new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        }),
+      };
+      const ch = createChannel(
+        {},
+        { bridgeRecovery: () => recoveryState.current },
+      );
+
+      const inbound = ch.handleInbound(envelope());
+      await Promise.resolve();
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      releaseFirst!();
+      await Promise.resolve();
+
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      recoveryState.current = undefined;
+      releaseSecond!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+    });
+
+    it('rechecks bridge recovery after inbound preprocessing has started', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let releaseContactRecord: (() => void) | undefined;
+      const contactRecord = new Promise<void>((resolve) => {
+        releaseContactRecord = resolve;
+      });
+      const ch = createChannel(
+        {},
+        {
+          bridgeRecovery: () => recoveryState.current,
+          observedContacts: {
+            observe: vi.fn().mockImplementation(() => contactRecord),
+          },
+        },
+      );
+
+      const inbound = ch.handleInbound(envelope());
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      releaseContactRecord!();
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
+
+      releaseRecovery!();
+      await inbound;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for bridge recovery before running a loop prompt', async () => {
+      let releaseBridge: (() => void) | undefined;
+      const bridgeReady = new Promise<void>((resolve) => {
+        releaseBridge = resolve;
+      });
+      const ch = createChannel({}, { bridgeRecovery: () => bridgeReady });
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-recovery-gate',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat-1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await Promise.resolve();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      releaseBridge!();
+      await expect(loopRun).resolves.toBe('agent response');
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('rechecks bridge recovery before a loop prompt starts', async () => {
+      const recoveryState: { current?: Promise<void> } = {};
+      let releaseRecovery: (() => void) | undefined;
+      let releaseMemoryRead: (() => void) | undefined;
+      const memoryRead = new Promise<string>((resolve) => {
+        releaseMemoryRead = () => resolve('');
+      });
+      const channelMemory = createChannelMemory();
+      channelMemory.readChannelMemory.mockReturnValue(memoryRead);
+      const ch = createChannel(
+        {},
+        { bridgeRecovery: () => recoveryState.current, channelMemory },
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-late-recovery-gate',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat-1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+      recoveryState.current = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      releaseMemoryRead!();
+      // Absent the recheck gate the (fully mocked) flow reaches bridge.prompt
+      // quickly; wait long enough that a missing gate would be caught, then
+      // confirm the gate held the prompt back until recovery resolved.
+      await expect(
+        vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled(), {
+          timeout: 500,
+          interval: 25,
+        }),
+      ).rejects.toThrow();
+
+      releaseRecovery!();
+      await expect(loopRun).resolves.toBe('agent response');
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {
@@ -17253,7 +17572,7 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       });
-      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
       expect(bridge.prompt).toHaveBeenCalledOnce();
       (
         ch as unknown as { sessionGenerations: Map<string, number> }

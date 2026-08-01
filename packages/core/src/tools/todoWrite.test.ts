@@ -15,6 +15,7 @@ import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 // Mock fs modules
 vi.mock('fs/promises');
@@ -37,7 +38,8 @@ describe('TodoWriteTool', () => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
       getHookSystem: () => undefined,
-    } as Config;
+      setActiveTodoReminder: vi.fn(),
+    } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
     vi.clearAllMocks();
@@ -259,7 +261,9 @@ describe('TodoWriteTool', () => {
       mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
-      const result = await invocation.execute(mockAbortSignal);
+      const result = await promptIdContext.run('todo-prompt', () =>
+        invocation.execute(mockAbortSignal),
+      );
 
       expect(result.llmContent).toContain(
         'Todos have been modified successfully',
@@ -283,6 +287,10 @@ describe('TodoWriteTool', () => {
       expect(
         JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
       ).toMatchObject({ planId: expect.any(String), todos: params.todos });
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        expect.stringContaining('Task 1'),
+      );
     });
 
     it('should retain the plan ID while an active plan is revised', async () => {
@@ -369,6 +377,44 @@ describe('TodoWriteTool', () => {
       expect(persisted).not.toHaveProperty('planId');
     });
 
+    it('bounds the active Todo reminder', async () => {
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'x'.repeat(5000), status: 'in_progress' }],
+      };
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      await promptIdContext.run('todo-prompt', () =>
+        tool.build(params).execute(mockAbortSignal),
+      );
+
+      const reminder = vi.mocked(mockConfig.setActiveTodoReminder).mock
+        .lastCall?.[1];
+      expect(reminder).toContain('[truncated]');
+      expect(reminder?.length).toBeLessThan(1100);
+    });
+
+    it('skips active Todo reminder when no prompt id is active', async () => {
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+      };
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool.build(params).execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(mockConfig.setActiveTodoReminder).not.toHaveBeenCalled();
+    });
+
     it('should replace todos with new ones', async () => {
       const existingTodos = [
         { id: '1', content: 'Existing Task', status: 'completed' },
@@ -389,7 +435,9 @@ describe('TodoWriteTool', () => {
       mockAtomicWrite.mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
-      const result = await invocation.execute(mockAbortSignal);
+      const result = await promptIdContext.run('todo-prompt', () =>
+        invocation.execute(mockAbortSignal),
+      );
 
       expect(result.llmContent).toContain(
         'Todos have been modified successfully',
@@ -409,6 +457,10 @@ describe('TodoWriteTool', () => {
         expect.stringMatching(/"Updated Task"/),
         { encoding: 'utf-8' },
       );
+      const reminder = vi.mocked(mockConfig.setActiveTodoReminder).mock
+        .lastCall?.[1];
+      expect(reminder).toContain('New Task');
+      expect(reminder).not.toContain('Updated Task');
     });
 
     it('should handle file write errors', async () => {
@@ -451,7 +503,9 @@ describe('TodoWriteTool', () => {
       );
 
       const invocation = tool.build(params);
-      const result = await invocation.execute(mockAbortSignal);
+      const result = await promptIdContext.run('todo-prompt', () =>
+        invocation.execute(mockAbortSignal),
+      );
 
       expect(result.llmContent).toContain('Todo list has been cleared');
       expect(result.llmContent).toContain('<system-reminder>');
@@ -465,6 +519,10 @@ describe('TodoWriteTool', () => {
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
         { encoding: 'utf-8' },
+      );
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        undefined,
       );
     });
 
@@ -989,7 +1047,7 @@ describe('TodoWriteTool – runtime output directory', () => {
     mockConfig = {
       getSessionId: () => 'runtime-session',
       getHookSystem: () => undefined,
-    } as Config;
+    } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
     Storage.setRuntimeBaseDir(null);

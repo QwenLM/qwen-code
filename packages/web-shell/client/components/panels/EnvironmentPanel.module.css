@@ -1,0 +1,265 @@
+.panel {
+  box-sizing: border-box;
+  flex: 0 0 320px;
+  width: 320px;
+  max-height: calc(100% - 24px);
+  min-height: 0;
+  margin: 12px 12px 12px 0;
+  align-self: flex-start;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 18px;
+  background: var(--background);
+  box-shadow: 0 8px 20px color-mix(in srgb, #000 8%, transparent);
+}
+
+.floating {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 30;
+  width: min(320px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  margin: 0;
+}
+
+.section {
+  padding: 18px;
+}
+
+.section + .section {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--border) 52%, transparent),
+    color-mix(in srgb, var(--border) 52%, transparent)
+  );
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: calc(100% - 36px) 1px;
+}
+
+.sectionHeader {
+  display: flex;
+  width: calc(100% + 12px);
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin: -6px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.sectionHeader:hover,
+.sectionHeader:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.sectionHeader > svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  stroke-width: 1.7;
+}
+
+.sectionContent {
+  margin-top: 10px;
+}
+
+.row {
+  display: flex;
+  width: calc(100% + 12px);
+  min-width: 0;
+  min-height: 34px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 10px;
+  margin-right: -6px;
+  margin-left: -6px;
+  padding: 5px 12px 5px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+}
+
+button.row {
+  cursor: pointer;
+}
+
+button.row:hover,
+button.row:focus-visible,
+.row:not(button):hover {
+  background: var(--accent);
+  outline: none;
+}
+
+button.row:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.row > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: currentColor;
+  stroke-width: 1.7;
+}
+
+.row > .workspaceIcon {
+  stroke-width: 1.2;
+}
+
+.row > .rowActionIcon {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.branchName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task {
+  display: flex;
+  width: calc(100% + 12px);
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-right: -6px;
+  margin-left: -6px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.task:hover,
+.task:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.task:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.taskIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.taskIcon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.taskLabel {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.agentName,
+.taskName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskName {
+  display: block;
+}
+
+.agentColor {
+  display: inline-block;
+  width: 7px;
+  min-width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.agentTag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--muted-foreground) 22%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 8%, transparent);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.taskStatus {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+}
+
+.taskStatus svg {
+  width: 12px;
+  height: 12px;
+}
+
+.taskStatus[data-status='completed'] {
+  color: var(--success-color);
+}
+
+.taskStatus[data-status='failed'] {
+  color: var(--error-color);
+}
+
+.statusRunning {
+  animation: environment-panel-spin 1s linear infinite;
+}
+
+@keyframes environment-panel-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

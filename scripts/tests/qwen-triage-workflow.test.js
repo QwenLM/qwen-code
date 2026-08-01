@@ -6,6 +6,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -18,6 +19,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const cacheProducerWorkflow = readFileSync(
+  '.github/workflows/npm-cache.yml',
+  'utf8',
+);
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -833,7 +838,13 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (commentBody, author, commenter, issueNumber = '1') => {
+    const gate = (
+      commentBody,
+      author,
+      commenter,
+      issueNumber = '1',
+      isPr = 'true',
+    ) => {
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -850,6 +861,7 @@ describe('qwen-triage verify workflow', () => {
           COMMENT_USER: commenter,
           PR_NUMBER: '1',
           ISSUE_NUMBER: issueNumber,
+          IS_PR: isPr,
           TMUX_PR: '',
         },
         encoding: 'utf8',
@@ -864,6 +876,7 @@ describe('qwen-triage verify workflow', () => {
         run: val('should_run'),
         trust: val('verify_trust'),
         oid: val('verify_head_oid'),
+        lane: val('verify_lane'),
       };
     };
 
@@ -899,16 +912,49 @@ describe('qwen-triage verify workflow', () => {
       expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
       expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
       expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
-      // Neither non-verify path emits trust outputs. Assert the REAL keys:
-      // this line read `.runner` — a name from an earlier design that
-      // `gate()` never returns — so it was `expect(undefined).toBeUndefined()`
-      // and could not fail, however badly the trust level leaked.
-      const triage = gate('@qwen-code /triage', 'mallory', 'bob');
-      expect(triage.trust).toBeUndefined();
-      expect(triage.oid).toBeUndefined();
+
+      // /triage on a PR ALSO starts the verify lane, in parallel — and the
+      // point of routing it through the same classifier is that an external
+      // author still gets the external control set. If this ever emits
+      // `trusted` (or no trust at all) for `mallory`, the head-OID pin, the
+      // risk screen and both workspace wipes silently stop firing while the
+      // lane keeps executing that author's code on the persistent pool.
+      const triagePr = gate('@qwen-code /triage', 'mallory', 'bob');
+      expect(triagePr.run).toBe('true');
+      expect(triagePr.lane).toBe('true');
+      expect(triagePr.trust).toBe('external');
+      expect(triagePr.oid).toBe('deadbeefcafe');
+      expect(gate('@qwen-code /triage', 'alice', 'bob').trust).toBe('trusted');
+
+      // The lane fails closed DIFFERENTLY from an explicit /verify. An
+      // unreadable author permission denies `/verify` outright, because the
+      // commenter asked for exactly that; on `/triage` it must only close
+      // the lane, or a flaky permission API silently costs the reviewer
+      // their triage too. Same for a failed head-OID snapshot (issue 99).
+      const laneFail = gate('@qwen-code /triage', 'charlie', 'bob');
+      expect(laneFail.run).toBe('true');
+      expect(laneFail.lane).toBe('false');
+      expect(laneFail.trust).toBeUndefined();
+      const oidFail = gate('@qwen-code /triage', 'mallory', 'bob', '99');
+      expect(oidFail.run).toBe('true');
+      expect(oidFail.lane).toBe('false');
+      expect(gate('@qwen-code /verify', 'charlie', 'bob').run).toBe('false');
+
+      // On a plain ISSUE there is nothing to build, so the lane stays off
+      // and no author lookup is spent. This assertion used to be written as
+      // "/triage emits no trust outputs" with a fixture that never set
+      // IS_PR — true for the wrong reason, and it would have stayed green
+      // through the change above.
+      const triageIssue = gate('@qwen-code /triage', 'mallory', 'bob', '1', '');
+      expect(triageIssue.run).toBe('true');
+      expect(triageIssue.lane).toBeUndefined();
+      expect(triageIssue.trust).toBeUndefined();
+      expect(triageIssue.oid).toBeUndefined();
+
       const tmux = gate('@qwen-code /tmux', 'alice', 'bob');
       expect(tmux.trust).toBeUndefined();
       expect(tmux.oid).toBeUndefined();
+      expect(tmux.lane).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -943,6 +989,72 @@ describe('qwen-triage verify workflow', () => {
     const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
     expect(rm).toBeGreaterThan(-1);
     expect(mk).toBeGreaterThan(rm);
+  });
+
+  // The lane trigger was unpinned: deleting the gate from the verify job's
+  // `if` left every assertion green while the job became reachable from any
+  // comment on any open PR. Measured as a mutation before this test existed.
+  //
+  // `verify_lane` is also the single source of truth for WHICH comments
+  // start the lane. Re-enumerating the command strings in the job predicate
+  // is what let the trigger and the trust classification drift apart — the
+  // classifier keyed on `/verify` while the predicate would have keyed on
+  // `/verify` or `/triage`, so a `/triage`-started run would have executed
+  // an external author's code with `verify_trust` empty and all four
+  // external-only controls (head-OID pin, risk screen, both wipes) skipped.
+  it('gates the verify lane on authorize alone, not on re-matched commands', () => {
+    // Slice the two predicates APART. Asserting over the whole job text
+    // cannot tell them apart: the first version of this test did exactly
+    // that, and deleting the gate from `if:` still matched the copy inside
+    // `concurrency:` — the mutation survived its own regression test.
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toBeTruthy();
+    expect(concBlock).toBeTruthy();
+    for (const predicate of [ifBlock, concBlock]) {
+      expect(predicate).toContain(
+        "needs.authorize.outputs.verify_lane == 'true'",
+      );
+    }
+    // Concurrency is evaluated after `needs`, so it can and must read the
+    // same output; an unguarded group would let non-runnable triggers share
+    // the per-PR group and cancel a real run.
+    expect(ifBlock).not.toContain("comment.body == '@qwen-code /verify'");
+    expect(concBlock).not.toContain("comment.body == '@qwen-code /verify'");
+
+    // And the authorize job has to actually publish it.
+    expect(job('authorize')).toContain(
+      "verify_lane: '${{ steps.perm.outputs.verify_lane }}'",
+    );
+  });
+
+  // Positive control for the mutations above: a guard this suite is known
+  // to pin, asserted per predicate. Written first as one `toContain` over
+  // the whole job, it survived its own mutation — the copy in
+  // `concurrency:` matched after the `if:` copy was deleted, which is the
+  // same coarse-assertion defect the test above documents. A control that
+  // cannot fail proves nothing about the assertions it vouches for.
+  it('pins the ECS kill switch on both verify predicates (control)', () => {
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(concBlock).toContain(
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+    );
   });
 });
 
@@ -1515,15 +1627,19 @@ describe('qwen-triage verify hardening', () => {
   // The lifecycle-script command-file guards must be asserted on the verify
   // job's own commands: a bare step() lookup returns the tmux job's
   // identically named step, so verify-side regressions would pass silently.
-  it('strips GitHub command files from both verify lifecycle commands', () => {
-    // Bound to the prepare step: the agent step's own `runuser` launches
-    // qwen under `env -i`, which needs no per-variable stripping.
+  it('strips GitHub command files from every node-run verify command', () => {
+    // Bound to the lifecycle commands that run as node before the agent:
+    // npm ci and npm run build in the prepare step, plus the evidence
+    // browser download. The slice stops at the agent step, whose own
+    // `runuser` launches qwen under `env -i` and needs no per-variable
+    // stripping. Covering all three by construction (not enumeration) is
+    // what catches a future node-run command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(2);
+    expect(commands.length).toBe(3);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -1544,6 +1660,496 @@ describe('qwen-triage verify hardening', () => {
   // tests do not cover it. Execute it: hostile content must stay literal,
   // and the escaped body must land under GitHub's 65,536-char comment cap
   // (the cap is applied AFTER escaping for exactly this reason).
+  it('renders report.md as sanitized markdown with an escaped-pre fallback', () => {
+    // #8140's verify comment displayed the whole curated bilingual report
+    // as a wall of raw markdown source inside <pre><code>. report.md now
+    // renders as MARKDOWN, wrapped in a collapsed <details> so it still
+    // costs one line in the conversation. A code-region-aware node sanitizer
+    // holds the security floor: CommonMark does NOT decode entities in code
+    // spans/fences, so escaping there would show &amp;&amp; / &lt;T&gt; in
+    // the very commands and types the report is read to copy — prose is
+    // escaped, code is left alone (inert under a code/pre ancestor), the
+    // comment-open token is broken EVERYWHERE so no forged qwen-triage:*
+    // marker survives in the RAW body the upsert greps, prose @ cannot fire
+    // mentions, and folds are balanced over prose only (a </details> quoted
+    // in code is inert) so a malformed report cannot swallow the footer or
+    // escape its wrapper. Oversized reports fall back to the escaped <pre>
+    // wholesale (cut markdown dangles fences).
+    const publishStep = step('Post verification report comment');
+    const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    const script = body.replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('EVIDENCE_SECTION='),
+    );
+    expect(helpers).toContain('emit_report()');
+    // Each fallback branch announces itself in the Actions log (mirroring
+    // emit_block's failure warning) so a degradation to the escaped pre dump
+    // is attributable, not silent. The fold-closer overhead is now budgeted
+    // inside the sanitized-size gate (closers land before it), so four
+    // warnings cover every degradation.
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report exceeds size cap)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitize failed)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap)',
+    );
+    // The report call site uses the rendering path; the tmux lane keeps
+    // its escaped embedding.
+    expect(script).toContain('emit_report "$REPORT" 45000');
+    expect(step('Post tmux result comment')).not.toContain('emit_report');
+
+    // Mirror the sanitizer's code-region model so security assertions test
+    // PROSE only: a live-looking tag inside a fence is inert code text, not
+    // a hole, so grepping the raw output would give false positives.
+    const stripCode = (s) => {
+      const kept = [];
+      let inFence = false;
+      let fc = '';
+      let fl = 0;
+      let inHtml = false;
+      for (const line of s.split('\n')) {
+        if (!inFence) {
+          if (inHtml && /^\s*$/.test(line)) inHtml = false;
+          const wasHtml = inHtml;
+          const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+          if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
+            inFence = true;
+            fc = m[1][0];
+            fl = m[1].length;
+            continue;
+          }
+          if (/^\s*<\/?(details|summary)\b/.test(line)) inHtml = true;
+          kept.push(wasHtml ? line : line.replace(/`[^`]*`/g, ''));
+        } else {
+          const cm = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
+        }
+      }
+      return kept.join('\n');
+    };
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-render-'));
+    try {
+      const report = join(dir, 'report.md');
+      writeFileSync(
+        report,
+        [
+          '# Deep Verification — `merge-ready`',
+          '',
+          '**Verdict:** pass && <T<U>> ok',
+          '',
+          'Run `npm test && Map<string> @pkg` then check `a -> b`.',
+          '',
+          '```bash',
+          'npm run build && node probe.mjs --pkg @qwen-code/core',
+          '<img src=x onerror=alert(1)>',
+          'marker: <!-- qwen-triage:verify-state=running -->',
+          'fold-quote: </details>',
+          '```',
+          '',
+          '> a blockquote && more',
+          '',
+          '| scenario | match |',
+          '| --- | --- |',
+          '| success | ✅ |',
+          '',
+          '<details>',
+          '<summary>中文摘要</summary>',
+          '',
+          '- 结论：通过 @everyone <img src=x onerror=alert(1)>',
+          '- marker: <!-- qwen-triage:verify -->',
+          '',
+          '</details>',
+          '',
+          '<details>',
+          '<summary>unclosed fold</summary>',
+          'tail',
+          '',
+        ].join('\n'),
+      );
+      const emit = (file, max) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_report "$1" ${max}`, '_', file],
+          { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+
+      const out = emit(report, 45000);
+      // Wrapped in a collapsed <details>; markdown structure survives inside.
+      expect(out).toContain(
+        '<details>\n<summary>Verification report</summary>',
+      );
+      expect(out).toContain('| scenario | match |');
+      expect(out).toContain('**Verdict:**');
+      expect(out).toContain('<summary>中文摘要</summary>');
+      expect(out).not.toContain('<pre><code>');
+      // Prose fidelity: && and blockquotes survive; a prose < is escaped
+      // (renders back to <), > is left alone.
+      expect(out).toContain('pass && &lt;T&lt;U>> ok');
+      expect(out).toContain('> a blockquote && more');
+      expect(out).not.toContain('&amp;&amp;');
+      // Code fidelity: spans and fences are untouched — no entity mangling
+      // of the commands/types/paths a reader copies, and a fenced <img> or
+      // </details> stays inert code text.
+      expect(out).toContain('`npm test && Map<string> @pkg`');
+      expect(out).toContain(
+        'npm run build && node probe.mjs --pkg @qwen-code/core',
+      );
+      expect(out).toContain('<img src=x onerror=alert(1)>');
+      // Security floor over the WHOLE raw body: no live comment-open token
+      // anywhere (broken globally, prose AND code), so the upsert grep for
+      // the running marker cannot be forged from a fenced quote.
+      expect(out).not.toContain('<!--');
+      // Security floor over PROSE: the mention is neutralized by a ZWSP
+      // (GitHub decodes &#64; before the mention filter, so the entity alone
+      // was inert), no live non-allowlisted tag, and prose folds balance
+      // (the fenced </details> is NOT counted, so the genuinely unclosed
+      // fold still gets closed).
+      const prose = stripCode(out);
+      expect(prose).not.toContain('@everyone');
+      expect(prose).toContain('@&#8203;everyone');
+      expect(prose).not.toContain('<img');
+      expect(prose.match(/<(?!\/?(details|summary)\b)[A-Za-z]/g)).toBe(null);
+      const opens = prose.split('<details>').length - 1;
+      const closes = prose.split('</details>').length - 1;
+      expect(opens).toBe(closes);
+
+      // Guarantee 4, the hole the review reproduced: one genuinely unclosed
+      // fold plus a fenced block quoting </details>. The fenced closer is
+      // inert code and must NOT balance the live fold — the prose folds
+      // still net to zero only because a closer is appended for the open.
+      const hole = join(dir, 'hole.md');
+      writeFileSync(
+        hole,
+        '<details>\n<summary>fold that never closes</summary>\n\n```html\n</details>\n```\n',
+      );
+      const holeOut = emit(hole, 45000);
+      const holeProse = stripCode(holeOut);
+      expect(holeProse.split('<details>').length).toBe(
+        holeProse.split('</details>').length,
+      );
+
+      // HTML-block divergence: a fence opener inside a <details> HTML
+      // block is literal text per CommonMark/GitHub, not a fence. The
+      // sanitizer must prose-escape the content (neutralizing <img>)
+      // rather than passing it through escCode as inert code.
+      const htmlblk = join(dir, 'htmlblk.md');
+      writeFileSync(
+        htmlblk,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          '```',
+          '<img src=x onerror=alert(1)>',
+          '```',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const htmlOut = emit(htmlblk, 45000);
+      // The <img> is prose-escaped, not passed through as inert code.
+      expect(htmlOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(htmlOut).not.toContain('<img');
+      // The fold balances: wrapper 1 open / 1 close, report fold balanced.
+      expect(htmlOut.split('<details>').length - 1).toBe(
+        htmlOut.split('</details>').length - 1,
+      );
+
+      // Code-span divergence: a backtick code span inside a <details>
+      // HTML block is literal text per CommonMark/GitHub, not code.
+      // The sanitizer must prose-escape the whole line (neutralizing
+      // <img>) rather than splitting it through proseLine and passing
+      // the span through escCode as inert code.
+      const codespan = join(dir, 'codespan.md');
+      writeFileSync(
+        codespan,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          'text `<img src=x onerror=alert(1)>` more',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const csOut = emit(codespan, 45000);
+      expect(csOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(csOut).not.toContain('<img');
+      expect(csOut.split('<details>').length - 1).toBe(
+        csOut.split('</details>').length - 1,
+      );
+      const csProse = stripCode(csOut);
+      expect(csProse).not.toContain('<img');
+
+      // Indented fold: a <details> nested in a list (indent >= 4) must
+      // enter the inHtml state too — GitHub opens HTML blocks relative
+      // to the list-item content column, not just at column 0-3.
+      const indented = join(dir, 'indented.md');
+      writeFileSync(
+        indented,
+        [
+          '- list item',
+          '    <details>',
+          '    <summary>fold</summary>',
+          '    text `<img src=x>` more',
+          '    </details>',
+          '',
+        ].join('\n'),
+      );
+      const indOut = emit(indented, 45000);
+      expect(indOut).toContain('&lt;img src=x>');
+      expect(indOut).not.toContain('<img');
+
+      // Mirror case: a surplus </details> with no open is dropped so it
+      // cannot close the wrapping fold early — the wrapper stays 1 open /
+      // 1 close even though the report shipped an orphan closer.
+      const surplus = join(dir, 'surplus.md');
+      writeFileSync(surplus, 'text </details> more\n');
+      const surplusOut = emit(surplus, 45000);
+      expect(surplusOut).toContain('text  more');
+      expect(surplusOut.split('<details>').length - 1).toBe(1);
+      expect(surplusOut.split('</details>').length - 1).toBe(1);
+
+      // A report ending inside an open code fence: a fence still open at
+      // EOF means the flat scanner diverged from GitHub's container-aware
+      // parser (which closes a list-nested fence at the container's end,
+      // not at EOF). Rather than guess and ship prose GitHub parses as
+      // live, emit_report degrades to the escaped-pre fallback through its
+      // non-zero-exit branch, announcing the cause with its own warning.
+      const fence = join(dir, 'fence.md');
+      writeFileSync(fence, '# Title\n\n```bash\ncode here\n');
+      const fenceProc = spawnSync(
+        'bash',
+        ['-c', `${helpers}\nemit_report "$1" 45000`, '_', fence],
+        { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+      );
+      expect(fenceProc.status).toBe(0);
+      expect(fenceProc.stdout).toContain('<pre><code>');
+      expect(fenceProc.stdout).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(fenceProc.stderr).toContain(
+        '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
+      );
+
+      // Container-axis hole the review reproduced: a fence nested in a list
+      // item, never explicitly closed. CommonMark closes it at the
+      // container's end but the flat scanner stays inFence to EOF, so before
+      // the fix the trailing unindented line shipped as prose GitHub parsed
+      // as live (mention, <img>, raw <a href>). The EOF-open fence now
+      // degrades to the escaped fallback. Red before the fix (output was
+      // sanitized markdown carrying a literal <img>/<a>, not the escaped
+      // pre), green after; the @mention is inert under the pre/code ancestor.
+      const listFence = join(dir, 'list-fence.md');
+      writeFileSync(
+        listFence,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+        ].join('\n'),
+      );
+      const listOut = emit(listFence, 45000);
+      expect(listOut).toContain('<pre><code>');
+      expect(listOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(listOut).not.toContain('<img');
+      expect(listOut).not.toContain('<a href');
+
+      // Container-axis hole with a BALANCING closer (review hole #2 / the
+      // inline Critical): the list-nested fence opens indented, column-0
+      // prose follows, then a column-0 fence marker balances the flat
+      // scanner so it reaches EOF with inFence false — the old EOF guard
+      // never fired and the unescaped prose (mention, <img>, raw <a href>)
+      // shipped. The dedent guard now exits non-zero the moment a non-blank
+      // line dedents below the fence opener's indent. Asserted on the RAW
+      // output (parser-independent): the fallback is the escaped pre, so no
+      // live <img>/<a href> reaches the body and the @mention is inert under
+      // the pre/code ancestor.
+      const listFenceClosed = join(dir, 'list-fence-closed.md');
+      writeFileSync(
+        listFenceClosed,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+          '```',
+          'after',
+          '',
+        ].join('\n'),
+      );
+      const lfcOut = emit(listFenceClosed, 45000);
+      expect(lfcOut).toContain('<pre><code>');
+      expect(lfcOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(lfcOut).not.toContain('<img');
+      expect(lfcOut).not.toContain('<a href');
+
+      // Paragraph-spanning code span (review hole #1): CommonMark matches a
+      // code span across the lines of a paragraph, but proseLine matches per
+      // line. An unmatched backtick run on one line flips the parity for the
+      // rest of the paragraph, so the span the sanitizer classified as code
+      // was prose to GitHub — a live <img>/@everyone shipped before the fix.
+      // The scanner now fails closed: an unmatched run prose-escapes the rest
+      // of the paragraph. Asserted on the RAW output (parser-independent)
+      // rather than through stripCode, which mirrors the sanitizer's own
+      // line-scoped model and so cannot see this divergence.
+      const paraSpan = join(dir, 'para-span.md');
+      writeFileSync(
+        paraSpan,
+        ['A `hint about --flag', 'See `<img src=x> @everyone` here', ''].join(
+          '\n',
+        ),
+      );
+      const psOut = emit(paraSpan, 45000);
+      expect(psOut).toContain('&lt;img src=x>');
+      expect(psOut).not.toContain('<img');
+      expect(psOut).toContain('@&#8203;everyone');
+      expect(psOut).not.toContain('@everyone');
+
+      // Backslash-escaped opening backtick (review Critical): CommonMark's
+      // escape rule consumes \` before the backticks rule runs, so it does
+      // NOT open a code span — but the raw-text backtick scanner still lets it
+      // CLOSE one. Before the fix proseLine paired the escaped backtick with a
+      // later one and shipped the gap as inert code, so GitHub rendered prose:
+      // a live <a href>, an un-defused @everyone, and a </details> that
+      // balance() never saw (it went through escCode), closing the wrapper
+      // early. The scanner now fails closed on an odd backslash run. Asserted
+      // on the RAW output (parser-independent): no live <a href>/<img>, the
+      // mention is ZWSP-defused, and the injected closer is dropped so the
+      // wrapper stays 1 open / 1 close.
+      const escBt = join(dir, 'esc-bt.md');
+      writeFileSync(
+        escBt,
+        'see \\` opts </details> @everyone <a href="https://evil.example/phish">Merge instructions</a> ` end\n',
+      );
+      const escBtOut = emit(escBt, 45000);
+      expect(escBtOut).not.toContain('<a href');
+      expect(escBtOut).not.toContain('<img');
+      expect(escBtOut).toContain('@&#8203;everyone');
+      expect(escBtOut).not.toContain('@everyone');
+      expect(escBtOut.split('<details>').length - 1).toBe(1);
+      expect(escBtOut.split('</details>').length - 1).toBe(1);
+
+      // Pre-escaped entities (review Medium): escProse restores the allowlist
+      // by round-tripping through &lt;, so before the fix it could not tell a
+      // &lt; it just produced from one the author typed — a literal
+      // &lt;details> in the report was promoted to a LIVE fold and a literal
+      // &lt;/details> was silently deleted by the surplus-closer drop. The
+      // sentinel now protects only the source's OWN raw tags, so author-typed
+      // entities stay escaped text: no forged fold, nothing deleted, wrapper
+      // stays 1 open / 1 close.
+      const ent = join(dir, 'entity.md');
+      writeFileSync(
+        ent,
+        'pre-escaped: &lt;/details> and &lt;details> and &lt;img src=x>\n',
+      );
+      const entOut = emit(ent, 45000);
+      expect(entOut).toContain('&lt;/details>');
+      expect(entOut).toContain('&lt;details>');
+      expect(entOut).toContain('&lt;img src=x>');
+      expect(entOut.split('<details>').length - 1).toBe(1);
+      expect(entOut.split('</details>').length - 1).toBe(1);
+
+      // A NUL byte in the report is stripped (parity with emit_block's
+      // tr -d '\000'); it must not reach the comment body.
+      const nul = join(dir, 'nul.md');
+      writeFileSync(nul, 'before\u0000after\n');
+      const nulOut = emit(nul, 45000);
+      expect(nulOut).toContain('beforeafter');
+      expect(nulOut).not.toContain('\u0000');
+
+      // Oversize → wholesale fallback to the escaped pre embedding.
+      const big = join(dir, 'big.md');
+      writeFileSync(big, `x${'y'.repeat(46000)}`);
+      const fb = emit(big, 45000);
+      expect(fb).toContain('<pre><code>');
+      expect(fb).toContain('Verification report (report.md, truncated)');
+
+      // Inflation: raw under the cap but sanitized over it. & is no longer
+      // escaped (it is not a security control), so < drives the inflation —
+      // each < becomes the 4-byte &lt;.
+      const dense = join(dir, 'dense.md');
+      writeFileSync(dense, '<'.repeat(12000));
+      const inflated = emit(dense, 45000);
+      expect(inflated).toContain('<pre><code>');
+      expect(inflated).toContain('Verification report (report.md, truncated)');
+
+      // The sanitizer runs under the step's real `set -euo pipefail`; a
+      // fold-free report must still exit 0 and render (no grep whose
+      // zero-match exit could abort the composer).
+      const nofolds = join(dir, 'nofolds.md');
+      writeFileSync(nofolds, '## heading\nbody text\n');
+      const pf = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set -o pipefail\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          nofolds,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(pf.status).toBe(0);
+      expect(pf.stdout).toContain('<summary>Verification report</summary>');
+      expect(pf.stdout).toContain('## heading');
+
+      // Appended fold closers land in the sanitized output BEFORE the size
+      // gate, so a report dense in unbalanced <details> opens falls back to
+      // the capped pre dump once the closers push the wrapped section over
+      // the budget — rather than shipping a section over the cap.
+      // 100 opens: raw ~900 B clears max=2000, but 900 + 100*11 closers +
+      // the ~61 B wrapper > 2000 forces the fallback.
+      const folds = join(dir, 'folds.md');
+      writeFileSync(folds, '<details>\n'.repeat(100));
+      const over = emit(folds, 2000);
+      expect(over).toContain('<pre><code>');
+      expect(over).toContain('Verification report (report.md, truncated)');
+
+      // Sanitizer crash → escaped-pre fallback. Override node so the
+      // sanitizer's `node -e` fails; emit_block's own node call has a
+      // head -c fallback so the escaped output still renders.
+      const crash = join(dir, 'crash.md');
+      writeFileSync(crash, '# crash report\n\nbody text\n');
+      const crashProc = spawnSync(
+        'bash',
+        [
+          '-c',
+          `node() { return 1; }\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          crash,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(crashProc.status).toBe(0);
+      expect(crashProc.stdout).toContain('<pre><code>');
+      expect(crashProc.stdout).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('escapes and size-caps the verify report body', () => {
     const publishStep = step('Post verification report comment');
     const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
@@ -1869,7 +2475,7 @@ describe('qwen-triage verify hardening round 2', () => {
       // A bare remote with a pr-assets branch, plus a gh stub.
       sh(`git init -q --bare "${dir}/assets.git"`);
       sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets`,
+        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/7999-verify`,
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -1931,7 +2537,7 @@ describe('qwen-triage verify hardening round 2', () => {
       });
       expect(res.status).toBe(0);
       const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets | grep verify/ || true`,
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
       )
         .stdout.trim()
         .split('\n')
@@ -1947,8 +2553,8 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment).not.toContain('02-fake');
       expect(comment).toContain('did not pass the hosting checks');
 
-      // No reachable pr-assets branch -> text-only, never an aborted report.
-      sh(`git init -q --bare "${dir}/empty.git"`);
+      // Unreachable remote -> text-only, never an aborted report.
+      sh(`rm -rf "${dir}/empty.git" && mkdir -p "${dir}/empty.git"`);
       const out2 = join(dir, 'comment2.md');
       const res2 = sh(script, {
         cwd: work,
@@ -1976,6 +2582,62 @@ describe('qwen-triage verify hardening round 2', () => {
       const comment2 = readFileSync(out2, 'utf8');
       expect(comment2).toContain('Sandboxed verification');
       expect(comment2).not.toContain('Evidence images');
+
+      // FIRST RUN on a PR: the remote is valid but the per-PR branch does
+      // not exist yet, so the clone fails and the orphan-init path runs for
+      // real. Both scenarios above take the clone-failed branch too, but
+      // both then fail to push (one seeded the branch, the other has no
+      // remote), so neither proves orphan-init can actually DELIVER. Without
+      // this, a bug in `checkout --orphan` or a dropped `remote add origin`
+      // would silently discard every image on every PR's first run.
+      sh(`git -C "${dir}/assets.git" branch -D pr-assets/7999-verify`);
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" branch --list pr-assets/7999-verify`,
+        ).stdout.trim(),
+      ).toBe('');
+      const out3 = join(dir, 'comment3.md');
+      const res3 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out3,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '79',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+        },
+      });
+      expect(res3.status).toBe(0);
+      // The branch was created by orphan-init and carries this run's images.
+      const hosted3 = sh(
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
+      )
+        .stdout.trim()
+        .split('\n')
+        .filter(Boolean);
+      expect(hosted3.map((p) => p.split('/').pop()).sort()).toEqual([
+        '01-ab.png',
+        '04-edge.png',
+      ]);
+      // Orphan, not a graft onto unrelated history: exactly one commit.
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" rev-list --count pr-assets/7999-verify`,
+        ).stdout.trim(),
+      ).toBe('1');
+      expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2087,6 +2749,102 @@ describe('qwen-triage verify hardening round 2', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Verification techniques lifted from maintainer-written verification rounds that
+  // the skill could not previously have produced. Each is pinned to the
+  // failure it exists for, because a rule stated without its failure reads
+  // as advice and gets skipped.
+  it('carries the maintainer-round verification techniques', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // #7914 §4: the PR added write_file as a second writer into the shared
+    // artifact store, and the store's pre-existing first-writer-wins merge
+    // then silently discarded record_artifact's curated title. Nothing in
+    // the old skill pointed at collisions between writers.
+    expect(flat).toContain('new writer into a shared store');
+    expect(flat).toContain('in both orders');
+    expect(flat).toContain('what the loser is told');
+
+    // ...and that finding surfaced from a control that existed to validate
+    // the BASE probe, run identically on head.
+    expect(flat).toContain('Run every control on BOTH arms');
+
+    // #7998: the hardware cursor was read with a tmux query, then
+    // corroborated by a post-exit marker — a second effect of the same fact
+    // whose failure mode does not involve the query.
+    expect(flat).toContain('corroborate it with a mechanism that does not use');
+
+    // #7998 nit: re-running patch-package produced a byte-different file,
+    // proving the committed hunks were hand-written.
+    expect(flat).toContain('Re-run the generator and diff');
+
+    // #7998 "what I did not verify": a blank harness was proved
+    // environmental by booting base and head identically.
+    expect(flat).toContain('A/A control');
+
+    // #7934 R4 §1: a new guard turned a vacuous pass into a failure that is
+    // deterministic on a fast machine. Sampling cannot find it from a
+    // loaded CI box — only measuring the margin can, so the rule must say
+    // measure and must say why repetition is the wrong instrument here.
+    expect(flat).toContain('measure it, do not sample it');
+    expect(flat).toContain('speed-correlated failure is not flake');
+    expect(flat).toContain('You cannot reproduce a fast-machine failure');
+    // The blocking verdict must be expressible in the contract, not just
+    // asserted in prose: encode the margin as a scripted assertion so a
+    // crossing distribution lands in `fail`.
+    expect(flat).toContain('encoding the margin as a scripted assertion');
+
+    // #7934 R4 §2: the abort cases fired during CLI startup, so the fake
+    // server saw zero requests — a suite named for mid-stream aborts never
+    // streamed, and every assertion passed.
+    expect(flat).toContain('the scenario never reached the code under test');
+    expect(flat).toContain('assert that count is non-zero');
+
+    // #7836: both blockers had one root cause — a route and the child it
+    // spawns asked the same question against different state (pinned vs
+    // unpinned runtime dir), and a lazily-created backing file left a
+    // window where a just-created session was invisible to any on-disk
+    // existence check.
+    expect(flat).toContain('the same predicate is checked in two places');
+    expect(flat).toContain('is the state observable yet at all');
+    expect(flat).toContain('blast radius on bystanders');
+
+    // #7836: a whole-file revert removed a test's precondition, so a good
+    // test looked vacuous. A false "your test is vacuous" is worse than a
+    // missed survivor, so the rule must demand the finer mutation first.
+    expect(flat).toContain('escalate to a finer mutation');
+
+    // #7885: an npm cache claimed ~75% off npm ci; isolating the slice a
+    // download cache can touch (--ignore-scripts) showed 36s of 226s, so
+    // the real saving was 15% — and 33s off a 14m37s job at that.
+    expect(flat).toContain('Isolate the slice the mechanism can actually');
+    expect(flat).toContain('has a cost, not only a benefit');
+    // ...and the severity of the finding it did have was bounded by
+    // disproving the scarier readings.
+    expect(flat).toContain('report which ones do NOT hold');
+
+    // #7885: the PR said the cache dir was discarded after the job; the
+    // action's own manifest declares a post-step that uploads it as root.
+    expect(flat).toContain('their own manifest');
+
+    // #7899: the shipped script was run verbatim against the live repo with
+    // every mutating call hard-failing — real data, no possible side effect.
+    expect(flat).toContain('interpose a refusing proxy on the write path');
+
+    // #7862 R4: the fix bundled reduce() with an ordering change. A third
+    // build with only the ordering change showed each half does a different
+    // job — either alone leaves a channel that floods or wedges, which the
+    // two-cell A/B cannot reach.
+    expect(flat).toContain('build the intermediate variants');
+    // ...and the same round bisected the RangeError threshold through the
+    // real async stack, where it fired far below a micro-benchmark's number.
+    expect(flat).toContain(
+      'A limit measured in isolation does not transfer to the real call site',
+    );
+    // ...counting emitted envelopes instead of delivered prompts would have
+    // hidden every gate on the path.
+    expect(flat).toContain('count at the destination, not at the component');
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -2506,10 +3264,13 @@ describe('qwen-triage verify publish fidelity', () => {
           expect(assertZh).toBeGreaterThan(details);
           expect(assertZh).toBeLessThan(detailsEnd);
         }
-        // The report block stays outside the Chinese fold.
-        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
-          detailsEnd,
-        );
+        // The report section stays outside the Chinese fold — now rendered
+        // as markdown inside its own collapsed <details>, not an escaped
+        // <pre> dump and not a 45 KB wall in the conversation.
+        expect(
+          body.indexOf('<summary>Verification report</summary>'),
+        ).toBeGreaterThan(detailsEnd);
+        expect(body).toContain('## real report');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2898,6 +3659,367 @@ describe('qwen-triage verify round-3 hardening', () => {
       verifyJob.indexOf('timeout-minutes:'),
     );
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+  });
+
+  // Evidence images: the agent cannot install chromium (runs as `node`,
+  // `env -i`, fresh HOME, no apt). The tools step installs system deps
+  // as root; a post-checkout step downloads the browser binary using the
+  // checkout's own Playwright so the version always matches the lockfile.
+  it('pre-installs chromium and hands it to the agent', () => {
+    // System deps only — no browser binary, no version-sensitive download.
+    const tools = stepIn('verify', 'Install verify runner tools');
+    expect(tools).toContain('install-deps chromium');
+    expect(tools).not.toContain('install --with-deps');
+    expect(tools).toContain('::warning::Chromium system deps install failed');
+    // Deps success is recorded in a marker the browser step gates on: apt
+    // and the Playwright CDN are independent servers, so a binary download
+    // alone must not promise chromium to the agent.
+    expect(tools).toContain('verify-chromium-deps-ok');
+    // No hardcoded Playwright pin here either: the apt list must track
+    // current Playwright so it covers the lockfile-matched binary below.
+    expect(tools).not.toMatch(/playwright@[\d.]/);
+
+    // Browser binary: downloaded after npm ci, and by the CLI of the
+    // package the capture harness actually imports — never a hardcoded pin
+    // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
+    // imports `playwright`, but node_modules/.bin/playwright (what `npx
+    // playwright` resolves) is @playwright/test's CLI, which pins a
+    // different chromium revision. The install must therefore resolve the
+    // imported package's cli.js from the harness's own directory (the same
+    // algorithm as its import), not assume npm hoists `playwright` to the
+    // root — a hoist nothing pins. cli.js is absent from the package's
+    // exports map, so the workflow resolves the exported package.json and
+    // joins; binding this assertion to the harness's import keeps the two
+    // from drifting apart.
+    const capture = readFileSync(
+      'integration-tests/terminal-capture/terminal-capture.ts',
+      'utf8',
+    );
+    expect(capture).toMatch(/from 'playwright'/);
+    const browser = stepIn('verify', 'Install evidence browser');
+    expect(browser).toContain(
+      "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })",
+    );
+    expect(browser).toContain('node "$PW_CLI" install chromium');
+    expect(browser).not.toContain('./node_modules/playwright/cli.js');
+    expect(browser).not.toContain('npx playwright install chromium');
+    expect(browser).not.toMatch(/playwright@[\d.]/);
+    expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
+    // The CLI runs PR-controlled code ($PW_CLI resolves from the PR's
+    // node_modules), so it must drop the same runner-injected cache
+    // credentials the prepare and agent steps unset — a doctored
+    // playwright package could otherwise write to the Actions cache.
+    expect(browser).toContain('-u ACTIONS_RUNTIME_TOKEN');
+    expect(browser).toContain('-u ACTIONS_RUNTIME_URL');
+    expect(browser).toContain('-u ACTIONS_CACHE_URL');
+    // Marker is written ONLY inside the success branch (M6): the if
+    // condition must precede the marker write, and the else branch must
+    // carry the warning instead. The condition must ALSO require the deps
+    // marker (M6b): a binary download alone is not enough.
+    expect(browser).toContain('verify-chromium-deps-ok');
+    const ifIdx = browser.indexOf(
+      'if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ]',
+    );
+    const markerIdx = browser.indexOf('verify-chromium-path');
+    const elseIdx = browser.indexOf('::warning::Chromium unavailable');
+    expect(ifIdx).toBeGreaterThan(-1);
+    expect(markerIdx).toBeGreaterThan(ifIdx);
+    expect(elseIdx).toBeGreaterThan(markerIdx);
+    // Best-effort: a failed download must not fail a verification.
+    expect(browser).not.toContain('exit 1');
+    // A stale marker from an earlier run on the persistent pool must not
+    // ride along: prepare clears it before this step writes a fresh one,
+    // so absence stays a real signal even though RUNNER_TEMP outlives the
+    // run.
+    expect(stepIn('verify', 'Install and build PR app')).toContain(
+      'rm -f "$RUNNER_TEMP/verify-chromium-path"',
+    );
+
+    // The agent is told ONLY when the install actually succeeded, so the
+    // variable's absence is a real signal rather than a stale promise.
+    // The guard must be CONDITIONAL (M1b): QWEN_VERIFY_CHROMIUM=1 must
+    // appear inside the if-block that reads the marker, not unconditionally.
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain('verify-chromium-path');
+    expect(runStep).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // Both variables, not just the flag. Losing the path alone is the
+    // nastiest arm: the agent is TOLD chromium is available, Playwright
+    // then looks in the default ~/.cache/ms-playwright instead of the
+    // shared install, and captures degrade to text-only after a successful
+    // install — verified by mutation, this test passed without this line.
+    expect(runStep).toContain('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
+    const guard = runStep.indexOf('verify-chromium-path');
+    const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
+    const path = runStep.indexOf('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
+    expect(guard).toBeLessThan(marker);
+    expect(guard).toBeLessThan(path);
+    // The if-fi block must wrap the QWEN_ENV+= assignment. Anchor the
+    // slice at the real `if` keyword: `guard - 20` lands inside the marker
+    // path, where "ver-if-y-chromium-path" satisfies toContain('if') even
+    // with the guard deleted.
+    const runIfIdx = runStep.lastIndexOf('if CHROMIUM_PATH', guard);
+    expect(runIfIdx).toBeGreaterThan(-1);
+    const ifBlock = runStep.slice(runIfIdx, marker + 30);
+    expect(ifBlock).toMatch(/(^|\s)if\s/);
+    expect(ifBlock).toContain('then');
+
+    // The tmux lane is untouched: it has no evidence-image path.
+    expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
+      'QWEN_VERIFY_CHROMIUM',
+    );
+
+    // And the skill must stop calling captures optional.
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('Produce these whenever you ran a harness');
+    expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
+  });
+
+  // The browser step's require.resolve + cli.js join is otherwise guarded
+  // only by a literal string match, so a Playwright bump that relocates
+  // cli.js would break the download at runtime while that assertion still
+  // passes. Execute the workflow's exact resolution against the installed
+  // tree and require it to land on a real cli.js. Skipped only when
+  // playwright is absent entirely (the require.resolve itself fails),
+  // mirroring the jq tool-availability guard above.
+  const resolveHarnessCli =
+    "process.stdout.write(require('path').join(require('path').dirname(" +
+    "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })" +
+    "), 'cli.js'))";
+  it.skipIf(spawnSync('node', ['-e', resolveHarnessCli]).status !== 0)(
+    'resolves the harness Playwright cli.js to a real file',
+    () => {
+      const cli = spawnSync('node', ['-e', resolveHarnessCli], {
+        encoding: 'utf8',
+      });
+      expect(cli.status).toBe(0);
+      expect(cli.stdout).toMatch(/cli\.js$/);
+      expect(existsSync(cli.stdout)).toBe(true);
+    },
+  );
+
+  // The publish job must host images on a per-PR branch that can coexist
+  // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
+  // cannot be created while `pr-assets/…` children exist.
+  it('hosts evidence on a per-PR branch, not a bare pr-assets leaf', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain('pr-assets/${PR_NUMBER}-verify');
+    expect(publish).toContain('checkout -q --orphan');
+    expect(publish).not.toMatch(/--branch pr-assets["\s]/);
+  });
+
+  // Every `pr-assets/*` producer needs a deleter, or its branches are
+  // permanent: one single-commit branch per verified PR, forever, slowing
+  // `git ls-remote` and cluttering the branch list for every contributor.
+  // The verify lane became a second producer and was not added.
+  it('deletes both pr-assets producers when a PR closes', () => {
+    const cleanup = readFileSync(
+      '.github/workflows/web-shell-visuals-cleanup.yml',
+      'utf8',
+    );
+    // Both branch names, built from the same PR number.
+    expect(cleanup).toContain('pr-assets/web-shell-visuals-${PR_NUMBER}');
+    expect(cleanup).toContain('pr-assets/${PR_NUMBER}-verify');
+    // Runs in the base context and never touches PR code.
+    expect(cleanup).toContain('pull_request_target');
+    expect(cleanup).not.toContain('actions/checkout');
+    // One branch missing or one delete failing must not stop the other:
+    // most PRs produce neither, so absence is the normal case.
+    expect(cleanup).not.toContain('set -euo pipefail');
+    expect(cleanup).toContain('continue');
+    // ...but a real delete failure still has to be visible.
+    expect(cleanup).toContain('::warning::Failed to delete');
+
+    // Execute it against a stubbed gh: the loop must attempt both refs, and
+    // a missing first branch must not skip the second.
+    const script = cleanup.match(/run: \|-\n([\s\S]*?)$/)?.[1];
+    expect(script).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'assets-cleanup-'));
+    try {
+      const calls = join(dir, 'gh-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // Only the verify branch exists; the visuals one 404s.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res.status).toBe(0);
+      const lines = readFileSync(calls, 'utf8').trim().split('\n');
+      const deletes = lines.filter((l) => l.includes('DELETE'));
+      // The missing visuals branch was probed but never deleted...
+      expect(
+        lines.some((l) => l.includes('pr-assets/web-shell-visuals-7999')),
+      ).toBe(true);
+      expect(deletes.some((l) => l.includes('web-shell-visuals'))).toBe(false);
+      // ...and the loop carried on to the verify branch and deleted it.
+      // This is the assertion the whole test exists for: a `set -e` script
+      // would have exited on the first 404 and never reached here.
+      expect(deletes.some((l) => l.includes('pr-assets/7999-verify'))).toBe(
+        true,
+      );
+      expect(res.stdout).toContain('Deleted pr-assets/7999-verify');
+
+      // Delete-FAILURE path: the verify branch probes OK but its DELETE
+      // fails (transient 500, or the PAT lost contents:write). The loop
+      // must set a non-zero exit and surface the warning — without this, a
+      // future edit dropping `exit "$status"` leaves the job green while
+      // the orphaned branch this workflow exists to prevent accumulates.
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // The verify branch probes OK but its DELETE fails; the visuals
+          // branch still 404s on the probe.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          '  *"-X DELETE"*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res2 = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res2.status).toBe(1);
+      expect(res2.stdout).toContain(
+        '::warning::Failed to delete pr-assets/7999-verify',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // One budget drives the agent's graceful kill and the watchdog threshold
+  // that distinguishes that kill from an OOM — both derive from a single
+  // AGENT_BUDGET_M, so they cannot drift apart. The job limit and the
+  // skill's advertised budget are still separate literals with their own
+  // quiet failures, so pin their relationship to the budget, not the number.
+  it('keeps the verify budget, watchdog and job limit consistent', () => {
+    const verifyJob = job('verify');
+    const runStep = stepIn('verify', 'Run verification agent');
+
+    const agentMinutes = Number(runStep.match(/AGENT_BUDGET_M=(\d+)/)?.[1]);
+    const jobMinutes = Number(
+      verifyJob.match(/^ {4}timeout-minutes: (\d+)/m)?.[1],
+    );
+    expect(agentMinutes).toBeGreaterThan(0);
+    expect(jobMinutes).toBeGreaterThan(0);
+
+    // The graceful kill and the watchdog threshold must both derive from
+    // AGENT_BUDGET_M rather than carry their own literals — that derivation
+    // is what makes the coupling correct by construction. A hardcoded
+    // `120m` or `7200` would reintroduce the drift this test exists to
+    // catch: set the threshold below the budget and a late OOM (137) reads
+    // as `timeout`, publishing "partial evidence" for a crash; set it above
+    // and a real timeout reads as a crash.
+    expect(runStep).toMatch(/timeout --kill-after=10s "\$\{AGENT_BUDGET_M\}m"/);
+    expect(runStep).toMatch(
+      /"\$AGENT_ELAPSED" -ge \$\(\(AGENT_BUDGET_M \* 60\)\)/,
+    );
+
+    // That comparison is only meaningful if the elapsed-time chain exists:
+    // drop the baseline and AGENT_ELAPSED is total shell uptime, so a late
+    // OOM reads as `timeout`; drop the assignment and it is empty, so the
+    // watchdog never fires and a real timeout reads as a crash. Pin both
+    // lines so deleting either fails here instead of silently in CI.
+    expect(runStep).toMatch(/AGENT_START=\$SECONDS/);
+    expect(runStep).toMatch(/AGENT_ELAPSED=\$\(\(SECONDS - AGENT_START\)\)/);
+
+    // A step-level `timeout-minutes` on the run step would cap the agent
+    // below the budget while every relationship above stays green — the
+    // job limit must be the only cap.
+    expect(runStep).not.toMatch(/^\s+timeout-minutes:/m);
+
+    // The job limit only guards infra hangs, so it must clear the agent
+    // budget plus install/build plus fixed overhead — otherwise the job
+    // is killed mid-run and the agent never ships its partial report.
+    // 20 minutes is the documented allowance (≈15m install/build + ≈5m
+    // tools, checkout, pin, upload, cleanup).
+    expect(jobMinutes).toBeGreaterThanOrEqual(agentMinutes + 20);
+
+    // And the skill has to advertise the same budget, or the agent
+    // self-limits to the old number and the raise does nothing.
+    const advertised = Number(verifySkill.match(/hard (\d+)-minute kill/)?.[1]);
+    expect(advertised).toBe(agentMinutes);
+    const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
+    expect(soft).toBeLessThan(agentMinutes);
+    expect(soft).toBeLessThanOrEqual(agentMinutes - 10);
+    // A proportional lower bound catches the most common drift — the hard
+    // kill is raised but the soft budget is forgotten, silently wasting CI
+    // time — without freezing the reserve at a fixed minute count for every
+    // future budget.
+    expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
+  });
+
+  // Third instance of one structural bug: an instruction placed outside the
+  // flow the agent actually follows. #7917 buried the /verify recommendation
+  // in a "local invocation ONLY" section; #8016 marked captures "Optionally";
+  // and captures still came out ZERO on two live runs (#7975, #8066) where
+  // the browser installed fine — because the plan the agent executes is the
+  // Scope-selection budget list, and that list had no capture line at all.
+  it('budgets evidence capture in scope selection, not only in the contract', () => {
+    const scope = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    // A numbered budget item alongside the A/B, harnesses and gates.
+    expect(scope).toMatch(/^4\. \*\*Capture/m);
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
+    // Time reserved, and the failure that motivated it named — a rule
+    // stated without its failure reads as advice and gets skipped.
+    expect(scope).toContain('four live runs produced zero images');
+    // Bounded: the cap exists so "budget it" does not become eight images.
+    expect(scope).toMatch(/normally two, at most a handful/);
+
+    // And the report has somewhere to put it, or a produced capture has no
+    // referent and the naming rule means nothing.
+    const structure = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(structure).toContain('Reference the capture of those cells here');
   });
 
   // Cleanups must never descend through a PR-writable parent, and an
@@ -3838,6 +4960,121 @@ describe('qwen-triage tmux lane parity', () => {
     expect(transcriptCap).toBeGreaterThan(0);
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
+  });
+
+  // The cache step must be restore-only: `actions/cache/restore` has no
+  // post-save hook, so PR lifecycle scripts cannot write to the shared
+  // cache. Swapping to `actions/cache` would re-enable the save path and
+  // let a PR poison subsequent runs.
+  it('pins the npm cache step to restore-only in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain('actions/cache/restore@');
+      expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+      // A separate save step would reopen the same hole the
+      // restore-only variant closes.
+      expect(job(jobName)).not.toContain('actions/cache/save@');
+      expect(job(jobName)).not.toMatch(/uses:\s*'actions\/cache@/);
+    }
+  });
+
+  it('points npm ci at the restored cache directory in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+      );
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cachePath = cacheStep.match(
+        /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
+      )?.[1];
+      expect(cachePath).toBeTruthy();
+      const npmCaches = [
+        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      ].map((m) => m[1]);
+      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
+      for (const c of npmCaches) expect(c).toBe(cachePath);
+    }
+  });
+  it('clears stale npm cache before restore in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      expect(clearStep, `${jobName} must have a clear step`).toContain(
+        'rm -rf',
+      );
+      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
+      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      expect(clearIdx).toBeGreaterThan(-1);
+      expect(restoreIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeLessThan(restoreIdx);
+    }
+  });
+
+  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain("id: 'npm-cache'");
+      const reportStep = stepIn(jobName, 'Report npm cache hit');
+      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
+    }
+  });
+});
+
+describe('qwen-triage npm cache producer', () => {
+  it('saves with the same key and path the triage lanes restore', () => {
+    expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    // Prettier may choose single or double quotes depending on inner
+    // quote characters, so compare the parsed scalar, not the raw YAML.
+    const yamlScalar = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+      return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    };
+    const savePath = yamlScalar(
+      cacheProducerWorkflow.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+    );
+    const saveKey = yamlScalar(
+      cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+    );
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const path = yamlScalar(
+        restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+      );
+      const key = yamlScalar(
+        restoreStep.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+      );
+      expect(path).toBeTruthy();
+      expect(key).toBeTruthy();
+      expect(savePath).toBe(path);
+      expect(saveKey).toBe(key);
+    }
+  });
+
+  it('triggers on push to main', () => {
+    expect(cacheProducerWorkflow).toMatch(/push:/);
+    expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method, so a producer on a different runner or outside
+    // the container computes a different version and every restore misses
+    // even when the key and path strings match.
+    expect(cacheProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    for (const jobName of ['verify', 'tmux-testing']) {
+      expect(job(jobName)).toContain(
+        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+      );
+      expect(job(jobName)).toContain("image: 'node:22-bookworm'");
+    }
   });
 });
 

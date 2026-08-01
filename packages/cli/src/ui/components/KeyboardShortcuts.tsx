@@ -20,7 +20,9 @@ const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
 const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
-  return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
+  // macOS terminals (iTerm2, Terminal.app) intercept Cmd+V for text paste, so
+  // advertise Ctrl+V and Option+V, which reach the CLI as image-paste keys.
+  return process.platform === 'darwin' ? 'ctrl+v / option+v' : 'ctrl+v';
 };
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
@@ -38,7 +40,7 @@ const getShortcuts = (): Shortcut[] => [
   { key: 'ctrl+c', description: t('to quit') },
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },
-  { key: 'ctrl+o', description: t('to view transcript') },
+  { key: 'ctrl+o', description: t('to expand details') },
   { key: 'ctrl+r', description: t('to search history') },
   { key: 'ctrl+y', description: t('to retry last request') },
   { key: 'ctrl+q', description: t('to queue for the next turn') },

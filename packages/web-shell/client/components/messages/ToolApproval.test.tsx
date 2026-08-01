@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { ToolApproval } from './ToolApproval';
 
@@ -69,10 +69,11 @@ function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
+  language: WebShellLanguage = 'en',
 ): void {
   act(() =>
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ToolApproval
           request={req}
           onConfirm={onConfirm}
@@ -88,11 +89,12 @@ function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
+  language: WebShellLanguage = 'en',
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, planTodos);
+  rerender(keyboardActive, req, planTodos, language);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -265,6 +267,48 @@ describe('ToolApproval accessibility', () => {
     });
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
   });
+
+  it.each([
+    ['en' as const, 'Yes, allow once', 'Allow once and switch to Default mode'],
+    ['zh-CN' as const, '是，允许一次', '允许一次并切换到默认模式'],
+  ])(
+    'distinguishes the switch-to-default approval in %s',
+    (language, allowOnceLabel, switchLabel) => {
+      render(
+        undefined,
+        {
+          ...request,
+          options: [
+            {
+              id: 'proceed_once',
+              label: 'Allow',
+              kind: 'allow_once',
+            },
+            {
+              id: 'proceed_once_and_switch_to_default',
+              label: 'Switch to Default Mode and allow once (recommended)',
+              kind: 'allow_once',
+            },
+          ],
+        },
+        undefined,
+        language,
+      );
+
+      expect(optionButtons().map((option) => option.textContent)).toEqual([
+        expect.stringContaining(allowOnceLabel),
+        expect.stringContaining(switchLabel),
+      ]);
+
+      act(() => {
+        optionButtons()[1]!.click();
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        'req-1',
+        'proceed_once_and_switch_to_default',
+      );
+    },
+  );
 
   it('confirms by digit shortcut, scoped to the panel', () => {
     render(undefined);

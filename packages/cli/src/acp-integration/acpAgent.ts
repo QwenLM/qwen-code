@@ -162,6 +162,7 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -199,6 +200,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
@@ -206,9 +208,9 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from '../serve/workspace-remember-errors.js';
-import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
-import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+} from '../runtime/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../runtime/workspace-memory-summaries.js';
+import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
@@ -300,12 +302,15 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -315,14 +320,15 @@ import {
   endAcpBootstrapConfigProfiling,
   markAcpStartup,
 } from '../utils/acp-startup-profiler.js';
-import { isValidServerName } from '../serve/validate-server-name.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
-import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
+import { isValidServerName } from '../runtime/validate-server-name.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import {
   collectContextData,
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
@@ -343,6 +349,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -626,10 +633,58 @@ function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
 }
 
-function isChannelSessionRequest(params: { _meta?: unknown }): boolean {
+function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
+}
+
+export function selectVisibleHistoryRecords(
+  records: ChatRecord[],
+  hideInheritedHistory: boolean,
+): ChatRecord[] {
+  const sourceBoundary = records.findIndex(
+    (record) =>
+      record.type === 'system' &&
+      record.subtype === 'session_source' &&
+      isObjectRecord(record.systemPayload) &&
+      record.systemPayload['sourceType'] === 'side_task',
+  );
+  // A persisted side-task source boundary is authoritative for every replay;
+  // callers cannot opt inherited parent history back into that child session.
+  if (sourceBoundary >= 0) {
+    return records
+      .slice(sourceBoundary)
+      .filter((record) => record.forkedFrom === undefined);
+  }
+  return hideInheritedHistory
+    ? records.filter((record) => record.forkedFrom === undefined)
+    : records;
+}
+
+interface SessionSource {
+  sourceType: string;
+  sourceId?: string;
+}
+
+function getSessionSource(params: {
+  _meta?: unknown;
+}): SessionSource | undefined {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   const value = meta?.[SESSION_SOURCE_META_KEY];
-  return isObjectRecord(value) && value['sourceType'] === 'channel';
+  if (!isObjectRecord(value) || typeof value['sourceType'] !== 'string') {
+    return undefined;
+  }
+  return {
+    sourceType: value['sourceType'],
+    ...(typeof value['sourceId'] === 'string'
+      ? { sourceId: value['sourceId'] }
+      : {}),
+  };
+}
+
+function shouldDeferMcpDiscovery(params: { _meta?: unknown }): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[WORKTREE_MCP_DEFER_META_KEY] === true;
 }
 
 function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
@@ -2826,6 +2881,7 @@ export async function runAcpAgent(
     process.stderr.write(`${warning}\n`);
   }
   const eventLoopMonitor = startEventLoopLagMonitor({
+    suspendThresholdMs: ACP_EVENT_LOOP_STALL_RESTART_MS,
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
     },
@@ -3328,6 +3384,7 @@ class QwenAgent implements Agent {
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
+  private workspaceExtensionStatusRefreshPromise: Promise<void> | undefined;
   private readonly pendingMcpAuthentications = new Map<
     string,
     PendingMcpAuthentication
@@ -3460,7 +3517,7 @@ class QwenAgent implements Agent {
     const writerTerminals: Array<Promise<void>> = [];
     for (const config of configList) {
       try {
-        writerTerminals.push(config.closeSessionWriter());
+        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
       } catch (error) {
         writerTerminals.push(Promise.reject(error));
       }
@@ -3516,6 +3573,41 @@ class QwenAgent implements Agent {
       return this.config;
     }
     return this.workspaceMcpDiscoveryConfig ?? this.config;
+  }
+
+  private refreshBootstrapExtensionStatus(): Promise<void> {
+    if (this.workspaceExtensionStatusRefreshPromise) {
+      return this.workspaceExtensionStatusRefreshPromise;
+    }
+
+    const promise = (async () => {
+      const errors: unknown[] = [];
+      try {
+        await this.config.getExtensionManager().refreshCache();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await this.config.getSkillManager()?.refreshCache();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(
+          errors,
+          'Bootstrap extension status refresh failed',
+        );
+      }
+    })();
+    this.workspaceExtensionStatusRefreshPromise = promise;
+    const clear = () => {
+      if (this.workspaceExtensionStatusRefreshPromise === promise) {
+        this.workspaceExtensionStatusRefreshPromise = undefined;
+      }
+    };
+    void promise.then(clear, clear);
+    return promise;
   }
 
   private getLiveMcpConfigs(serverName: string): Config[] {
@@ -4336,7 +4428,11 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
-    const isChannelSession = isChannelSessionRequest(params);
+    const requestedSessionId =
+      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
+        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
+        : undefined;
+    const sessionSource = getSessionSource(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
       'qwen-code.daemon.session_start',
@@ -4354,7 +4450,17 @@ class QwenAgent implements Agent {
         );
         this.settings = settings;
         const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(cwd, mcpServers, settings, isChannelSession),
+          this.newSessionConfig(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            requestedSessionId,
+            undefined,
+            shouldDeferMcpDiscovery(params)
+              ? { skipMcpDiscovery: true }
+              : undefined,
+          ),
         );
         let session: Session;
         try {
@@ -4387,7 +4493,7 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
@@ -4409,12 +4515,19 @@ class QwenAgent implements Agent {
               : {}),
           } as LoadSessionResponse;
           const records = sessionData.conversation.messages;
-          if (records.length === 0) return response;
+          const visibleRecords = selectVisibleHistoryRecords(
+            records,
+            shouldHideInheritedHistory(params),
+          );
+          if (visibleRecords.length === 0) return response;
 
           const bulkReplay = isBulkLoadReplayRequest(params);
           const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(records, getLoadReplayPageSize(params))
-            : { records, hasMore: false };
+            ? selectRecentHistoryRecords(
+                visibleRecords,
+                getLoadReplayPageSize(params),
+              )
+            : { records: visibleRecords, hasMore: false };
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
             config,
@@ -4473,7 +4586,7 @@ class QwenAgent implements Agent {
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -4494,8 +4607,12 @@ class QwenAgent implements Agent {
             let replayUpdates: SessionUpdate[] = [];
             if (records) {
               createdSession.primeTurnFromHistory(records);
-              const replayPage = selectRecentHistoryRecords(
+              const visibleRecords = selectVisibleHistoryRecords(
                 records,
+                shouldHideInheritedHistory(params),
+              );
+              const replayPage = selectRecentHistoryRecords(
+                visibleRecords,
                 replayPageSize,
               );
               const replayUsage = createReplayCumulativeUsage();
@@ -4543,7 +4660,6 @@ class QwenAgent implements Agent {
         }
       });
     }
-
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
@@ -4570,7 +4686,7 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettingsCached(params.cwd);
     const liveSession = this.sessions.get(params.sessionId);
@@ -4608,7 +4724,7 @@ class QwenAgent implements Agent {
       params.cwd,
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -5832,26 +5948,69 @@ class QwenAgent implements Agent {
     };
   }
 
+  /**
+   * Keeps the extension-derived half of the skill snapshot self-healing.
+   *
+   * Skills have a watcher (`SkillManager.startWatching`); extensions do not, so
+   * without this the child would never notice an extension installed, removed,
+   * enabled, or disabled outside the daemon — and extension-level skills are
+   * derived from that set, so a skill-watcher tick alone cannot recover it.
+   *
+   * The check is one `readdir` plus a bounded number of `stat`s, and refreshes
+   * only when the sources actually moved, so a steady-state read still parses
+   * no manifest and no `SKILL.md`. Failures are logged and swallowed: a status
+   * read must not fail because revalidation could not run.
+   *
+   * Skipped in safe and bare mode. Those modes deliberately never populate the
+   * extension cache (`Config.initialize` omits the refresh), and the snapshot
+   * derives extension skills from `getExtensions()` — so revalidating here
+   * would load the extensions those modes exist to exclude.
+   */
+  private async revalidateExtensionSources(config: Config): Promise<void> {
+    // Everything here is inside the boundary, mode check included: this must not
+    // be able to fail a status read no matter which accessor misbehaves.
+    try {
+      if (config.isSafeMode() || config.getBareMode()) return;
+      const changed = await config
+        .getExtensionManager()
+        .refreshCacheIfSourcesChanged();
+      if (!changed) return;
+      await config.getSkillManager()?.refreshCache();
+    } catch (error) {
+      debugLogger.warn('Extension source revalidation failed:', error);
+    }
+  }
+
   private async buildWorkspaceSkillsStatus(
     config: Config,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
+      // No manager means nothing has been enumerated and nothing ever will be
+      // on this config — report that rather than an empty "initialized" list,
+      // which the daemon would latch as a valid snapshot and then keep serving
+      // in preference to its own local enumeration.
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
       };
     }
 
+    await this.revalidateExtensionSources(config);
+
     try {
-      const resolved = resolveSkillSettings(
-        loadSettings(this.workspaceCwd(config), {
-          consumeCorruptionEnvVars: false,
-          skipLoadEnvironment: true,
-        }),
-      );
+      const skills = skillManager.getCachedSkills();
+      if (skills === null) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: this.workspaceCwd(config),
+          initialized: false,
+          skills: [],
+        };
+      }
+      const resolved = resolveSkillSettings(this.settings);
       const disablements = new Map(
         Array.from(config.getDisabledSkillNames(), (name) => {
           const normalizedName = name.trim().toLowerCase();
@@ -5862,17 +6021,6 @@ class QwenAgent implements Agent {
           ] as const;
         }),
       );
-      try {
-        await config.getExtensionManager().refreshCache();
-      } catch (error) {
-        debugLogger.warn('Extension cache refresh failed:', error);
-      }
-      try {
-        await skillManager.refreshCache();
-      } catch (error) {
-        debugLogger.warn('Skill cache refresh failed:', error);
-      }
-      const skills = await skillManager.listSkills();
       const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
       const skillsByKey = new Map(
         skills.map((skill) => [
@@ -8940,6 +9088,15 @@ class QwenAgent implements Agent {
               }`,
             );
           }
+          if (relocation.mcpRefreshError) {
+            warnings.push(
+              `MCP refresh failed: ${
+                relocation.mcpRefreshError instanceof Error
+                  ? relocation.mcpRefreshError.message
+                  : String(relocation.mcpRefreshError)
+              }`,
+            );
+          }
 
           try {
             await config
@@ -9648,6 +9805,16 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
+        const rawRefreshBootstrap = params['refreshBootstrap'];
+        if (
+          rawRefreshBootstrap !== undefined &&
+          typeof rawRefreshBootstrap !== 'boolean'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'refreshBootstrap must be a boolean',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const extensionManager = config.getExtensionManager();
@@ -9661,6 +9828,12 @@ class QwenAgent implements Agent {
         };
         await runRefresh(async () => await extensionManager.refreshCache());
         await runRefresh(async () => await extensionManager.refreshTools());
+        const bootstrapConfig = this.config;
+        if (rawRefreshBootstrap !== false && bootstrapConfig !== config) {
+          await runRefresh(
+            async () => await this.refreshBootstrapExtensionStatus(),
+          );
+        }
         const discoveryConfig = this.workspaceMcpDiscoveryConfig;
         if (discoveryConfig && discoveryConfig !== config) {
           const discoveryExtensionManager =
@@ -9708,6 +9881,9 @@ class QwenAgent implements Agent {
             return sessionService.removeSession(sessionId);
           },
         );
+        if (success) {
+          fireSessionDeleteHook(this.config, sessionId, debugLogger);
+        }
         return { success };
       }
       case 'renameSession': {
@@ -10009,7 +10185,9 @@ class QwenAgent implements Agent {
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
       }
-      case SERVE_CONTROL_EXT_METHODS.sessionBranch: {
+      case SERVE_CONTROL_EXT_METHODS.sessionBranch:
+      case SERVE_CONTROL_EXT_METHODS.sessionSideTask: {
+        const isSideTask = method === SERVE_CONTROL_EXT_METHODS.sessionSideTask;
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
           throw RequestError.invalidParams(
@@ -10035,7 +10213,20 @@ class QwenAgent implements Agent {
 
         const newSessionId = randomUUID();
         const sessionService = sourceConfig.getSessionService();
-        await sessionService.forkSession(sessionId, newSessionId);
+        const fork = () =>
+          isSideTask
+            ? sessionService.forkSession(sessionId, newSessionId, {
+                source: {
+                  sourceType: 'side_task',
+                  sourceId: sessionId,
+                },
+              })
+            : sessionService.forkSession(sessionId, newSessionId);
+        if (isSideTask && recording) {
+          await recording.runWithWriteBarrier(fork);
+        } else {
+          await fork();
+        }
 
         let title: string;
         try {
@@ -10054,7 +10245,9 @@ class QwenAgent implements Agent {
             }
           }
 
-          title = await computeUniqueBranchTitle(baseName, sessionService);
+          title = isSideTask
+            ? baseName
+            : await computeUniqueBranchTitle(baseName, sessionService);
           const renamed = await sessionService.renameSession(
             newSessionId,
             title,
@@ -10493,10 +10686,62 @@ class QwenAgent implements Agent {
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
-        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const rawReason = params['reason'];
+        if (
+          rawReason !== undefined &&
+          rawReason !== 'settings' &&
+          rawReason !== 'content' &&
+          rawReason !== 'all'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'reason must be settings, content, or all',
+          );
+        }
+        const reason = rawReason ?? 'all';
+        const refreshSettings = reason !== 'content';
+        const refreshContent = reason !== 'settings';
+        if (refreshSettings) {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        }
         const sessions = this.getActiveSessions();
+        const settingsReloadResults = refreshSettings
+          ? await Promise.allSettled(
+              sessions.map((session) =>
+                Promise.resolve().then(() => session.reloadSkillSettings()),
+              ),
+            )
+          : undefined;
+        let configResults: Array<PromiseSettledResult<void>> = [];
+        if (refreshContent) {
+          const skillManagers = new Set(
+            [this.config, ...sessions.map((session) => session.getConfig())]
+              .map((config) => config.getSkillManager())
+              .filter(
+                (manager): manager is NonNullable<typeof manager> =>
+                  manager !== undefined,
+              ),
+          );
+          configResults = await Promise.allSettled(
+            [...skillManagers].map((manager) => manager.refreshCache()),
+          );
+          for (const result of configResults) {
+            if (result.status === 'rejected') {
+              debugLogger.warn(`Skill config refresh failed: ${result.reason}`);
+            }
+          }
+        }
         const results = await Promise.allSettled(
-          sessions.map((session) => session.refreshSkillsFromSettings()),
+          sessions.map((session, index) => {
+            const settingsReload = settingsReloadResults?.[index];
+            if (settingsReload?.status === 'rejected') {
+              return Promise.reject(settingsReload.reason);
+            }
+            return session.refreshSkillsFromSettings({
+              reloadSettings: false,
+              notifyConfigChanged: !refreshContent,
+            });
+          }),
         );
         for (let i = 0; i < results.length; i++) {
           if (results[i]!.status === 'rejected') {
@@ -10513,6 +10758,13 @@ class QwenAgent implements Agent {
           sessionsFailed: results.filter(
             (result) => result.status === 'rejected',
           ).length,
+          configsRefreshed: configResults.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          configsFailed: configResults.filter(
+            (result) => result.status === 'rejected',
+          ).length,
+          reason,
         };
       }
       default:
@@ -10636,7 +10888,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10653,7 +10905,7 @@ class QwenAgent implements Agent {
           cwd,
           mcpServers,
           settings,
-          isChannelSession,
+          sessionSource,
           sessionId,
           resume,
           initializeOptions,
@@ -10661,6 +10913,9 @@ class QwenAgent implements Agent {
         );
       });
     } catch (error) {
+      if (error instanceof SessionIdConflictError) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -10675,7 +10930,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10699,7 +10954,6 @@ class QwenAgent implements Agent {
           stdioServer.command,
           stdioServer.args,
           env,
-          cwd,
         );
         continue;
       }
@@ -10746,7 +11000,7 @@ class QwenAgent implements Agent {
       experimental: {
         ...settings.merged.experimental,
         sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
-        ...(isChannelSession ? { cron: false } : {}),
+        ...(sessionSource?.sourceType === 'channel' ? { cron: false } : {}),
       },
     };
 
@@ -10787,7 +11041,16 @@ class QwenAgent implements Agent {
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
+      // The daemon owns the settings watcher lifecycle.
+      undefined,
+      // A duplicate caller-supplied session id must fail this one request,
+      // not process.exit(1) the shared ACP child and every session on its
+      // channel. newSessionConfig maps the throw to a RequestError.
+      true,
     );
+    if (sessionSource) {
+      config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
@@ -10795,6 +11058,7 @@ class QwenAgent implements Agent {
       this.assertManagedSessionAdmission();
       if (this.isTrustedManagedParent()) {
         config.setSessionWriterReclaimPolicy('never');
+        config.setSessionWriterTakeoverPolicy('certified');
       }
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>

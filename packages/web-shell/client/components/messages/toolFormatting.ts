@@ -511,6 +511,26 @@ export function getAgentType(agent: ACPToolCall): string {
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
 }
 
+/**
+ * Locale-aware agent type display name. Looks up `agentType.<name>`
+ * (case-insensitive) via the translator; falls back to the raw name
+ * for user-defined agents that have no i18n entry.
+ */
+export function localizeAgentTypeName(
+  agentType: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const keys = [
+    `agentType.${agentType}`,
+    `agentType.${agentType.toLowerCase()}`,
+  ];
+  for (const key of keys) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
+  return agentType;
+}
+
 export function getAgentDescription(agent: ACPToolCall): string {
   if (agent.title) {
     const colonIdx = agent.title.indexOf(': ');

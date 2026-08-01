@@ -3,6 +3,7 @@ import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
+  ACP_START_TIMEOUT_MS,
   AcpBridge,
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
@@ -47,6 +48,7 @@ const child = vi.hoisted(() => {
     });
   }
 
+  let initializeImplementation: () => Promise<void> = () => Promise.resolve();
   return {
     instances: [] as MockChild[],
     clients: [] as Array<{
@@ -57,6 +59,13 @@ const child = vi.hoisted(() => {
       cancel: ReturnType<typeof vi.fn>;
     }>,
     MockChild,
+    initializeImplementation: () => initializeImplementation(),
+    resetInitializeImplementation: () => {
+      initializeImplementation = () => Promise.resolve();
+    },
+    setInitializeImplementation: (implementation: () => Promise<void>) => {
+      initializeImplementation = implementation;
+    },
     spawn: vi.fn(() => {
       const instance = new MockChild();
       child.instances.push(instance);
@@ -80,7 +89,7 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   ClientSideConnection: vi.fn().mockImplementation((createClient) => {
     const client = createClient();
     const connection = {
-      initialize: vi.fn().mockResolvedValue(undefined),
+      initialize: vi.fn(() => child.initializeImplementation()),
       cancel: vi.fn().mockResolvedValue(undefined),
     };
     child.clients.push(client);
@@ -131,6 +140,29 @@ describe('AcpBridge', () => {
     child.clients.length = 0;
     child.connections.length = 0;
     child.spawn.mockClear();
+    child.resetInitializeImplementation();
+  });
+
+  it('times out bridge initialization and stops the child', async () => {
+    vi.useFakeTimers();
+    try {
+      child.setInitializeImplementation(() => new Promise(() => {}));
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      });
+
+      const start = bridge.start();
+      const rejection = expect(start).rejects.toThrow(
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await vi.advanceTimersByTimeAsync(1000 + ACP_START_TIMEOUT_MS);
+
+      await rejection;
+      expect(child.instances[0]!.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {

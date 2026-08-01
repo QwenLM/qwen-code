@@ -279,6 +279,10 @@ export interface PendingPromptActionOptions {
   sessionId?: string;
 }
 
+export interface GetTasksActionOptions {
+  silent?: boolean;
+}
+
 export interface DaemonPromptImage {
   data: string;
   mimeType?: string;
@@ -420,7 +424,7 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
-  getTasks(): Promise<DaemonSessionTasksStatus>;
+  getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
   cancelTask(
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],

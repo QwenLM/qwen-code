@@ -803,7 +803,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // §4.9: in transcript full-detail mode, collapsible tools (read/search/list)
+  // §4.9: in full-detail mode, collapsible tools (read/search/list)
   // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
   // from the persisted functionResponse. Only a non-empty string detail
   // qualifies; everything else (and all main-view rendering) keeps the summary.

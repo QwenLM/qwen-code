@@ -1,11 +1,29 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type {
-  ChannelAgentBridge,
-  ChannelConfig,
-  Envelope,
+import {
+  getWorkspaceScopeDirName,
+  type ChannelAgentBridge,
+  type ChannelConfig,
+  type Envelope,
 } from '@qwen-code/channel-base';
 
 vi.mock('@octokit/rest', () => {
@@ -23,6 +41,10 @@ vi.mock('@octokit/rest', () => {
         listEvents: vi.fn(),
         createComment: vi.fn(),
         get: vi.fn(),
+      },
+      reactions: {
+        createForIssueComment: vi.fn(),
+        deleteForIssueComment: vi.fn(),
       },
       pulls: {
         get: vi.fn(),
@@ -64,6 +86,10 @@ const mockOctokit = (
       listEvents: ReturnType<typeof vi.fn>;
       createComment: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
+    };
+    reactions: {
+      createForIssueComment: Mock;
+      deleteForIssueComment: Mock;
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
@@ -150,6 +176,21 @@ class TestableGithubChannel extends GithubChannel {
   inboundEnvelopes: Envelope[] = [];
   handleInboundError: Error | null = null;
   usePreflight = false;
+  sourceMessageId: string | undefined;
+  sourceSenderId: string | undefined;
+  sourceMetadata: string | undefined;
+
+  protected getResponseMessageId(_sessionId: string): string | undefined {
+    return this.sourceMessageId;
+  }
+
+  protected getResponseSenderId(_sessionId: string): string | undefined {
+    return this.sourceSenderId;
+  }
+
+  protected getResponseMetadata(_sessionId: string): string | undefined {
+    return this.sourceMetadata;
+  }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.handleInboundError) throw this.handleInboundError;
@@ -163,6 +204,28 @@ class TestableGithubChannel extends GithubChannel {
     text: string,
   ): Promise<void> {
     return this.sendThreadMessage(chatId, threadId, text);
+  }
+}
+
+class LiveGithubChannel extends GithubChannel {
+  setCursorForTest(lastProcessedAt: string): void {
+    this.cursor = { lastProcessedAt };
+  }
+
+  async pollForTest(): Promise<void> {
+    await this.pollOnce();
+  }
+
+  startPromptForTest(
+    chatId: string,
+    sessionId: string,
+    messageId: string,
+  ): void {
+    this.onPromptStart(chatId, sessionId, messageId);
+  }
+
+  endPromptForTest(chatId: string, sessionId: string, messageId: string): void {
+    this.onPromptEnd(chatId, sessionId, messageId);
   }
 }
 
@@ -184,9 +247,14 @@ describe('GithubChannel', () => {
     });
     mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
     mockOctokit.rest.issues.createComment.mockResolvedValue({});
+    mockOctokit.rest.reactions.createForIssueComment.mockResolvedValue({
+      data: { id: 9000 },
+    });
+    mockOctokit.rest.reactions.deleteForIssueComment.mockResolvedValue({});
   });
 
   afterEach(() => {
+    rmSync(process.env.QWEN_HOME!, { recursive: true, force: true });
     if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
     else process.env.QWEN_HOME = savedQwenHome;
   });
@@ -297,6 +365,19 @@ describe('GithubChannel', () => {
       await expect(channel.connect()).resolves.toBeUndefined();
       channel.disconnect();
       expect(config.allowedUsers).toEqual(['alice']);
+    });
+
+    it('forces final-only delivery and appends the publication policy', () => {
+      const config = makeConfig({
+        blockStreaming: 'on',
+        instructions: 'Respond in Chinese.',
+      });
+      new TestableGithubChannel('test-github', config, makeBridge());
+
+      expect(config.blockStreaming).toBe('off');
+      expect(config.instructions).toContain('GitHub publication policy:');
+      expect(config.instructions).toContain('<no-reply/>');
+      expect(config.instructions).toContain('Respond in Chinese.');
     });
   });
 
@@ -681,6 +762,12 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Author: alice | State: open | Draft: false',
       );
+      expect(channel.inboundEnvelopes[0]!.text).toBe(
+        'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+      );
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'For review_requested, return a formal review summary',
+      );
     });
 
     it('dispatches late direct events once without muting newer events', async () => {
@@ -734,7 +821,7 @@ describe('GithubChannel', () => {
 
       expect(
         channel.inboundEnvelopes.map((envelope) => envelope.messageId),
-      ).toEqual(['2001', '2002']);
+      ).toEqual(['event-2001', 'event-2002']);
       expect(channel.cursor.dispatchedEvents).toEqual(['E_2001', 'E_2002']);
     });
 
@@ -856,6 +943,9 @@ describe('GithubChannel', () => {
         expect(channel.inboundEnvelopes[0]).toMatchObject({
           isMentioned: true,
         });
+        expect(channel.inboundEnvelopes[0]!.text).toContain(
+          'output exactly <no-reply/> if no public reply is needed',
+        );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
       },
@@ -883,7 +973,7 @@ describe('GithubChannel', () => {
 
     it('normalizes configured reasonFilter entries before matching', async () => {
       await initWithoutLoop({
-        reasonFilter: [' COMMENT ', 123, ''],
+        reasonFilter: [' COMMENT ', ''],
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1053,6 +1143,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Trigger: subscribed.',
       );
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'GitHub publication policy:',
+      );
     });
 
     it('deduplicates replayed comments by node ID', async () => {
@@ -1073,6 +1166,1043 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001']);
+    });
+  });
+
+  describe('reasonFilter', () => {
+    function connectWithReasonFilter(reasonFilter: unknown): Promise<void> {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ reasonFilter }),
+        makeBridge(),
+      );
+      return channel.connect();
+    }
+
+    it('skips notifications whose reason is not in the allowlist', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      await initWithoutLoop({
+        reasonFilter: ['mention'],
+      });
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason: 'comment',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+            makeNotification({
+              reason: 'mention',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+          ])
+          .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+          'Trigger: mention.',
+        );
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledWith({
+          last_read_at: '2026-07-02T10:00:00.000Z',
+          read: true,
+        });
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'skipping notification (reason=comment not in reasonFilter, subject=https://api.github.com/repos/owner/repo/issues/42)',
+          ),
+        );
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('rejects unrecognized reasonFilter values', async () => {
+      await expect(connectWithReasonFilter(['mentions'])).rejects.toThrow(
+        'Unrecognized reasonFilter values for channel test-github: mentions',
+      );
+    });
+
+    it('rejects non-array reasonFilter values', async () => {
+      await expect(connectWithReasonFilter('mention')).rejects.toThrow(
+        'reasonFilter for channel test-github must be an array of GitHub notification reasons.',
+      );
+    });
+
+    it('rejects non-string reasonFilter entries', async () => {
+      await expect(connectWithReasonFilter([42])).rejects.toThrow(
+        'reasonFilter entries for channel test-github must be strings.',
+      );
+    });
+
+    it('accepts documented security notification reasons', async () => {
+      await expect(
+        connectWithReasonFilter(['security_alert']),
+      ).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+
+    it('processes all reasons when filter is empty or unset', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('processes all reasons when filter is an empty array', async () => {
+      await initWithoutLoop({ reasonFilter: [] });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+  });
+
+  describe('publication contract', () => {
+    const nameHash = createHash('sha256')
+      .update('test-github')
+      .digest('hex')
+      .slice(0, 16);
+
+    function pendingPath(cwd = '/tmp/test'): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName(cwd),
+        `test-github-${nameHash}-github-pending-deliveries.json`,
+      );
+    }
+
+    function auditPath(): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName('/tmp/test'),
+        `test-github-${nameHash}-github-audit.jsonl`,
+      );
+    }
+
+    function stateDir(): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName('/tmp/test'),
+      );
+    }
+
+    function pendingRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'pending',
+        createdAt: '2026-07-30T00:00:00.000Z',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        fullText: 'Final reply',
+        sessionId: 'session-publication',
+        ...overrides,
+      };
+    }
+
+    function writePending(records: Array<Record<string, unknown>>): void {
+      mkdirSync(join(pendingPath(), '..'), { recursive: true });
+      writeFileSync(pendingPath(), JSON.stringify(records));
+    }
+
+    async function retryPendingForTest(): Promise<void> {
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        abortableSleep: (ms: number) => Promise<void>;
+        retryPendingFinalDeliveries: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      await privateChannel.retryPendingFinalDeliveries();
+    }
+
+    async function connectForPublication() {
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      channel.disconnect();
+    }
+
+    it('suppresses the exact no-reply sentinel and audits the outcome', async () => {
+      await connectForPublication();
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        ' \n<no-reply/>\t',
+        'session-publication',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"outcome":"suppressed"');
+      expect(audit).not.toContain('<no-reply/>');
+    });
+
+    it.each(['<NO-REPLY/>', '<no-reply />', '```text\n<no-reply/>\n```'])(
+      'suppresses no-reply sentinel variant %s',
+      async (response) => {
+        await connectForPublication();
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await publish(
+          'owner/repo',
+          'issue:42',
+          response,
+          'session-publication',
+        );
+
+        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      },
+    );
+
+    it('posts one final comment and audits only its digest and metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2001,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2001',
+        },
+      });
+      await connectForPublication();
+      const response = 'Use <no-reply/> to suppress replies 🙂';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish('owner/repo', 'issue:42', response, 'session-publication');
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: response,
+      });
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"outcome":"posted"');
+      expect(audit).toContain('issuecomment-2001');
+      expect(audit).toContain(
+        createHash('sha256').update(response).digest('hex'),
+      );
+      expect(audit).not.toContain(response);
+      expect(JSON.parse(audit)).toMatchObject({
+        outcome: 'posted',
+        repository: 'owner/repo',
+        number: 42,
+        bodyChars: Array.from(response).length,
+      });
+    });
+
+    it('uses the active prompt thread for final delivery', async () => {
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+      const sendResponse = (
+        channel as unknown as {
+          sendResponseMessage: (
+            chatId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage.bind(channel);
+      vi.spyOn(
+        channel as unknown as {
+          getResponseThreadId: (sessionId: string) => string | undefined;
+        },
+        'getResponseThreadId',
+      ).mockReturnValue('pr:99');
+
+      await sendResponse('owner/repo', 'Final public reply', 'shared-session');
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 99,
+        body: 'Final public reply',
+      });
+    });
+
+    it('does not retry an ambiguous failed final delivery', async () => {
+      await connectForPublication();
+      const error = new Error('ambiguous transport failure');
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({
+        message: 'ambiguous transport failure',
+        cause: error,
+      });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(JSON.parse(audit)).toMatchObject({
+        outcome: 'failed',
+        failurePhase: 'delivery',
+        failureError: 'ambiguous transport failure',
+      });
+    });
+
+    it.each([
+      Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      }),
+      Object.assign(new Error('rate limited'), {
+        status: 403,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      }),
+    ])(
+      'retries final delivery when GitHub definitely did not write',
+      async (error) => {
+        await connectForPublication();
+        const sleep = vi.fn().mockResolvedValue(undefined);
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = sleep;
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(error)
+          .mockResolvedValueOnce({ data: {} });
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await publish(
+          'owner/repo',
+          'issue:42',
+          'Final reply',
+          'session-publication',
+        );
+
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+        expect(sleep).toHaveBeenCalled();
+      },
+    );
+
+    it('deduplicates repeated pending final deliveries', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      channel.sourceMessageId = 'source-message';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+      expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
+    });
+
+    it('does not collapse same-body pending finals without a source message id', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+
+      const records = JSON.parse(
+        readFileSync(pendingPath(), 'utf-8'),
+      ) as Array<{
+        id: string;
+      }>;
+      expect(records).toHaveLength(2);
+      expect(new Set(records.map((record) => record.id)).size).toBe(2);
+    });
+
+    it('preserves concurrent delivery while recovering a pending final', async () => {
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ message: 'rate limited', cause: error });
+
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        {
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+          fullText: 'Final reply',
+          sessionId: 'session-publication',
+        },
+      ]);
+
+      mockOctokit.rest.issues.createComment.mockReset();
+      let resolveRetry!: (value: {
+        data: { id: number; html_url: string };
+      }) => void;
+      mockOctokit.rest.issues.createComment.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRetry = resolve;
+        }),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      const current = JSON.parse(readFileSync(pendingPath(), 'utf-8'));
+      writeFileSync(
+        pendingPath(),
+        JSON.stringify([
+          ...current,
+          {
+            id: 'concurrent',
+            createdAt: new Date().toISOString(),
+            chatId: 'owner/repo',
+            threadId: 'issue:43',
+            fullText: 'Concurrent reply',
+            sessionId: 'session-concurrent',
+          },
+        ]),
+      );
+      resolveRetry({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          owner: 'owner',
+          repo: 'repo',
+          issue_number: 42,
+          body: 'Final reply',
+        }),
+      );
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        {
+          id: 'concurrent',
+          threadId: 'issue:43',
+          fullText: 'Concurrent reply',
+        },
+      ]);
+
+      channel.disconnect();
+      mockOctokit.rest.issues.createComment.mockReset();
+      let resolveUnreadableRetry!: (value: {
+        data: { id: number; html_url: string };
+      }) => void;
+      mockOctokit.rest.issues.createComment.mockReturnValue(
+        new Promise((resolve) => {
+          resolveUnreadableRetry = resolve;
+        }),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      writeFileSync(pendingPath(), '{');
+      resolveUnreadableRetry({
+        data: {
+          id: 2003,
+          html_url: 'https://github.com/owner/repo/issues/43#issuecomment-2003',
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(readFileSync(pendingPath(), 'utf-8')).toBe('{');
+      channel.disconnect();
+    });
+
+    it('keeps a pending final when retry still definitely did not write', async () => {
+      writePending([pendingRecord()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('rate limited'), {
+          status: 429,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        { id: 'pending' },
+      ]);
+    });
+
+    it('drops and audits an ambiguous pending final retry failure', async () => {
+      writePending([pendingRecord({ triggerKind: 'mention' })]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous'),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
+        outcome: 'failed',
+        triggerKind: 'mention',
+        failurePhase: 'delivery',
+        failureError: 'ambiguous',
+      });
+    });
+
+    it('ignores invalid pending final retry records', async () => {
+      writePending([pendingRecord(), { id: 123, bad: true }]);
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2004,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2004',
+        },
+      });
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: 'Final reply',
+      });
+    });
+
+    it('continues retrying pending finals when a per-record update fails', async () => {
+      writePending([
+        pendingRecord({ id: 'first' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          fullText: 'Second reply',
+        }),
+      ]);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      mockOctokit.rest.issues.createComment
+        .mockImplementationOnce(async () => {
+          writeFileSync(pendingPath(), '{');
+          throw new Error('ambiguous');
+        })
+        .mockResolvedValueOnce({
+          data: {
+            id: 2004,
+            html_url:
+              'https://github.com/owner/repo/issues/43#issuecomment-2004',
+          },
+        });
+
+      try {
+        await retryPendingForTest();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('failed to update pending GitHub deliveries'),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenNthCalledWith(2, {
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 43,
+        body: 'Second reply',
+      });
+      const audit = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(audit).toEqual([
+        expect.objectContaining({
+          outcome: 'failed',
+          failureError: 'ambiguous',
+        }),
+        expect.objectContaining({
+          outcome: 'posted',
+          commentId: 2004,
+        }),
+      ]);
+    });
+
+    it('does not replay an in-flight pending final on reconnect', async () => {
+      writePending([pendingRecord()]);
+      const retry = Promise.withResolvers<{
+        data: { id: number; html_url: string };
+      }>();
+      mockOctokit.rest.issues.createComment.mockReturnValueOnce(retry.promise);
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      channel.disconnect();
+      await channel.connect();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+
+      retry.resolve({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      channel.disconnect();
+    });
+    it('stops after an in-flight pending retry finishes during disconnect', async () => {
+      writePending([
+        pendingRecord(),
+        pendingRecord({ id: 'second', threadId: 'issue:43' }),
+      ]);
+      const retry = Promise.withResolvers<{
+        data: { id: number; html_url: string };
+      }>();
+      mockOctokit.rest.issues.createComment.mockReturnValueOnce(retry.promise);
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      channel.disconnect();
+      retry.resolve({
+        data: {
+          id: 2006,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2006',
+        },
+      });
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        { id: 'second', threadId: 'issue:43' },
+      ]);
+    });
+
+    it('does not burn retry budget when reconnect aborts cooldown', async () => {
+      writePending([pendingRecord()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('rate limited'), {
+          status: 429,
+          response: {
+            headers: {
+              'x-ratelimit-remaining': '0',
+              'x-ratelimit-reset': `${Math.ceil(Date.now() / 1000) + 3600}`,
+            },
+          },
+        }),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      const previousRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      channel.disconnect();
+      await previousRetry;
+      await channel.connect();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      channel.disconnect();
+    });
+
+    it('keeps bare 429 publication failures single-shot', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('secondary rate limit'), {
+        status: 429,
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('migrates legacy pending finals before retrying', async () => {
+      const legacyPath = join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-pending-deliveries.json',
+      );
+      const legacyAuditPath = join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-audit.jsonl',
+      );
+      mkdirSync(join(legacyPath, '..'), { recursive: true });
+      writeFileSync(legacyPath, JSON.stringify([pendingRecord()]));
+      writeFileSync(legacyAuditPath, '{"outcome":"posted"}\n');
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2007,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2007',
+        },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      expect(existsSync(legacyPath)).toBe(false);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '{"outcome":"posted"}\n',
+      );
+      expect(existsSync(legacyAuditPath)).toBe(false);
+      channel.disconnect();
+    });
+
+    it('keeps connecting when legacy state migration cannot write', async () => {
+      mkdirSync(join(stateDir(), '..'), { recursive: true });
+      writeFileSync(stateDir(), '');
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await expect(channel.connect()).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+
+    it('isolates pending finals by workspace', () => {
+      const other = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ cwd: '/tmp/other-workspace' }),
+        makeBridge(),
+      );
+      const otherPath = (
+        other as unknown as { pendingFinalDeliveriesPath: () => string }
+      ).pendingFinalDeliveriesPath();
+
+      expect(otherPath).toBe(pendingPath('/tmp/other-workspace'));
+      expect(otherPath).not.toBe(pendingPath());
+    });
+
+    it('does not treat a same-body posted audit as a different pending retry', async () => {
+      writePending([pendingRecord({ id: 'second-pending' })]);
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: 'session-publication',
+          threadId: 'issue:42',
+          bodySha256: createHash('sha256').update('Final reply').digest('hex'),
+          bodyChars: 'Final reply'.length,
+        })}\n`,
+      );
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2005,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2005',
+        },
+      });
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('skips a pending final already recorded as posted', async () => {
+      writePending([pendingRecord()]);
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `{"partial"\n${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: 'session-publication',
+          threadId: 'issue:42',
+          pendingId: 'pending',
+          bodySha256: createHash('sha256').update('Final reply').digest('hex'),
+          bodyChars: 'Final reply'.length,
+        })}\n`,
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('distinguishes pre-delivery validation from ambiguous failures', async () => {
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous transport failure'),
+      );
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string | undefined,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      vi.spyOn(channel, 'handleInbound').mockImplementation(async () => {
+        await publish(
+          'owner/repo',
+          'issue:42',
+          'Final reply',
+          'session-publication',
+        );
+      });
+
+      const handled = await (
+        channel as unknown as {
+          dispatchEnvelope: (
+            envelope: Envelope,
+            issueNumber: number,
+          ) => Promise<boolean>;
+        }
+      ).dispatchEnvelope(
+        {
+          channelName: 'test-github',
+          senderId: 'alice',
+          senderName: 'alice',
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+          messageId: '1001',
+          text: '@test-bot help',
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+        },
+        42,
+      );
+
+      expect(handled).toBe(false);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      let validationError: unknown;
+      try {
+        await publish(
+          'owner/repo',
+          undefined,
+          'Final reply',
+          'session-publication',
+        );
+      } catch (error) {
+        validationError = error;
+      }
+      expect(validationError).toBeInstanceOf(Error);
+      expect((validationError as Error).constructor).toBe(Error);
+    });
+
+    it('records the active source message and response thread', async () => {
+      await connectForPublication();
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      channel.sourceMessageId = 'source-message';
+      channel.sourceSenderId = 'maintainer';
+      channel.sourceMetadata = 'Type: Pull Request\nTrigger: review_requested.';
+
+      await publish('owner/repo', 'pr:99', '<no-reply/>', 'session-correlated');
+
+      const audit = readFileSync(auditPath(), 'utf-8');
+      expect(audit).toContain('"sourceMessageId":"source-message"');
+      expect(audit).toContain('"threadId":"pr:99"');
+      expect(JSON.parse(audit)).toMatchObject({
+        triggerKind: 'review_requested',
+        actor: 'maintainer',
+        repository: 'owner/repo',
+        number: 99,
+      });
+    });
+
+    it('keeps successful publication when its audit write fails', async () => {
+      await connectForPublication();
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+      mkdirSync(auditPath(), { recursive: true });
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).resolves.toBeUndefined();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1431,6 +2561,216 @@ describe('GithubChannel', () => {
     });
   });
 
+  describe('working reaction', () => {
+    it('acknowledges an accepted comment with an eyes reaction', async () => {
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await liveChannel.pollForTest();
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        content: 'eyes',
+      });
+    });
+
+    it('does not wait for the acknowledgment before replying', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await liveChannel.pollForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'response' }),
+      );
+      resolveReaction({ data: { id: 9000 } });
+      await reactionPending;
+    });
+
+    it('does not create a duplicate reaction while one is pending', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      liveChannel.startPromptForTest('owner/repo', 'session-2', '1001');
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalledTimes(1);
+      resolveReaction({ data: { id: 9000 } });
+      await reactionPending;
+    });
+
+    it('removes the working reaction when the prompt finishes', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '1001');
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).not.toHaveBeenCalled();
+
+      resolveReaction({ data: { id: 9001 } });
+      await reactionPending;
+      await Promise.resolve();
+
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        reaction_id: 9001,
+      });
+    });
+
+    it('handles direct working reaction removal failures', async () => {
+      mockOctokit.rest.reactions.deleteForIssueComment.mockRejectedValue(
+        new Error('403'),
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      await Promise.resolve();
+      await Promise.resolve();
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '1001');
+
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.deleteForIssueComment,
+        ).toHaveBeenCalledTimes(3),
+      );
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        reaction_id: 9000,
+      });
+    });
+
+    it('retries acknowledgement after a create failure', async () => {
+      const error = new Error('403');
+      mockOctokit.rest.reactions.createForIssueComment
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockResolvedValue({ data: { id: 9002 } });
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).toHaveBeenCalledTimes(3),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-2', '1001');
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).toHaveBeenCalledTimes(4),
+      );
+    });
+
+    it('does not react to a synthetic direct review-request trigger', async () => {
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'review_requested',
+            subject: {
+              title: 'Review me',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeIssueEvent()])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: { title: 'Review me', user: { login: 'alice' } },
+      });
+
+      await liveChannel.pollForTest();
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
   describe('sendThreadMessage', () => {
     it('posts comment on the correct issue', async () => {
       mockOctokit.paginate.mockResolvedValue([]);
@@ -1469,7 +2809,7 @@ describe('GithubChannel', () => {
             ) => Promise<void>;
           }
         ).sendThreadMessage('owner/repo', undefined, 'response'),
-      ).rejects.toThrow('requires a threadId');
+      ).rejects.toThrow('createIssueComment requires a threadId');
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
       channel.disconnect();
     });
