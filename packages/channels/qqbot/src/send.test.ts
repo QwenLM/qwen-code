@@ -387,6 +387,10 @@ describe('purgeSingleScopeOrphans', () => {
     const router = {
       getAll: () => [
         { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        // Sibling channel's live single-scope route: the exact-match guard
+        // (entry.key === `${this.name}:__single__`) must NOT purge it — a
+        // suffix match would silently reset the sibling channel's session.
+        { key: 'other-bot:__single__', sessionId: 'sibling-live' },
         { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
         { key: 'test-bot:user-1:chat-1', sessionId: 'normal-2' },
       ],
@@ -396,6 +400,7 @@ describe('purgeSingleScopeOrphans', () => {
     callPurge(ch);
     expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
   });
 
   it('is a safe no-op when the router throws during purge', () => {

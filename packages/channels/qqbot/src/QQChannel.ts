@@ -213,8 +213,20 @@ export class QQChannel extends ChannelBase {
        * message that triggered it, so a concurrent message in the same chat
        * overwriting the chat-level replyMsgId entry cannot re-parent this
        * session's streaming chunks onto the other message.
+       *
+       * Note: this only covers the idle-flush streaming path — with
+       * blockStreaming: "on", onResponseChunk returns immediately and the
+       * anchor is never captured.
        */
       msgId?: string;
+      /**
+       * Turn generation this entry belongs to (see turnCounter). A leftover
+       * entry from a previous turn (e.g. a deferred send parked the session
+       * in pendingStreamDelete and a new turn started before it settled)
+       * must never receive the new turn's chunks — onResponseChunk compares
+       * its turn against the current counter and drops stale entries.
+       */
+      turn: number;
     }
   > = new Map();
   /**
@@ -229,11 +241,24 @@ export class QQChannel extends ChannelBase {
    * concurrent message in the same chat that overwrites the chat-level
    * replyMsgId entry mid-stream cannot re-parent this session's later
    * chunks onto its own msg_id (see PR #6457 review).
+   *
+   * Note: this only covers the idle-flush streaming path — with
+   * blockStreaming: "on", onResponseChunk returns immediately and the
+   * anchor is never captured.
    */
   private sessionReplyMsgId: Map<
     string,
     { msgId: string; timestamp: number }
   > = new Map();
+  /**
+   * Monotonic turn counter per session, bumped on every onPromptStart.
+   * streamState entries carry the turn they were created in; when a new
+   * prompt starts on a session whose previous turn left a streamState entry
+   * behind (deferred send still settling), onResponseChunk uses this counter
+   * to detect and drop the stale entry so the new turn's chunks cannot be
+   * appended to the old turn's buffer or delivered under its msgId.
+   */
+  private turnCounter: Map<string, number> = new Map();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
@@ -659,7 +684,13 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
       );
-      this.msgSeqMap.delete(entry.msgId);
+      // A streaming reply anchored to this msgId may still be in flight
+      // (per-session msgId): keep its msg_seq counter alive so its tail send
+      // doesn't reset the sequence — only delete it when no live session is
+      // still anchored to it.
+      if (!this.isMsgIdAnchoredBySession(entry.msgId)) {
+        this.msgSeqMap.delete(entry.msgId);
+      }
       this.replyMsgId.delete(chatId);
       this.saveQQState();
     }
@@ -1004,6 +1035,7 @@ export class QQChannel extends ChannelBase {
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
+    this.turnCounter.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
@@ -1028,6 +1060,12 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    // Bump the turn generation: streamState entries created by a previous
+    // turn on this session (e.g. one left behind by a deferred send) are now
+    // stale — onResponseChunk compares its turn against this counter and
+    // drops them so this turn's chunks cannot leak into the old turn's state.
+    const turn = (this.turnCounter.get(sessionId) ?? 0) + 1;
+    this.turnCounter.set(sessionId, turn);
     if (messageId) {
       this.sessionReplyMsgId.set(sessionId, {
         msgId: messageId,
@@ -1068,6 +1106,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.turnCounter.delete(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
   }
 
@@ -1079,7 +1118,21 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
   ): void {
     if (this.blockStreaming) return;
+    const currentTurn = this.turnCounter.get(sessionId) ?? 0;
     let state = this.streamState.get(sessionId);
+    if (state && state.turn !== currentTurn) {
+      // Stale state left behind by a previous turn of this session (a
+      // deferred send parked it in pendingStreamDelete and the new prompt
+      // started before the send settled). Dropping it here keeps the new
+      // turn's chunks from being appended to the old turn's buffer or
+      // delivered under the old turn's msgId. The old turn's in-flight send
+      // chain is safe: its .then()/.catch() identity guards compare the
+      // current map entry against the captured state object, and the fresh
+      // entry created below fails that guard, so the chain releases itself.
+      if (state.timer) clearTimeout(state.timer);
+      this.streamState.delete(sessionId);
+      state = undefined;
+    }
     if (!state) {
       // Reuse the session's reply anchor across buffer windows (a single
       // response may flush several times, each creating a fresh state entry).
@@ -1097,6 +1150,9 @@ export class QQChannel extends ChannelBase {
         } else {
           // Drop the stale anchor through the release path so its orphaned
           // msg_seq counter is purged too (a raw delete would leave it behind).
+          process.stderr.write(
+            `[QQ:${this.name}] per-session reply anchor expired for ${sanitizeLogText(sessionId, 64)}, falling back to active send\n`,
+          );
           this.releaseSessionReplyAnchor(sessionId);
         }
       }
@@ -1106,6 +1162,7 @@ export class QQChannel extends ChannelBase {
         timer: null,
         retryCount: 0,
         msgId: anchor,
+        turn: currentTurn,
       };
       this.streamState.set(sessionId, state);
     } else {
@@ -1441,6 +1498,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.turnCounter.delete(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
     super.onSessionDied(sessionId);
   }
@@ -1880,7 +1938,13 @@ export class QQChannel extends ChannelBase {
       let dirty = false;
       for (const [chatId, entry] of this.replyMsgId) {
         if (entry.timestamp < cutoff) {
-          this.msgSeqMap.delete(entry.msgId);
+          // A streaming reply anchored to this msgId may still be in flight
+          // (per-session msgId): keep its msg_seq counter alive so the tail
+          // send doesn't reset the sequence — only delete it when no live
+          // session is still anchored to it.
+          if (!this.isMsgIdAnchoredBySession(entry.msgId)) {
+            this.msgSeqMap.delete(entry.msgId);
+          }
           this.replyMsgId.delete(chatId);
           dirty = true;
         }
