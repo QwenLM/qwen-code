@@ -1181,7 +1181,7 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const LEAKED_TOOL_CALL_TAGS = /^[}\]]\s*<\/parameter>\s*<\/function>/i;
+const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
 
 function hasLeakedToolCallTags(text: string): boolean {
   let inString = false;
@@ -1194,11 +1194,9 @@ function hasLeakedToolCallTags(text: string): boolean {
       else if (char === '"') inString = false;
     } else if (char === '"') {
       inString = true;
-    } else if (
-      (char === '}' || char === ']') &&
-      LEAKED_TOOL_CALL_TAGS.test(text.slice(i))
-    ) {
-      return true;
+    } else if (char === '}' || char === ']') {
+      LEAKED_TOOL_CALL_TAGS.lastIndex = i;
+      if (LEAKED_TOOL_CALL_TAGS.test(text)) return true;
     }
   }
   return false;

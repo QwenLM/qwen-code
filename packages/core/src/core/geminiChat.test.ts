@@ -9443,6 +9443,51 @@ describe('GeminiChat', async () => {
     },
   );
 
+  it('releases buffered JSON through a finish-only chunk without leaked tags', async () => {
+    const response = JSON.stringify([{ name: 'example', value: 1 }]);
+    const splitAt = 12;
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamResponse(
+        {
+          candidates: [
+            { content: { parts: [{ text: response.slice(0, splitAt) }] } },
+          ],
+        } as unknown as GenerateContentResponse,
+        {
+          candidates: [
+            { content: { parts: [{ text: response.slice(splitAt) }] } },
+          ],
+        } as unknown as GenerateContentResponse,
+        {
+          candidates: [{ finishReason: 'STOP' }],
+        } as unknown as GenerateContentResponse,
+      ),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-json-finish-only',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    const emittedText = emittedParts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe(response);
+    expect(chat.getLastModelMessageText()).toBe(response);
+    expect(chat.getHistory().at(-1)?.parts).toEqual(emittedParts);
+  });
+
   it.each(['preparation', 'function call'] as const)(
     'retries when a %s interrupts a partial JSON protocol leak',
     async (middleChunkType) => {
