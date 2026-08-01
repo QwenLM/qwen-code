@@ -197,6 +197,16 @@ describe('earlyInputCapture', () => {
       expect(input.length).toBe(0);
     });
 
+    it('should filter CSI private parameter responses (ESC [ =)', () => {
+      startEarlyInputCapture();
+      // Private parameter byte '=' (0x3D): ESC [ = 1 ; 2 c
+      mockStdin.write(Buffer.from('\x1b[=1;2c'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
     it('should filter OSC sequences (ESC ])', () => {
       startEarlyInputCapture();
       // OSC sequence: ESC ] 0 ; title BEL
@@ -300,6 +310,15 @@ describe('earlyInputCapture', () => {
     it('should drop incomplete OSC sequence on capture end', () => {
       startEarlyInputCapture();
       mockStdin.write(Buffer.from('\x1b]0;title'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should drop incomplete SGR mouse sequence on capture end', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b[<65;68'));
       stopEarlyInputCapture();
 
       const input = getAndClearCapturedInput();

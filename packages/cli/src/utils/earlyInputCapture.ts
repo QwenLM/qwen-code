@@ -82,7 +82,9 @@ function classifyEscapeSequence(
     return 'terminal';
   }
 
-  // Check for terminal responses in CSI sequences
+  // Check for terminal responses in CSI sequences. A private parameter byte
+  // (0x3C-0x3F: < = > ?) as the third byte is always a terminal response,
+  // never a user key:
   // ESC [ ? ... (DEC private mode response)
   // ESC [ > ... (DA2 response)
   // ESC [ < ... (SGR mouse event)
@@ -93,8 +95,7 @@ function classifyEscapeSequence(
       return 'incomplete';
     }
     const thirdByte = data[thirdIdx];
-    if (thirdByte === 0x3f || thirdByte === 0x3e || thirdByte === 0x3c) {
-      // ESC [ ? or ESC [ > or ESC [ < - this is a terminal response
+    if (thirdByte >= 0x3c && thirdByte <= 0x3f) {
       return 'terminal';
     }
     return 'user';
