@@ -168,6 +168,12 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'rather than one item per error, file, command, or minor edit',
     );
+    expect(prompt).toContain(
+      'When an active Todo plan covers work delegated through top-level Agent calls',
+    );
+    expect(prompt).not.toContain(
+      'For complex work delegated through top-level Agent calls, create the relevant todo first',
+    );
     expect(prompt).not.toContain('VERY frequently');
     expect(prompt).not.toContain('EXTREMELY helpful');
     expect(prompt).not.toContain('write 10 items to the todo list');

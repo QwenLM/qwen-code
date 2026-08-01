@@ -370,7 +370,8 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
           (oldTodos.every((todo) => todo.status === 'completed') &&
-            finalTodos.some((todo) => todo.status !== 'completed')));
+            (finalTodos.some((todo) => todo.status !== 'completed') ||
+              finalTodos.some((todo) => !oldTodosMap.has(todo.id)))));
       const activePlanId =
         finalTodos.length === 0
           ? undefined
