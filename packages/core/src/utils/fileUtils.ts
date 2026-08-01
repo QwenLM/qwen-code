@@ -36,7 +36,11 @@ import {
 import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
 import { readNotebookWithMetadata } from './notebook.js';
-import { readTextRange } from './read-text-range.js';
+import {
+  readTextRange,
+  type ReadTextRangeResult,
+  detectLineEndingFromContent,
+} from './read-text-range.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,
@@ -330,15 +334,7 @@ export async function readFileWithLineAndLimit(params: {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: import('node:fs').Stats;
-}): Promise<{
-  content: string;
-  bom?: boolean;
-  encoding?: string;
-  originalLineCount: number;
-  originalLineCountExact?: boolean;
-  lineEnding?: 'crlf' | 'lf';
-  truncatedByBytes?: boolean;
-}> {
+}): Promise<ReadTextRangeResult> {
   const { path: filePath, limit, line, maxOutputBytes, signal } = params;
   const stats = params.stats ?? (await fs.promises.stat(filePath));
   if (
@@ -372,12 +368,15 @@ export async function readFileWithLineAndLimit(params: {
   const actualStartLine = Math.min(startLine, originalLineCount);
   const selectedLines = lines.slice(actualStartLine, endLine);
 
+  const joined = selectedLines.join('\n');
   return {
-    content: selectedLines.join('\n'),
+    content: joined,
     bom,
     encoding,
     originalLineCount,
     originalLineCountExact: true,
+    truncatedByBytes: false,
+    lineEnding: detectLineEndingFromContent(joined),
   };
 }
 
