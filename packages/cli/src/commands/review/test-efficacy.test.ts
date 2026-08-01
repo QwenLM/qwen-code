@@ -20,12 +20,13 @@ import {
   hasCollocatedNewTest,
   collocatedProbe,
   fitsAnotherMutantRun,
-  probeCreateFailureDetail,
   probeCleanupFailureDetail,
   findVitestBin,
   exposeDependencies,
   MAX_MUTANTS,
+  runControlMutant,
 } from './test-efficacy.js';
+import { worktreeCreateFailureDetail } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -35,6 +36,7 @@ import {
   readFileSync,
   readdirSync,
   lstatSync,
+  rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -247,13 +249,14 @@ describe('exposeDependencies', () => {
   });
 });
 
-describe('probeCreateFailureDetail', () => {
+describe('worktreeCreateFailureDetail', () => {
   // The branch this string is built on fires only when `git worktree add` fails,
   // which no real-git test can force portably (the one lever — an unwritable
   // `.git/worktrees` — is bypassed by root and differs under CI's unprivileged
   // user). The composition is the part with logic in it, so it is pinned here.
   it('names the add failure, and folds in the sweep stderr that explains it', () => {
-    const got = probeCreateFailureDetail(
+    const got = worktreeCreateFailureDetail(
+      'probe',
       new Error("fatal: '/w/wt-probe' already exists"),
       "fatal: '/w/wt-probe' is not a working tree\n",
     );
@@ -268,19 +271,59 @@ describe('probeCreateFailureDetail', () => {
   it('omits the sweep clause when the sweep said nothing', () => {
     // The normal case: no stale tree, so the sweep is silent. A dangling empty
     // "(stale-tree sweep also reported: )" would be noise in the report.
-    const got = probeCreateFailureDetail(new Error('disk full'), '   \n');
+    const got = worktreeCreateFailureDetail(
+      'probe',
+      new Error('disk full'),
+      '   \n',
+    );
     expect(got).toBe('probe worktree could not be created: disk full');
   });
 
   it('survives a non-Error throw', () => {
-    expect(probeCreateFailureDetail('boom', '')).toBe(
+    expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
   });
 });
 
+describe('runControlMutant', () => {
+  it('returns null — not false — when the probe file cannot be read', () => {
+    // `false` is a VERDICT: "the injected always-failing test stayed green".
+    // With an unreadable probe file nothing is injected and nothing runs, so
+    // reporting `false` states a run that never happened, re-classes every
+    // survivor with that sentence, and discards the whole mutant/hunk window
+    // over an I/O error. `null` is the file's own third-outcome discipline.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-control-'));
+    try {
+      expect(runControlMutant(dir, 'nope/does-not-exist.test.ts')).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the probe file byte-identical when it cannot run', () => {
+    // The restore is in a `finally`, but the early return happens BEFORE the
+    // write — a probe file the control corrupted would poison every mutant
+    // run after it.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-control-'));
+    try {
+      const original = 'import { it } from "vitest";\nit("t", () => {});\n';
+      writeFileSync(join(dir, 'a.test.ts'), original);
+      // No vitest resolvable from this tmpdir, so the run THROWS out of the
+      // suite helper — which is the point: the restore lives in a `finally`
+      // and has to survive that path, or the control leaves an injected
+      // always-failing test behind in a file every later mutant run uses.
+      // (The caller's outer catch is what turns the throw into inconclusive.)
+      expect(() => runControlMutant(dir, 'a.test.ts')).toThrow();
+      expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('probeCleanupFailureDetail', () => {
-  // Sibling of probeCreateFailureDetail, and pure for the same reason: the path
+  // Sibling of worktreeCreateFailureDetail, and pure for the same reason: the path
   // fires only when the tree outlives BOTH `worktree remove` and `rmSync`, which
   // no portable test can force. The reason is the whole value of the message —
   // it dropped out of an earlier cut of this code and a reviewer caught it.

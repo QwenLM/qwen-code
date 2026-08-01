@@ -893,6 +893,7 @@ const EN: Messages = {
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
+  'history.retry': 'Retry',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
@@ -3460,6 +3461,7 @@ const ZH: Messages = {
   'history.loadingEarlier': '正在加载更早消息…',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
+  'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
