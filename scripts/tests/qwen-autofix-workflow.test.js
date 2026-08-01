@@ -8417,7 +8417,7 @@ describe('qwen-autofix workflow', () => {
     // misconfigured repo variable degrades to a warning, not a misreport.
     expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
     expect(addressStep).toMatch(
-      /QWEN_TIMEOUT_MS.*exceeds the step backstop; clamping/,
+      /QWEN_TIMEOUT_MS.*exceeds the budget ceiling; clamping/,
     );
     // The clamp ceiling must stay under the step backstop with the SAME margin
     // rule as the fallback above, or the cap fires first and the internal kill
@@ -8425,6 +8425,36 @@ describe('qwen-autofix workflow', () => {
     const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
     expect(Number.isFinite(clampMs)).toBe(true);
     expect(clampMs / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    // The clamp ceiling IS the fallback budget: raising the default below the
+    // || without raising BUDGET_CAP_MS would be silently pulled back down (with
+    // a ::warning::) on every run.
+    expect(budgetMs).toBeLessThanOrEqual(clampMs);
+
+    // Replay the ACTUAL clamp block so the guard condition is executed, not
+    // merely string-matched: a flipped operator, a dropped width bound, or a
+    // missing 10# must fail here rather than survive green.
+    const clampBlock = addressStep.match(
+      /BUDGET_CAP_MS=\d+\n[\s\S]*?export QWEN_TIMEOUT_MS/,
+    )?.[0];
+    expect(clampBlock).toBeTruthy();
+    const runClamp = (value) =>
+      execFileSync(
+        'bash',
+        ['-c', `${clampBlock}\nprintf '%s' "$QWEN_TIMEOUT_MS"`],
+        { env: { ...process.env, QWEN_TIMEOUT_MS: value }, encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+    // In-range values pass through untouched; the cap itself is inclusive.
+    expect(runClamp('100')).toBe('100');
+    expect(runClamp('7200000')).toBe('7200000');
+    // Over-cap, malformed, zero-padded (octal), and int64-overflowing values
+    // all clamp to the ceiling instead of reaching run-agent.mjs unclamped.
+    expect(runClamp('9999999')).toBe('7200000');
+    expect(runClamp('abc')).toBe('7200000');
+    expect(runClamp('09999999')).toBe('7200000');
+    expect(runClamp('9223372036854775808')).toBe('7200000');
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {

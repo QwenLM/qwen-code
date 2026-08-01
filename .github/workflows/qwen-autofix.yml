@@ -3425,10 +3425,10 @@ jobs:
           # if the step cap fires first, `agent-timeout` is never written and
           # the report step misclassifies the round as a crash.
           # QWEN_AUTOFIX_TIMEOUT_MS can only LOWER the fallback without a code
-          # change: the run block clamps it to the 7,200,000 ms ceiling (the
-          # fallback itself), so raising the budget still requires editing this
-          # default and the step backstop, while a misconfigured variable
-          # degrades to a warning, not a misreport.
+          # change: the run block clamps it to the 7,200,000 ms ceiling
+          # (BUDGET_CAP_MS, the fallback itself), so raising the budget still
+          # requires editing this default, BUDGET_CAP_MS, and the step backstop,
+          # while a misconfigured variable degrades to a warning, not a misreport.
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
@@ -3487,11 +3487,13 @@ jobs:
           # backstop, the cap would fire first, and the round would be
           # misreported as a crash. Malformed values fall back to the same
           # ceiling (run-agent.mjs's own || handles the empty/NaN case).
-          # 10# forces base-10 below: a zero-padded value is octal in (( ))
-          # and would error past the guard, exporting it unclamped.
+          # The {1,8} width bound keeps 10# inside int64: a 19+ digit value
+          # wraps negative in (( )) and slips past the comparison unclamped.
+          # 10# forces base-10: a zero-padded value is octal in (( )) and would
+          # error past the guard the same way.
           BUDGET_CAP_MS=7200000
-          if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]+$ ]] || (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
-            echo "::warning::QWEN_TIMEOUT_MS=${QWEN_TIMEOUT_MS} exceeds the step backstop; clamping to ${BUDGET_CAP_MS}"
+          if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] || (( 10#${QWEN_TIMEOUT_MS} > BUDGET_CAP_MS )); then
+            echo "::warning::QWEN_TIMEOUT_MS=${QWEN_TIMEOUT_MS} is not a positive integer or exceeds the budget ceiling; clamping to ${BUDGET_CAP_MS}"
             QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
           fi
           export QWEN_TIMEOUT_MS
