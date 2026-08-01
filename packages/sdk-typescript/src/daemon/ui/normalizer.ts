@@ -42,6 +42,8 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'promptId'
+  | 'branchRecordId'
   | 'originatorClientId'
   | 'rawEvent'
 >;
@@ -564,6 +566,7 @@ function createBase(
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }

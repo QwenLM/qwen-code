@@ -43,10 +43,15 @@ describe('daemon transcript rewind', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
-        { type: 'assistant.text.delta', text: 'answer' },
+        {
+          type: 'assistant.text.delta',
+          text: 'answer',
+          promptId: 'prompt-1',
+        },
         {
           type: 'assistant.done',
           reason: 'end_turn',
+          promptId: 'prompt-1',
           sourceRecordIds: ['assistant-record'],
           branchRecordId: 'checkpoint-record',
         },
@@ -56,9 +61,33 @@ describe('daemon transcript rewind', () => {
 
     expect(state.blocks[0]).toMatchObject({
       kind: 'assistant',
+      promptId: 'prompt-1',
       sourceRecordIds: ['assistant-record'],
       branchRecordId: 'checkpoint-record',
     });
+  });
+
+  it('does not attach a branch anchor when the completed prompt differs', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'answer',
+          promptId: 'prompt-1',
+        },
+        {
+          type: 'assistant.done',
+          reason: 'end_turn',
+          promptId: 'prompt-2',
+          sourceRecordIds: ['assistant-record'],
+          branchRecordId: 'checkpoint-record',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks[0]).not.toHaveProperty('branchRecordId');
   });
 
   it('does not attach a branch anchor to an errored Assistant block', () => {

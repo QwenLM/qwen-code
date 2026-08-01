@@ -20,6 +20,11 @@ vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
+
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
@@ -590,6 +595,60 @@ describe('SessionTranscriptReader', () => {
     );
 
     expect(page.records.map((item) => item.uuid)).toContain('a1');
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+    expect(vi.mocked(fs.open)).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves tool completion semantics in the indexed branch catalog', async () => {
+    const toolCall: ChatRecord = {
+      ...record('a-tool', 'u1', ''),
+      message: {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+      },
+    };
+    const toolResult: ChatRecord = {
+      ...record('t1', 'a-tool', ''),
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+    };
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      record('a1', 't1', 'answer'),
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 4 },
+    );
+
     expect(page.branchPointsByAssistantUuid).toEqual({
       a1: 'checkpoint-1',
     });

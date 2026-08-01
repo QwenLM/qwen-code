@@ -322,6 +322,11 @@ checkpoint transaction before starting cron or notification drains and before
 emitting the completed branch point. The prompt holds the Agent history
 mutation lock for this entire interval.
 
+Recorder-side eligibility validation scans the current active chain while the
+topology fence is held. This linear scan is the authoritative restored/rewound
+state check; replacing it with an incremental cursor requires a separate
+ownership and invalidation design.
+
 ## 9. Live Protocol
 
 ### 9.1 Agent response
@@ -359,11 +364,13 @@ are dropped rather than repaired.
 ### 9.3 SDK and WebUI
 
 Add an explicit optional `branchPoint` field to `DaemonTurnCompleteData` and
-`PromptResult`. `matchTurnEvent()` must retain it.
+`PromptResult`. `matchTurnEvent()` must retain it. Normalized live events and
+transcript blocks also retain the daemon-stamped `promptId`.
 
-The WebUI reducer uses `promptId` to find the unique final Assistant block for
-the completed active prompt. It verifies that the block is the final visible
-Assistant shape for the turn, then stores:
+For an `end_turn`, the WebUI reducer requires the terminal event's `promptId`
+to equal the active top-level Assistant block's `promptId`. It verifies that
+the block is non-empty and is the final visible Assistant shape for that prompt,
+then stores:
 
 - `assistantRecordUuid` as its persisted record identity/source record; and
 - `checkpointUuid` as `branchRecordId`.
@@ -386,6 +393,13 @@ Extend `SessionTranscriptReader` so branch-point discovery uses the same frozen
 - same snapshot size;
 - same selected leaf UUID; and
 - same active-chain view.
+
+During the index's single sequential snapshot parse, retain a compact resolver
+projection containing only record identity/topology, checkpoint payloads,
+tool-call identities, tool-response identities, and visible-Assistant markers.
+After selecting the active chain, run the shared resolver once and freeze the
+resulting catalog into `TranscriptIndex`. A page read may open only the records
+needed for that page and must not reopen or materialize the entire active chain.
 
 The reader returns only the `assistantUuid -> checkpointUuid` entries relevant
 to Assistant records in that page. `HistoryReplayer` attaches
@@ -523,9 +537,10 @@ The target transcript:
 - rebuilds a clean target parent chain.
 
 When a retained checkpoint's `startExclusiveRecordUuid` points to a filtered
-creation record, rewrite it to `null`. Otherwise rewrite it to the retained
-target predecessor that represents the same exclusive turn boundary. Run
-`resolveBranchPoints()` on the completed target chain before publication so
+creation record, rewrite it to `null`. Otherwise retain the UUID: historical
+fork construction preserves source record UUIDs, so that retained record is
+also the target predecessor representing the same exclusive turn boundary.
+Run `resolveBranchPoints()` on the completed target chain before publication so
 earlier Assistant responses remain branchable from the new session.
 
 ### 13.3 File-history snapshots
@@ -806,13 +821,3 @@ Rejected because the session picker could discover an incomplete session.
 
 Rejected because another client may already have discovered or attached the
 session. A committed fork is retained and recoverable instead.
-
-## 21. Review Record
-
-The design was revised through six strict review rounds. Earlier rounds found
-and closed issues in final-Assistant authority, branch/rewind TOCTOU, automatic
-turn contamination, side-artifact bounds, backup filename selection, cleanup
-ownership, legacy inference, pagination, live metadata propagation, exact turn
-boundaries, crash-safe publication, post-commit ownership, and recorder writer
-topology. The v6 review reported no remaining Critical, High, or Medium
-findings.

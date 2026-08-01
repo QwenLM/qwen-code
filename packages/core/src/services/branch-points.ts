@@ -7,6 +7,11 @@
 import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 
+export type BranchPointRecord = Pick<
+  ChatRecord,
+  'uuid' | 'parentUuid' | 'type' | 'subtype' | 'message' | 'systemPayload'
+>;
+
 export interface BranchCheckpointRecordPayloadV1 {
   v: 1;
   startExclusiveRecordUuid: string | null;
@@ -33,11 +38,11 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function parts(record: ChatRecord): readonly Part[] {
+function parts(record: BranchPointRecord): readonly Part[] {
   return record.message?.parts ?? [];
 }
 
-function functionCalls(record: ChatRecord): ToolCallIdentity[] {
+function functionCalls(record: BranchPointRecord): ToolCallIdentity[] {
   return parts(record).flatMap((part) => {
     const call = part.functionCall;
     if (!call) return [];
@@ -50,7 +55,7 @@ function functionCalls(record: ChatRecord): ToolCallIdentity[] {
   });
 }
 
-function functionResponses(record: ChatRecord): ToolCallIdentity[] {
+function functionResponses(record: BranchPointRecord): ToolCallIdentity[] {
   return parts(record).flatMap((part) => {
     const response = part.functionResponse;
     if (!response) return [];
@@ -63,7 +68,7 @@ function functionResponses(record: ChatRecord): ToolCallIdentity[] {
   });
 }
 
-function hasVisibleText(record: ChatRecord): boolean {
+function hasVisibleText(record: BranchPointRecord): boolean {
   return parts(record).some(
     (part) =>
       part.thought !== true &&
@@ -99,7 +104,7 @@ function closeToolCall(
 }
 
 function resolveCompletedTurnBranchCandidateInRange(input: {
-  activeChain: readonly ChatRecord[];
+  activeChain: readonly BranchPointRecord[];
   startIndex: number;
   endIndex: number;
   startExclusiveRecordUuid: string | null;
@@ -150,7 +155,7 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
 }
 
 export function resolveCompletedTurnBranchCandidate(input: {
-  activeChain: readonly ChatRecord[];
+  activeChain: readonly BranchPointRecord[];
   startExclusiveRecordUuid: string | null;
   endInclusiveRecordUuid: string;
 }): BranchCandidate | undefined {
@@ -216,7 +221,7 @@ export function parseBranchCheckpointPayload(
 }
 
 export function resolveBranchPoints(
-  activeChain: readonly ChatRecord[],
+  activeChain: readonly BranchPointRecord[],
 ): ReadonlyMap<string, BranchPoint> {
   const points = new Map<string, BranchPoint>();
   const recordIndexes = new Map<string, number>();
@@ -233,7 +238,7 @@ export function resolveBranchPoints(
   }
 
   const checkpoints: Array<{
-    checkpoint: ChatRecord;
+    checkpoint: BranchPointRecord;
     checkpointIndex: number;
     startIndex: number;
     payload: BranchCheckpointRecordPayloadV1;

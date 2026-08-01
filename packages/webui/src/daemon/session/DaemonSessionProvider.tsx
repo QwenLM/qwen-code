@@ -154,6 +154,7 @@ function assistantDoneFromTurnEvent(
     type: 'assistant.done',
     reason,
     eventId: event.id,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(branchPointValid
       ? {
