@@ -261,7 +261,7 @@ export default {
   'to search history': '搜索歷史',
   'to paste images': '粘貼圖片',
   'for external editor': '外部編輯器',
-  'to view transcript': '檢視完整記錄',
+  'to expand details': '展開詳情',
   'Jump through words in the input': '在輸入中按單詞跳轉',
   'Close dialogs, cancel requests, or quit application':
     '關閉對話框、取消請求或退出應用程序',
@@ -464,9 +464,6 @@ export default {
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
   Transcript: '完整記錄',
-  'to close': '關閉',
-  'to scroll': '捲動',
-  'Failed to render transcript.': '無法呈現完整記錄。',
   'Read {{count}} file': '讀取了 {{count}} 個檔案',
   'Read {{count}} files': '讀取了 {{count}} 個檔案',
   'Reading {{count}} file': '正在讀取 {{count}} 個檔案',

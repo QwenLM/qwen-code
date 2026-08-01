@@ -266,7 +266,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
-  'to view transcript': '查看完整记录',
+  'to expand details': '展开详情',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -489,9 +489,6 @@ export default {
   'Unknown Step': '未知步骤',
   'Esc to close': '按 Esc 关闭',
   Transcript: '完整记录',
-  'to close': '关闭',
-  'to scroll': '滚动',
-  'Failed to render transcript.': '无法渲染完整记录。',
   'Read {{count}} file': '读取了 {{count}} 个文件',
   'Read {{count}} files': '读取了 {{count}} 个文件',
   'Reading {{count}} file': '正在读取 {{count}} 个文件',
