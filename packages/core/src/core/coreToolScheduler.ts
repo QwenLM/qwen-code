@@ -145,6 +145,10 @@ import {
   shouldUsePlanOnlyReminderInSubagentContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { safeSetStatus } from '../telemetry/tracer.js';
+import {
+  TOOL_FAILURE_KIND_ATTRIBUTE,
+  TOOL_FAILURE_KIND_CANCELLED,
+} from '../telemetry/constants.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
   startToolSpan,
@@ -256,13 +260,11 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
   return '';
 }
 
-const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
 const TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED = 'invocation_guard_denied';
 const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
 const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
 const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
-const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
 // Approval-flow failure kinds — distinct from `pre_hook_blocked` (which
 // only applies to actual PreToolUse hook denials in `_executeToolCallBody`)
 // so dashboards can attribute denies to their real cause (#4321 review).
@@ -1166,15 +1168,16 @@ function withPostToolBatchStop(
   const calls = [...completedCalls];
   const lastCall = calls[calls.length - 1];
   const executionStatus = lastCall.response.executionStatus;
-  const response: ToolCallResponseInfo = createErrorResponse(
+  const { executionStatus: _es, ...responseBase } = createErrorResponse(
     lastCall.request,
     new Error(stopReason),
     ToolErrorType.EXECUTION_DENIED,
     executionStatus ?? 'not_started',
   );
-  if (executionStatus === undefined) {
-    delete response.executionStatus;
-  }
+  const response: ToolCallResponseInfo = {
+    ...responseBase,
+    ...(executionStatus !== undefined ? { executionStatus } : {}),
+  };
   calls[calls.length - 1] = {
     status: 'error',
     request: lastCall.request,

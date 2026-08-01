@@ -615,10 +615,14 @@ export function recordToolCallMetrics(
 }
 
 export function recordToolExecutionMetrics(
+  config: TelemetryRuntimeConfig,
   attributes: MetricDefinitions[typeof TOOL_EXECUTION_COUNT]['attributes'],
 ): void {
   if (!toolExecutionCounter || !isMetricsInitialized) return;
-  toolExecutionCounter.add(1, attributes);
+  toolExecutionCounter.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  });
 }
 
 export function recordTokenUsageMetrics(

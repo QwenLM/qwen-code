@@ -25,6 +25,8 @@ import {
   SPAN_TOOL,
   SPAN_TOOL_BLOCKED_ON_USER,
   SPAN_TOOL_EXECUTION,
+  TOOL_FAILURE_KIND_ATTRIBUTE,
+  TOOL_FAILURE_KIND_CANCELLED,
 } from './constants.js';
 import { ApiRequestPhase, recordApiRequestBreakdown } from './metrics.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -990,7 +992,8 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
       if (metadata.cancelled) {
-        endAttributes['tool.failure_kind'] = 'cancelled';
+        endAttributes[TOOL_FAILURE_KIND_ATTRIBUTE] =
+          TOOL_FAILURE_KIND_CANCELLED;
       }
     }
 

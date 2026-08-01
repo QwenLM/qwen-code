@@ -1066,10 +1066,13 @@ describe('loggers', () => {
           tool_type: 'native',
         },
       );
-      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith({
-        execution_status: 'unknown',
-        tool_type: 'native',
-      });
+      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith(
+        configWithRecording,
+        {
+          execution_status: 'unknown',
+          tool_type: 'native',
+        },
+      );
       expect(event).not.toHaveProperty('execution_status');
       expect(event.function_name).toBe('   ');
       expect(event.success).toBe(true);
@@ -1253,10 +1256,13 @@ describe('loggers', () => {
       expect(qwenSink).toHaveBeenCalled();
       expect(mockLogger.emit).toHaveBeenCalled();
       expect(mockMetrics.recordToolCallMetrics).toHaveBeenCalled();
-      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith({
-        execution_status: 'success',
-        tool_type: 'native',
-      });
+      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith(
+        config,
+        {
+          execution_status: 'success',
+          tool_type: 'native',
+        },
+      );
       qwenLoggerSpy.mockRestore();
     });
 
@@ -1357,10 +1363,13 @@ describe('loggers', () => {
           tool_type: 'native',
         },
       );
-      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith({
-        execution_status: 'success',
-        tool_type: 'native',
-      });
+      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        {
+          execution_status: 'success',
+          tool_type: 'native',
+        },
+      );
 
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {

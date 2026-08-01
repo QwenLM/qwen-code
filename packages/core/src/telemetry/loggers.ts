@@ -139,6 +139,7 @@ import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -180,11 +181,13 @@ export function normalizeToolCallEvent(
   return normalized;
 }
 
+const debugLogger = createDebugLogger('TELEMETRY_SINK');
+
 function runToolTelemetrySink(sink: () => void): void {
   try {
     sink();
-  } catch {
-    // Telemetry is best-effort.
+  } catch (e) {
+    debugLogger.debug('Telemetry sink failed (best-effort):', e);
   }
 }
 
@@ -334,7 +337,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     });
   });
   runToolTelemetrySink(() => {
-    recordToolExecutionMetrics({
+    recordToolExecutionMetrics(config, {
       execution_status: normalizedEvent.execution_status,
       tool_type: normalizedEvent.tool_type,
     });

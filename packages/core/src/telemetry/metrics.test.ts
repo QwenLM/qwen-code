@@ -288,7 +288,7 @@ describe('Telemetry Metrics', () => {
     } as unknown as Config;
 
     it('does not record before metrics are initialized', () => {
-      recordToolExecutionMetricsModule({
+      recordToolExecutionMetricsModule(mockConfig, {
         execution_status: 'unknown',
         tool_type: 'native',
       });
@@ -300,7 +300,7 @@ describe('Telemetry Metrics', () => {
       initializeMetricsModule(mockConfig);
       mockCounterAddFn.mockClear();
 
-      recordToolExecutionMetricsModule({
+      recordToolExecutionMetricsModule(mockConfig, {
         execution_status: 'error',
         tool_type: 'mcp',
       });
@@ -312,6 +312,26 @@ describe('Telemetry Metrics', () => {
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         execution_status: 'error',
         tool_type: 'mcp',
+      });
+    });
+
+    it('merges common attributes when session id is opted in', () => {
+      const configWithSession = {
+        ...mockConfig,
+        getTelemetryMetricsIncludeSessionId: () => true,
+      } as unknown as Config;
+      initializeMetricsModule(configWithSession);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(configWithSession, {
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        'session.id': 'test-session-id',
+        execution_status: 'success',
+        tool_type: 'native',
       });
     });
   });

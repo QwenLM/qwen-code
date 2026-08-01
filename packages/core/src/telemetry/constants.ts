@@ -101,3 +101,8 @@ export const SPAN_HOOK = 'qwen-code.hook';
  * (#3731 Phase 3).
  */
 export const SPAN_SUBAGENT = 'qwen-code.subagent';
+
+// Tool failure kind span attribute — shared by coreToolScheduler and
+// session-tracing so the two write sites cannot drift.
+export const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+export const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
