@@ -20,6 +20,7 @@ import {
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
+  isValidMemoryBudgetMb,
   MAX_MEMORY_BUDGET_MB,
   MIN_MEMORY_BUDGET_MB,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
