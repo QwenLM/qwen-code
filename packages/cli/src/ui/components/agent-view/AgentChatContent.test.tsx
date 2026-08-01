@@ -34,6 +34,8 @@ function makeCore(shellPids: Map<string, number> = new Map()) {
     getPendingApprovals: () => [],
     getLiveOutputs: () => new Map(),
     getShellPids: () => shellPids,
+    runtimeContext: { getTargetDir: () => '/tmp/test' },
+    modelConfig: { model: 'test-model' },
   };
 }
 

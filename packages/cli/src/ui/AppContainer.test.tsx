@@ -50,6 +50,7 @@ import {
 } from '../utils/windowTitle.js';
 import ansiEscapes from 'ansi-escapes';
 import {
+  AuthType,
   type Config,
   makeFakeConfig,
   SendMessageType,
@@ -4976,6 +4977,115 @@ describe('AppContainer State Management', () => {
       // (e.g. (prev) => true) makes this assertion fail (mutation M1).
       expect(handleKeypress!.toString()).toMatch(
         /setThoughtExpanded\(\s*\(prev\)\s*=>\s*!prev/,
+      );
+    });
+  });
+
+  describe('Model toggle (Ctrl+F) error handling', () => {
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...overrides,
+      }) as Key;
+
+    // The global keypress handler (handleGlobalKeypress) is the one that
+    // dispatches Ctrl+F into the model-toggle glue; locate it by the
+    // handleToggleKeypress call it contains.
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleToggleKeypress'),
+        ) as ((key: Key) => void) | undefined;
+
+    const ctrlF = makeKey({ name: 'f', ctrl: true, sequence: '\x06' });
+
+    it('reports an error and re-arms the guard when switchModel rejects', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+
+      // Configure a toggle target so the guard's toggleModelConfigured passes.
+      mockSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+          model: { toggleModel: 'model-b' },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      // Current model is model-a under a known auth type; the toggle target
+      // (model-b) differs, so computeToggleAction yields a forward switch
+      // that reaches config.switchModel.
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+      vi.spyOn(mockConfig, 'getAvailableModelsForAuthType').mockReturnValue([]);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockRejectedValue(new Error('switch failed'));
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      // First Ctrl+F reaches switchModel, which rejects.
+      handleKeypress!(ctrlF);
+      expect(switchModelSpy).toHaveBeenCalledTimes(1);
+
+      // Flush the rejection microtasks (error handler + finally guard reset).
+      await vi.waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: MessageType.ERROR }),
+          expect.any(Number),
+        );
+      });
+
+      // The error message names the failure reason.
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('switch failed'),
+        }),
+        expect.any(Number),
+      );
+
+      // The guard must be re-armed after the failure: a second Ctrl+F fires
+      // switchModel again (isTogglingRef was reset in the .finally block).
+      handleKeypress!(ctrlF);
+      expect(switchModelSpy).toHaveBeenCalledTimes(2);
+
+      // Structural (error path clears the return-model ref): the handler body
+      // must reset previousModelRef on failure so the next toggle attempts a
+      // fresh forward switch.
+      expect(handleKeypress!.toString()).toContain(
+        'previousModelRef.current = null',
       );
     });
   });
