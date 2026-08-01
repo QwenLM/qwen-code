@@ -982,7 +982,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
         '6a',
@@ -992,7 +994,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('9 agents required');
+      expect(printed).toContain('11 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1000,7 +1002,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 9 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1027,13 +1029,15 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
       ]);
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('6 agents required');
+      expect(printed).toContain('8 agents required');
       expect(printed).not.toMatch(/Agent 6[abc]:/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1770,7 +1774,9 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '1b',
     '1c',
     '2',
-    '3',
+    '3a',
+    '3b',
+    '3c',
     '4',
     '5',
     '6a',
@@ -2196,12 +2202,21 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
     );
   });
 
-  it.each(['1a', '1b', '2', '3', '4', '5', '6a', '6b', '6c'] as const)(
-    'reaches the code-reviewing dimension %s',
-    (role) => {
-      expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
-    },
-  );
+  it.each([
+    '1a',
+    '1b',
+    '2',
+    '3a',
+    '3b',
+    '3c',
+    '4',
+    '5',
+    '6a',
+    '6b',
+    '6c',
+  ] as const)('reaches the code-reviewing dimension %s', (role) => {
+    expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
+  });
 
   it.each(['0', '7', 'test-matrix'] as const)(
     'does not reach %s — it is not sitting that exam',
