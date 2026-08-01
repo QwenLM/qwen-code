@@ -240,6 +240,21 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
+  it('keeps the auto-attach session silent when autoAttach is false', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 32,
+      method: 'Target.setAutoAttach',
+      params: { autoAttach: false, flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r-off' });
+    expect(
+      replies.filter((reply) => reply.sessionId === 'qwen-cdp-page-session'),
+    ).toHaveLength(0);
+  });
+
   it('skips the auto-attach session when no setAutoAttach handshake occurred', async () => {
     const { emu, replies } = setup();
     await emu.handleFromClient({
@@ -335,6 +350,31 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     expect(
       replies.filter((reply) => reply.sessionId === explicitSessionId),
     ).toHaveLength(1);
+  });
+
+  it('stops auto-attach delivery when the page session is detached', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 33,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 34,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session' },
+    });
+    expect(replies[0]).toEqual({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session', targetId: 'qwen-cdp-page' },
+    });
+    replies.length = 0;
+    emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r-detached' });
+    expect(
+      replies.filter((reply) => reply.sessionId === 'qwen-cdp-page-session'),
+    ).toHaveLength(0);
   });
 
   it('does not emit detachedFromTarget for a never-attached session', async () => {

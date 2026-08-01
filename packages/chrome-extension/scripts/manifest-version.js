@@ -11,7 +11,7 @@ import semver from 'semver';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  '../..',
+  '../../..',
 );
 
 export function resolveNightlyBuildNumber(packageVersion) {

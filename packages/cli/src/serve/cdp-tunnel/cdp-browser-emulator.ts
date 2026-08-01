@@ -201,7 +201,22 @@ export class CdpBrowserEmulator {
         }
         case 'Target.detachFromTarget': {
           const attachedSessionId = params?.['sessionId'];
-          if (
+          if (attachedSessionId === PAGE_SESSION_ID) {
+            // The auto-attach session is only live after the tab-session
+            // handshake; detaching it stops event delivery and reports the
+            // teardown, so a client that switches to explicit-attach-only mode
+            // does not keep receiving events on a session it believes is gone.
+            if (this.autoAttachActive) {
+              this.autoAttachActive = false;
+              this.cb.reply({
+                method: 'Target.detachedFromTarget',
+                params: {
+                  sessionId: PAGE_SESSION_ID,
+                  targetId: PAGE_TARGET_ID,
+                },
+              });
+            }
+          } else if (
             typeof attachedSessionId === 'string' &&
             this.attachedPageSessions.delete(attachedSessionId)
           ) {
@@ -230,7 +245,7 @@ export class CdpBrowserEmulator {
     // ── tab session: recursive auto-attach mints the page session ──
     if (sessionId === TAB_SESSION_ID) {
       if (method === 'Target.setAutoAttach') {
-        this.autoAttachActive = true;
+        this.autoAttachActive = params?.['autoAttach'] !== false;
         this.cb.reply({
           method: 'Target.attachedToTarget',
           sessionId: TAB_SESSION_ID,

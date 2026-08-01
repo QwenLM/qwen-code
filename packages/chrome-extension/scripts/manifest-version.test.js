@@ -111,7 +111,13 @@ describe('toChromeManifestVersion', () => {
     try {
       execFileSync(process.execPath, ['scripts/sync-extension.js'], {
         cwd: packageRoot,
-        env: { ...process.env, EXTENSION_OUT_DIR: outputDir },
+        env: {
+          ...process.env,
+          EXTENSION_OUT_DIR: outputDir,
+          // Pin the build number so the assertion is deterministic and does not
+          // depend on git history (a shallow clone has no rev-list count).
+          QWEN_CHROME_EXTENSION_BUILD_NUMBER: '1',
+        },
       });
       const packageJson = JSON.parse(
         readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),

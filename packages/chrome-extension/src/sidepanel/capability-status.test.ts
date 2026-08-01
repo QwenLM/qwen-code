@@ -262,4 +262,90 @@ describe('deriveCapabilityStatus', () => {
         'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
     });
   });
+
+  it('detects shadowing even while discoveryState stays not_started', () => {
+    // A live daemon reports discoveryState: 'not_started' permanently next to a
+    // populated servers array, so a stale --browserUrl config that shadows the
+    // tunnel must still surface as shadowed, not collapse to automation-configured.
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          initialized: true,
+          discoveryState: 'not_started',
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'disconnected',
+              config: {
+                args: ['--browserUrl', 'http://127.0.0.1:9333'],
+              },
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
+
+  it('reports a connected tunnel even while discoveryState stays not_started', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          initialized: true,
+          discoveryState: 'not_started',
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--wsEndpoint', 'ws://127.0.0.1:4170/cdp'],
+              },
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-connected',
+      shellReady: true,
+      warning: null,
+    });
+  });
+
+  it('does not treat an argument that merely contains "cdp" as the tunnel', () => {
+    // A userDataDir like /home/me/cdp-profile contains "cdp" but not a /cdp path
+    // segment, so it must read as shadowing, not as the extension tunnel.
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--userDataDir', '/home/me/cdp-profile'],
+              },
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
 });

@@ -74,10 +74,15 @@ export function deriveCapabilityStatus(
     // The ACP child serves an idle placeholder ({ initialized: false,
     // discoveryState: 'not_started', servers: [] }) before the first session,
     // after the child is reaped, and on cold-start preheat timeout. That is
-    // "no data yet", not "adapter missing".
+    // "no data yet", not "adapter missing". A live daemon, however, reports
+    // discoveryState: 'not_started' permanently next to a populated servers
+    // array (the chrome-devtools entry comes from the daemon MCP pool, not the
+    // config-level discovery state), so this branch only applies when there are
+    // genuinely no servers to inspect yet.
     if (
-      mcpSnapshot.initialized === false ||
-      mcpSnapshot.discoveryState === 'not_started'
+      (mcpSnapshot.initialized === false ||
+        mcpSnapshot.discoveryState === 'not_started') &&
+      !mcpSnapshot.servers?.length
     ) {
       return {
         state: 'automation-configured',
