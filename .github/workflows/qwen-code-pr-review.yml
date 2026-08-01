@@ -479,10 +479,14 @@ jobs:
           # week after 0.21.x shipped. So resolve latest here and upgrade when
           # stale; a pre-installed qwen is acceptable only as the fallback when
           # the registry or the install is the thing that is broken.
-          want="$(npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version 2>/dev/null | tail -n 1 || true)"
+          #
+          # Run npm from RUNNER_TEMP, not the workspace: npm reads a cwd .npmrc
+          # whose settings a --registry flag does not override (same guard as
+          # the triage and fleet-updater lanes).
+          want="$(cd "${RUNNER_TEMP:?}" && timeout 60 npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version 2>/dev/null | tail -n 1 || true)"
           have=''
           if command -v qwen >/dev/null 2>&1; then
-            have="$(qwen --version 2>/dev/null || true)"
+            have="$(qwen --version 2>/dev/null | tail -n 1 || true)"
           fi
           if [ -n "$have" ] && [ "$have" = "$want" ]; then
             echo "qwen $have (latest)"
@@ -496,16 +500,24 @@ jobs:
             echo '::error::qwen is not installed and the npm registry is unreachable'
             exit 1
           fi
-          if ! npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@$want"; then
-            if [ -n "$have" ]; then
-              echo "::warning::upgrade to qwen $want failed; reviewing with installed qwen $have"
-              exit 0
+          # Mirror the fleet updater: the system prefix is root-owned on ECS
+          # hosts, so try sudo first and fall back to an unprivileged install.
+          if ! (cd "${RUNNER_TEMP:?}" && sudo -n env -u NPM_CONFIG_PREFIX timeout 120 npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@$want") 2>/dev/null; then
+            if ! (cd "${RUNNER_TEMP:?}" && timeout 120 npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@$want"); then
+              if [ -n "$have" ]; then
+                echo "::warning::upgrade to qwen $want failed; reviewing with installed qwen $have"
+                exit 0
+              fi
+              echo "::error::qwen is not installed and installing $want failed"
+              exit 1
             fi
-            echo "::error::qwen is not installed and installing $want failed"
-            exit 1
           fi
           hash -r
-          actual="$(qwen --version)"
+          actual="$(qwen --version 2>/dev/null | tail -n 1 || true)"
+          if [ -z "$actual" ]; then
+            echo "::error::qwen $want installed but not resolvable on PATH"
+            exit 1
+          fi
           echo "qwen $actual"
           if [ "$actual" != "$want" ]; then
             echo "::warning::wanted qwen $want but PATH resolves $actual — a system-wide install shadows the per-run upgrade"
