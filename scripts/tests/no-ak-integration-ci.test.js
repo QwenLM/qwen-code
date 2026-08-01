@@ -57,10 +57,9 @@ describe('no-AK integration CI wiring', () => {
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
-    const workflowTriggers = workflow.slice(
-      0,
-      workflow.indexOf('\npermissions:'),
-    );
+    const permissionsIndex = workflow.indexOf('\npermissions:');
+    expect(permissionsIndex).toBeGreaterThan(0);
+    const workflowTriggers = workflow.slice(0, permissionsIndex);
     const gateStepMarker =
       "      - name: 'Run required no-AK integration gate'";
     const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
@@ -83,6 +82,12 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(gateStep).toContain(
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+    );
+    expect(gateStep).toContain(
+      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
+    );
+    expect(gateStep).toContain(
+      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
     );
     for (const key of [
       'API_KEY',

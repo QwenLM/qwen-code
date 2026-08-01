@@ -209,21 +209,24 @@ describe('System Control (E2E)', () => {
         () => ({ content: 'Done.' }),
         FAKE_SERVER_OPTIONS,
       );
-      const q = query({
-        prompt: 'Hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
-          cwd: testDir,
-        },
-      });
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
 
-      await q.close();
+        await q.close();
 
-      await expect(q.setModel('fake-model-2')).rejects.toThrow(
-        'Query is closed',
-      );
-      await fakeServer.close();
+        await expect(q.setModel('fake-model-2')).rejects.toThrow(
+          'Query is closed',
+        );
+      } finally {
+        await fakeServer.close();
+      }
     });
   });
 
@@ -312,19 +315,22 @@ describe('System Control (E2E)', () => {
         () => ({ content: 'Done.' }),
         FAKE_SERVER_OPTIONS,
       );
-      const q = query({
-        prompt: 'Hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
-          cwd: testDir,
-        },
-      });
+      try {
+        const q = query({
+          prompt: 'Hello',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+          },
+        });
 
-      await q.close();
+        await q.close();
 
-      await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
-      await fakeServer.close();
+        await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
+      } finally {
+        await fakeServer.close();
+      }
     });
   });
 });
