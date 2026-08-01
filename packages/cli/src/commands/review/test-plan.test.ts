@@ -164,6 +164,34 @@ describe('extractClaims', () => {
     expect(claims[0].text).toContain('157');
   });
 
+  it('does not extract the MIXED file-count shape either', () => {
+    // The shape a runner prints the moment any file fails — which is when a
+    // summary actually gets pasted into a Test Plan. The label is no longer
+    // adjacent to the number it qualifies, so an adjacency rule lets `44`
+    // through as a test count and the note reads `claimed 44, observed 1323`.
+    const claims = extractClaims(
+      'Test Files  1 failed | 44 passed (45)\n     Tests  2 failed | 1323 passed (1325)',
+    ).filter((c) => c.kind === 'count');
+    expect(claims.map((c) => c.text)).toEqual(['1323 passed']);
+  });
+
+  it('does not extract jest Test Suites counts as test counts', () => {
+    // Same rule, jest's spelling: every number after the label counts suites.
+    const claims = extractClaims(
+      'Test Suites: 1 failed, 44 passed, 45 total\nTests:       2 failed, 1323 passed, 1325 total',
+    ).filter((c) => c.kind === 'count');
+    expect(claims.map((c) => c.text)).toEqual(['1323 passed']);
+  });
+
+  it('keeps a bare count on a line that never named files', () => {
+    // The mask is per-line: blanking to end of line must not swallow a
+    // legitimate count that follows on the NEXT one.
+    const claims = extractClaims('Test Files  3 passed\n471 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['471 passed']);
+  });
+
   it('emits one claim per distinct count', () => {
     const claims = extractClaims(
       'core: 1135 passed, desktop: 41 passed',
