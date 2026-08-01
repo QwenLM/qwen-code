@@ -1669,7 +1669,8 @@ describe('selectMutants — replacement operators', () => {
 
   it('caps replacements at their sub-cap and counts what it drops', () => {
     // 24x pool inflation measured on real commits: uncapped replacements would
-    // drain the time window hunk probes draw from last.
+    // drain the time window hunk probes draw from last, silently un-shipping
+    // the hunk-survived finding class.
     const many = Array.from({ length: 6 }, (_, i) =>
       fileOf(`if (a${i} !== b${i}) go();\n`, [1]),
     ).map((f, i) => ({ ...f, file: `src/g${i}.ts` }));
@@ -1748,6 +1749,16 @@ describe('replacementMutantsOf', () => {
       operator: 'guard-true',
       mutated: 'if (true) return;',
     });
+  });
+
+  it('does not read a GENERIC call as a comparison', () => {
+    // `if (isRecord<string>(v))` is a type-guard predicate — the `if (ready)`
+    // shape whose survivors this gate calls noise. Telling `a<b` from
+    // `fn<T>(x)` needs a parser, so the gate stays silence-biased.
+    expect(same('if (isRecord<string>(v)) return;')).toBeNull();
+    expect(same('if (fn<Bar>(x)) go();')).toBeNull();
+    // A spaced comparison still qualifies.
+    expect(same('if (n <= 0) return 0;')?.operator).toBe('guard-true');
   });
 
   it('does not read an arrow function as a comparison', () => {

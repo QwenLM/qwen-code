@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
+import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
   buildLedger,
@@ -3147,6 +3148,68 @@ describe('buildLedger', () => {
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
+  });
+
+  it('classifies through `severityOf`, whitespace and all', () => {
+    // The ledger restated the severity predicate as a bare `startsWith`, while
+    // `countInlineFindings` — the count the VERDICT is computed from — trims
+    // first. A Critical whose body opened with a newline was therefore counted,
+    // posted, blocked the merge, and was silently missing from the ledger,
+    // shifting the id of every finding after it.
+    const drafted = [
+      { path: 'src/a.ts', line: 1, body: '\n  **[Critical]** leading space' },
+      { path: 'src/b.ts', line: 2, body: '**[Suggestion]** plain' },
+    ];
+    expect(countInlineFindings(drafted)).toEqual({
+      criticalsInline: 1,
+      suggestionsInline: 1,
+    });
+    expect(buildLedger(1, drafted, []).findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 1,
+        title: 'leading space',
+      },
+      { id: 'R1-2', sev: 'S', file: 'src/b.ts', line: 2, title: 'plain' },
+    ]);
+  });
+
+  it('keeps a carried-forward id instead of renumbering it by position', () => {
+    // Step 6 re-reports a still-standing finding under its ORIGINAL id, so the
+    // report says `R1-2 still stands` — and a ledger that renumbered it `R3-1`
+    // handed the next round a work list keyed by ids the report never used,
+    // which is the whole thing `R1-2 names the same claim every round` promised.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'a.ts', line: 4, body: '**[Critical]** R1-2: still leaking' },
+        { path: 'b.ts', body: '**[Suggestion]** brand new this round' },
+        { path: 'c.ts', body: '**[Critical]** R2-1 — moved but the same' },
+      ],
+      ['R1-5) the unanchorable one, still open'],
+    );
+    expect(l.findings.map((f) => `${f.id}|${f.title}`)).toEqual([
+      'R1-2|still leaking',
+      'R3-1|brand new this round',
+      'R2-1|— moved but the same',
+      'R1-5|the unanchorable one, still open',
+    ]);
+  });
+
+  it('never issues one id twice, however the comments are worded', () => {
+    // A duplicated carried id (a copy-paste, or a title that merely opens like
+    // one) must not collapse two claims onto one ledger entry.
+    const l = buildLedger(
+      2,
+      [
+        { path: 'a.ts', body: '**[Critical]** R1-1: one' },
+        { path: 'b.ts', body: '**[Critical]** R1-1: two, same id' },
+      ],
+      [],
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-1', 'R2-1']);
   });
 });
 

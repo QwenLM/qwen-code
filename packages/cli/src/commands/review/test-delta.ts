@@ -129,10 +129,12 @@ export interface TestDeltaArgs {
   report: string;
   baseline: string;
   out?: string;
-  /** The PR worktree the report's failures were produced in — its root is
-   *  stripped so both sides compare as repo-relative paths. */
-  /** yargs camel-cases `--pr-worktree`; naming the field for the flag would
-   *  read `undefined` on every real invocation. */
+  /**
+   * The PR worktree the report's failures were produced in — its root is
+   * stripped so both sides compare as repo-relative paths. Named for yargs'
+   * camel-cased `--pr-worktree`; a field named for the flag itself would read
+   * `undefined` on every real invocation.
+   */
   prWorktree?: string;
   timeout: number;
   /** Test seam — production spawns the real command. */
@@ -178,12 +180,16 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
 }
 
 /**
- * Whole-command budget, mirroring test-efficacy's: the tool ceiling is 600s,
- * and three failed commands at the 300s per-command default would blow past it
- * with NO report written — discarding the base install+build just paid for.
- * Commands the budget cannot fit are disclosed, never silently dropped.
+ * Whole-command budget, mirroring test-efficacy's. `--timeout` is PER COMMAND,
+ * so three failed commands at the 300s default is 900s against the 600s tool
+ * ceiling — killed with NO report written, discarding the base-tree install and
+ * build just paid for. Commands the budget cannot fit are disclosed, never
+ * silently dropped.
  */
 const TOTAL_BUDGET_MS = 540_000;
+
+/** The CLI default, reused when a programmatic caller omits `--timeout`. */
+const DEFAULT_TIMEOUT_S = 300;
 
 export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const exec = args.exec ?? run;
@@ -219,8 +225,14 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     );
   }
 
+  // A programmatic caller may omit `timeout`; `NaN * 1000` reaches spawnSync as
+  // an invalid deadline. Fall back to the CLI's own default.
+  const perCommandMs =
+    (Number.isFinite(args.timeout) ? args.timeout : DEFAULT_TIMEOUT_S) * 1000;
   const startedAt = Date.now();
   const skippedForBudget: string[] = [];
+  /** Reruns killed by a deadline the BUDGET shortened, not by their own. */
+  const budgetClamped: string[] = [];
   const entries: DeltaEntry[] = [];
   for (const t of failed) {
     const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
@@ -228,13 +240,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       skippedForBudget.push(t.command);
       continue;
     }
-    const prFailingFiles = failingFilesOf(t.output ?? '');
-    const base = exec(
-      t.command,
-      baseline,
-      Math.min(args.timeout * 1000, remaining),
+    const prFailingFiles = failingFilesOf(
+      t.output ?? '',
+      args.prWorktree ?? '',
     );
-    const baseFailingFiles = base.timedOut ? [] : failingFilesOf(base.output);
+    // A clamped deadline is not the same fact as a slow command: if the
+    // budget cut this rerun short, "timed out — infrastructure" would send the
+    // reader hunting a hang that is really an exhausted budget. Record which.
+    const clamped = remaining < perCommandMs;
+    const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
+    if (base.timedOut && clamped) budgetClamped.push(t.command);
+    const baseFailingFiles = base.timedOut
+      ? []
+      : failingFilesOf(base.output, baseline);
     // The PR side is what netNew/shared are derived from, so a PR side that
     // parsed NOTHING attributes nothing — regardless of what the base rerun
     // managed to parse. Requiring both sides to be empty silently dropped a
@@ -310,7 +328,10 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (timedOut) {
     parts.push(
-      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
+      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence` +
+        (budgetClamped.length
+          ? ` (${budgetClamped.length} of them on a deadline the whole-command budget shortened, not their own: ${budgetClamped.join(', ')} — a rerun with budget to spare may still measure them)`
+          : ''),
     );
   }
   if (skippedForBudget.length) {
