@@ -152,6 +152,21 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-base',
     ]);
   });
+
+  it('sweeps a stale base-tree build lock left by a killed builder', () => {
+    // The lock is a plain directory (`mkdirSync` test-and-set), not a worktree,
+    // so `releaseWorktree` never touches it; a builder killed mid-build leaves it
+    // behind and every later base-tree probe reports "another probe is building"
+    // until a manual rm. Cleanup sweeps it at the end of the review.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-base.lock',
+      { recursive: true, force: true },
+    );
+  });
 });
 
 describe('findUnsanctionedIssueComments', () => {

@@ -72,7 +72,7 @@ export interface BaseTreeReport {
   path?: string;
   /** The commit it holds — the merge base of the PR and its target branch. */
   baseSha?: string;
-  /** The build that ran there; null when the tree could not be created. */
+  /** The build that ran there; null when the tree could not be created or a fast-path reuse found it already built. */
   build: BuildTestReport | null;
   /** What happened, in one line. Rendered to the reviewer verbatim. */
   note: string;
@@ -250,7 +250,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           buildOnly: true,
         });
 
-    if (!build.ok) {
+    // `ok: true` is not enough: `runBuildTest` returns `ok: true` for a handoff
+    // that built nothing — an `unsupported` toolchain (a changed dir the merge
+    // base maps to no package, e.g. a package this PR adds), or an npm scope with
+    // nothing to compile. Such a tree was never built, so it cannot be run against;
+    // stamping it `available` would let an A/B read the absence of a build as a
+    // behavioural difference.
+    if (!build.ok || build.toolchain !== 'npm' || build.build.length === 0) {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
       // bad trade — `cleanup` sweeps it at the end of the review either way.
@@ -274,7 +280,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
     // The marker is what the fast path above trusts, so it is written only after
     // a build that succeeded, and it records the SHA it vouches for.
-    writeFileSync(marker(), `${baseSha}\n`);
+    try {
+      writeFileSync(marker(), `${baseSha}\n`);
+    } catch {
+      // The tree may be too broken to hold a marker; the next shard rebuilds.
+    }
     return {
       available: true,
       path: tree,
@@ -318,21 +328,17 @@ export const baseTreeCommand: CommandModule = {
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;
-    let report: BaseTreeReport;
     try {
-      report = runBaseTree(args);
+      const report = runBaseTree(args);
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+      writeStderrLine(`base-tree: ${report.note}`);
     } catch (err) {
-      // The one handler without a catch was the one whose throw discarded a
-      // paid-for build: every sibling reports the error and exits non-zero.
-      writeStderrLine(`base-tree: ${(err as Error).message}`);
+      writeStderrLine((err as Error).message);
       process.exitCode = 1;
-      return;
     }
-    if (args.out) {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
-    }
-    writeStdoutLine(JSON.stringify(report, null, 2));
-    writeStderrLine(`base-tree: ${report.note}`);
   },
 };

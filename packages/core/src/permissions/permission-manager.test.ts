@@ -896,7 +896,9 @@ describe('matchesPathPattern', () => {
     });
   });
 
-  it('preserves traversal semantics in a dangling symlink target', () => {
+  // Title names the platform assumption so a future realpath-based resolution
+  // in matchesPathPattern is seen to break it, not silently re-asserted.
+  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -915,16 +917,33 @@ describe('matchesPathPattern', () => {
         link,
       );
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
-        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${targetRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(true);
       expect(
-        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${otherRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(false);
     });
   });
 
-  it('resolves parent traversal after following a directory symlink', () => {
+  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -938,9 +957,14 @@ describe('matchesPathPattern', () => {
       fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
       const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
         matchesPathPattern(
-          '/outside/safe/**',
+          `/${targetRoot}/safe/**`,
           filePath,
           root,
           root,
@@ -949,7 +973,7 @@ describe('matchesPathPattern', () => {
       ).toBe(true);
       expect(
         matchesPathPattern(
-          '/project/safe/**',
+          `/${otherRoot}/safe/**`,
           filePath,
           root,
           root,

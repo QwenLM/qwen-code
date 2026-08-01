@@ -18,13 +18,15 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  chmodSync,
   rmSync,
   existsSync,
   symlinkSync,
+  statSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   runOneMutant,
   runOneHunkProbe,
@@ -103,16 +105,19 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
   return { wt, base };
 }
 
+function vitestScript(): string {
+  return join(repo, 'node_modules', 'vitest', 'vitest.mjs');
+}
+
 /**
  * Swap the fake runner for one that reports every test file as FAILED. Used to
  * drive the unmutated baseline red, so the mutant phase must skip wholesale.
  */
 function installFailingVitest(): void {
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
   writeFileSync(
-    bin,
+    vitestScript(),
     `#!/usr/bin/env node
-const path = require('path');
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   numPassedTests: 0,
@@ -124,7 +129,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 }
 
 /**
@@ -134,49 +138,73 @@ process.stdout.write(JSON.stringify({
  * `inconclusive`, not red, and must not disable the mutant phase.
  */
 function installMixedVitest(): void {
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
   writeFileSync(
-    bin,
+    vitestScript(),
     `#!/usr/bin/env node
-const path = require('path');
+import path from 'node:path';
+import fs from 'node:fs';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return 'failed';
+  } catch {}
+  return f.includes('skip') ? 'skipped' : 'passed';
+};
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: require('fs').readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL') ? 'failed' : f.includes('skip') ? 'skipped' : 'passed' }],
+    assertionResults: [{ status: st(f) }],
   })),
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 }
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   git(repo, 'init', '-q', '-b', 'main', '.');
+  git(repo, 'config', 'core.autocrlf', 'false');
+  const hooksDir = join(repo, '.git-hooks-disabled');
+  mkdirSync(hooksDir);
+  git(repo, 'config', 'core.hooksPath', hooksDir);
   // Keep the fake vitest out of git: `commitAll` runs `git add -A`, and a
   // committed bin would be checked out into the probe worktree — the stale
   // passing copy, not the file `installFailingVitest` overwrites.
   writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
 
-  // A fake `vitest` on the up-tree bin path so `npx vitest` in the probe tree
-  // resolves locally — fast, deterministic, no network. It echoes each test
-  // file it is handed back as PASSED, so a probe over reverted source reads as
-  // `inert` without a real runner. `npx` walks node_modules upward, and the
-  // probe tree is a direct child of `repo`, so this bin is what it finds.
-  mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
+  // Put a fake vitest entry in the repo parent so the probe is independent of
+  // npm's platform-specific bin wrappers. It reports every test file as passed.
+  const vitestDir = join(repo, 'node_modules', 'vitest');
+  mkdirSync(vitestDir, { recursive: true });
+  // A package.json with a `bin` entry so the probe resolves the fake through the
+  // same `vitest/package.json` + `bin.vitest` path it uses for the real package,
+  // not a hard-coded entry the finder and the fake merely agree on by
+  // construction.
   writeFileSync(
-    bin,
+    join(vitestDir, 'package.json'),
+    JSON.stringify({
+      name: 'vitest',
+      version: '0.0.0',
+      bin: { vitest: './vitest.mjs' },
+    }),
+  );
+  const script = join(vitestDir, 'vitest.mjs');
+  writeFileSync(
+    script,
     `#!/usr/bin/env node
-const path = require('path');
-const fs = require('fs');
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+import path from 'node:path';
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+if (args[0] !== 'run' || args[1] !== '--reporter=json') {
+  process.stderr.write('unexpected vitest argv: ' + JSON.stringify(args));
+  process.exit(1);
+}
+const files = args.slice(2).filter((a) => a.includes('.test.'));
 // Like the real runner, the injected positive control FAILS: a fake that
 // stayed green under it would (correctly) be ruled a dead harness and every
 // survivor scenario in this suite would re-class to inconclusive.
-const status = (f) => {
+const st = (f) => {
   try {
     return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
       ? 'failed'
@@ -187,7 +215,7 @@ const status = (f) => {
 };
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: status(f) }],
+  assertionResults: [{ status: st(f) }],
 }));
 const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
@@ -197,7 +225,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
 });
 
 afterEach(() => {
@@ -411,12 +438,15 @@ describe('test-efficacy probe isolation (#6832)', () => {
     );
     // The baseline drops the collocated test: `price.test.ts` collects nothing
     // (the probe-tree import-error shape); every other file passes.
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    // Override the fake PACKAGE entry — post-#8050 the probe resolves the
+    // runner through vitest/package.json's bin, so a node_modules/.bin file
+    // is dead weight it never reads. price.test.ts collects nothing; every
+    // other file passes.
     writeFileSync(
-      bin,
+      join(repo, 'node_modules', 'vitest', 'vitest.mjs'),
       `#!/usr/bin/env node
-const path = require('path');
-const fs = require('fs');
+import path from 'node:path';
+import fs from 'node:fs';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const st = (f) => {
   try {
@@ -432,7 +462,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     await runHandler({
       report: join(repo, 'report.json'),
@@ -574,15 +603,14 @@ process.stdout.write(JSON.stringify({
     // The fake runner reads the source: green when `state.clear()` is present,
     // red when it is gone. The baseline passes; the mutant (statement deleted)
     // fails — KILLED.
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const src = fs.readFileSync(path.join(process.cwd(), 'packages/lib/src/f.ts'), 'utf8');
-const ctl = files.some((f) => { try { return require('fs').readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL'); } catch { return false; } });
+const ctl = files.some((f) => { try { return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL'); } catch { return false; } });
 const failed = ctl ? 1 : src.includes('state.clear()') ? 0 : 1;
 process.stdout.write(JSON.stringify({
   numPassedTests: failed ? 0 : files.length,
@@ -594,7 +622,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     const before = treeState(wt);
     await runHandler({
@@ -818,12 +845,11 @@ process.stdout.write(JSON.stringify({
     // The fake runner appends one line per invocation; the injected clock
     // reads the log, so it moves only when a suite actually runs.
     const runsLog = join(repo, 'runs.log');
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 fs.appendFileSync(${JSON.stringify(runsLog)}, 'run\\n');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const status = (f) => {
@@ -843,7 +869,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
     const suiteRuns = () =>
       existsSync(runsLog)
         ? readFileSync(runsLog, 'utf8').split('\n').filter(Boolean).length
@@ -990,12 +1015,11 @@ process.stdout.write(JSON.stringify({
       }),
     );
     const callsFile = join(repo, 'calls.txt');
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
     writeFileSync(
-      bin,
+      vitestScript(),
       `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 let n = 0;
 try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) || 0; } catch {}
 n += 1;
@@ -1016,7 +1040,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     await runHandler({
       report: join(repo, 'report.json'),
@@ -1233,6 +1256,100 @@ process.stdout.write(JSON.stringify({
     expect(got.verdict).toBe('inconclusive');
     expect(got.detail).toContain('does not match the selected statement');
     expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
+  });
+
+  it('runs tests with dependencies from the source worktree', () => {
+    const dependencyRoot = join(repo, 'source-worktree');
+    const probeTree = join(repo, 'separate-probe');
+    mkdirSync(dependencyRoot);
+    mkdirSync(join(probeTree, 'src'), { recursive: true });
+    const sourceVitestDir = join(dependencyRoot, 'node_modules', 'vitest');
+    const sourceDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      'probe-dependency',
+    );
+    const sourceScopedDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      '@probe',
+      'scoped-dependency',
+    );
+    mkdirSync(sourceVitestDir, { recursive: true });
+    mkdirSync(sourceDependencyDir);
+    mkdirSync(sourceScopedDependencyDir, { recursive: true });
+    writeFileSync(
+      join(sourceVitestDir, 'package.json'),
+      JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
+    );
+    const sourceBinDir = join(dependencyRoot, 'node_modules', '.bin');
+    mkdirSync(sourceBinDir);
+    writeFileSync(
+      join(dependencyRoot, 'node_modules', '.package-lock.json'),
+      '{}\n',
+    );
+    writeFileSync(
+      join(sourceVitestDir, 'vitest.mjs'),
+      `import '${pathToFileURL(join(probeTree, 'src/x.test.mjs')).href}';
+process.stdout.write(JSON.stringify({
+  testResults: [{
+    name: ${JSON.stringify(join(probeTree, 'src/x.test.mjs'))},
+    assertionResults: [{ status: 'passed' }],
+  }],
+}));
+`,
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'index.mjs'),
+      'export default 1;\n',
+    );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceScopedDependencyDir, 'index.mjs'),
+      'export default 2;\n',
+    );
+    const brokenLink = join(dependencyRoot, 'node_modules', 'broken-link');
+    if (process.platform !== 'win32') {
+      symlinkSync(
+        join(dependencyRoot, 'node_modules', 'missing-package'),
+        brokenLink,
+      );
+    }
+    writeFileSync(join(sourceBinDir, 'probe-tool'), 'available');
+    writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
+    writeFileSync(
+      join(probeTree, 'src/x.test.mjs'),
+      "import fs from 'node:fs'; import value from 'probe-dependency'; import scopedValue from '@probe/scoped-dependency'; if (value !== 1 || scopedValue !== 2 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
+    );
+
+    const result = runOneMutant(
+      probeTree,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.mjs'],
+      undefined,
+      Date.now,
+      dependencyRoot,
+    );
+
+    const probeModules = join(probeTree, 'node_modules');
+    expect(statSync(probeModules).isDirectory()).toBe(true);
+    expect(lstatSync(probeModules).isSymbolicLink()).toBe(false);
+    writeFileSync(join(probeModules, '.vite-probe'), 'local cache');
+    expect(
+      existsSync(join(dependencyRoot, 'node_modules', '.vite-probe')),
+    ).toBe(false);
+    if (process.platform !== 'win32') {
+      expect(() => lstatSync(join(probeModules, 'broken-link'))).toThrow();
+    }
+
+    expect(result.verdict).toBe('survived');
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {

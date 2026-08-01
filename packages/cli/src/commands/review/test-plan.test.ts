@@ -75,6 +75,14 @@ describe('extractTestPlanSection', () => {
     expect(s?.content).not.toContain('low');
   });
 
+  it('tracks fence markers: a ``` line inside a ~~~ fence does not close it', () => {
+    const s = extractTestPlanSection(
+      '## Test Plan\n\n~~~\n```\n# still fenced\nnpm test\n```\n~~~\n\nafter\n\n## Risk\n\nlow',
+    );
+    expect(s?.content).toContain('after');
+    expect(s?.content).not.toContain('low');
+  });
+
   it('finds a heading whose name is PREFIXED, not anchored', () => {
     // This repo's own PR template writes `## Reviewer Test Plan`. An anchored
     // pattern found neither it nor `## Reviewer 测试计划`, so the command
@@ -135,6 +143,17 @@ describe('extractClaims', () => {
     expect(claims[0].text).toBe('471 tests passed');
   });
 
+  it('does not extract a Test Files file-count line as a test-count claim', () => {
+    // A pasted vitest summary nests 'Test Files  3 passed (3)' above
+    // 'Tests  157 passed (157)'. The file-count line must not produce a
+    // count claim — it would always 'differs' against the real test count.
+    const claims = extractClaims(
+      'Test Files  3 passed (3)\n     Tests  157 passed (157)',
+    ).filter((c) => c.kind === 'count');
+    expect(claims).toHaveLength(1);
+    expect(claims[0].text).toContain('157');
+  });
+
   it('emits one claim per distinct count', () => {
     const claims = extractClaims(
       'core: 1135 passed, desktop: 41 passed',
@@ -165,9 +184,9 @@ describe('extractClaims', () => {
     const claims = extractClaims(
       '`cd packages/core && npx vitest run src/telemetry/loggers.test.ts`',
     );
-    // The cd TARGET itself is no longer claimed (a bare dir has no path
-    // evidence — round-3 review); it only resolves the file tokens after it.
-    expect(claims).not.toContainEqual({ kind: 'path', text: 'packages/core' });
+    // The cd TARGET is claimed (running `cd` proves the dir must exist) —
+    // filtered only through the static exclusion list, not the evidence bar.
+    expect(claims).toContainEqual({ kind: 'path', text: 'packages/core' });
     expect(claims).toContainEqual({
       kind: 'path',
       text: 'packages/core/src/telemetry/loggers.test.ts',
@@ -176,6 +195,24 @@ describe('extractClaims', () => {
       kind: 'path',
       text: 'src/telemetry/loggers.test.ts',
     });
+  });
+
+  it('excludes a cd base under .qwen/ or build output from path claims', () => {
+    // The cd base is a directory the Test Plan tells the reader to CREATE
+    // (.qwen/) or gitignored build output (dist/) — absent at the reviewed
+    // commit by construction, the same exclusion isPathClaim applies to tokens.
+    const qwen = extractClaims('`cd .qwen/tmp/review-pr-9 && npm test`');
+    expect(qwen.filter((c) => c.kind === 'path')).toEqual([]);
+
+    const dist = extractClaims('`cd dist/foo && npm test`');
+    expect(dist.filter((c) => c.kind === 'path')).toEqual([]);
+  });
+
+  it('still extracts a normal cd base as a path claim', () => {
+    const claims = extractClaims(
+      '`cd packages/core && npx vitest run src/a.test.ts`',
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'packages/core' });
   });
 
   it('extracts no path from a `cd` shape it cannot resolve', () => {
@@ -198,6 +235,55 @@ describe('extractClaims', () => {
     ).toHaveLength(1);
   });
 
+  it('does not read prose inside a quoted argument as a path', () => {
+    // `-t 'covers write/edit tools'` is a test-name filter, not a path claim.
+    const claims = extractClaims(
+      "`npx vitest run src/a.test.ts -t 'covers write/edit tools'`",
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/a.test.ts' });
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('write/edit')),
+    ).toBe(false);
+  });
+
+  it('bails on path-rebasing flags like --root, as it does on cd', () => {
+    // `--root ./integration-tests` rebases relative paths like `cd` does;
+    // resolving them against the repo root files false `contradicted` notes.
+    const claims = extractClaims(
+      '`npx vitest run --root ./integration-tests sdk-typescript/perm.test.ts`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('sdk-typescript')),
+    ).toBe(false);
+  });
+
+  it('bails on the inline --root=./dir form too, not only --root ./dir', () => {
+    // The inline `=` form rebases paths exactly like the spaced one; before this
+    // bail it extracted them as repo-root-relative and filed false `contradicted`.
+    const claims = extractClaims(
+      '`npx vitest run --root=./integration-tests src/b.test.ts`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('src/b.test.ts')),
+    ).toBe(false);
+  });
+
+  it('still reads a positional path after an inline --flag=value', () => {
+    // `--reporter=verbose` carries its value in the same token and does NOT
+    // consume the next one, so the file after it is still a path claim. The old
+    // skip treated it as the flag's value and silently dropped the path.
+    const claims = extractClaims(
+      '`npx vitest run --reporter=verbose src/a.test.ts`',
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/a.test.ts' });
+  });
+
   it('does not read a bare parenthesised number as a count', () => {
     expect(
       extractClaims('Follows up on (#8176).').filter((c) => c.kind === 'count'),
@@ -208,6 +294,36 @@ describe('extractClaims', () => {
     expect(extractClaims('The `status` field is now authoritative.')).toEqual(
       [],
     );
+  });
+
+  it('skips unified-diff headers pasted into the Test Plan', () => {
+    // The template's Evidence section invites pasting diffs; their a/ b/
+    // prefixes are not path claims about the reviewed tree.
+    const claims = extractClaims(
+      [
+        '```diff',
+        'diff --git a/packages/cli/src/foo.ts b/packages/cli/src/foo.ts',
+        '--- a/packages/cli/src/foo.ts',
+        '+++ b/packages/cli/src/foo.ts',
+        '@@ -1,3 +1,4 @@',
+        '+added line',
+        '```',
+      ].join('\n'),
+    );
+    expect(claims.filter((c) => c.kind === 'path')).toEqual([]);
+  });
+
+  it('does not extract a gitignored build-output path as a claim', () => {
+    // dist/ is absent at the reviewed commit by construction — a Test Plan
+    // naming it is telling the reader to build, not claiming the commit ships it.
+    const claims = extractClaims(
+      'Run `node packages/cli/dist/index.js --yolo`',
+    );
+    expect(
+      claims
+        .filter((c) => c.kind === 'path')
+        .some((c) => c.text.includes('dist/')),
+    ).toBe(false);
   });
 });
 
@@ -251,6 +367,14 @@ describe('observedTestCounts', () => {
   it('reads a summary that also reports failures', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),
+    ).toEqual([40]);
+  });
+
+  it('reads a three-segment summary (failed | skipped | passed)', () => {
+    expect(
+      observedTestCounts(
+        report(['Tests  2 failed | 3 skipped | 40 passed (45)']),
+      ),
     ).toEqual([40]);
   });
 
@@ -308,6 +432,16 @@ describe('npmScriptOf', () => {
     expect(npmScriptOf('npm ci')).toBeNull();
     expect(npmScriptOf('npm install')).toBeNull();
     expect(npmScriptOf('make build')).toBeNull();
+  });
+
+  it('does not truncate a run-less `yarn test:unit` to `test`', () => {
+    // `\b` matched at the `:`, so a correct `test:unit` claim was ruled against
+    // the wrong script; anchored to a full token, it falls through to unchecked.
+    expect(npmScriptOf('yarn test:unit')).toBeNull();
+    expect(npmScriptOf('pnpm test:e2e')).toBeNull();
+    // The bare alias and the `run` form are unchanged.
+    expect(npmScriptOf('yarn test')).toBe('test');
+    expect(npmScriptOf('yarn run test:unit')).toBe('test:unit');
   });
 });
 
@@ -466,13 +600,18 @@ describe('runTestPlan', () => {
       expect(r.claims).toEqual([]);
     });
 
-    it('rules a gitignored path unchecked — absent by construction', () => {
+    it('sheds no claim at all for a well-known build directory', () => {
+      // `dist/` is on the static exclusion list, so the claim never forms.
+      const r = run('## Test Plan\n\nRun `node dist/index.js`');
+      expect(r.claims.find((c) => c.text === 'dist/index.js')).toBeUndefined();
+    });
+
+    it('rules a gitignored path OUTSIDE the static list unchecked', () => {
+      // The check-ignore backstop covers ignored dirs the list cannot name.
       execFileSync('git', ['init', '-q'], { cwd: dir });
-      writeFileSync(join(dir, '.gitignore'), 'dist/\n');
-      const r = run(
-        '## Test Plan\n\nRun `node dist/index.js` against `dist/index.js`',
-      );
-      const claim = r.claims.find((c) => c.text === 'dist/index.js');
+      writeFileSync(join(dir, '.gitignore'), 'artifacts/\n');
+      const r = run('## Test Plan\n\nWrote `artifacts/report.json`');
+      const claim = r.claims.find((c) => c.text === 'artifacts/report.json');
       expect(claim?.verdict).toBe('unchecked');
       expect(claim?.note).toContain('gitignored');
     });
@@ -591,6 +730,54 @@ describe('runTestPlan', () => {
     it('does not rule on a non-npm runner', () => {
       const r = run('## Test Plan\n\nRan `make check`');
       expect(verdictOf(r.claims, 'make check')).toBe('unchecked');
+    });
+
+    it('rules a bare command contradicted when ANY scoped run failed', () => {
+      // build-test records one scoped command per package and does not stop on
+      // failure; the first match could be the green package that sorted first,
+      // stating the opposite of the authoritative `ok: false`.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: 'npm test --workspace="packages/a"',
+            exitCode: 0,
+            seconds: 1,
+            timedOut: false,
+            output: '',
+          },
+          {
+            command: 'npm test --workspace="packages/b"',
+            exitCode: 1,
+            seconds: 1,
+            timedOut: false,
+            output: 'fail',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
+    it('finds a root-only script when the root defines no build/test', () => {
+      // `readRootPackage` returns null when the root has neither build nor test,
+      // which used to drop a root-only `lint` and rule a correct claim contradicted.
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          workspaces: ['packages/*'],
+          scripts: { lint: 'eslint .' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { build: 'tsc' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run lint`');
+      expect(verdictOf(r.claims, 'npm run lint')).toBe('reproduces');
     });
   });
 

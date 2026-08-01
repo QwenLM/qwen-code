@@ -861,8 +861,9 @@ export function buildRoleBrief(
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
           'different claims. Give this call `timeout: 600000` too — besides the revert ' +
-          'probe it runs up to 8 single-statement deletion mutants, each a suite run, and ' +
-          'it budgets itself to finish inside that ceiling:',
+          'probe it runs up to 8 single-statement deletion mutants and up to 6 per-hunk ' +
+          'reverse-apply probes, each a suite run, and it budgets itself to finish inside ' +
+          'that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,

@@ -51,7 +51,7 @@ import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { diffHashOf } from './script-lint.js';
-import { readRootPackage, readWorkspacePackages } from './lib/workspaces.js';
+import { readWorkspacePackages } from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
 import type { FileMetric } from './lib/report.js';
 
@@ -146,14 +146,16 @@ export function extractTestPlanSection(
   // this ends the section at the first `#!/usr/bin/env bash` and reports a Test
   // Plan that stops one line into its own repro.
   const fenced = new Array<boolean>(lines.length).fill(false);
-  let inFence = false;
+  let fenceMarker: string | null = null;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(```|~~~)/.test(lines[i])) {
+    const m = /^\s*(```|~~~)/.exec(lines[i]);
+    if (m) {
       fenced[i] = true;
-      inFence = !inFence;
+      if (!fenceMarker) fenceMarker = m[1];
+      else if (m[1] === fenceMarker) fenceMarker = null;
       continue;
     }
-    fenced[i] = inFence;
+    fenced[i] = fenceMarker !== null;
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -208,7 +210,7 @@ const COUNT_RES = [
   // Variable-length lookbehind: `Test Files  45 passed` counts FILES, and
   // filing its number as a differing TEST count was measured on this PR's own
   // body. `\s+` because runners pad the summary column with multiple spaces.
-  /(?<!\bFiles\s+)\b(\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(?<!Files\s{1,20})(\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /** Extract every backticked span, including fenced-block bodies. */
@@ -263,20 +265,29 @@ export function extractClaims(section: string): Array<{
     claims.push({ kind, text });
   };
 
+  // The review's temp root and gitignored build output are excluded outright:
+  // absent at the reviewed commit by construction. Applied to both standalone
+  // path tokens (via isPathClaim) and cd bases (which legitimately carry no
+  // file extension, so the evidence bar below does not apply to them).
+  const isExcludedPath = (bare: string): boolean =>
+    bare.startsWith('.qwen/') ||
+    /(?:^|\/)(?:dist|build|out|bundle|coverage|node_modules)\//.test(bare);
+
   // A slash token is claimed as a repo path only with EVIDENCE it is one: a
   // file extension on its last segment, or an explicit ./ prefix. A bare
   // `owner/repo` is far more often a slug (`--repo QwenLM/qwen-code`), and
   // `origin/main` a ref — this PR's own Test Plan produced two false
-  // `contradicted` notes before this bar existed. The review's temp root is
-  // excluded outright: `.qwen/tmp/...` paths are things a Test Plan tells the
-  // reader to CREATE, absent at the reviewed commit by construction.
+  // `contradicted` notes before this bar existed.
   const isPathClaim = (t: string): boolean => {
     const bare = t.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
-    if (bare.startsWith('.qwen/')) return false;
+    if (isExcludedPath(bare)) return false;
     return /\.\w+$/.test(bare) || t.startsWith('./');
   };
 
   for (const span of codeSpans(section)) {
+    // A unified diff pasted into the Test Plan (the template's Evidence
+    // section invites it) is not a set of path claims about the tree.
+    if (/^(?:diff --git|---|\+\+\+|@@)\s/.test(span)) continue;
     if (RUNNER_RE.test(span)) push('command', span);
     if (PATH_RE.test(span)) {
       if (isPathClaim(span)) push('path', span);
@@ -300,12 +311,35 @@ export function extractClaims(section: string): Array<{
     // isPathClaim requires, and claiming it around the bar re-opened the
     // false-contradicted class the bar exists to close.
     const base = cd?.[1] ?? '';
-    const tokens = (cd?.[2] ?? span).split(/\s+/);
+    if (base && PATH_RE.test(base)) {
+      const bareBase = base.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
+      if (!isExcludedPath(bareBase)) push('path', base);
+    }
+    // Flags that rebase relative paths (`--root ./integration-tests`) are
+    // `cd`'s twin: a path token after one is relative to the flag's value,
+    // not the repo root. Bail like the exotic-`cd` case — the `cd` directory
+    // above was already pushed.
+    const rest = cd?.[2] ?? span;
+    if (/(?:^|\s)(?:--root|--prefix|--cwd|--project|-C)(?:\s|=)/.test(rest))
+      continue;
+    // Strip quoted arguments before tokenizing: `-t 'covers write/edit tools'`
+    // is prose inside a flag value, not a path claim about the tree.
+    const tokens = rest
+      .replace(/'[^']*'/g, '')
+      .replace(/"[^"]*"/g, '')
+      .split(/\s+/);
     for (let i = 0; i < tokens.length; i++) {
       // A token following a flag is that flag's VALUE (`--repo owner/repo`,
       // `-f infra/compose.yml`) — a claim about the tool's argument space,
-      // not about this tree.
-      if (i > 0 && tokens[i - 1].startsWith('-')) continue;
+      // not about this tree. The inline `--flag=value` form is the exception:
+      // it carries its value in the same token and does NOT consume the next
+      // one, so a positional path after it is still a claim about the tree.
+      if (
+        i > 0 &&
+        tokens[i - 1].startsWith('-') &&
+        !tokens[i - 1].includes('=')
+      )
+        continue;
       const t = tokens[i].replace(/[.,;:)'"]+$/, '');
       if (PATH_RE.test(t) && isPathClaim(t)) {
         push('path', base ? `${base}/${t}` : t);
@@ -340,10 +374,10 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
     let total = 0;
     let saw = false;
-    // `Tests  472 passed (472)`, `Tests: 12 passed, 12 total`, and the mixed
-    // form `Tests  1 failed | 40 passed (41)` — vitest separates with ` | `,
-    // jest with `, `, so the separator carries its own surrounding whitespace.
-    const re = /^\s*Tests:?\s+(?:\d+\s+failed\s*[,|]\s*)?(\d+)\s+passed/gim;
+    // `Tests  472 passed (472)`, `Tests: 12 passed, 12 total`, and multi-
+    // segment forms like `Tests  2 failed | 3 skipped | 40 passed (45)` —
+    // vitest separates with ` | `, jest with `, `.
+    const re = /^\s*Tests:?\s+(?:\d+\s+\w+\s*[,|]\s*)*(\d+)\s+passed/gim;
     // Strip ANSI SGR sequences first. A real runner writes its summary through
     // a color-enabled pipe, so the kept text reads
     // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
@@ -439,9 +473,8 @@ export function npmScriptOf(command: string): string | null {
   // ("`npm run test:unit` was renamed") lives entirely in the allowed forms.
   const m = /^(?:npm|pnpm|yarn|bun)\s+run\s+([\w:.-]+)/.exec(command);
   if (m && !m[1].startsWith('-')) return m[1];
-  const alias = /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)\b/.exec(
-    command,
-  );
+  const alias =
+    /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)(?=\s|$)/.exec(command);
   return alias ? alias[1] : null;
 }
 
@@ -452,20 +485,29 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
-  const ran = [...(buildTest?.build ?? []), ...(buildTest?.test ?? [])].find(
-    (c) => {
-      const command = c.command.trim();
-      const claimed = text.trim();
-      // A workspace-scoped run (`npm run build --workspace=...`) still settles
-      // the plan's bare command, so match it plus any extra flags — not only an
-      // exact string. The space guard keeps `build` from matching `build:all`.
-      return (
-        command === claimed ||
-        (command.startsWith(claimed) && command[claimed.length] === ' ')
-      );
-    },
-  );
-  if (ran && !ran.timedOut) {
+  const matches = [
+    ...(buildTest?.build ?? []),
+    ...(buildTest?.test ?? []),
+  ].filter((c) => {
+    const command = c.command.trim();
+    const claimed = text.trim();
+    // A workspace-scoped run (`npm run build --workspace=...`) still settles
+    // the plan's bare command, so match it plus any extra flags — not only an
+    // exact string. The space guard keeps `build` from matching `build:all`.
+    return (
+      command === claimed ||
+      (command.startsWith(claimed) && command[claimed.length] === ' ')
+    );
+  });
+  // build-test records one scoped command per package and does not stop on
+  // failure, so a bare claim can match several runs. Prefer a failure: if ANY
+  // scoped run failed, the phase failed, and the bare claim must read
+  // `contradicted` — the first match could be a green package that merely
+  // sorted first, stating the opposite of the authoritative `ok: false`.
+  const ran =
+    matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
+    matches.find((c) => !c.timedOut);
+  if (ran) {
     return ran.exitCode === 0
       ? {
           kind: 'command',
@@ -492,8 +534,20 @@ function ruleCommand(
       note: 'not an npm script',
     };
   }
-  const root = readRootPackage(worktree);
-  const defined = new Set<string>(root?.scripts ?? []);
+  // The root manifest's scripts read directly: `readRootPackage` returns null
+  // when the root defines neither `build` nor `test` (it is scoped to those),
+  // which would drop a root-only `lint`/`format` from `defined` and rule a
+  // correct `npm run lint` claim `contradicted`.
+  let rootScripts: string[] = [];
+  try {
+    const rootPkg = JSON.parse(
+      readFileSync(join(worktree, 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, unknown> };
+    rootScripts = Object.keys(rootPkg.scripts ?? {});
+  } catch {
+    // No readable root manifest; workspace packages may still define scripts.
+  }
+  const defined = new Set<string>(rootScripts);
   for (const pkg of readWorkspacePackages(worktree)) {
     for (const s of pkg.scripts) defined.add(s);
   }
@@ -702,12 +756,20 @@ export const testPlanCommand: CommandModule = {
   handler: (argv) => {
     const args = argv as unknown as TestPlanArgs;
     setGhHost(args.host);
-    const report = runTestPlan(args);
-    if (args.out) {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+    try {
+      const report = runTestPlan(args);
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+      writeStderrLine(`test-plan: ${report.note}`);
+    } catch (err) {
+      // A missing/invalid plan makes `runTestPlan` throw. Emit the one-line
+      // message and a non-zero exit (matching build-test and script-lint), not
+      // yargs' stack trace — the orchestrator reads a clean error.
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
     }
-    writeStdoutLine(JSON.stringify(report, null, 2));
-    writeStderrLine(`test-plan: ${report.note}`);
   },
 };

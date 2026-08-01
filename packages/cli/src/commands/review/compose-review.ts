@@ -1434,6 +1434,14 @@ export function testPlanGate(planPath: string): { notes: string[] } {
       );
     }
   }
+  // The same cap discipline the mutant/hunk probes apply: unbounded notes
+  // joined into one line drown the verdict they ride on.
+  const MAX_NOTES = 5;
+  if (notes.length > MAX_NOTES) {
+    const extra = notes.length - MAX_NOTES;
+    notes.length = MAX_NOTES;
+    notes.push(`and ${extra} more`);
+  }
   return { notes };
 }
 

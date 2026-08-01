@@ -18,6 +18,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -723,6 +724,14 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  SessionIdConflictError: class SessionIdConflictError extends Error {
+    sessionId: string;
+    constructor(sessionId: string, message: string) {
+      super(message);
+      this.name = 'SessionIdConflictError';
+      this.sessionId = sessionId;
+    }
+  },
 }));
 vi.mock('../ui/commands/contextCommand.js', () => ({
   collectContextData: vi.fn().mockResolvedValue({
@@ -843,13 +852,13 @@ import type {
   McpServer,
   ResumeSessionResponse,
 } from '@agentclientprotocol/sdk';
-import { AgentSideConnection } from '@agentclientprotocol/sdk';
+import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   MAX_PERMISSION_RULE_LENGTH,
   MAX_PERMISSION_RULES_COUNT,
 } from '../config/permission-settings.js';
-import { loadCliConfig } from '../config/config.js';
+import { loadCliConfig, SessionIdConflictError } from '../config/config.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
@@ -1397,6 +1406,12 @@ describe('runAcpAgent shutdown cleanup', () => {
       maxMs: 0,
     });
     expect(snapshot).toHaveBeenCalledTimes(1);
+
+    expect(startEventLoopLagMonitor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        suspendThresholdMs: ACP_EVENT_LOOP_STALL_RESTART_MS,
+      }),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2799,6 +2814,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
     }
     expect(attributes['session.id']).toBe('test-session-id');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
+    await setupSessionMocks('meta-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { 'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000' },
+    });
+
+    const argv = vi.mocked(loadCliConfig).mock.calls[0]![1];
+    expect(argv).toMatchObject({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    });
+    // Index 8 is `throwOnSessionIdConflict`: it must be true so a duplicate
+    // caller-supplied id throws (mapped to a RequestError) instead of
+    // process.exit(1)-ing the shared ACP child.
+    expect(vi.mocked(loadCliConfig).mock.calls[0]![8]).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps a duplicate sessionId conflict to a RequestError instead of crashing the child', async () => {
+    const conflict = new SessionIdConflictError(
+      '550e8400-e29b-41d4-a716-446655440000',
+      'Error: Session Id 550e8400-e29b-41d4-a716-446655440000 already exists (active or archived). Delete or unarchive it first.',
+    );
+    vi.mocked(loadCliConfig).mockRejectedValue(conflict);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toThrow('already exists');
+    expect(RequestError.invalidParams).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
