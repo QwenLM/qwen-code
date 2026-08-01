@@ -86,6 +86,22 @@ function userMessageContains(
   );
 }
 
+/** Serves a tool call on the first request whose user messages contain `triggerText`. */
+function startFakeToolServerOnMatch(
+  triggerText: string,
+  toolName: string,
+  input: Record<string, unknown>,
+) {
+  let served = false;
+  return startFakeOpenAIServer(({ body }) => {
+    if (!served && userMessageContains(body, triggerText)) {
+      served = true;
+      return { toolCalls: [fakeToolCall(toolName, input)] };
+    }
+    return { content: 'Done.' };
+  }, FAKE_SERVER_OPTIONS);
+}
+
 /**
  * Factory function that creates a streaming input with a control point.
  * After the first message is yielded, the generator waits for a resume signal,
@@ -427,27 +443,11 @@ describe('Permission Control (E2E)', () => {
 
     it('should block write tools after changing permission mode from yolo to plan', async () => {
       const fileName = 'plan-after-switch.txt';
-      let toolCallServed = false;
-      const fakeServer = await startFakeOpenAIServer(({ body }) => {
-        // Serve the tool call on the first request whose user messages
-        // mention the target file, so internal SDK requests (memory, etc.)
-        // cannot shift it into the wrong turn.
-        if (
-          !toolCallServed &&
-          userMessageContains(body, `Create ${fileName}`)
-        ) {
-          toolCallServed = true;
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: helper.getPath(fileName),
-                content: 'should be blocked',
-              }),
-            ],
-          };
-        }
-        return { content: 'Done.' };
-      }, FAKE_SERVER_OPTIONS);
+      const fakeServer = await startFakeToolServerOnMatch(
+        `Create ${fileName}`,
+        'write_file',
+        { file_path: helper.getPath(fileName), content: 'should be blocked' },
+      );
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'Hello',
@@ -542,24 +542,11 @@ describe('Permission Control (E2E)', () => {
     it('should auto-approve write tools after changing permission mode to auto-edit', async () => {
       let callbackInvoked = false;
       const fileName = 'auto-edit-after-switch.txt';
-      let toolCallServed = false;
-      const fakeServer = await startFakeOpenAIServer(({ body }) => {
-        if (
-          !toolCallServed &&
-          userMessageContains(body, `Create ${fileName}`)
-        ) {
-          toolCallServed = true;
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: helper.getPath(fileName),
-                content: 'auto-edit works',
-              }),
-            ],
-          };
-        }
-        return { content: 'Done.' };
-      }, FAKE_SERVER_OPTIONS);
+      const fakeServer = await startFakeToolServerOnMatch(
+        `Create ${fileName}`,
+        'write_file',
+        { file_path: helper.getPath(fileName), content: 'auto-edit works' },
+      );
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'Hello',
@@ -1084,6 +1071,12 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
+            const errorResults = findAllToolResultBlocks(messages).filter(
+              (r) => r.isError,
+            );
+            expect(errorResults[0].content.toLowerCase()).toContain(
+              'plan mode',
+            );
             await expect(helper.readFile(fileName)).resolves.toBe(
               'old content',
             );
@@ -1124,6 +1117,7 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
+            expect(helper.fileExists('plan-shell-blocked.txt')).toBe(false);
           } finally {
             await q.close();
             await fakeServer.close();
