@@ -229,6 +229,25 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenCalledWith('status');
   });
 
+  it('clamps a footer drag to the footer when it enters history', () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('move', 3, 1));
+    handler(makeEvent('left-release', 3, 1));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 1,
+      ex: 2,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('sta');
+  });
+
   it('does not select frame content outside registered regions', () => {
     frame = makeTwoLineFrame('hello', 'input');
     viewportRect = { x: 0, y: 0, width: 5, height: 1 };
