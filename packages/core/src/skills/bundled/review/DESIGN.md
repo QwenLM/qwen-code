@@ -376,6 +376,65 @@ Two other deliberate limits:
 - **A test-only diff is never probed.** A new test for old code is _supposed_ to pass with nothing reverted. Probing it would flag every such PR as inert — a false blocker on exactly the PRs we want people to write.
 - **Findings are Suggestions, not Criticals.** A test that does not gate is not itself wrong code; nothing is broken today. What the finding must say concretely is which behaviour is now shipping unprotected.
 
+## Why a review that only ever had one tree needed the other one
+
+Every step in this pipeline looks at a single tree. The agents read the PR's code. The verifier traces a failure scenario through the PR's code. Even the probe capability — the one thing here that _runs_ rather than reads — runs against the PR's code alone. The merge base has been known since the first `fetch-pr` (`mergeBaseSha`, resolved and recorded), and it was used for exactly one thing: choosing the diff range. Nothing ever built it.
+
+That is fine for most findings, because most findings are claims about the code in front of you: this branch is unreachable, this variable is undefined here, this lock is never released. But it leaves a class the review can only ever guess at, and it is a large one, because it is the class the diff itself is _about_:
+
+- "This changes the output format."
+- "This only adds a field; existing consumers are unaffected."
+- "This silently drops the error message."
+- "Before this, a cancelled call and a failed call were indistinguishable."
+
+Every one is a statement about the **difference between two programs**, and the review has had one of them. So the difference gets recovered by reading the diff — and that is precisely the reading that fails, for the reason this document keeps rediscovering in other contexts: a diff's new lines are always present and always look correct, and whether they change what anyone observes routinely turns on code the diff never touches. It is the same shape as the `fixed by this diff` trap ("the diff adds a fix" is not "the defect can no longer fire") and the same shape as the documented-intent trap. Both were closed by making the verifier go read something outside the diff. This one cannot be closed that way, because what is outside the diff here is not a _file_ — it is a _build_.
+
+**With a built base tree the question stops being an argument and becomes an observation.** Feed the same input to both, compare the two outputs. That is a different kind of evidence from anything else in this pipeline: not a better-traced claim, but a measurement, and the only kind that settles a disagreement about what a program used to do.
+
+Three deliberate limits:
+
+- **The command builds; it does not run.** Standing up the tree is the expensive, failure-prone half — a detached worktree at the right SHA, a stale sibling from a crashed run, the minimal build set, the widening loop, deadlines a real build can meet — and all of it is decidable, so it is code. _What_ to run is not: it depends entirely on the claim under test, and a fixed scenario would fit almost none of them. The report hands back a path and stops.
+- **It is per-finding, not per-review.** A cold checkout means an install and a build — the honest price, and why the command's idempotent fast path reuses an already-built tree instead of letting concurrent verifiers each pay it (or worse, sweep it out from under each other mid-A/B). Paid on a review with a comparative claim it is cheap for what it settles; paid on every review it is a tax most of them get nothing for. So it lives in the verifier's brief as an option, next to the probe, on the same terms.
+- **Unavailable is never a finding.** No merge base, a merge base that may be stale (`baseFetchFailed` — an A/B against the wrong base attributes the base branch's own commits to this PR, the two-dot-diff error in another shape), or a base tree that will not compile: each is a fact about the harness. The base failing to build says nothing whatsoever about the PR, and a review that filed it as one would be reporting on its own infrastructure.
+
+## Why the Test Plan is checked — and why a count mismatch is never a contradiction
+
+Every other input this pipeline reads is something the review has to derive: the diff, the linked issue, the existing threads, the build's exit code. A Test Plan is different. It is a list of falsifiable assertions the author **already wrote down** and handed over, and until `test-plan` existed the review read none of them.
+
+Not for want of the text — `pr-context` renders the PR body in full. But its consumer is Agent 0, and Agent 0's question is root-cause fidelity: is this the right fix for the linked issue? "The author says 471 tests pass; do they?" is a different question, nobody owned it, and the answer is frequently no in a way that costs the next reader real time — a path from a commit that got amended away, an `npm run test:unit` that was renamed, a count copied from the first push.
+
+The split follows this document's recurring line — determinism owns the evidence, judgment owns the ruling — but the interesting part is where it says determinism owns **nothing**. Two claim kinds are decidable here with no model and no false positives:
+
+- **A path that is not there.** Checkable against the reviewed tree. Absent from the diff _and_ absent from the worktree means the sentence describes some other commit. (Present-but-untouched is not a defect: "ran the existing suite at X" is a normal thing to write, and the ruling says so.)
+- **An npm script that does not exist.** Checkable against the workspace manifests. If no package defines it, a reviewer who follows the Test Plan cannot run it.
+
+**A test count is the third kind, it is the one that motivated the command, and it is deliberately not ruled a contradiction.** The temptation is obvious — the count is right there, `build-test` observed a count, compare them. It is wrong, because a count is only falsifiable against the suite the author meant, and a Test Plan almost never names one. `build-test` runs the subset of workspaces the diff touched; the author ran whatever they ran. `471 ≠ 472` is then a fact about two different measurements, and filing it as a defect is filing arithmetic the command cannot do. So the verdict is `differs`: both numbers, side by side, framed as claimed-versus-observed, and the reader decides. That is what the observation was worth in the first place — a note to the author, never a blocker. The real 471-vs-472 case that prompted this was the mildest item in a four-item review, and the fix was "bump the number".
+
+**Nothing here blocks and nothing caps**, which makes `testPlanGate` the first gate in this file that is pure disclosure. Both halves are deliberate. A Test Plan defect is not a code defect — the diff is unaffected, and the verdict is about the code; spending the review's one irreversible public action on a documentation nit is exactly the "cry wolf" cost the design philosophy exists to avoid. And capping on a **missing** report would cap essentially every PR, because most produce no notes at all. That is the deferred-checker precedent from `script-lint`, for the identical reason: a limitation the author cannot fix must not make their PR un-Approvable forever. A stale report is dropped in silence rather than failed closed, since there is no cap to fall back to and a note about a previous commit's Test Plan is worse than no note.
+
+## Why the probe is also per-hunk, when there are already mutants
+
+The efficacy command asks "does anything gate this change?" three ways, and the third exists because the first two leave a gap that is easy to miss:
+
+| probe  | neutralises                                              | answers                  |
+| ------ | -------------------------------------------------------- | ------------------------ |
+| revert | **all** the diff's source, at once                       | is ANY of this gated?    |
+| mutant | **one statement**, from a high-precision safety-verb set | is THIS statement gated? |
+| hunk   | **one hunk**                                             | is THIS change gated?    |
+
+The revert probe is all-or-nothing, and the live dogfood that motivated the mutants showed exactly what that costs: a file with six well-tested behaviours and one untested safety statement reverts red on the six, reports `gated`, and the seventh — the PR's headline invariant — is invisible. The mutants close that, but only for statements the safety-verb set recognises: calls that discard, detach or reset state, and reassignment to an empty collection. That set is deliberately narrow, because a wide one produces mutants nobody should act on.
+
+So a diff made of **condition changes, return-value changes, format changes, off-by-one fixes** — which is most diffs — generates **zero mutants**, and its only signal is the all-or-nothing revert. A hunk is the natural unit for the missing question: it is the granularity the author wrote and the granularity a reviewer reads, and reverting one at a time is the only way to attribute a still-green suite to a **particular** change rather than to the diff at large.
+
+Four things this gets right by construction, three of them borrowed from the mutants:
+
+- **The patch, not a checkout.** `git checkout base -- <file>` reverts the whole file and the verdict belongs to no particular change — the revert probe's limitation, one level down. Reverse-applying the hunk's own patch keeps the attribution, and `git` does the line-offset arithmetic so a later hunk lands in the right place without this code tracking offsets.
+- **The third outcome is still asymmetric.** A patch that will not apply, or a tree that will not compile without the hunk, is `inconclusive` and **never** `killed`. A compile error says nothing about whether a test would have caught a behavioural regression, and scoring it as "a test caught it" is the precise false assurance this whole command exists to remove.
+- **Restore by content, never by re-applying forward.** A forward re-apply can fail on its own and would leave the tree neutralised for every probe after it, turning one bad restore into a run of false survivors.
+- **Hunks a mutant already covers are skipped**, and the probes run **last**, out of the mutants' leftover budget. The ordering is the priority statement: the safety-verb mutant is the higher-precision experiment, so it is bought first; a hunk probe is what the remainder buys. Both skip counts — cap and budget — are reported, because a hunk probe that never ran must never be readable as a hunk that came back clean.
+
+The gating mistake worth recording, because it inverted the feature while every test stayed green: the hunk loop first lived **inside** the mutant branch, so it ran only when the diff already had a safety-verb candidate. The one class of diff per-hunk probing exists for — no mutants at all — got nothing. Selection now happens beside the mutants' and the phase runs whenever **either** kind has candidates.
+
 ## Why "fixed by this diff" is the verdict that needed a bar
 
 The re-check has three verdicts, and until PR #6486 only two of them cost anything:

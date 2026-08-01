@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -14,7 +15,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 
-const WS_BOUND = '/work/bound';
+const WS_BOUND = path.resolve('/work/bound');
 
 function makeBridge(
   sessionCount = 0,

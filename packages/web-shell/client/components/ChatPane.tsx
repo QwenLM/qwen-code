@@ -882,6 +882,7 @@ export function ChatPane({
           sessionId={connection.sessionId}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
+          animatePlaceholder={false}
         />
         {CustomComposerFooter && (
           <CustomComposerFooter

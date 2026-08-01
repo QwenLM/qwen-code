@@ -427,6 +427,7 @@ const EN: Messages = {
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
+  'approval.option.restorePrevious': 'Yes, restore previous mode',
   'approval.option.rejectOnce': 'Reject',
   'approval.option.allowAllEdits': 'Allow All Edits',
   'approval.option.allowAlwaysProject': 'Always allow in this project',
@@ -1373,7 +1374,7 @@ const EN: Messages = {
   'skilldesc.agentReproduceFeature':
     'Reproduce an existing Codex/Claude Code feature',
   'skilldesc.autofix':
-    'Implement approved issues or address PR review feedback',
+    'Review and fix local changes or run repository Autofix workflows',
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
@@ -3012,6 +3013,7 @@ const ZH: Messages = {
   'approval.launchAgentQuestion': '启动这个 agent？',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
+  'approval.option.restorePrevious': '是，恢复之前的模式',
   'approval.option.rejectOnce': '拒绝',
   'approval.option.allowAllEdits': '允许所有编辑',
   'approval.option.allowAlwaysProject': '项目内始终允许',
@@ -3896,7 +3898,7 @@ const ZH: Messages = {
   'skilldesc.agentReproduceAlign':
     '将已移植的 Codex/Claude Code 功能与原版对齐',
   'skilldesc.agentReproduceFeature': '复现 Codex/Claude Code 的现有功能',
-  'skilldesc.autofix': '实现已批准的 issue 或处理 PR 审查反馈',
+  'skilldesc.autofix': '审查并修复本地改动，或运行仓库 Autofix 工作流',
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',

@@ -135,6 +135,10 @@ describe('Session.pendingWorktreeNotice', () => {
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       }),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       // The prompt turn's finally sweeps review-worktree leases against the
