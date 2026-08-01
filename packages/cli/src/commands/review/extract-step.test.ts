@@ -514,4 +514,48 @@ describe('expressionsOf / invokedCommandsOf', () => {
       ),
     ).toEqual(['curl', 'gh', 'jq']);
   });
+
+  // Each of these was measured as a junk source on this repo's 434 real steps:
+  // together they accounted for the worst case's 63 "commands", of which the
+  // overwhelming majority were prose. A stub list is a starting point only if
+  // its entries are plausibly commands.
+  it('does not split a ${{ }} expression on its own `||`', () => {
+    // `${{ a || b }}` is not a pipeline, and neither operand is a command.
+    expect(invokedCommandsOf('X="${{ matrix.foo || matrix.arch }}"')).toEqual(
+      [],
+    );
+    expect(invokedCommandsOf('${{ steps.x.outputs.cmd }} --flag')).toEqual([]);
+  });
+
+  it('treats a heredoc body as data, not as a list of commands', () => {
+    expect(
+      invokedCommandsOf('cat <<EOF > f\nCI Evidence PR and agent\nEOF\njq .'),
+    ).toEqual(['cat', 'jq']);
+    // A quoted terminator behaves the same.
+    expect(invokedCommandsOf("cat <<'EOF'\ncurl evil\nEOF")).toEqual(['cat']);
+  });
+
+  it('does not read the inside of a quoted assignment as the command', () => {
+    // Measured shape from qwen-triage.yml: the `name=` prefix is stepped over
+    // and the next WORD taken as the command — but that word is inside the
+    // value, not after it.
+    expect(
+      invokedCommandsOf("EVIDENCE_SECTION=$'### Evidence images\\n'"),
+    ).toEqual([]);
+    // A command substitution inside the value is still a real invocation.
+    expect(invokedCommandsOf('body="$(sanitize < "$REPORT")"')).toEqual([
+      'sanitize',
+    ]);
+  });
+
+  it('carries an unterminated quote across lines, and ends it at a trailing comment', () => {
+    // A multi-line string's continuation lines are data.
+    expect(
+      invokedCommandsOf('msg="line one\ncurl evil\nline three"\njq .'),
+    ).toEqual(['jq']);
+    // ...but an apostrophe in a trailing comment must not open one.
+    expect(
+      invokedCommandsOf("gh api x # don't treat this as a quote\njq ."),
+    ).toEqual(['gh', 'jq']);
+  });
 });

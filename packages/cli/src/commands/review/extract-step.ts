@@ -146,14 +146,92 @@ const KEYWORDS = new Set([
   'false',
   'cd',
   'test',
+  // Builtins and keywords a stub could not intercept anyway.
+  'break',
+  'continue',
+  'eval',
+  'exec',
+  'source',
+  'unset',
+  'wait',
+  'declare',
+  'readonly',
+  'let',
+  'command',
+  'builtin',
+  'type',
+  'hash',
+  'umask',
+  'getopts',
+  'alias',
+  'pushd',
+  'popd',
 ]);
+
+/**
+ * Replace every `${{ … }}` with an opaque token. A GitHub expression is not
+ * shell, and it routinely contains `||` — splitting on that as if it were a
+ * pipeline reports both operands as invoked commands (`matrix.arch`,
+ * `github.event.inputs.version`). The token starts with a quote, so an
+ * expression sitting in command position contributes nothing, which is honest:
+ * what it expands to is unknown here by design.
+ */
+function maskExpressions(line: string): string {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const start = line.indexOf('${{', i);
+    if (start === -1) return out + line.slice(i);
+    const end = line.indexOf('}}', start + 3);
+    out += `${line.slice(i, start)}'\${EXPR}'`;
+    if (end === -1) return out;
+    i = end + 2;
+  }
+}
+
+/**
+ * Blank out quoted spans, carrying the quote across lines. Everything inside
+ * quotes is DATA, and a line-based word split that runs through a quote reads
+ * it as code: `EVIDENCE_SECTION=$'### Evidence images'` steps over the
+ * `name=` prefix and then reports `Evidence` as an invoked command — the
+ * single largest source of junk measured on this repo's workflows. Command
+ * substitutions are read before this runs, so `"$(sanitize …)"` still counts.
+ */
+function stripQuoted(
+  line: string,
+  open: '"' | "'" | null,
+): { live: string; open: '"' | "'" | null } {
+  let live = '';
+  let quote = open;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote !== null) {
+      if (quote === '"' && c === '\\')
+        i++; // \" does not close the span
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+      live += ' ';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
+      break; // trailing comment: the rest is prose, apostrophes and all
+    } else {
+      live += c;
+    }
+  }
+  return { live, open: quote };
+}
+
+/** `<<WORD`, `<<-WORD`, `<<'WORD'` — the body that follows is data. */
+const HEREDOC =
+  /<<-?\s*(?:'([A-Za-z_][\w-]*)'|"([A-Za-z_][\w-]*)"|([A-Za-z_][\w-]*))/;
 
 export function invokedCommandsOf(script: string): string[] {
   const seen = new Set<string>();
   const scanSegment = (seg: string) => {
-    // Descend into command substitutions first — `body="$(sanitize < f)"` is
-    // an assignment whose real invocation lives inside the `$()`.
-    for (const m of seg.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
     const words = seg
       .trim()
       .replace(/^[\s(]+/, '')
@@ -167,9 +245,23 @@ export function invokedCommandsOf(script: string): string[] {
       break; // only the command position; arguments are not invocations
     }
   };
+  let heredocTerminator: string | null = null;
+  let openQuote: '"' | "'" | null = null;
   for (const rawLine of script.split('\n')) {
-    const line = rawLine.trim();
+    if (heredocTerminator !== null) {
+      if (rawLine.trim() === heredocTerminator) heredocTerminator = null;
+      continue; // a heredoc body is input to a command, not a list of them
+    }
+    const masked = maskExpressions(rawLine);
+    // Command substitutions first, on the unstripped text — `body="$(sanitize
+    // < f)"` is an assignment whose real invocation lives inside the `$()`.
+    for (const m of masked.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
+    const { live, open } = stripQuoted(masked, openQuote);
+    openQuote = open;
+    const line = live.trim();
     if (!line || line.startsWith('#')) continue;
+    const heredoc = HEREDOC.exec(masked);
+    if (heredoc) heredocTerminator = heredoc[1] ?? heredoc[2] ?? heredoc[3];
     for (const seg of line.split(/(?:\|\||&&|\||;)/)) scanSegment(seg);
   }
   return [...seen].sort();
