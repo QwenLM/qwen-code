@@ -307,13 +307,13 @@ interface DaemonStatusRuntimeMemory {
    */
   registeredWorkspaces: number;
   /**
-   * Daemon-managed ACP children with a live channel: every runtime that still
-   * holds a process, including draining, transitioning, or blocked entries
-   * whose child has not exited. Deliberately narrow — it excludes channel
-   * workers, MCP descendants, and spawn reservations that have not attached,
-   * so a later admission policy cannot mistake it for a process-tree count.
-   * Such a policy will additionally need an in-flight spawn count to admit
-   * without racing.
+   * Daemon-managed ACP children with a live (non-dying) channel, including
+   * transitioning or blocked entries. Excludes a workspace whose kill has
+   * started (dying channel) even if the child process has not exited yet.
+   * Deliberately narrow — it also excludes channel workers, MCP descendants,
+   * and spawn reservations that have not attached, so a later admission policy
+   * cannot mistake it for a process-tree count. Such a policy will additionally
+   * need an in-flight spawn count to admit without racing.
    */
   activeAcpChildren: number;
   /**
@@ -458,13 +458,14 @@ export async function buildDaemonStatusResponse(
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Count what actually holds a process, not what is merely active-state. A
-    // workspace mid-drain, mid-replacement, or blocked still holds a live ACP
-    // child while `list()` (active-state only) drops it, which would under-report
-    // live children in exactly the window an admission policy must not treat as
-    // free capacity. `listManaged()` is the process-holding set; `listEntries()`
-    // is the registration count. Registered-but-dormant workspaces still have no
-    // live child, which is why the registered count remains unsafe to divide by.
+    // Count managed runtimes whose channel is live (non-dying), not what is
+    // merely active-state. `list()` (active-state only) drops workspaces
+    // mid-replacement or blocked, which would under-report children in exactly
+    // the window an admission policy must not treat as free capacity.
+    // `listManaged()` is the managed set; `listEntries()` is the registration
+    // count. A workspace whose kill has started but whose child has not exited
+    // is excluded (dying channel); registered-but-dormant workspaces have no
+    // live child, so the registered count remains unsafe to divide by.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
     const activeAcpChildCount = managedRuntimes
       ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())

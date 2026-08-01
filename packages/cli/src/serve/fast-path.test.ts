@@ -857,6 +857,32 @@ describe('serve fast path argument parsing', () => {
     },
   );
 
+  it.each([
+    [['serve', '--memory-budget-mb', '8192'], 'valid --memory-budget-mb'],
+    [['serve'], 'absent --memory-budget-mb'],
+  ])('accepts %s without a range error', async (argv, _label) => {
+    const qwenHome = useTempQwenHome();
+    writeFileSync(join(qwenHome, 'settings.json'), '{');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('unexpected process.exit');
+    }) as typeof process.exit);
+
+    // Bootstrap fails (broken settings.json), but validation must pass
+    // first — a spurious range error would exit(1) before reaching it.
+    const result = await tryRunServeFastPath(argv);
+
+    expect(result).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'must be an integer in [1024, 1048576]',
+    );
+  });
+
   it('does not enable rate limiting just because tuning flags are present', () => {
     const parsed = parseServeFastPathArgs([
       'serve',

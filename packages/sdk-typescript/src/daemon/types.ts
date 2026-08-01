@@ -695,9 +695,9 @@ export interface DaemonStatusReport {
        */
       registeredWorkspaces: number;
       /**
-       * Daemon-managed ACP children with a live channel; counts a runtime that
-       * still holds a process even while draining or blocked. Not a
-       * process-tree count.
+       * Daemon-managed ACP children with a live (non-dying) channel, including
+       * transitioning or blocked entries. Excludes a workspace whose kill has
+       * started even if the child has not exited. Not a process-tree count.
        */
       activeAcpChildren: number;
       /**
