@@ -173,6 +173,7 @@ import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
 } from './utils/workflow-keyword.js';
+import { parseSlashCommand } from '../utils/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
@@ -2345,6 +2346,15 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       if (
         streamingState === StreamingState.Responding &&
+        isSlashCommand(userPromptText) &&
+        parseSlashCommand(userPromptText, slashCommands).commandToExecute
+          ?.canRunDuringStreaming
+      ) {
+        void handleSlashCommand(userPromptText);
+        return;
+      }
+      if (
+        streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
         void submitUserQuery({
@@ -2489,6 +2499,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isProcessing,
       submitUserQuery,
       handleSlashCommand,
+      slashCommands,
       config,
       geminiClient,
       historyManager,

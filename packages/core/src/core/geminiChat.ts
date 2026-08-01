@@ -30,6 +30,10 @@ import {
 } from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  containsXmlToolCalls,
+  tryRecoverXmlToolCalls,
+} from './xml-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import {
   getRateLimitErrorDetails,
@@ -4250,7 +4254,7 @@ export class GeminiChat {
       }
     }
 
-    const contentParts = allModelParts.filter((part) => !part.thought);
+    let contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
     for (const part of contentParts) {
       const lastPart =
@@ -4266,11 +4270,82 @@ export class GeminiChat {
       }
     }
 
-    const contentText = consolidatedHistoryParts
+    let contentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
       .join('')
       .trim();
+
+    // Deferred until after the throw sites below so a protocol-tag leak
+    // or stream-validation failure cannot dispatch a recovered call that
+    // the retry path would then execute a second time.
+    let recoveredChunk: GenerateContentResponse | null = null;
+
+    // XML tool call fallback: some models (e.g. qwen3.8-max-preview in very
+    // long contexts) occasionally emit tool calls as raw XML in the content
+    // field instead of using the structured tool_calls array. Detect and
+    // recover these so the agent loop is not broken. See #8003.
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      hasFinishReason &&
+      contentText &&
+      containsXmlToolCalls(contentText)
+    ) {
+      const recovery = tryRecoverXmlToolCalls(contentText);
+      if (recovery.recovered) {
+        hasToolCall = true;
+        // recovery.remainingText is derived from the join of ALL text
+        // parts, so every text part is consumed. Remove them, reinsert
+        // remainingText at the first text position so non-text parts
+        // (inlineData/fileData) keep their original relative order, and
+        // append functionCallParts at the end.
+        const textIndices: number[] = [];
+        for (let i = 0; i < consolidatedHistoryParts.length; i++) {
+          if (consolidatedHistoryParts[i]!.text !== undefined)
+            textIndices.push(i);
+        }
+        for (let j = textIndices.length - 1; j >= 0; j--) {
+          consolidatedHistoryParts.splice(textIndices[j]!, 1);
+        }
+        const insertAt = Math.min(
+          textIndices[0] ?? 0,
+          consolidatedHistoryParts.length,
+        );
+        if (recovery.remainingText) {
+          consolidatedHistoryParts.splice(insertAt, 0, {
+            text: recovery.remainingText,
+          });
+        }
+        consolidatedHistoryParts.push(...recovery.functionCallParts);
+        // Recompute contentText and contentParts so the JSONL recording
+        // below stays aligned with in-memory history (--resume fidelity).
+        contentText = consolidatedHistoryParts
+          .filter((part) => part.text)
+          .map((part) => part.text)
+          .join('')
+          .trim();
+        contentParts = consolidatedHistoryParts;
+        // Build a synthetic chunk so the agent loop (turn.ts) actually
+        // executes the recovered tool calls; yielded after the throw sites.
+        const syntheticChunk = {
+          candidates: [
+            {
+              content: { role: 'model', parts: recovery.functionCallParts },
+            },
+          ],
+        } as GenerateContentResponse;
+        syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
+        recoveredChunk = syntheticChunk;
+        debugLogger.warn(
+          `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) [${recovery.functionCallParts.map((p) => p.functionCall?.name).join(', ')}] from plain text content (contentLength=${contentText.length})`,
+        );
+      } else {
+        debugLogger.warn(
+          `XML tool call fallback: detected XML tool calls but recovery was rejected (prose ratio too high or no parameterized blocks), contentLength=${contentText.length}`,
+        );
+      }
+    }
 
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
@@ -4312,6 +4387,10 @@ export class GeminiChat {
         'Model stream ended with empty response text.',
         'NO_RESPONSE_TEXT',
       );
+    }
+
+    if (recoveredChunk) {
+      yield recoveredChunk;
     }
 
     // Record assistant turn with raw Content and metadata. Gate matches
