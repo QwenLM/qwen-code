@@ -683,6 +683,34 @@ function sessionArtifactsPersistenceAvailableFromSettings(
 }
 
 /**
+ * Reads the optional `serve.maxConcurrentSubSessions*` overrides. Only
+ * positive integers are honored; anything else falls back to the launcher's
+ * built-in defaults. Caps are a daemon-resource control, so an untrusted
+ * workspace's settings (skipped at load time) must not raise them — the
+ * caller passes the already trust-filtered merged settings.
+ */
+export function subSessionConcurrencyCapsFromSettings(serve: {
+  maxConcurrentSubSessionsPerCaller?: unknown;
+  maxConcurrentSubSessionsTotal?: unknown;
+}): {
+  maxConcurrentPerCaller?: number;
+  maxConcurrentTotal?: number;
+} {
+  const asCap = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 1
+      ? value
+      : undefined;
+  const maxConcurrentPerCaller = asCap(
+    serve?.maxConcurrentSubSessionsPerCaller,
+  );
+  const maxConcurrentTotal = asCap(serve?.maxConcurrentSubSessionsTotal);
+  return {
+    ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
+    ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
+  };
+}
+
+/**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
  *
@@ -3682,6 +3710,9 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      ...subSessionConcurrencyCapsFromSettings(
+        runtimeBootSettings?.merged.serve ?? {},
+      ),
     });
     const bridge =
       deps.bridge ??
@@ -4077,6 +4108,9 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          secondarySettings?.merged.serve ?? {},
+        ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -4575,6 +4609,9 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          wsSettings?.merged.serve ?? {},
+        ),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
