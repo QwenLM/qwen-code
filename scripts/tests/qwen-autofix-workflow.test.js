@@ -8317,17 +8317,14 @@ describe('qwen-autofix workflow', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('replays the handoff decision and terminal-round transitions under bash', () => {
+  it('bounds every long step so the round fits under the job timeout', () => {
     // Every long step is bounded BELOW the job timeout so a runaway fails its
     // own STEP, leaving the always() report step time to run — a job-level
     // timeout cancels that step too and the round goes silent.
     //
-    // The invariant is the SUM, not any single number, and asserting the
-    // numbers individually is what let it break: with an unbounded
-    // verification gate measured at 22m48s, the worst case was
-    // 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job, and every
-    // assertion here still passed. Derive the whole budget from the workflow
-    // and check it fits.
+    // The invariant is the SUM, not any single number: identify the long
+    // steps by what they EXECUTE, not by whether they already carry a bound,
+    // so a new long step added without one shows up here.
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
@@ -8344,46 +8341,32 @@ describe('qwen-autofix workflow', () => {
     );
     expect(Number.isFinite(jobCapMin)).toBe(true);
 
-    // The bug this PR closes was a long step with NO bound: the verification
-    // gate ran unbounded (measured 22m48s), so the worst case was
-    // 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job while every
-    // per-number assertion still passed. So identify the long steps by what
-    // they EXECUTE, not by whether they already carry a bound — summing only
-    // bounded steps stays silent when a new long step is added without one,
-    // which is exactly how the gate drifted in the first place. Cheap
-    // setup/report steps are allowlisted implicitly by not matching.
     const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
     const longSteps = stepBlocks.filter((b) =>
       /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
         b,
       ),
     );
-    // Primary + repair agent steps and their two verification gates. A new
-    // long step shows up here and must carry its own bound; an existing one
-    // that loses its bound fails the per-step check below.
+    // Primary + repair agent steps and their two verification gates.
     expect(longSteps).toHaveLength(4);
-    // Every long step must be bounded, and `always()` runs them all, so the
-    // worst case is the SUM of those bounds.
     const stepCaps = longSteps.map((b) =>
       Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
     );
     for (const cap of stepCaps) {
       expect(Number.isFinite(cap)).toBe(true);
     }
-    // Measured on run 30646547838: setup 5-7m in earlier steps, reporting 3-4s,
-    // but none of the 12 setup steps nor the reporters is bounded — so hold a
-    // real reserve, not the measured floor. 25 still fits today
-    // (270 + 25 = 295 <= 300) and keeps the headroom a property, not a guess.
+    // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
+    // runtime — this reserve is an ASSUMPTION that they stay under 25m
+    // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
+    // of them can still eat the job timeout.
     const SETUP_AND_REPORT_MIN = 25;
     const worstCaseMin =
       stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
     expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
-    // ubuntu-latest cannot run a job longer than 6 hours whatever we write.
     expect(jobCapMin).toBeLessThanOrEqual(360);
 
-    // continue-on-error is what makes bounding the verification gates a
-    // graceful degrade rather than a new way to kill the job: a timed-out
-    // gate must fall through to the report step, not cancel it.
+    // continue-on-error makes bounding the verification gates a graceful
+    // degrade: a timed-out gate falls through to the report step.
     for (const name of ['Verification gate', 'Repair verification gate']) {
       const gate =
         jobBlock.match(
@@ -8393,14 +8376,9 @@ describe('qwen-autofix workflow', () => {
       expect(gate).toContain('continue-on-error: true');
     }
 
-    // The step cap is only a backstop for a runaway that ignores the agent's
-    // own timer; QWEN_TIMEOUT_MS is the budget that actually ends a round.
-    // Leaving it implicit let the two drift 30 minutes apart — run-agent.mjs
-    // defaults to 50 minutes against an 80-minute cap, so a third of the
-    // step was unreachable and every "ran out of time" round stopped early
-    // for a reason no one could see in this file. Derive BOTH numbers from
-    // the workflow rather than restating them: a pair asserted as two
-    // literals cannot catch the pair drifting.
+    // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
+    // timeout is only a backstop. Derive both from the workflow and assert
+    // the margin so the pair cannot drift silently.
     const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
     const budgetMs = Number(
       addressStep.match(
@@ -8412,10 +8390,7 @@ describe('qwen-autofix workflow', () => {
     const marginMin = stepCapMin - budgetMs / 60000;
     // Under the cap, or the cap fires first and the internal kill path never
     // writes `agent-timeout` — the file the report step reads to tell a
-    // timeout apart from a crash. That path is SIGTERM, a 10s grace, SIGKILL,
-    // then the marker write, so a one-minute floor clears it several times
-    // over; the primary (10m) and repair (2m) margins both do, so one floor
-    // fits both instead of an asymmetric pair.
+    // timeout apart from a crash.
     expect(marginMin).toBeGreaterThanOrEqual(1);
     // The repair attempt stays inside its own smaller step the same way.
     const repairCapMin = Number(
@@ -8426,6 +8401,19 @@ describe('qwen-autofix workflow', () => {
     );
     expect(repairCapMin - repairMs / 60000).toBeGreaterThanOrEqual(1);
 
+    // The run block clamps QWEN_TIMEOUT_MS to the budget ceiling so a
+    // misconfigured repo variable degrades to a warning, not a misreport.
+    expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
+    expect(addressStep).toMatch(
+      /QWEN_TIMEOUT_MS.*exceeds the step backstop; clamping/,
+    );
+    // The clamp ceiling must stay under the step backstop.
+    const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
+    expect(Number.isFinite(clampMs)).toBe(true);
+    expect(clampMs).toBeLessThanOrEqual(stepCapMin * 60000);
+  });
+
+  it('replays the handoff decision and terminal-round transitions under bash', () => {
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.
     const decision = reviewAddressReportStep.match(

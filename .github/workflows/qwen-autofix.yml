@@ -2588,9 +2588,9 @@ jobs:
       # is that a backlog cannot open an unbounded number of agent runs at
       # once, not the specific number. The 300-minute job cap raises the
       # worst-case hold to 5 runner-hours per slot (25 across the fleet) and
-      # holds the per-PR head-write concurrency group for the same window; in
-      # practice the 120-minute agent budget ends rounds well before the cap,
-      # so the queueing tail above is unchanged.
+      # holds the per-PR head-write concurrency group for the same window.
+      # The cap itself does not lengthen the queueing tail above; the raised
+      # 120-minute budget does, for the PRs that exhaust it.
       max-parallel: 5
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
@@ -3384,30 +3384,20 @@ jobs:
         # cancel those steps too and leave the loop silent.
         #
         # This step timeout is the BACKSTOP for a runaway that ignores the
-        # agent's own timer; QWEN_TIMEOUT_MS below is the real budget. The two
-        # had drifted 30 minutes apart — run-agent.mjs defaults to 50 minutes
-        # against what was an 80-minute cap — so a third of the step was
-        # unreachable and every "ran out of time" round ended for a reason
-        # this file never mentioned.
+        # agent's own timer; QWEN_TIMEOUT_MS below is the real budget.
+        # Invariant: budget <= backstop - margin, where the margin covers
+        # the internal kill path (SIGTERM, 10s grace, SIGKILL, marker write).
         #
-        # Every number below is measured, from one scan (run 30646547838):
+        # Measured on run 30646547838:
         #
         #   setup (12 steps, ends at 'Post autofix status comment')  5-7m
         #   Triage and address   #8005 round 9  50m03s (its own timer)
         #                        #8211          12m45s
-        #   Verification gate    #8211          22m48s   <- the big one, and
-        #                        it had NO step bound of its own until now
+        #   Verification gate    #8211          22m48s
         #   push + report + finalize                     3-4s
         #
-        # Setup runs in EARLIER steps, so it never competes with the agent for
-        # this cap. The old arithmetic ("80 + 20 leaves ~50 for setup, two
-        # verification passes, and reporting") was wrong once verification was
-        # measured: 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job, so
-        # the worst case already overran the job timeout — the silent-loop
-        # failure this whole design exists to avoid.
-        #
-        # Sized for the PRs that actually time out (47 and 35 changed files),
-        # since those are the ones the budget is for:
+        # Setup runs in EARLIER steps, so it never competes with the agent
+        # for this cap. Worst-case budget:
         #
         #   setup                    7
         #   Triage and address     130  (120 budget + 10 margin)
@@ -3428,33 +3418,14 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
-          # The primary attempt's real budget. Left implicit until now, so it
-          # silently took run-agent.mjs's 50-minute default and left 30 of the
-          # step's 80 minutes unreachable. Stated here, next to the cap it
-          # must stay under, because a budget nobody can see is a budget
-          # nobody re-checks when the cap moves.
-          #
-          # 120m, with a 10-minute margin under the step backstop above —
-          # enough for the internal kill path, which only writes
-          # `agent-timeout` and exits (measured: the 3 seconds between the
-          # agent's death and the job's last step). That file is how the
-          # report step tells a timeout apart from a crash, so if the step
-          # cap ever fires first the round is misreported.
-          #
-          # Raising it does NOT make a doomed round cheaper — the workflow's
-          # own breakers exist because each exhausted budget pushes nothing —
-          # so TIMEOUT_WINDOW_CAP still stops the PR after 3 in a window. This
-          # buys rounds that were close to finishing, not rounds that were
-          # never going to. QWEN_AUTOFIX_TIMEOUT_MS overrides it without a
-          # code change; a malformed value falls back to the runner default.
-          #
-          # CEILING: the override MUST stay below 7,800,000 ms — the 130-minute
-          # step backstop above. A non-empty repo variable wins over the
-          # fallback, so a round "give it more time" value such as 9,000,000
-          # (150m) arms run-agent.mjs's timer PAST the step cap; the cap then
-          # kills the process first, `agent-timeout` is never written, and the
-          # report step misclassifies the round as a crash — the exact
-          # misreport the margin above exists to prevent. Keep it <= 120m.
+          # The primary attempt's real budget: 120m, with a 10-minute margin
+          # under the 130-minute step backstop above. The margin covers the
+          # internal kill path (SIGTERM, 10s grace, SIGKILL, marker write);
+          # if the step cap fires first, `agent-timeout` is never written and
+          # the report step misclassifies the round as a crash.
+          # QWEN_AUTOFIX_TIMEOUT_MS overrides the fallback without a code
+          # change; the run block below clamps it to 7,200,000 ms so a
+          # misconfigured variable degrades to a warning, not a misreport.
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
@@ -3508,6 +3479,17 @@ jobs:
           # write-capable collaborators); keep AUTOFIX_OPENAI_API_KEY a
           # low-privilege, quota-bounded, rotatable key.
           git config core.hooksPath .husky
+          # Clamp the override to the budget ceiling: a repo variable past
+          # 7,200,000 ms (120m) would arm the timer past the 130-minute step
+          # backstop, the cap would fire first, and the round would be
+          # misreported as a crash. Malformed values fall back to the same
+          # ceiling (run-agent.mjs's own || handles the empty/NaN case).
+          BUDGET_CAP_MS=7200000
+          if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]+$ ]] || (( QWEN_TIMEOUT_MS > BUDGET_CAP_MS )); then
+            echo "::warning::QWEN_TIMEOUT_MS=${QWEN_TIMEOUT_MS} exceeds the step backstop; clamping to ${BUDGET_CAP_MS}"
+            QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
+          fi
+          export QWEN_TIMEOUT_MS
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
@@ -4294,7 +4276,7 @@ jobs:
                   # this is usually a one-off; the last automatic attempt names
                   # the real fix (split the PR or raise the budget).
                   CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
-                  LAST_FIX="a human should split the PR or raise the agent time budget, then re-arm"
+                  LAST_FIX="a human should split the PR or raise the agent time budget and its step backstop, then re-arm"
                 elif [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE="crashed before it could evaluate the feedback"
                   LAST_FIX="a human should take over this PR"
@@ -4508,7 +4490,7 @@ jobs:
                   # failed differently (a gate rejection landing on a window
                   # that already carries the cap — the exact rollout state
                   # of #7929/#7846).
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing. A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
                 fi
               fi
             fi
