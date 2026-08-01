@@ -655,6 +655,46 @@ describe('handleGroup', () => {
     stderrSpy.mockRestore();
   });
 
+  it('不同 chatId 下同一非法 senderOpenId 各告警一次（去重按 chatId 作用域）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // 默认 group-openid-1
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'd1',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    // 另一个 chatId，同一非法 senderOpenId——去重键是 `${chatId}:${senderOpenId}`
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'd2',
+        group_openid: 'group-openid-2',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(2);
+    const warnCalls = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((c) => c.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(2);
+
+    stderrSpy.mockRestore();
+  });
+
   it('allowMention=false 时同昵称不同发送者用前 8 位消歧', async () => {
     const ch = makeChannel({ allowMention: false });
     const pvt = ch as unknown as QQChannelRaw;

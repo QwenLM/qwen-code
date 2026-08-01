@@ -950,6 +950,7 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
+    this.warnedSenderOpenIds.clear();
     this.groupActiveMsgEnabled.clear();
     this.seenMessages.clear();
     this.coldStart = true;
