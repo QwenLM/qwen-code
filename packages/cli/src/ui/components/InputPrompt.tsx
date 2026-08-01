@@ -380,6 +380,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const showCompletionSuggestions =
     completion.showSuggestions && !isHistoryRestoredText;
 
+  // Sync transient sub-mode state to AppContainer so the global keypress
+  // handler can suppress the model toggle when InputPrompt is in a mode
+  // where Ctrl+F should move the cursor (shell, reverse/command search,
+  // completion suggestions, attachment mode).
+  const inTransientMode =
+    shellModeActive ||
+    reverseSearchActive ||
+    commandSearchActive ||
+    showCompletionSuggestions ||
+    isAttachmentMode;
+  useEffect(() => {
+    uiActions.setInputPromptTransientMode(inTransientMode);
+  }, [inTransientMode, uiActions]);
+
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
     text: string;
@@ -1089,7 +1103,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // would fall through to text-buffer's cursor-right. Suppress it when
       // the model toggle is configured and its guard passes — the toggle
       // itself fires in AppContainer's global keypress handler.
-      if (uiActions.handleToggleKeypress(key)) {
+      // In transient sub-modes (shell, reverse/command search, completion,
+      // attachment), Ctrl+F should move the cursor, not toggle the model.
+      if (
+        !shellModeActive &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        !showCompletionSuggestions &&
+        !isAttachmentMode &&
+        uiActions.handleToggleKeypress(key)
+      ) {
         return true;
       }
 

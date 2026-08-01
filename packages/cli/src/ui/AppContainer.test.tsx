@@ -5253,6 +5253,52 @@ describe('AppContainer State Management', () => {
       // The wrapper never delegated to vim for the toggle key.
       expect(vimHandleInputSpy).not.toHaveBeenCalled();
     });
+
+    it('shows "Already on" info message when toggle target is the current model', () => {
+      mockSettings = settingsWithToggle('model-b');
+
+      // Current model is already the toggle target.
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-b');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+      vi.spyOn(mockConfig, 'getAvailableModelsForAuthType').mockReturnValue([]);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockResolvedValue(undefined);
+
+      const addItemSpy = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem: addItemSpy,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(ctrlF);
+
+      // Should NOT switch model.
+      expect(switchModelSpy).not.toHaveBeenCalled();
+      // Should show info message.
+      expect(addItemSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Already on'),
+        }),
+        expect.any(Number),
+      );
+    });
   });
 
   describe('Model Dialog Integration', () => {

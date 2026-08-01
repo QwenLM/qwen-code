@@ -18,6 +18,7 @@ import type { Key } from './hooks/useKeypress.js';
  * - `embeddedShellFocused` is false (embedded shell not focused)
  * - `agentViewHasActiveShellPty` is false (agent shell not active)
  * - `dialogsVisible` is false (no dialog open)
+ * - `inputPromptInTransientMode` is false (no shell/reverse-search/command-search/completion/attachment mode)
  */
 export interface ToggleModelGuards {
   toggleModelConfigured: boolean;
@@ -27,6 +28,7 @@ export interface ToggleModelGuards {
   embeddedShellFocused: boolean;
   agentViewHasActiveShellPty: boolean;
   dialogsVisible: boolean;
+  inputPromptInTransientMode: boolean;
 }
 
 /**
@@ -43,6 +45,7 @@ export function canToggleModel(key: Key, guards: ToggleModelGuards): boolean {
     !guards.hasActivePty &&
     !guards.embeddedShellFocused &&
     !guards.agentViewHasActiveShellPty &&
-    !guards.dialogsVisible
+    !guards.dialogsVisible &&
+    !guards.inputPromptInTransientMode
   );
 }

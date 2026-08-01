@@ -52,7 +52,8 @@ const getShortcuts = (showModelToggle: boolean): Shortcut[] => {
 
   if (showModelToggle) {
     // Insert after ctrl+o to keep logical grouping
-    shortcuts.splice(9, 0, {
+    const idx = shortcuts.findIndex((s) => s.key === 'ctrl+o');
+    shortcuts.splice(idx + 1, 0, {
       key: 'ctrl+f',
       description: t('to toggle model'),
     });

@@ -24,6 +24,7 @@ const ALL_OK = {
   embeddedShellFocused: false,
   agentViewHasActiveShellPty: false,
   dialogsVisible: false,
+  inputPromptInTransientMode: false,
 };
 
 describe('canToggleModel guard conditions', () => {
@@ -77,6 +78,12 @@ describe('canToggleModel guard conditions', () => {
     expect(canToggleModel(ctrlF, { ...ALL_OK, dialogsVisible: true })).toBe(
       false,
     );
+  });
+
+  it('returns false when InputPrompt is in a transient sub-mode', () => {
+    expect(
+      canToggleModel(ctrlF, { ...ALL_OK, inputPromptInTransientMode: true }),
+    ).toBe(false);
   });
 
   it('returns false on bare "f" (no ctrl)', () => {

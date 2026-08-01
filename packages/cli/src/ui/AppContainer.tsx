@@ -505,6 +505,8 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
+  const [inputPromptTransientMode, setInputPromptTransientMode] =
+    useState(false);
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
@@ -1933,8 +1935,9 @@ export const AppContainer = (props: AppContainerProps) => {
         embeddedShellFocused: embeddedShellFocusedRef.current,
         agentViewHasActiveShellPty: agentViewActiveShellPtyRef.current,
         dialogsVisible: dialogsVisibleRef.current,
+        inputPromptInTransientMode: inputPromptTransientMode,
       }),
-    [],
+    [inputPromptTransientMode],
   );
 
   useEffect(() => {
@@ -4487,6 +4490,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
+      setInputPromptTransientMode,
       vimHandleInput: (key: Key) => {
         // When handleToggleKeypress passes, AppContainer's global key handler
         // (handleGlobalKeypress) handles Ctrl+F for model toggle. Block
@@ -4588,6 +4592,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
+      setInputPromptTransientMode,
       vimHandleInput,
       handleToggleKeypress,
       handleIdePromptComplete,

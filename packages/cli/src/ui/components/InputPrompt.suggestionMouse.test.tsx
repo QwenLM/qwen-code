@@ -59,6 +59,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     popAllQueuedMessages: vi.fn(() => null),
     handleToggleKeypress: vi.fn(() => false),
     invalidateSubmittedPromptProvenance: vi.fn(),
+    setInputPromptTransientMode: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({

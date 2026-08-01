@@ -77,6 +77,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     popAllQueuedMessages: vi.fn(() => null),
     handleToggleKeypress: vi.fn(() => false),
     invalidateSubmittedPromptProvenance: vi.fn(),
+    setInputPromptTransientMode: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -225,6 +226,7 @@ describe('InputPrompt', () => {
       popAllQueuedMessages: vi.fn(() => null),
       handleToggleKeypress: vi.fn(() => false),
       invalidateSubmittedPromptProvenance: vi.fn(),
+      setInputPromptTransientMode: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -453,6 +455,7 @@ describe('InputPrompt', () => {
       popAllQueuedMessages: vi.fn(() => null),
       invalidateSubmittedPromptProvenance,
       handleToggleKeypress: vi.fn(() => false),
+      setInputPromptTransientMode: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     props.buffer.setText('repeat prompt');
     vi.mocked(props.buffer.setText).mockClear();
@@ -1272,6 +1275,7 @@ describe('InputPrompt', () => {
       popAllQueuedMessages: vi.fn(() => null),
       invalidateSubmittedPromptProvenance,
       handleToggleKeypress: vi.fn(() => false),
+      setInputPromptTransientMode: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
       'previous command',
@@ -3407,6 +3411,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         handleToggleKeypress: vi.fn(() => true),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -3427,6 +3432,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -4048,6 +4054,7 @@ describe('InputPrompt', () => {
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion
       const mockHandleAutocomplete = vi.fn(() => {
@@ -4106,6 +4113,7 @@ describe('InputPrompt', () => {
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion to return suggestions
       mockedUseReverseSearchCompletion.mockReturnValue({
@@ -4302,6 +4310,7 @@ describe('InputPrompt', () => {
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
       vi.mocked(useReverseSearchCompletion).mockImplementation(
         (_buffer, _data, isActive) => ({
@@ -5024,6 +5033,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
     });
 
@@ -5038,6 +5048,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -5066,6 +5077,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       // Set existing text in buffer
@@ -5100,6 +5112,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -5128,6 +5141,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
         handleToggleKeypress: vi.fn(() => false),
+        setInputPromptTransientMode: vi.fn(),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(

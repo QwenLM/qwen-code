@@ -66,6 +66,7 @@ export interface UIActions {
   closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
+  setInputPromptTransientMode: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;
   handleToggleKeypress: (key: Key) => boolean;
   handleIdePromptComplete: (result: IdeIntegrationNudgeResult) => void;
