@@ -46,6 +46,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildRunEnv,
   spawnTimedOut,
+  trimOutput,
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
@@ -63,22 +64,37 @@ const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
  * output trimming simply does not match — an unparsed failure surfaces as a
  * count mismatch in the caller's disclosure, never as an invented path.
  */
-export function failingFilesOf(output: string): string[] {
+export function failingFilesOf(output: string, root = ''): string[] {
   const text = output.replace(ANSI_SGR_RE, '');
   const files = new Set<string>();
   const re =
     // `\\` and `:` in the path class: a Windows runner prints
     // `FAIL  C:\\repo\\src\\x.test.ts`, which the POSIX-only class missed —
     // and a missed parse is an unattributed failure, not a loud error.
-    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|[^|]+\|\s+)?([\w@.:\\/-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
+    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|([^|]+)\|\s+)?([\w@.:\\/-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     // The `❯` progress line lists every file; only a failing one counts.
-    if (m[0].trimStart().startsWith('❯') && !/failed/.test(m[2] ?? ''))
+    if (m[0].trimStart().startsWith('❯') && !/failed/.test(m[3] ?? ''))
       continue;
-    files.add(m[1]);
+    // ROOT-RELATIVE, and keyed by project. The two sides run in DIFFERENT
+    // roots (the PR worktree and the base tree), so comparing absolute paths
+    // verbatim made every pre-existing failure a fabricated netNew. The vitest
+    // project token is part of the identity too: dropping it collapsed
+    // same-named files across workspaces, suppressing a real Critical as a
+    // "measurement" — the worse of the two failure directions.
+    files.add(`${m[1] ? `${m[1].trim()}::` : ''}${relativeToRoot(m[2], root)}`);
   }
   return [...files].sort();
+}
+
+/** Strip the run's own root (and any leading `./`) so the two sides compare. */
+export function relativeToRoot(file: string, root: string): string {
+  const norm = (v: string) => v.replace(/\\/g, '/').replace(/\/+$/, '');
+  const f = norm(file);
+  const r = root ? norm(root) : '';
+  const rel = r && f.startsWith(`${r}/`) ? f.slice(r.length + 1) : f;
+  return rel.replace(/^\.\//, '');
 }
 
 /** One rerun: the same command, in the base tree. */
@@ -94,7 +110,7 @@ export interface DeltaEntry {
   shared: string[];
   base: CommandResult;
   /**
-   * True when neither side's failing files could be parsed although the
+   * True when the PR side named no parseable failing file although the
    * command failed — the delta for this command proves nothing, and the
    * path-based judgment stays in force. Disclosed, never silently dropped.
    */
@@ -113,6 +129,11 @@ export interface TestDeltaArgs {
   report: string;
   baseline: string;
   out?: string;
+  /** The PR worktree the report's failures were produced in — its root is
+   *  stripped so both sides compare as repo-relative paths. */
+  /** yargs camel-cases `--pr-worktree`; naming the field for the flag would
+   *  read `undefined` on every real invocation. */
+  prWorktree?: string;
   timeout: number;
   /** Test seam — production spawns the real command. */
   exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
@@ -127,6 +148,9 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     timeout: timeoutMs,
     env: buildRunEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
+    // build-test's, deliberately: "a build that asks a question is a build that
+    // hangs until the deadline" — and this reruns those same commands.
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   // The sibling's predicate, not a weaker re-derivation: an external SIGTERM
   // (container stop, cancelled CI job) sets neither an ETIMEDOUT message nor
@@ -138,7 +162,11 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     exitCode: timedOut ? null : (r.status ?? null),
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: `${r.stdout ?? ''}${r.stderr ?? ''}`,
+    // Bounded like build-test's: this lands in `entries[].base.output`, which
+    // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
+    // untrimmed megabyte pushes exactly what the command produces past any
+    // reader's truncation.
+    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
   };
 }
 
@@ -177,9 +205,18 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
 
   const entries: DeltaEntry[] = failed.map((t) => {
-    const prFailingFiles = failingFilesOf(t.output ?? '');
-    const base = exec(t.command, baseline, args.timeout * 1000);
-    const baseFailingFiles = base.timedOut ? [] : failingFilesOf(base.output);
+    const prFailingFiles = failingFilesOf(
+      t.output ?? '',
+      args.prWorktree ?? '',
+    );
+    // A programmatic caller may omit `timeout`; `NaN * 1000` reaches spawnSync
+    // as an invalid deadline. Fall back to the CLI's own default.
+    const perCommandMs =
+      (Number.isFinite(args.timeout) ? args.timeout : 300) * 1000;
+    const base = exec(t.command, baseline, perCommandMs);
+    const baseFailingFiles = base.timedOut
+      ? []
+      : failingFilesOf(base.output, baseline);
     // The PR side is what netNew/shared are derived from, so a PR side that
     // parsed NOTHING attributes nothing — regardless of what the base rerun
     // managed to parse. Requiring both sides to be empty silently dropped a
@@ -282,6 +319,12 @@ export const testDeltaCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'The BUILT base tree from `qwen review base-tree`',
+      })
+      .option('pr-worktree', {
+        type: 'string',
+        describe:
+          "The PR worktree the report's failures were produced in — its root " +
+          'is stripped so both sides compare as repo-relative paths',
       })
       .option('out', { type: 'string', describe: 'Write the JSON report here' })
       .option('timeout', {
