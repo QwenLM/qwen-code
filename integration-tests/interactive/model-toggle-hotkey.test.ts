@@ -63,51 +63,57 @@ const IS_WINDOWS = process.platform === 'win32';
   it('should toggle model on Ctrl+F and show Switched to message', async () => {
     const { ptyProcess, promise } = rig.runInteractive();
 
-    let output = '';
-    ptyProcess.onData((data) => {
-      output += data;
-    });
+    try {
+      let output = '';
+      ptyProcess.onData((data) => {
+        output += data;
+      });
 
-    // If the CLI exits early (crash, OOM), surface the exit code in the
-    // failure message instead of a generic waitForText timeout.
-    let earlyExit: string | null = null;
-    void promise.then(({ exitCode, output: exitOutput }) => {
-      earlyExit = `CLI exited with code ${exitCode}. Last output:\n${exitOutput.slice(-500)}`;
-    });
+      // If the CLI exits early (crash, OOM), surface the exit code in the
+      // failure message instead of a generic waitForText timeout.
+      let earlyExit: string | null = null;
+      void promise.then(({ exitCode, output: exitOutput }) => {
+        earlyExit = `CLI exited with code ${exitCode}. Last output:\n${exitOutput.slice(-500)}`;
+      });
 
-    // Wait for CLI to be ready
-    const isReady = await rig.waitForText('Type your message', 30000);
-    expect(isReady, earlyExit ?? 'CLI did not start in interactive mode').toBe(
-      true,
-    );
+      // Wait for CLI to be ready
+      const isReady = await rig.waitForText('Type your message', 30000);
+      expect(
+        isReady,
+        earlyExit ?? 'CLI did not start in interactive mode',
+      ).toBe(true);
 
-    // Raw Ctrl+F byte (0x06). In a PTY without kitty-protocol
-    // negotiation this is what the terminal sends for Ctrl+F;
-    // Ink decodes it as Key({ctrl: true, name: 'f'}).
-    const CTRL_F = '\x06';
+      // Raw Ctrl+F byte (0x06). In a PTY without kitty-protocol
+      // negotiation this is what the terminal sends for Ctrl+F;
+      // Ink decodes it as Key({ctrl: true, name: 'f'}).
+      const CTRL_F = '\x06';
 
-    // Toggle to toggleModel (model-b) and wait for the info message
-    ptyProcess.write(CTRL_F);
-    const switchedToModelB = await rig.waitForText(
-      'Switched to model-b',
-      10000,
-    );
-    expect(
-      switchedToModelB,
-      earlyExit ??
-        `Expected 'Switched to model-b' after first toggle. Output:\n${output}`,
-    ).toBe(true);
+      // Toggle to toggleModel (model-b) and wait for the info message
+      ptyProcess.write(CTRL_F);
+      const switchedToModelB = await rig.waitForText(
+        'Switched to model-b',
+        10000,
+      );
+      expect(
+        switchedToModelB,
+        earlyExit ??
+          `Expected 'Switched to model-b' after first toggle. Output:\n${output}`,
+      ).toBe(true);
 
-    // Toggle back to original model (model-a)
-    ptyProcess.write(CTRL_F);
-    const switchedToModelA = await rig.waitForText(
-      'Switched to model-a',
-      10000,
-    );
-    expect(
-      switchedToModelA,
-      earlyExit ??
-        `Expected 'Switched to model-a' after second toggle. Output:\n${output}`,
-    ).toBe(true);
+      // Toggle back to original model (model-a)
+      ptyProcess.write(CTRL_F);
+      const switchedToModelA = await rig.waitForText(
+        'Switched to model-a',
+        10000,
+      );
+      expect(
+        switchedToModelA,
+        earlyExit ??
+          `Expected 'Switched to model-a' after second toggle. Output:\n${output}`,
+      ).toBe(true);
+    } finally {
+      ptyProcess.kill();
+      await promise;
+    }
   });
 });

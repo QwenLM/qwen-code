@@ -83,32 +83,3 @@ describe('canToggleModel guard conditions', () => {
     expect(canToggleModel({ ...ctrlF, ctrl: false }, ALL_OK)).toBe(false);
   });
 });
-
-describe('vimHandleInput cursor-right suppression', () => {
-  // vimHandleInput wrapper in AppContainer:
-  //   if (canToggleModel(key)) return true; // block cursor-right
-  //   return vimHandleInput(key);
-  //
-  // When canToggleModel is true, the wrapper returns true (handled).
-  // When false, it delegates to vimHandleInput — we can't test that
-  // here since it requires actual vim context, but we verify the guard.
-
-  it('blocks cursor-right (returns true) when canToggleModel passes', () => {
-    // Simulate the vimHandleInput wrapper: when canToggleModel is true,
-    // it returns true (consumed) and does NOT forward to vim cursor-right.
-    const vimHandleInputWrapper = (key: Key): boolean => {
-      if (canToggleModel(key, ALL_OK)) return true;
-      return false; // would be vimHandleInput(key)
-    };
-    expect(vimHandleInputWrapper(ctrlF)).toBe(true);
-  });
-
-  it('passes through (returns false) when canToggleModel fails', () => {
-    const vimHandleInputWrapper = (key: Key): boolean => {
-      if (canToggleModel(key, { ...ALL_OK, toggleModelConfigured: false }))
-        return true;
-      return false; // would be vimHandleInput(key)
-    };
-    expect(vimHandleInputWrapper(ctrlF)).toBe(false);
-  });
-});

@@ -43,6 +43,15 @@ function renderShortcuts(toggleModel?: string) {
   );
 }
 
+function renderShortcutsWide(toggleModel?: string) {
+  useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
+  return render(
+    <SettingsContext.Provider value={createSettings(toggleModel)}>
+      <KeyboardShortcuts />
+    </SettingsContext.Provider>,
+  );
+}
+
 describe('KeyboardShortcuts', () => {
   afterEach(() => {
     stubPlatform(originalPlatform);
@@ -73,6 +82,23 @@ describe('KeyboardShortcuts', () => {
 
   it('should render the last shortcut when toggleModel is configured', () => {
     const { lastFrame } = renderShortcuts('model-b');
+    const frame = lastFrame();
+    expect(frame).toContain('ctrl+x');
+    expect(frame).toContain('for external editor');
+  });
+
+  // Regression: wide-terminal (3-column) layout must also render the last shortcut.
+  // The narrow tests above use columns: 40 which forces 1-column layout,
+  // leaving columnSplits[2] and columnSplits[3] branches unverified.
+  it('should render the last shortcut in wide terminal (3 columns) without toggleModel', () => {
+    const { lastFrame } = renderShortcutsWide();
+    const frame = lastFrame();
+    expect(frame).toContain('ctrl+x');
+    expect(frame).toContain('for external editor');
+  });
+
+  it('should render the last shortcut in wide terminal (3 columns) with toggleModel', () => {
+    const { lastFrame } = renderShortcutsWide('model-b');
     const frame = lastFrame();
     expect(frame).toContain('ctrl+x');
     expect(frame).toContain('for external editor');
