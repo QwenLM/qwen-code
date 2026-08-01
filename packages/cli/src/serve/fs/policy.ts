@@ -32,6 +32,26 @@ import type { Intent, ResolvedPath } from './paths.js';
 export const MAX_READ_BYTES = 256 * 1024;
 
 /**
+ * Upper bound on bytes read off disk to locate a line window above
+ * `MAX_READ_BYTES`.
+ *
+ * `MAX_READ_BYTES` caps what a read *returns*; it says nothing about what a
+ * read *costs*. Line offsets address a byte stream, so `{ line: 900_000_000,
+ * limit: 20 }` returns almost nothing and still walks the file from byte 0.
+ * Without this cap a single query param turns into an uninterruptible
+ * multi-second scan of an arbitrarily large file, and on Windows it holds a
+ * read handle (opened without `FILE_SHARE_DELETE`) for that entire span,
+ * blocking renames and deletes of the target.
+ *
+ * 8 MiB is ~25 ms at the ~300 MB/s this streams at — small enough that the
+ * cost is bounded and the handle-hold window stays negligible, large enough
+ * to cover the head and tail-ish regions agents actually ask for. Requests
+ * past it get `file_too_large` pointing at `readBytes`, which reaches any
+ * offset in O(1).
+ */
+export const MAX_TEXT_SCAN_BYTES = 8 * 1024 * 1024;
+
+/**
  * Maximum bytes accepted by `writeText` / `edit`. Sized below the
  * `express.json({ limit: '10mb' })` middleware cap so a request
  * body that survives the parser also survives the policy gate.

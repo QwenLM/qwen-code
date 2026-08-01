@@ -257,9 +257,6 @@ export default {
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
   Transcript: 'Transcription',
-  'to close': 'pour fermer',
-  'to scroll': 'pour défiler',
-  'Failed to render transcript.': 'Échec du rendu de la transcription.',
   'Read {{count}} file': 'Lu {{count}} fichier',
   'Read {{count}} files': 'Lu {{count}} fichiers',
   'Reading {{count}} file': 'Lecture de {{count}} fichier',
@@ -2046,7 +2043,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to view transcript': 'pour voir la transcription',
+  'to expand details': 'pour développer les détails',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',

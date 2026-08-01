@@ -43,6 +43,7 @@ export interface AcpBridgeOptions {
 }
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+export const ACP_START_TIMEOUT_MS = 30 * 1000;
 export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
@@ -178,11 +179,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       stream,
     );
 
-    await this.connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {},
-    });
-    await this.registerChannelLoopMcpServer();
+    try {
+      await withTimeout(
+        this.connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {},
+        }),
+        ACP_START_TIMEOUT_MS,
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await this.registerChannelLoopMcpServer();
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
   }
 
   registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
@@ -619,6 +629,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         ? 'No channel loop tool handler is registered.'
         : `No channel loop handler matched session ${sessionId}.`,
     );
+  }
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

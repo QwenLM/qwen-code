@@ -321,6 +321,17 @@ function dataCell(
   return cell!;
 }
 
+function columnGroup(
+  container: HTMLElement,
+  visibleColumnIndex: number,
+): HTMLColElement {
+  const col = [...container.querySelectorAll<HTMLColElement>('col')].slice(1)[
+    visibleColumnIndex
+  ];
+  expect(col).toBeDefined();
+  return col!;
+}
+
 function dragCells(from: Element, to: Element): void {
   act(() => {
     from.dispatchEvent(
@@ -1169,6 +1180,15 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenLastCalledWith("'=1+1");
   });
 
+  it('keeps an accessible name on the custom columns trigger', () => {
+    const container = renderTable();
+
+    const trigger = button(container, 'Custom columns');
+
+    expect(trigger.getAttribute('aria-label')).toBe('Custom columns');
+    expect(trigger.textContent).toContain('Custom columns');
+  });
+
   it('hides columns and restores them from custom columns', () => {
     const container = renderTable();
 
@@ -1213,10 +1233,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '220px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('220px');
+    expect(columnGroup(container, 0).style.width).toBe('220px');
   });
 
   it('clamps resized columns to the minimum width', () => {
@@ -1239,10 +1256,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '80px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('80px');
+    expect(columnGroup(container, 0).style.width).toBe('80px');
   });
 
   it('clamps resized columns to the maximum width', () => {
@@ -1265,10 +1279,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '640px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('640px');
+    expect(columnGroup(container, 0).style.width).toBe('640px');
   });
 
   it('stops resizing a column when the window blurs', () => {
@@ -1293,9 +1304,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('flushes pending resize width when the window blurs', () => {
@@ -1318,9 +1327,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new Event('blur'));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '260px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('260px');
   });
 
   it('stops resizing a column when page visibility changes', () => {
@@ -1349,9 +1356,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('keeps resizing when page visibility changes while visible', () => {
@@ -1381,9 +1386,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '280px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('280px');
   });
 
   it('resizes a column with keyboard arrows', () => {
@@ -1399,9 +1402,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '176px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('176px');
 
     act(() => {
       resize.dispatchEvent(
@@ -1412,9 +1413,92 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
+    expect(columnGroup(container, 0).style.width).toContain('160px');
+  });
+
+  it('uses a filler column after every visible column is manually sized', () => {
+    const container = renderTable();
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(container.querySelector('[class*="fillerColumn"]')).toBeNull();
+
+    for (const column of ['Team', 'Score']) {
+      act(() => {
+        button(container, `Resize ${column}`).dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            key: 'ArrowRight',
+          }),
+        );
+      });
+    }
+
+    const columns = Array.from(table!.querySelectorAll('col'));
+    expect(columns).toHaveLength(4);
+    expect(columns[0]?.style.width).toBe('40px');
+    expect(columns[1]?.style.width).toBe('176px');
+    expect(columns[2]?.style.width).toBe('176px');
+    expect(columns[3]?.className).toContain('fillerColumn');
+    expect(table!.querySelector('thead th:last-child')?.className).toContain(
+      'fillerHeaderCell',
     );
+    expect(table!.querySelector('tbody td:last-child')?.className).toContain(
+      'fillerCell',
+    );
+  });
+
+  it('subtracts fixed widths from the flexible column calc()', () => {
+    const container = renderTable();
+
+    const initialColumns = Array.from(container.querySelectorAll('col'));
+    // Two flexible columns share the remaining width, so the divisor is 2
+    // (jsdom serializes `/ 2` as `0.5 *`); a `/ 1` mutant would claim the
+    // full width and fail this assertion.
+    expect(initialColumns[1]?.style.width).toContain(
+      '0.5 * (100cqw - 40px - 0px)',
+    );
+    expect(initialColumns[2]?.style.width).toContain(
+      '0.5 * (100cqw - 40px - 0px)',
+    );
+
+    act(() => {
+      button(container, 'Resize Team').dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    const columns = Array.from(container.querySelectorAll('col'));
+    expect(columns).toHaveLength(3);
+    expect(columns[1]?.style.width).toBe('176px');
+    expect(columns[2]?.style.width).toContain('1 * (100cqw - 40px - 176px)');
+    expect(container.querySelector('[class*="fillerColumn"]')).toBeNull();
+  });
+
+  it('spans the detail row across the filler column', () => {
+    const container = renderTable();
+
+    for (const column of ['Team', 'Score']) {
+      act(() => {
+        button(container, `Resize ${column}`).dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            key: 'ArrowRight',
+          }),
+        );
+      });
+    }
+    expect(container.querySelector('[class*="fillerColumn"]')).not.toBeNull();
+
+    click(button(container, 'View details for row 1'));
+
+    const detailCell = container.querySelector<HTMLTableCellElement>(
+      '[class*="detailCell"]',
+    );
+    expect(detailCell).not.toBeNull();
+    expect(detailCell!.colSpan).toBe(4);
   });
 
   it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
@@ -1437,7 +1521,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(header?.style.width).toBe('108px');
+    expect(columnGroup(container, 0).style.width).toBe('108px');
   });
 
   it('ignores keyboard resize arrows with modifiers', () => {
@@ -1454,9 +1538,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('reorders columns and quick copies in the visible order', () => {
@@ -1585,6 +1667,145 @@ describe('EnhancedMarkdownTable', () => {
     expect(
       button(container, 'Sort by Score').closest('th')?.className,
     ).not.toContain('frozenHeaderCell');
+  });
+
+  it('positions the frozen shadow from the rendered column edge', () => {
+    const container = renderWideTable();
+    const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
+    const header = button(container, 'Sort by Team').closest('th');
+    expect(shell).not.toBeNull();
+    expect(header).not.toBeNull();
+    Object.defineProperty(shell, 'clientLeft', {
+      configurable: true,
+      value: 1,
+    });
+    Object.defineProperty(shell, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20 }) as DOMRect,
+    });
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ right: 301 }) as DOMRect,
+    });
+
+    freezeFirstColumn(container);
+
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('280px');
+  });
+
+  it('repositions the frozen shadow when the ResizeObserver fires', () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class CapturingResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
+      CapturingResizeObserver;
+
+    try {
+      const container = renderWideTable();
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      );
+      const header = button(container, 'Sort by Team').closest('th');
+      expect(shell).not.toBeNull();
+      expect(header).not.toBeNull();
+      Object.defineProperty(shell, 'clientLeft', {
+        configurable: true,
+        value: 1,
+      });
+      Object.defineProperty(shell, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 20 }) as DOMRect,
+      });
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 301 }) as DOMRect,
+      });
+
+      freezeFirstColumn(container);
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('280px');
+
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 351 }) as DOMRect,
+      });
+      act(() => {
+        for (const cb of callbacks) {
+          cb([], {} as ResizeObserver);
+        }
+      });
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('330px');
+    } finally {
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
+        OriginalResizeObserver;
+    }
+  });
+
+  it('repositions the frozen shadow on window resize without ResizeObserver', () => {
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    // @ts-expect-error -- force the window-resize fallback branch
+    delete globalThis.ResizeObserver;
+
+    try {
+      const container = renderWideTable();
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      );
+      const header = button(container, 'Sort by Team').closest('th');
+      expect(shell).not.toBeNull();
+      expect(header).not.toBeNull();
+      Object.defineProperty(shell, 'clientLeft', {
+        configurable: true,
+        value: 1,
+      });
+      Object.defineProperty(shell, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 20 }) as DOMRect,
+      });
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 301 }) as DOMRect,
+      });
+
+      freezeFirstColumn(container);
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('280px');
+
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 351 }) as DOMRect,
+      });
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('330px');
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    }
   });
 
   it('dismisses the first-column context menu without clearing the active column', () => {
@@ -1920,28 +2141,30 @@ describe('EnhancedMarkdownTable', () => {
   it('selects display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
-    const teamHeader = button(container, 'Sort by Team').closest('th');
+    const columns = () => Array.from(container.querySelectorAll('col'));
     expect(shell?.className).toContain('densityStandard');
     expect(button(container, 'Table density').textContent).toContain(
       'Standard density',
     );
-    expect(teamHeader?.style.width).toBe('160px');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('160px');
 
     selectValue(button(container, 'Table density'), 'compact');
     expect(shell?.className).toContain('densityCompact');
     expect(button(container, 'Table density').textContent).toContain(
       'Compact density',
     );
-    expect(teamHeader?.style.width).toBe('auto');
-    expect(teamHeader?.style.minWidth).toBe('');
-    expect(teamHeader?.style.maxWidth).toBe('');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('72px');
+    expect(columns()[1]?.style.width).not.toContain('160px');
 
     selectValue(button(container, 'Table density'), 'comfortable');
     expect(shell?.className).toContain('densityComfortable');
     expect(button(container, 'Table density').textContent).toContain(
       'Comfortable density',
     );
-    expect(teamHeader?.style.width).toBe('160px');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('160px');
   });
 
   it('renders compact row details with blank values and globally expandable long values', () => {
@@ -1970,6 +2193,43 @@ describe('EnhancedMarkdownTable', () => {
 
     click(textButton(container, 'Expand text'));
     expect(textButton(container, 'Collapse text')).toBeDefined();
+  });
+
+  it('keeps the opened row anchored when the table scroller expands', () => {
+    const container = renderTable();
+    container.style.overflowY = 'auto';
+    container.scrollTop = 40;
+    const detailsButton = button(container, 'View details for row 3');
+    const row = detailsButton.closest('tr');
+    expect(row).not.toBeNull();
+    const rowRect = vi
+      .spyOn(row!, 'getBoundingClientRect')
+      .mockReturnValueOnce({ top: 120 } as DOMRect)
+      .mockReturnValueOnce({ top: 280 } as DOMRect);
+
+    click(detailsButton);
+
+    expect(rowRect).toHaveBeenCalledTimes(2);
+    expect(container.scrollTop).toBe(200);
+    expect(detailsButton.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('falls back to window.scrollBy when no scroll ancestor exists', () => {
+    const container = renderTable();
+    const scrollBySpy = vi
+      .spyOn(window, 'scrollBy')
+      .mockImplementation(() => {});
+    const detailsButton = button(container, 'View details for row 3');
+    const row = detailsButton.closest('tr');
+    expect(row).not.toBeNull();
+    vi.spyOn(row!, 'getBoundingClientRect')
+      .mockReturnValueOnce({ top: 120 } as DOMRect)
+      .mockReturnValueOnce({ top: 280 } as DOMRect);
+
+    click(detailsButton);
+
+    expect(scrollBySpy).toHaveBeenCalledWith(0, 160);
+    expect(detailsButton.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('shows statistics for a numeric selection', () => {

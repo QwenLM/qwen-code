@@ -9,6 +9,7 @@ import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
+  Storage,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -73,6 +74,7 @@ import {
 } from './workspace-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from './workspace-remember.js';
 import {
@@ -171,7 +173,10 @@ import {
 } from './server/error-handlers.js';
 import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
-import { SessionArchiveCoordinator } from './server/session-archive.js';
+import {
+  deleteDaemonSessionIfOrphan,
+  SessionArchiveCoordinator,
+} from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
@@ -182,13 +187,20 @@ import {
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
 import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from './workspace-runtime-storage.js';
+import {
   isScratchRootCompatible,
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
 import {
   isPortableAbsolutePath,
+  requireTrustedWorkspaceRuntime,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceRuntimeFromParam,
+  sendWorkspaceRuntimeUnavailable,
 } from './workspace-route-runtime.js';
 import {
   registerWorkspaceLifecycleRoutes,
@@ -238,7 +250,7 @@ import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   parseChannelWebhookConfigLenient,
@@ -636,7 +648,7 @@ export function createServeApp(
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
   // cap they configured via `ServeOptions`. Previously the default
-  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
+  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (32) and
   // only the `runQwenServe` path piped the option through.
   //
   // The primary workspace value advertised on `/capabilities`, used for the
@@ -935,6 +947,21 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
+  (
+    app.locals as {
+      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+    }
+  ).sessionArchiveCoordinator = archiveCoordinator;
+
+  const cleanupSession = (runtime: WorkspaceRuntime, sessionId: string) =>
+    runWithWorkspaceRuntimeStorage(runtime, () =>
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: createWorkspaceRuntimeSessionService(runtime),
+        bridge: runtime.bridge,
+        coordinator: archiveCoordinator,
+      }),
+    );
 
   installSelfOriginStripMiddleware(app, getPort);
 
@@ -1038,6 +1065,7 @@ export function createServeApp(
       {
         workspaceId: hashDaemonWorkspace(boundWorkspace),
         workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
         primary: true,
         trusted: deps.primaryWorkspaceTrusted ?? false,
         env: primaryRuntimeEnvMetadata ?? {
@@ -1414,6 +1442,62 @@ export function createServeApp(
     safeBody,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+    mutate,
+    resolveRouteDeps: (req, res, { creating, kind }) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
+        return null;
+      // The primary lane is owned locally (the same instance the ACP handle
+      // uses), so the qualified route stays available for the primary even when
+      // ACP HTTP is disabled. Secondary lanes live inside the ACP handle; reads
+      // use a non-creating lookup so a status poll never allocates a mount.
+      const handle = acpHandleRef.current;
+      const lane = runtime.primary
+        ? workspaceRememberLane
+        : creating
+          ? handle?.ensureWorkspaceRememberLane(runtime.workspaceId)
+          : handle?.getWorkspaceRememberLane(runtime.workspaceId);
+      if (!lane) {
+        if (!handle) {
+          // ACP HTTP disabled: no secondary lane can ever exist, so report a
+          // permanent failure instead of a retryable 503 + Retry-After.
+          res.status(501).json({
+            error: 'Workspace-qualified memory is not enabled on this daemon.',
+            code: 'workspace_memory_unavailable',
+            workspaceCwd: runtime.workspaceCwd,
+            workspaceId: runtime.workspaceId,
+          });
+        } else if (!creating) {
+          // No mount means no tasks: answer like the per-kind GET handler.
+          res.status(404).json({
+            error: `Workspace memory ${kind} task not found`,
+            code: `${kind}_task_not_found`,
+          });
+        } else {
+          // Handle present but the lane is unavailable (disposed/draining):
+          // a retry may succeed.
+          sendWorkspaceRuntimeUnavailable(res, runtime);
+        }
+        return null;
+      }
+      return {
+        bridge: runtime.bridge,
+        lane,
+        parseClientId: parseClientIdHeader,
+        safeBody,
+        isWorkspaceTrusted: () => runtime.trusted,
+        captureGenerationAssertion: () => {
+          const guard = runtime.generationGuard;
+          return guard ? () => guard.assertOpen() : undefined;
+        },
+      };
+    },
   });
   mountWorkspaceAgentsRoutes(app, {
     bridge: primaryBridge,
@@ -1852,6 +1936,7 @@ export function createServeApp(
       workspaceRegistry.primaryEntry.state === 'active'
         ? workspaceRegistry.primaryEntry.current?.runtime
         : undefined,
+    cleanupSession,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
@@ -1875,6 +1960,7 @@ export function createServeApp(
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    cleanupSession,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1918,28 +2004,27 @@ export function createServeApp(
     // restart (a bound task fires only in its own session, which nothing else
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
-    const rehydrateWorkspace = (
-      taskBridge: AcpSessionBridge,
-      workspaceCwd: string,
-    ) => {
-      void rehydrateScheduledTaskSessions({
-        bridge: taskBridge,
-        boundWorkspace: workspaceCwd,
-        onTasksRead: (tasks) =>
-          registerScheduledTaskAuthorizations(workspaceCwd, tasks),
-        onError: (sessionId, err) => {
-          process.stderr.write(
-            `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`,
-          );
-        },
-        // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
-        // catches readCronTasks failures and per-session load errors internally
-        // (returning { loaded, failed }), so this only guards an unexpected throw
-        // from the function entry itself. Log rather than swallow it — a silent
-        // failure here leaves every bound task dormant with no diagnostic.
-      }).catch((err) => {
+    const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
+      void runWithWorkspaceRuntimeStorage(runtime, () =>
+        rehydrateScheduledTaskSessions({
+          bridge: runtime.bridge,
+          boundWorkspace: runtime.workspaceCwd,
+          onTasksRead: (tasks) =>
+            registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+          onError: (sessionId, err) => {
+            process.stderr.write(
+              `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          },
+          // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+          // catches readCronTasks failures and per-session load errors internally
+          // (returning { loaded, failed }), so this only guards an unexpected throw
+          // from the function entry itself. Log rather than swallow it — a silent
+          // failure here leaves every bound task dormant with no diagnostic.
+        }),
+      ).catch((err) => {
         process.stderr.write(
           `qwen serve: unexpected scheduled-task rehydration failure: ${
             err instanceof Error ? err.message : String(err)
@@ -1961,10 +2046,12 @@ export function createServeApp(
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
+      rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
     for (const runtime of workspaceRegistry.list()) {

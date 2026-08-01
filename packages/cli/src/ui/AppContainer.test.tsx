@@ -68,6 +68,10 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import {
+  useThoughtExpanded,
+  type ThoughtExpandedValue,
+} from './contexts/ThoughtExpandedContext.js';
+import {
   type HistoryItem,
   type HistoryItemWithoutId,
   MessageType,
@@ -94,10 +98,12 @@ vi.mock('ink', async (importOriginal) => {
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
+let capturedThoughtExpanded: ThoughtExpandedValue;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
   capturedRenderMode = useRenderMode().renderMode;
+  capturedThoughtExpanded = useThoughtExpanded();
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -240,6 +246,7 @@ describe('AppContainer State Management', () => {
     capturedUIState = null!;
     capturedUIActions = null!;
     capturedRenderMode = 'render';
+    capturedThoughtExpanded = null!;
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -812,6 +819,56 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Context Providers', () => {
+    const renderRespondingInput = (
+      slashCommands: Array<{
+        name: string;
+        description: string;
+        kind: 'built-in';
+        canRunDuringStreaming?: boolean;
+      }>,
+    ) => {
+      const handleSlashCommand = vi.fn();
+      const submitQuery = vi.fn();
+      const addMessage = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand,
+        slashCommands,
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      return { handleSlashCommand, submitQuery, addMessage };
+    };
+
     it('provides AppContext with correct values', () => {
       const { unmount } = render(
         <AppContainer
@@ -1392,6 +1449,66 @@ describe('AppContainer State Management', () => {
         { submittedPrompt: '/btw quick side question' },
       );
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('runs opted-in slash commands outside the active turn while responding', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'settings',
+            description: 'Open settings',
+            kind: 'built-in',
+            canRunDuringStreaming: true,
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/settings', {
+        submittedPrompt: '/settings',
+      });
+
+      expect(handleSlashCommand).toHaveBeenCalledWith('/settings');
+      expect(submitQuery).not.toHaveBeenCalled();
+      expect(addMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps opted-in slash commands queued when Ctrl+Q defers them', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'settings',
+            description: 'Open settings',
+            kind: 'built-in',
+            canRunDuringStreaming: true,
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/settings', {
+        deferUntilIdle: true,
+        submittedPrompt: '/settings',
+      });
+
+      expect(addMessage).toHaveBeenCalledWith('/settings', true, '/settings');
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+      expect(submitQuery).not.toHaveBeenCalled();
+    });
+
+    it('keeps turn-dependent slash commands queued while responding', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'model',
+            description: 'Change model',
+            kind: 'built-in',
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/model', {
+        submittedPrompt: '/model',
+      });
+
+      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model');
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+      expect(submitQuery).not.toHaveBeenCalled();
     });
 
     it('submits slash commands immediately instead of queueing while idle', () => {
@@ -4789,12 +4906,7 @@ describe('AppContainer State Management', () => {
     });
   });
 
-  describe('Transcript (Ctrl+O) integration', () => {
-    // The frozen transcript (TranscriptView) renders its title row as the
-    // literal "Transcript"; the main view never does, so its presence in the
-    // rendered frame is a reliable open/closed signal.
-    const TRANSCRIPT_MARKER = 'Transcript';
-
+  describe('Thinking expansion (Ctrl+O) integration', () => {
     const makeKey = (overrides: Partial<Key>): Key =>
       ({
         name: '',
@@ -4806,8 +4918,6 @@ describe('AppContainer State Management', () => {
         ...overrides,
       }) as Key;
 
-    // The global keypress handler owns Ctrl+O / the transcript close keys; it is
-    // the registered useKeypress handler whose body references TOGGLE_TRANSCRIPT.
     const getGlobalKeypress = () =>
       mockedUseKeypress.mock.calls
         .map((call) => call[0])
@@ -4815,12 +4925,25 @@ describe('AppContainer State Management', () => {
         .find(
           (handler): handler is (key: Key) => void =>
             typeof handler === 'function' &&
-            handler.toString().includes('TOGGLE_TRANSCRIPT'),
+            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
         ) as ((key: Key) => void) | undefined;
 
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
-    const renderApp = () =>
+    it('Ctrl+O flips the full-detail state that expands thoughts and tool output', () => {
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
       render(
         <AppContainer
           config={mockConfig}
@@ -4829,81 +4952,31 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
-
-    it('Ctrl+O installs the TranscriptView in the rendered tree', () => {
-      const { lastFrame } = renderApp();
       const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
-      // Baseline: the marker also confirms the main view doesn't render it.
-      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
-      act(() => handleKeypress!(ctrlO));
-      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-    });
 
-    it.each([
-      ['Esc', makeKey({ name: 'escape', sequence: '\x1b' })],
-      ['q', makeKey({ name: 'q', sequence: 'q' })],
-      ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
-      ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
-      // Ctrl+O is the toggle: pressing it again while open also closes.
-      ['Ctrl+O', ctrlO],
-    ])('%s while open removes the TranscriptView', (_label, closeKey) => {
-      const { lastFrame } = renderApp();
-      const handleKeypress = getGlobalKeypress()!;
-      act(() => handleKeypress(ctrlO));
-      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-      act(() => handleKeypress(closeKey));
-      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
-    });
+      expect(capturedThoughtExpanded.allExpanded).toBe(false);
 
-    it.each([
-      ['Ctrl+Q', makeKey({ name: 'q', ctrl: true, sequence: '\x11' })],
-      ['Alt+Q', makeKey({ name: 'q', meta: true, sequence: '\x1bq' })],
-      ['Shift+Q', makeKey({ name: 'q', shift: true, sequence: 'Q' })],
-    ])(
-      '%s does NOT close the transcript (bare-q modifier guard)',
-      (_l, modQ) => {
-        const { lastFrame } = renderApp();
-        const handleKeypress = getGlobalKeypress()!;
-        act(() => handleKeypress(ctrlO));
-        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-        act(() => handleKeypress(modQ));
-        // Only a bare `q` closes; modified variants stay swallowed but open.
-        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-      },
-    );
+      // Behavioural: the handler must reach the Ctrl+O code path,
+      // which calls refreshStatic → clearTerminal.
+      mockStdout.write.mockClear();
+      handleKeypress!(ctrlO);
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
 
-    it('swallows arbitrary keys while open and keeps the transcript open', () => {
-      const { lastFrame } = renderApp();
-      const handleKeypress = getGlobalKeypress()!;
-      act(() => handleKeypress(ctrlO));
-      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-      expect(() =>
-        act(() => handleKeypress(makeKey({ name: 'x', sequence: 'x' }))),
-      ).not.toThrow();
-      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
-    });
-
-    it('auto-closes when a blocking confirmation appears (anti-deadlock)', () => {
-      // A blocking prompt would be invisible behind the alt-screen transcript;
-      // the needsBlockingInput effect must close it on the same commit.
-      mockedUseGeminiStream.mockReturnValue({
-        streamingState: 'waiting_for_confirmation',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: vi.fn(),
-        retryLastPrompt: vi.fn(),
-        streamingResponseLengthRef: { current: 0 },
-        isReceivingContent: false,
-      });
-      const { lastFrame } = renderApp();
-      const handleKeypress = getGlobalKeypress()!;
-      act(() => handleKeypress(ctrlO));
-      // openTranscript sets the freeze, but the anti-deadlock effect tears it
-      // back down on the same commit, so it never stays visible.
-      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+      // Structural (M1): the handler must contain the state flip.
+      // Under this vi.mock('ink') harness the mocked App /
+      // TestContextConsumer never re-renders when a handler extracted
+      // from mockedUseKeypress.mock.calls calls setThoughtExpanded —
+      // act(), async act(), setTimeout, and IS_REACT_ACT_ENVIRONMENT
+      // were all tried; capturedThoughtExpanded.allExpanded stays
+      // false.  MainContent.test.tsx ("fullDetail wiring") covers the
+      // context → HistoryItemDisplay propagation behaviourally, so
+      // this source-level guard closes the remaining gap: removing
+      // or mutating setThoughtExpanded((prev) => !prev) in AppContainer
+      // (e.g. (prev) => true) makes this assertion fail (mutation M1).
+      expect(handleKeypress!.toString()).toMatch(
+        /setThoughtExpanded\(\s*\(prev\)\s*=>\s*!prev/,
+      );
     });
   });
 

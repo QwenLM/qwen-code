@@ -777,6 +777,46 @@ describe('scheduled-task keepalive', () => {
     releaseSpawn?.();
   });
 
+  it('waits for close before deleting a late spawned transcript', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'hung', prompt: 'will resolve late' }),
+    ]);
+    let resolveSpawn!: (value: { sessionId: string }) => void;
+    let finishClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      finishClose = resolve;
+    });
+    const closeSession = vi.fn(() => closeGate);
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const ka = startScheduledTaskKeepalive({
+      bridge: {
+        ...bridge,
+        spawnOrAttach: () =>
+          new Promise<{ sessionId: string }>((resolve) => {
+            resolveSpawn = resolve;
+          }),
+        closeSession,
+      },
+      boundWorkspace: workspace,
+      intervalMs: 50,
+      spawnTimeoutMs: 5,
+    });
+
+    await ka.tick();
+    resolveSpawn({ sessionId: 'late-sess' });
+    await vi.waitFor(() =>
+      expect(closeSession).toHaveBeenCalledWith('late-sess'),
+    );
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    finishClose();
+    await vi.waitFor(() => expect(removeSpy).toHaveBeenCalledWith('late-sess'));
+    ka.stop();
+    removeSpy.mockRestore();
+  });
+
   it('rehydration onTasksRead populates the authorization store for delivery-enabled tasks', async () => {
     const authorizations = new ChannelDeliveryAuthorizationStore();
     await updateCronTasks(workspace, () => [

@@ -10,6 +10,7 @@ import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_CANCEL,
@@ -244,44 +245,64 @@ export function logUserRetry(config: Config, event: UserRetryEvent): void {
   logger.emit(logRecord);
 }
 
-export function logToolCall(config: Config, event: ToolCallEvent): void {
-  const uiEvent = {
+function normalizeToolCallEvent(event: ToolCallEvent): ToolCallEvent {
+  const isError = event.status === 'error';
+  return {
     ...event,
+    function_name:
+      event.function_name.trim().length > 0
+        ? event.function_name
+        : 'unknown_tool',
+    success: event.status === 'success',
+    error: isError ? event.error : undefined,
+    error_type: isError
+      ? event.error_type?.trim()
+        ? event.error_type
+        : ToolErrorType.UNKNOWN
+      : undefined,
+  };
+}
+
+export function logToolCall(config: Config, event: ToolCallEvent): void {
+  const normalizedEvent = normalizeToolCallEvent(event);
+  const uiEvent = {
+    ...normalizedEvent,
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  if (!isInternalPromptId(event.prompt_id)) {
+  if (!isInternalPromptId(normalizedEvent.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
-  QwenLogger.getInstance(config)?.logToolCallEvent(event);
+  QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
-    ...event,
+    ...normalizedEvent,
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
-    function_args: safeJsonStringify(event.function_args, 2),
+    function_args: safeJsonStringify(normalizedEvent.function_args, 2),
   };
-  if (event.error) {
-    attributes['error.message'] = event.error;
-    if (event.error_type) {
-      attributes['error.type'] = event.error_type;
-    }
+  if (normalizedEvent.error) {
+    attributes['error.message'] = normalizedEvent.error;
+  }
+  if (normalizedEvent.error_type) {
+    attributes['error.type'] = normalizedEvent.error_type;
   }
 
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
-    body: `Tool call: ${event.function_name}${event.decision ? `. Decision: ${event.decision}` : ''}. Success: ${event.success}. Duration: ${event.duration_ms}ms.`,
+    body: `Tool call: ${normalizedEvent.function_name}${normalizedEvent.decision ? `. Decision: ${normalizedEvent.decision}` : ''}. Success: ${normalizedEvent.success}. Duration: ${normalizedEvent.duration_ms}ms.`,
     attributes,
   };
   logger.emit(logRecord);
-  recordToolCallMetrics(config, event.duration_ms, {
-    function_name: event.function_name,
-    success: event.success,
-    decision: event.decision,
-    tool_type: event.tool_type,
+  recordToolCallMetrics(config, normalizedEvent.duration_ms, {
+    function_name: normalizedEvent.function_name,
+    status: normalizedEvent.status,
+    success: normalizedEvent.success,
+    decision: normalizedEvent.decision,
+    tool_type: normalizedEvent.tool_type,
   });
 }
 

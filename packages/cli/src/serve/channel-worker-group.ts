@@ -19,7 +19,7 @@ import {
   type ClientMcpOverWsRuntimeConfig,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import { ChannelDeliveryError } from './channel-delivery-ipc.js';
+import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';

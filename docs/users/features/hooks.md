@@ -147,6 +147,87 @@ By default, HTTP hooks cannot target private or link-local IP ranges. In platfor
 }
 ```
 
+**Example: External Judgment Service Adapter**
+
+The `remote-security-check` config above expects `http://127.0.0.1:8080/hooks/pre-tool-use` to
+already be running a service that speaks this contract (POST `{tool_name, tool_input, ...}` in,
+`hookSpecificOutput.permissionDecision` out). Here is a minimal, stdlib-only adapter that fills
+in that missing half, wired to one concrete judgment backend so the whole thing is runnable and
+testable end to end rather than a stub. Only the `review()` function is backend-specific — swap
+its body and request/response shape for whichever service you use; everything else (the server,
+the fail-open handling, the hook response shape) stays the same regardless of backend.
+
+_Disclosure: the backend used below, [invinoveritas](https://api.babyblueviper.com), is a
+service the author is affiliated with — used here because it was the one that could be
+verified end to end for this example, not an endorsement. Any HTTP service that returns a
+JSON verdict works equally well; only `review()` needs to change._
+
+_Data handling: with `matcher: "*"`, the full `tool_input` of **every** tool call is sent to
+the judgment backend — treat that input as sensitive (it may contain file contents, paths, or
+secrets). Narrow the matcher (e.g. to `run_shell_command`) if you only need to judge shell
+commands._
+
+```python
+#!/usr/bin/env python3
+# judgment_hook.py -- run: JUDGMENT_API_KEY=... python3 judgment_hook.py
+import json, os, sys, urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+JUDGMENT_API_KEY = os.environ["JUDGMENT_API_KEY"]
+JUDGMENT_URL = os.environ.get("JUDGMENT_URL", "https://api.babyblueviper.com/review")
+
+def review(tool_name, tool_input):
+    """POST the call to the judgment backend and return its verdict. This is the
+    one function to change for a different backend -- request/response shape
+    below matches invinoveritas's /review; adapt both to your own backend's
+    contract if you swap it out."""
+    body = json.dumps({
+        "artifact": json.dumps({"tool_name": tool_name, "tool_input": tool_input}),
+        "artifact_type": "shell_command" if tool_name in ("run_shell_command", "shell") else "general",
+        "context": f"qwen-code PreToolUse: {tool_name}",
+    }).encode()
+    req = urllib.request.Request(
+        JUDGMENT_URL, data=body,
+        headers={"Authorization": f"Bearer {JUDGMENT_API_KEY}", "Content-Type": "application/json"},
+    )
+    # Keep this below the HTTP hook's own timeout (10s in the config above), so a "deny"
+    # verdict is always returned before the hook gives up and fails open on its own.
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return json.loads(resp.read())  # response includes a "verdict" field: "reject" denies, anything else allows
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        tool_name, tool_input = payload.get("tool_name", "unknown"), payload.get("tool_input", {})
+        try:
+            verdict = review(tool_name, tool_input)
+            decision = "deny" if verdict.get("verdict") == "reject" else "allow"
+            reason = verdict.get("summary", f"judgment verdict: {verdict.get('verdict')}")
+        except Exception as e:
+            decision, reason = "allow", "judgment backend unavailable, failing open"  # never block on a review-side outage
+            print(f"judgment backend unavailable for {tool_name}, failing open: {e}", file=sys.stderr)
+        out = {"continue": True, "decision": decision, "hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason,
+        }}
+        body = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+```
+
+Tested live end to end against the real production API above: a genuinely destructive input
+(`{"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /important_data"}}`)
+returned `permissionDecision: "deny"` with a real explanation; a benign one (`ls -la`) returned
+`"allow"`. Fails open on any network/timeout/malformed-response issue from the judgment
+backend, so an outage never blocks legitimate tool calls — same discipline the `command`-hook
+examples above apply with their own exit codes.
+
 ### Function Hooks
 
 Function hooks directly call registered JavaScript/TypeScript functions. They are used internally by the Skill system and are not currently exposed as a public API for end users.
@@ -255,24 +336,25 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                            | Matcher Target                                                 |
-| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
-| `UserPromptSubmit`   | Before supported model invocations        | None                                                           |
-| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
-| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
+| Event                | Triggered When                                  | Matcher Target                                                 |
+| :------------------- | :---------------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                           | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution                 | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                      | Tool id                                                        |
+| `UserPromptSubmit`   | Before supported model invocations              | None                                                           |
+| `SessionStart`       | When session starts or resumes                  | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                               | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `SessionDelete`      | After an explicitly selected session is deleted | None                                                           |
+| `MessageDisplay`     | Repeatedly, as the reply streams                | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response       | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                            | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                             | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction                  | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent                     | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown                 | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied                  | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created                 | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed         | None (always fires)                                            |
 
 ### Matcher Patterns
 
@@ -284,6 +366,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
 | Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
 | Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
+| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                           |
 | Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
 | Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
 | Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
@@ -557,6 +640,8 @@ Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `s
 - `reason`: human-readable explanation for the decision
 - `hookSpecificOutput.additionalContext`: additional context to append to the prompt (optional)
 
+When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context.
+
 **Note**: Since UserPromptSubmitOutput extends HookOutput, all standard fields are available but only additionalContext in hookSpecificOutput is specifically defined for this event.
 
 **Example Output**:
@@ -616,6 +701,20 @@ Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `s
 **Output Options**:
 
 - Standard hook output fields (typically not used for blocking)
+
+#### SessionDelete
+
+**Purpose**: Runs after an explicitly selected session has been permanently deleted. This event is fire-and-forget: output and failures cannot undo the deletion.
+
+**Event-specific fields**:
+
+```json
+{
+  "deleted_session_id": "the session that was deleted"
+}
+```
+
+The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
 
 #### MessageDisplay
 

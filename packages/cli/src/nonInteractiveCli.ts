@@ -12,6 +12,7 @@ import type {
   CronScheduler,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  RuntimeContentGeneratorView,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -50,6 +51,14 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
   finalizeToolResponses,
+  clampInlineMediaPart,
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
+  getFullTurnVisionModelSelector,
+  hasImageParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -456,6 +465,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      todoWorkChainId?: string;
       monitorId?: string;
       sdkNotification?: {
         task_id: string;
@@ -512,6 +522,7 @@ export async function runNonInteractive(
     // is also wrong: the abort path runs handleCancellationError → exit
     // 130 and re-introduces the same bypass.)
     let pipeBroken = false;
+    let workflowApprovalChannelRegistered = false;
     const stdoutErrorHandler = (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE' && !pipeBroken) {
         pipeBroken = true;
@@ -644,6 +655,20 @@ export async function runNonInteractive(
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
+
+      if (options.controlService) {
+        config
+          .getWorkflowRunRegistry()
+          .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
+            options.controlService!.permission.handleWorkflowApproval(
+              entry.runId,
+              approval,
+              rawArgs,
+              signal,
+            ),
+          );
+        workflowApprovalChannelRegistered = true;
+      }
 
       config.onTeamManagerChange(onTeamManagerChangeHandler);
 
@@ -890,7 +915,74 @@ export async function runNonInteractive(
         initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
-      const initialParts = normalizePartList(initialPartList);
+      let initialParts = normalizePartList(initialPartList);
+      let fullTurnModelOverride: string | undefined;
+      let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
+      const emitVisionNotice = (subtype: string, notice: string) => {
+        if (outputFormat === OutputFormat.TEXT) {
+          process.stderr.write(`${notice}\n`);
+        } else {
+          adapter.emitSystemMessage(subtype, { notice });
+        }
+      };
+      if (
+        inlineModelOverride === undefined &&
+        shouldRunVisionBridge(config) &&
+        hasImageParts(initialParts)
+      ) {
+        const fullTurnModel = config.getDefaultVisionBridgeModel();
+        if (fullTurnModel?.agentCapable) {
+          const fullTurnParts = initialParts.map((part) =>
+            clampInlineMediaPart(part),
+          );
+          initialParts = fullTurnParts;
+          if (hasImageParts(fullTurnParts)) {
+            fullTurnModelOverride =
+              getFullTurnVisionModelSelector(fullTurnModel);
+            fullTurnRuntimeView = await config
+              .getBaseLlmClient()
+              .resolveForModel(fullTurnModelOverride.slice(0, -1), {
+                failClosed: true,
+              });
+            emitVisionNotice(
+              'vision_routing',
+              formatFullTurnVisionNotice(fullTurnModel),
+            );
+          }
+        } else {
+          try {
+            const bridgeResult = await runVisionBridge({
+              config,
+              parts: initialParts,
+              signal: abortController.signal,
+            });
+            if (
+              bridgeResult.status !== 'skipped' ||
+              bridgeResult.egressOccurred
+            ) {
+              emitVisionNotice(
+                'vision_bridge',
+                formatVisionBridgeNotice(bridgeResult),
+              );
+            }
+            initialParts =
+              bridgeResult.applied && bridgeResult.parts != null
+                ? normalizePartList(bridgeResult.parts)
+                : splitImageParts(initialParts).nonImageParts;
+          } catch (error) {
+            debugLogger.debug(
+              `vision bridge: failed before replacement; falling back to text-only parts error=${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            emitVisionNotice(
+              'vision_bridge_failed',
+              'Vision bridge failed; proceeding without the image(s).',
+            );
+            initialParts = splitImageParts(initialParts).nonImageParts;
+          }
+        }
+      }
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       // Register the callback early so background agents launched during the main
@@ -901,6 +993,7 @@ export async function runNonInteractive(
           displayText,
           modelText,
           sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
           sdkNotification: {
             task_id: meta.agentId,
             tool_use_id: meta.toolUseId,
@@ -946,6 +1039,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              todoWorkChainId: meta.todoWorkChainId,
               monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
@@ -976,7 +1070,8 @@ export async function runNonInteractive(
 
       let isFirstTurn = true;
       let hasUnsentToolResponse = false;
-      let modelOverride: string | undefined = inlineModelOverride;
+      let modelOverride: string | undefined =
+        inlineModelOverride ?? fullTurnModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
@@ -986,6 +1081,7 @@ export async function runNonInteractive(
       // retry-clearing or skill-tool takeover to guard against, just the
       // within-turn precedence above.
       const inlineModelOverrideActive = inlineModelOverride !== undefined;
+      const fullTurnModelOverrideActive = fullTurnModelOverride !== undefined;
       if (inlineModelOverrideActive) {
         debugLogger.debug(
           `[runNonInteractive] inline model override active for turn: ${inlineModelOverride}`,
@@ -1115,6 +1211,7 @@ export async function runNonInteractive(
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => boolean,
+        runtimeView?: RuntimeContentGeneratorView,
       ): Promise<ToolCallBatchResult> => {
         const responseByRequest = new Map<
           ToolCallRequestInfo,
@@ -1326,6 +1423,7 @@ export async function runNonInteractive(
                   statusByResponse.set(call.response, call.status);
                 }
               },
+              runtimeView,
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -1629,6 +1727,7 @@ export async function runNonInteractive(
         };
       };
 
+      let currentPromptId = prompt_id;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -1682,13 +1781,16 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
+        if (isTeammateTurn) {
+          currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+        }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
-          prompt_id,
+          currentPromptId,
           {
             type: sendType,
             modelOverride,
@@ -1777,14 +1879,21 @@ export async function runNonInteractive(
           const {
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
-          } = await processToolCallBatch(toolCallRequests, (override) => {
-            if (inlineModelOverrideActive) return false;
-            if (modelOverride?.endsWith('\0') && modelOverride !== override) {
-              return false;
-            }
-            modelOverride = override;
-            return true;
-          });
+          } = await processToolCallBatch(
+            toolCallRequests,
+            (override) => {
+              if (inlineModelOverrideActive) return false;
+              if (fullTurnModelOverrideActive && modelOverride !== override) {
+                return false;
+              }
+              if (modelOverride?.endsWith('\0') && modelOverride !== override) {
+                return false;
+              }
+              modelOverride = override;
+              return true;
+            },
+            fullTurnRuntimeView,
+          );
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -1898,7 +2007,9 @@ export async function runNonInteractive(
             if (splitIdx === 0) {
               while (
                 splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType
+                localQueue[splitIdx]!.sendMessageType === targetType &&
+                localQueue[splitIdx]!.todoWorkChainId ===
+                  localQueue[0]!.todoWorkChainId
               ) {
                 splitIdx++;
               }
@@ -1917,6 +2028,7 @@ export async function runNonInteractive(
               displayText: batch.map((i) => i.displayText).join('; '),
               modelText: batch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
+              todoWorkChainId: batch[0]?.todoWorkChainId,
             };
 
             turnCount++;
@@ -1933,6 +2045,7 @@ export async function runNonInteractive(
             ];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
+            const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
 
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
@@ -1940,7 +2053,7 @@ export async function runNonInteractive(
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
-                prompt_id,
+                itemPromptId,
                 {
                   type: itemIsFirstTurn
                     ? item.sendMessageType
@@ -1948,6 +2061,7 @@ export async function runNonInteractive(
                   modelOverride: itemModelOverride,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
+                    todoWorkChainId: item.todoWorkChainId,
                   }),
                 },
               );
@@ -2183,6 +2297,7 @@ export async function runNonInteractive(
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
+                  todoWorkChainId: job.todoWorkChainId,
                 });
                 drainLocalQueue().then(checkCronDone, onDrainError);
               });
@@ -2383,6 +2498,9 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      if (workflowApprovalChannelRegistered) {
+        config.getWorkflowRunRegistry().setApprovalRequestCallback(undefined);
+      }
       cleanupReviewWorktrees();
       unregisterReviewWorktreeCleanup();
       // Unsubscribe the leader message callback and approval

@@ -20,6 +20,7 @@ import {
   getSpecifierKind,
   toolMatchesRuleToolName,
   splitCompoundCommand,
+  splitCompoundCommandSegments,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -480,13 +481,154 @@ describe('splitCompoundCommand', () => {
   });
 
   it('handles escaped characters', async () => {
-    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&& b']);
+    // A backslash escapes exactly one character, so `\&` is a literal
+    // ampersand argument and the command really is a single one.
+    expect(splitCompoundCommand('echo a \\& b')).toEqual(['echo a \\& b']);
+  });
+
+  it('escapes only the first of two ampersands', async () => {
+    // `echo a \&& b` is not an escaped `&&`: the backslash consumes the first
+    // ampersand and the second is a live async operator. `bash -x` runs it as
+    // two commands, `echo a '&'` and `b`, so the splitter has to see two.
+    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
   it('trims whitespace around sub-commands', async () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
       'git status',
       'rm -rf /',
+    ]);
+  });
+
+  // The async operator. Everything after a bare `&` is a separate command that
+  // the shell will run, so leaving it joined let one segment's allow rule
+  // authorise whatever followed it.
+  it('splits on the async operator', async () => {
+    expect(splitCompoundCommand('git status & rm -rf /tmp/x')).toEqual([
+      'git status',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('splits on repeated async operators', async () => {
+    expect(splitCompoundCommand('a & b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('drops the empty segment after a trailing async operator', async () => {
+    expect(splitCompoundCommand('npm test &')).toEqual(['npm test']);
+  });
+
+  it('splits an unquoted URL query the way the shell does', async () => {
+    // Not a special case: an unquoted `&` in a URL really is the async
+    // operator, and bash runs `b=2` as its own command.
+    expect(splitCompoundCommand('curl http://x?a=1&b=2')).toEqual([
+      'curl http://x?a=1',
+      'b=2',
+    ]);
+  });
+
+  it.each([
+    ['build &> log.txt'],
+    ['build &>> log.txt'],
+    ['ls /nope 2>&1'],
+    ['echo err >&2'],
+    ['ls /nope > out.txt 2>& 1'],
+    // Input-descriptor duplication: the `<` branch of the backward scan.
+    ['exec 3<&4'],
+    ['cat <&3'],
+  ])('does not split %s, where & belongs to a redirection', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it.each([["echo 'x & y'"], ['echo "x & y"']])(
+    'does not split %s, where & is quoted',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual([command]);
+    },
+  );
+
+  // Over-correction guard: the longer operators must keep winning over the
+  // bare `&`, so these two pass both before and after the change.
+  it.each([
+    ['a && b', ['a', 'b']],
+    ['a |& b', ['a', 'b']],
+  ])('keeps %s splitting on the longer operator', async (command, expected) => {
+    expect(splitCompoundCommand(command)).toEqual(expected);
+  });
+
+  it('splits a mix of long and bare operators', async () => {
+    expect(splitCompoundCommand('a && b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  // The backward scan for a redirection has to respect escaping. `\>` is a
+  // literal `>` argument, so bash backgrounds the `echo` and then runs the
+  // `rm`; reading it as a redirection kept both in one segment and let the
+  // `echo`'s allow rule authorise the `rm`.
+  it.each([
+    ['echo a \\> & rm -rf /tmp/x', ['echo a \\>', 'rm -rf /tmp/x']],
+    ['echo a \\< & rm -rf /tmp/x', ['echo a \\<', 'rm -rf /tmp/x']],
+  ])('splits %s, where the redirection is escaped', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('keeps an escaped backslash before a real redirection unsplit', async () => {
+    // Two backslashes are a literal backslash, so the `>` really is a
+    // redirection and the `&` really does duplicate a descriptor.
+    expect(splitCompoundCommand('echo a \\\\>& 2')).toEqual([
+      'echo a \\\\>& 2',
+    ]);
+  });
+
+  // Inside `$(( … ))` / `(( … ))` a bare `&` is bitwise AND. Splitting there
+  // produced two fragments that match no rule, so an otherwise allowed command
+  // stopped matching its own allow rule.
+  it.each([
+    ['VAR=$(( FLAGS & MASK ))'],
+    ['(( a & b ))'],
+    ['echo $(( (x & y) + z ))'],
+  ])('does not split %s, where & is arithmetic', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it('still splits a bare & that follows an arithmetic expansion', async () => {
+    // Over-correction guard: the depth counter has to come back down.
+    expect(splitCompoundCommand('echo $(( a & b )) & rm -rf /tmp/x')).toEqual([
+      'echo $(( a & b ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // The backward scan runs off the front of the string: nothing precedes the
+  // `&`, so it cannot be part of a redirection and is the async operator.
+  it.each([['& echo hi'], ['   & echo hi']])(
+    'treats the leading & in %s as the async operator',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual(['echo hi']);
+    },
+  );
+});
+
+// ─── splitCompoundCommandSegments ────────────────────────────────────────────
+
+describe('splitCompoundCommandSegments', () => {
+  it('reports the operator that terminated each segment', async () => {
+    expect(splitCompoundCommandSegments('a & b && c | d')).toEqual([
+      { command: 'a', terminator: '&' },
+      { command: 'b', terminator: '&&' },
+      { command: 'c', terminator: '|' },
+      { command: 'd', terminator: '' },
+    ]);
+  });
+
+  it('reports an empty terminator for a single command', async () => {
+    expect(splitCompoundCommandSegments('git status')).toEqual([
+      { command: 'git status', terminator: '' },
+    ]);
+  });
+
+  it('keeps the async terminator on a trailing background command', async () => {
+    expect(splitCompoundCommandSegments('npm test &')).toEqual([
+      { command: 'npm test', terminator: '&' },
     ]);
   });
 });
@@ -754,7 +896,9 @@ describe('matchesPathPattern', () => {
     });
   });
 
-  it('preserves traversal semantics in a dangling symlink target', () => {
+  // Title names the platform assumption so a future realpath-based resolution
+  // in matchesPathPattern is seen to break it, not silently re-asserted.
+  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -773,16 +917,33 @@ describe('matchesPathPattern', () => {
         link,
       );
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
-        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${targetRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(true);
       expect(
-        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${otherRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(false);
     });
   });
 
-  it('resolves parent traversal after following a directory symlink', () => {
+  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -796,9 +957,14 @@ describe('matchesPathPattern', () => {
       fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
       const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
         matchesPathPattern(
-          '/outside/safe/**',
+          `/${targetRoot}/safe/**`,
           filePath,
           root,
           root,
@@ -807,7 +973,7 @@ describe('matchesPathPattern', () => {
       ).toBe(true);
       expect(
         matchesPathPattern(
-          '/project/safe/**',
+          `/${otherRoot}/safe/**`,
           filePath,
           root,
           root,

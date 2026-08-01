@@ -58,7 +58,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to view transcript': 'per veure la transcripció',
+  'to expand details': 'per expandir els detalls',
   'to toggle model': 'alternar model',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
@@ -253,9 +253,6 @@ export default {
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
   Transcript: 'Transcripció',
-  'to close': 'per tancar',
-  'to scroll': 'per desplaçar',
-  'Failed to render transcript.': 'Error en renderitzar la transcripció.',
   'Read {{count}} file': 'Ha llegit {{count}} fitxer',
   'Read {{count}} files': 'Ha llegit {{count}} fitxers',
   'Reading {{count}} file': 'Llegint {{count}} fitxer',

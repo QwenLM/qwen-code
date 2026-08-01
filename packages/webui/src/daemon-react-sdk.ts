@@ -387,6 +387,9 @@ export type {
   DaemonChannelPairingRequestsSnapshot,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   /** Request/result for DELETE /workspace/models. */
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,

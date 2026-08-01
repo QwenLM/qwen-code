@@ -89,7 +89,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to view transcript': 'показать транскрипт',
+  'to expand details': 'развернуть детали',
   'to toggle model': 'переключить модель',
 
   // ============================================================================
@@ -256,9 +256,6 @@ export default {
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
   Transcript: 'Транскрипт',
-  'to close': 'закрыть',
-  'to scroll': 'прокрутить',
-  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
   'Read {{count}} file': 'Прочитано файлов: {{count}}',
   'Read {{count}} files': 'Прочитано файлов: {{count}}',
   'Reading {{count}} file': 'Чтение файлов: {{count}}',
