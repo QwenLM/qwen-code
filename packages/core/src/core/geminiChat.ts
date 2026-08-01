@@ -1181,7 +1181,28 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>(?:\s|$)/i;
+const LEAKED_TOOL_CALL_TAGS = /^[}\]]\s*<\/parameter>\s*<\/function>/i;
+
+function hasLeakedToolCallTags(text: string): boolean {
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (
+      (char === '}' || char === ']') &&
+      LEAKED_TOOL_CALL_TAGS.test(text.slice(i))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 class LeadingProtocolTagLeakDetector {
   private state: 'detecting' | 'json' | 'clean' | 'leaked' = 'detecting';
@@ -1227,7 +1248,7 @@ class LeadingProtocolTagLeakDetector {
 
   finish(): string {
     if (this.state === 'json') {
-      if (LEAKED_TOOL_CALL_TAGS.test(this.buffer)) {
+      if (hasLeakedToolCallTags(this.buffer)) {
         this.state = 'leaked';
         this.buffer = '';
         return '';
@@ -1248,7 +1269,7 @@ class LeadingProtocolTagLeakDetector {
   }
 
   releaseJsonCandidate(): string {
-    return this.state === 'json' ? this.release() : '';
+    return this.state === 'json' ? this.finish() : '';
   }
 
   private release(): string {
@@ -4447,7 +4468,7 @@ export class GeminiChat {
       }
     }
 
-    if (streamError === null && protocolTagDetector.leaked) {
+    if (streamError === null && protocolTagDetector.leaked && !hasToolCall) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
         'PROTOCOL_TAG_LEAK',

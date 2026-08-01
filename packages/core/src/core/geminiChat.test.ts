@@ -9302,7 +9302,7 @@ describe('GeminiChat', async () => {
     {
       name: 'single object with trailing prose',
       leakedJson: JSON.stringify({ command: 'ls', name: 'run_shell_command' }),
-      trailingText: '\nLet me continue.',
+      trailingText: 'Let me continue.',
       finishWithContent: true,
     },
   ])(
@@ -9517,6 +9517,79 @@ describe('GeminiChat', async () => {
     },
   );
 
+  it('does not retry after a structured tool call has already been emitted', async () => {
+    const recordAssistantTurn = vi.fn();
+    const chatWithRecording = new GeminiChat(
+      mockConfig,
+      config,
+      [],
+      {
+        recordAssistantTurn,
+        recordChatCompression: vi.fn(),
+      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      uiTelemetryService,
+    );
+    const leakedText =
+      JSON.stringify([{ name: 'read_file', file_path: 'a.ts' }]) +
+      '\n</parameter>\n</function>\n';
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockResolvedValueOnce(
+        streamResponse(
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { file_path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+          stopResponse([{ text: leakedText }]),
+        ),
+      )
+      .mockResolvedValueOnce(
+        streamResponse(stopResponse([{ text: 'Unexpected retry response' }])),
+      );
+
+    const stream = await chatWithRecording.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-tool-call-before-json-protocol-leak',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(emittedParts).toEqual([
+      {
+        functionCall: {
+          id: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+      },
+    ]);
+    expect(chatWithRecording.getHistory().at(-1)?.parts).toEqual(emittedParts);
+    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual(
+      emittedParts,
+    );
+  });
+
   it('does not reject normal HTML or protocol tag names in prose', async () => {
     const response =
       '<details><summary>Title</summary></details> ' +
@@ -9548,6 +9621,83 @@ describe('GeminiChat', async () => {
       false,
     );
     expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('does not reject closing protocol tags inside a JSON string', async () => {
+    const response = JSON.stringify({
+      example: '} </parameter></function> text',
+    });
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-json-protocol-literal',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('retries leaked JSON before a structured tool call', async () => {
+    vi.useFakeTimers();
+    try {
+      const leakedText =
+        JSON.stringify([{ name: 'read_file', file_path: 'a.ts' }]) +
+        '\n</parameter>\n</function>\n';
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamResponse(
+            {
+              candidates: [{ content: { parts: [{ text: leakedText }] } }],
+            } as unknown as GenerateContentResponse,
+            stopResponse([
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ]),
+          ),
+        )
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-json-leak-before-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
+      expect(chat.getHistory().at(-1)?.parts).toEqual(emittedParts);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('retries a protocol-tagged turn even when the leaked attempt also contains a tool call', async () => {
