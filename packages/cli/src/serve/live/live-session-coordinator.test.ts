@@ -91,6 +91,7 @@ function makeHarness(
     transcriptTail?: RealtimeTranscriptEntry[];
     transcriptPersistenceError?: Error;
     pendingInteractions?: BridgePendingInteraction[];
+    gracefulStopDrainMs?: number;
   } = {},
 ) {
   const subscribers = new Set<Subscriber>();
@@ -263,6 +264,7 @@ function makeHarness(
     ),
     discardEmptyConversationDirectory: vi.fn(async () => true),
     listRecentSessions: vi.fn(async () => options.recent ?? []),
+    gracefulStopDrainMs: options.gracefulStopDrainMs,
   });
 
   const finishTurn = async (
@@ -349,6 +351,7 @@ function makeHarness(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   readPersistedParentSessionId.mockReset();
 });
 
@@ -407,14 +410,24 @@ describe('LiveSessionCoordinator', () => {
       mode: 'new',
     });
 
+    harness.callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-first',
+    });
     harness.callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'response-first',
+      inputItemId: 'input-first',
       authority: 'direct',
+    });
+    harness.callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-second',
     });
     harness.callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'response-second',
+      inputItemId: 'input-second',
       authority: 'direct',
     });
     const stateUpdatesBeforeStaleCompletion =
@@ -423,6 +436,7 @@ describe('LiveSessionCoordinator', () => {
     harness.callbacks.onResponseDone?.({
       callEpoch: 1,
       responseId: 'response-first',
+      inputItemId: 'input-first',
       status: 'cancelled',
     });
 
@@ -439,9 +453,13 @@ describe('LiveSessionCoordinator', () => {
     harness.callbacks.onResponseDone?.({
       callEpoch: 1,
       responseId: 'response-second',
+      inputItemId: 'input-second',
       status: 'completed',
     });
     expect(harness.host.setCallState).toHaveBeenLastCalledWith(1, 'listening');
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toBeUndefined();
   });
 
   it('uses the attached Live session and sends the exact delegation envelope', async () => {
@@ -870,6 +888,103 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.pendingTurns).toHaveLength(0);
     expect(harness.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
+  });
+
+  it('waits for the provider final before closing a just-finished utterance', async () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onSpeechStarted?.({
+      callEpoch: 1,
+      itemId: 'input-final',
+    });
+
+    let stopped = false;
+    const stop = harness.coordinator
+      .stop({ epoch: 1, callId: 'call-1' })
+      .then((result) => {
+        stopped = true;
+        return result;
+      });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    expect(harness.realtime.commitInputAudio).toHaveBeenCalledOnce();
+    expect(harness.realtime.close).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(stopped).toBe(false);
+    expect(harness.realtime.close).not.toHaveBeenCalled();
+
+    harness.callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-final',
+    });
+    harness.callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'input-final',
+      text: '最后一个问题',
+    });
+    harness.callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'response-final',
+      inputItemId: 'input-final',
+      authority: 'direct',
+    });
+    harness.callbacks.onDirectTranscript?.({
+      callEpoch: 1,
+      entries: [
+        { role: 'user', text: '最后一个问题' },
+        { role: 'assistant', text: '最后一个回答' },
+      ],
+    });
+    harness.callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'response-final',
+      inputItemId: 'input-final',
+      status: 'completed',
+    });
+
+    await expect(stop).resolves.toBeUndefined();
+    expect(harness.bridge.appendSessionLiveTranscript).toHaveBeenCalledWith(
+      'live-new',
+      [
+        { role: 'user', text: '最后一个问题' },
+        { role: 'assistant', text: '最后一个回答' },
+      ],
+      'qwen3.5-omni-plus-realtime',
+    );
+    expect(harness.realtime.close).toHaveBeenCalledWith();
+  });
+
+  it('reports a bounded stop failure when the provider final never arrives', async () => {
+    const harness = makeHarness({ gracefulStopDrainMs: 5 });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onSpeechStarted?.({
+      callEpoch: 1,
+      itemId: 'input-final',
+    });
+    harness.callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-final',
+    });
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toEqual({
+      error:
+        'Live Voice could not confirm the final spoken input before the stop deadline.',
+    });
+    expect(harness.realtime.close).toHaveBeenCalledWith({
+      discardPendingInput: true,
+    });
   });
 
   it('stops immediately while backend work continues and persists the final realtime tail', async () => {

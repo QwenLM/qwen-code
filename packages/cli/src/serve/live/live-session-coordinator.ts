@@ -50,6 +50,7 @@ export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
 const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const SESSION_SCAN_SIZE = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
 
@@ -150,6 +151,7 @@ export interface LiveSessionCoordinatorOptions {
   ) => Promise<readonly SessionListItem[]>;
   interruptTaskWaits?: (callerSessionId: string) => void;
   coordinatorTurnTimeoutMs?: number;
+  gracefulStopDrainMs?: number;
 }
 
 interface LiveCallContext {
@@ -194,6 +196,9 @@ interface LiveCallContext {
   finishStop?: (outcome?: { error: string }) => void;
   diagnosticInputCapture?: LiveAudioCapture;
   transcriptPersistence: Promise<void>;
+  pendingCommittedInputItemIds: Set<string>;
+  unattributedCommittedInputCount: number;
+  stopDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface DelegateAdmission {
@@ -427,6 +432,7 @@ function toolPermissionEvent(
 export class LiveSessionCoordinator {
   private readonly openRealtime: typeof openQwenRealtimeSession;
   private readonly turnTimeoutMs: number;
+  private readonly gracefulStopDrainMs: number;
   private readonly inFlightTurnAborts = new Set<AbortController>();
   private active?: LiveCallContext;
 
@@ -434,6 +440,10 @@ export class LiveSessionCoordinator {
     this.openRealtime = options.openRealtimeSession ?? openQwenRealtimeSession;
     this.turnTimeoutMs =
       options.coordinatorTurnTimeoutMs ?? COORDINATOR_TURN_TIMEOUT_MS;
+    this.gracefulStopDrainMs = Math.max(
+      1,
+      options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS,
+    );
   }
 
   async start(call: {
@@ -464,6 +474,8 @@ export class LiveSessionCoordinator {
       outputCaption: '',
       stopping: false,
       transcriptPersistence: Promise.resolve(),
+      pendingCommittedInputItemIds: new Set(),
+      unattributedCommittedInputCount: 0,
     };
     this.active = context;
     this.options.host.setProviderReachability({ state: 'checking' });
@@ -647,12 +659,14 @@ export class LiveSessionCoordinator {
           this.options.host.setCallState(context.epoch, 'thinking');
         }
       },
-      onInputCommitted: () => {
+      onInputCommitted: ({ itemId }) => {
         if (!this.isCurrentSocket(context, generation)) return;
         diagnostic('input_committed');
         context.speechInProgress = false;
         context.inputCommitPending = false;
         context.inputAwaitingResponse = true;
+        if (itemId) context.pendingCommittedInputItemIds.add(itemId);
+        else context.unattributedCommittedInputCount += 1;
       },
       onInputTranscriptDelta: ({ itemId, text }) => {
         if (this.isCurrentSocket(context, generation)) {
@@ -719,19 +733,31 @@ export class LiveSessionCoordinator {
               admission.state = 'admitted';
               context.admittedInputItemIds.add(trackedInputItemId);
               admission.settle(true);
+              this.maybeFinishGracefulStop(context);
             },
           )
             .then((persisted) => {
-              if (!persisted) admission.settle(false);
-              else context.completedInputTranscripts.delete(trackedInputItemId);
+              if (!persisted) {
+                admission.state = 'cancelled';
+                admission.settle(false);
+              } else {
+                context.completedInputTranscripts.delete(trackedInputItemId);
+              }
             })
-            .catch(() => admission.settle(false))
+            .catch(() => {
+              admission.state = 'cancelled';
+              admission.settle(false);
+            })
             .finally(() => {
+              if (admission.state === 'dispatching') {
+                admission.state = 'cancelled';
+              }
               admission.settle(admission.state === 'admitted');
               context.delegatesInFlight = Math.max(
                 0,
                 context.delegatesInFlight - 1,
               );
+              this.maybeFinishGracefulStop(context);
             });
           return;
         }
@@ -749,25 +775,34 @@ export class LiveSessionCoordinator {
           admission.state = 'admitted';
           context.admittedInputItemIds.add(trackedInputItemId);
           admission.settle(true);
+          this.maybeFinishGracefulStop(context);
         })
           .then((persisted) => {
             if (!persisted) {
+              admission.state = 'cancelled';
               admission.settle(false);
               return;
             }
             context.completedInputTranscripts.delete(trackedInputItemId);
           })
-          .catch(() => admission.settle(false))
+          .catch(() => {
+            admission.state = 'cancelled';
+            admission.settle(false);
+          })
           .finally(() => {
             handoff.finishTurn();
             if (context.activeHandoff === handoff) {
               context.activeHandoff = undefined;
+            }
+            if (admission.state === 'dispatching') {
+              admission.state = 'cancelled';
             }
             admission.settle(admission.state === 'admitted');
             context.delegatesInFlight = Math.max(
               0,
               context.delegatesInFlight - 1,
             );
+            this.maybeFinishGracefulStop(context);
           });
       },
       onDirectTranscript: ({ entries }) => {
@@ -856,10 +891,12 @@ export class LiveSessionCoordinator {
           undefined,
         );
       },
-      onResponseDone: ({ responseId, status }) => {
+      onResponseDone: ({ responseId, inputItemId, status }) => {
         if (!this.isCurrentSocket(context, generation)) return;
         if (diagnosticResponseId !== responseId) {
           diagnostic('response_done_stale', { responseId, status });
+          this.resolveCommittedInput(context, inputItemId);
+          this.maybeFinishGracefulStop(context);
           return;
         }
         diagnostic('response_done', {
@@ -879,10 +916,12 @@ export class LiveSessionCoordinator {
         }
         context.responseInFlight = false;
         context.inputAwaitingResponse = false;
+        this.resolveCommittedInput(context, inputItemId);
         if (!context.stopping && context.delegatesInFlight === 0) {
           this.options.host.setStatusText(context.epoch);
           this.options.host.setCallState(context.epoch, 'listening');
         }
+        this.maybeFinishGracefulStop(context);
       },
       onBargeIn: ({ responseId }) => {
         if (!this.isInteractiveSocket(context, generation)) return;
@@ -951,6 +990,8 @@ export class LiveSessionCoordinator {
     context.completedInputTranscripts.clear();
     context.admittedInputItemIds.clear();
     context.delegateAdmissions.clear();
+    context.pendingCommittedInputItemIds.clear();
+    context.unattributedCommittedInputCount = 0;
   }
 
   private handleRealtimeClose(
@@ -987,32 +1028,73 @@ export class LiveSessionCoordinator {
     closeLiveAudioCapture(context.diagnosticInputCapture, 'call_stopping');
     context.diagnosticInputCapture = undefined;
     this.options.host.clearOutput(context.epoch);
-
-    const realtime = context.realtime;
-    const transcriptTail = realtime?.takeTranscriptTail() ?? [];
-    this.invalidateRealtime(context);
-    realtime?.close({ discardPendingInput: true });
-
-    const pendingAdmissions = [...context.delegateAdmissions.values()]
-      .filter((admission) => admission.state === 'dispatching')
-      .map((admission) => admission.promise);
-    void Promise.all(pendingAdmissions)
-      .then(async (admissions) => {
-        if (admissions.some((admitted) => !admitted)) {
-          throw new Error('A realtime handoff was not admitted.');
-        }
-        await context.transcriptPersistence;
-        if (transcriptTail.length > 0) {
-          await this.persistRealtimeTranscript(context, transcriptTail);
-        }
-        await this.finishGracefulStop(context);
-      })
-      .catch(async () => {
-        await this.finishGracefulStop(context, {
-          error: 'Live Voice could not persist the final transcript.',
-        });
-      });
+    if (!this.hasPendingStopTail(context)) {
+      void this.finishGracefulStop(context);
+      return context.stopCompletion;
+    }
+    context.stopDrainTimer = setTimeout(() => {
+      void this.finishGracefulStop(
+        context,
+        {
+          error:
+            'Live Voice could not confirm the final spoken input before the stop deadline.',
+        },
+        true,
+      );
+    }, this.gracefulStopDrainMs);
+    context.stopDrainTimer.unref?.();
+    if (context.speechInProgress || context.inputCommitPending) {
+      let committed = false;
+      try {
+        committed = context.realtime?.commitInputAudio() ?? false;
+      } catch {
+        committed = false;
+      }
+      if (!committed) {
+        void this.finishGracefulStop(
+          context,
+          {
+            error: 'Live Voice could not commit the final spoken input.',
+          },
+          true,
+        );
+      }
+    }
     return context.stopCompletion;
+  }
+
+  private hasPendingStopTail(context: LiveCallContext): boolean {
+    return (
+      context.speechInProgress ||
+      context.inputCommitPending ||
+      context.pendingCommittedInputItemIds.size > 0 ||
+      context.unattributedCommittedInputCount > 0 ||
+      [...context.delegateAdmissions.values()].some(
+        (admission) => admission.state === 'dispatching',
+      )
+    );
+  }
+
+  private resolveCommittedInput(
+    context: LiveCallContext,
+    itemId: string | undefined,
+  ): void {
+    if (itemId) context.pendingCommittedInputItemIds.delete(itemId);
+    else if (context.unattributedCommittedInputCount > 0) {
+      context.unattributedCommittedInputCount -= 1;
+    }
+  }
+
+  private maybeFinishGracefulStop(context: LiveCallContext): void {
+    if (
+      !this.isActive(context) ||
+      !context.stopping ||
+      !context.finishStop ||
+      this.hasPendingStopTail(context)
+    ) {
+      return;
+    }
+    void this.finishGracefulStop(context);
   }
 
   private queueRealtimeTranscript(
@@ -1055,10 +1137,31 @@ export class LiveSessionCoordinator {
   private async finishGracefulStop(
     context: LiveCallContext,
     outcome?: { error: string },
+    discardPendingInput = false,
   ): Promise<void> {
-    if (!this.isActive(context)) return;
+    if (!this.isActive(context) || !context.finishStop) return;
     const finish = context.finishStop;
     context.finishStop = undefined;
+    if (context.stopDrainTimer) {
+      clearTimeout(context.stopDrainTimer);
+      context.stopDrainTimer = undefined;
+    }
+    const realtime = context.realtime;
+    const transcriptTail = realtime?.takeTranscriptTail() ?? [];
+    try {
+      await context.transcriptPersistence;
+      if (transcriptTail.length > 0) {
+        await this.persistRealtimeTranscript(context, transcriptTail);
+      }
+    } catch {
+      outcome ??= {
+        error: 'Live Voice could not persist the final transcript.',
+      };
+    }
+    if (discardPendingInput) {
+      this.invalidateRealtime(context);
+      realtime?.close({ discardPendingInput: true });
+    }
     await this.closeContext(context);
     finish?.(outcome);
   }
@@ -1070,7 +1173,7 @@ export class LiveSessionCoordinator {
   ): void {
     if (!this.isActive(context)) return;
     if (context.stopping) {
-      void this.finishGracefulStop(context);
+      void this.finishGracefulStop(context, { error: message }, true);
     } else {
       context.stopping = true;
       this.options.host.failCall(context.epoch, message);
