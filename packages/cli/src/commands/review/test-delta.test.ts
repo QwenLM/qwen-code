@@ -174,6 +174,31 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('judge them by the diff as before');
   });
 
+  it('does NOT read a base that failed to RUN as "nothing fails on base"', () => {
+    // An unbuilt base tree, a missing install, a workspace the PR added: each
+    // exits non-zero with zero FAIL lines. Reading that as green manufactures
+    // the strongest evidence this command emits from a base that never ran.
+    const r = runWith([cmd({ output: ' FAIL  src/a.test.ts > case' })], () =>
+      cmd({
+        exitCode: 1,
+        output:
+          'Error: Cannot find module vitest/dist/cli.js\nnpm error code 1',
+      }),
+    );
+    expect(r.netNew).toEqual([]);
+    expect(r.entries[0].shared).toEqual([]);
+    expect(r.note).toContain('did not measure the base');
+  });
+
+  it('reads an external SIGTERM kill as a timeout, like build-test does', () => {
+    // The substring form missed it: no ETIMEDOUT message, no exit code — so
+    // timedOut:false with empty output, feeding the base-green path above.
+    const r = runWith([cmd({ output: ' FAIL  src/a.test.ts > case' })], () =>
+      cmd({ timedOut: true, exitCode: null, output: '' }),
+    );
+    expect(r.netNew).toEqual([]);
+  });
+
   it('treats a timed-out base rerun as infrastructure, not as "nothing fails on base"', () => {
     const r = runWith([cmd({ output: 'FAIL src/x.test.ts' })], () =>
       cmd({ timedOut: true, exitCode: null, output: '' }),
