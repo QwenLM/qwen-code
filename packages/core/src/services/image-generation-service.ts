@@ -21,6 +21,7 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const MINIMAX_IMAGE_GENERATION_PATH = '/v1/image_generation';
 
 class ResponseSizeLimitError extends Error {}
 
@@ -76,6 +77,9 @@ export async function generateImage(
     throw new Error(
       'Image generation baseUrl must be a valid HTTPS URL without credentials, query, or fragment.',
     );
+  }
+  if (isMiniMaxImageGenerationBaseUrl(baseUrl)) {
+    return generateMiniMaxImage({ ...request, baseUrl, fetchFn });
   }
   const generationUrl = baseUrl.endsWith(
     '/services/aigc/multimodal-generation/generation',
@@ -139,6 +143,81 @@ export async function generateImage(
 
   const bytes = await downloadPng(imageUrl, fetchFn, request.signal);
   const requestId = readString(payload, 'request_id', 'requestId');
+  return {
+    bytes,
+    mimeType: 'image/png',
+    ...(requestId ? { requestId } : {}),
+  };
+}
+
+async function generateMiniMaxImage(
+  request: ImageGenerationRequest & { baseUrl: string; fetchFn: typeof fetch },
+): Promise<GeneratedImage> {
+  const generationUrl = request.baseUrl.endsWith(MINIMAX_IMAGE_GENERATION_PATH)
+    ? request.baseUrl
+    : `${request.baseUrl}${MINIMAX_IMAGE_GENERATION_PATH.slice(3)}`;
+  const body: Record<string, unknown> = {
+    model: request.model,
+    prompt: request.prompt,
+    n: 1,
+    prompt_optimizer: true,
+    response_format: 'url',
+  };
+  const dimensions = parseImageSize(request.size);
+  if (dimensions) {
+    body['width'] = dimensions.width;
+    body['height'] = dimensions.height;
+  }
+
+  let response: Response;
+  try {
+    response = await request.fetchFn(generationUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${request.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      redirect: 'error',
+      signal: combineWithTimeout(request.signal, GENERATION_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new Error(
+      `Image generation request failed: ${getErrorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (!response.ok) {
+    let payload: unknown = {};
+    try {
+      payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+    } catch {
+      // non-JSON error body — formatImageGenerationError handles missing fields
+    }
+    throw new Error(formatImageGenerationError(response.status, payload));
+  }
+  const payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+  const image = findMiniMaxGeneratedImage(payload);
+  if (!image) {
+    throw new Error('Image generation response did not contain an image URL.');
+  }
+
+  const requestId =
+    readString(payload, 'request_id', 'requestId') ??
+    readString(
+      isRecord(payload) ? payload['base_resp'] : undefined,
+      'request_id',
+    );
+  if (image.kind === 'base64') {
+    return {
+      bytes: decodePngBase64Image(image.value),
+      mimeType: 'image/png',
+      ...(requestId ? { requestId } : {}),
+    };
+  }
+
+  const bytes = await downloadPng(image.value, request.fetchFn, request.signal);
   return {
     bytes,
     mimeType: 'image/png',
@@ -239,6 +318,70 @@ function findGeneratedImageUrl(payload: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function isMiniMaxImageGenerationBaseUrl(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+  return (
+    (parsed.hostname === 'api.minimax.io' ||
+      parsed.hostname === 'api.minimaxi.com') &&
+    (normalizedPath === '/v1' ||
+      normalizedPath === MINIMAX_IMAGE_GENERATION_PATH)
+  );
+}
+
+function parseImageSize(
+  value: string | undefined,
+): { width: number; height: number } | undefined {
+  const match = value?.trim().match(/^(\d+)\s*[*xX]\s*(\d+)$/);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
+    return undefined;
+  }
+  return { width, height };
+}
+
+function findMiniMaxGeneratedImage(
+  payload: unknown,
+): { kind: 'url' | 'base64'; value: string } | undefined {
+  if (!isRecord(payload)) return undefined;
+  const data = payload['data'];
+  if (!isRecord(data)) return undefined;
+  const imageUrls = data['image_urls'];
+  if (!Array.isArray(imageUrls)) return undefined;
+
+  for (const candidate of imageUrls) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue;
+    const value = candidate.trim();
+    if (/^https:\/\//i.test(value)) {
+      return { kind: 'url', value };
+    }
+    return { kind: 'base64', value };
+  }
+  return undefined;
+}
+
+function decodePngBase64Image(value: string): Buffer {
+  const match = value.match(/^data:image\/png;base64,(.+)$/i);
+  const base64 = (match?.[1] ?? value).trim();
+  const bytes = Buffer.from(base64, 'base64');
+  if (
+    bytes.length < PNG_SIGNATURE.length ||
+    !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+  ) {
+    throw new Error(
+      'Image generation response did not contain a valid PNG image.',
+    );
+  }
+  return bytes;
 }
 
 async function downloadPng(
