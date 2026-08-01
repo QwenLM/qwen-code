@@ -298,6 +298,62 @@ describe('modelCommand', () => {
     });
   });
 
+  it('persists the auth type for --default with an explicit auth type', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: `/model --default gpt-4(${AuthType.USE_OPENAI})`,
+        name: 'model',
+        args: `--default gpt-4(${AuthType.USE_OPENAI})`,
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      `--default gpt-4(${AuthType.USE_OPENAI})`,
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'gpt-4',
+      undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'gpt-4',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.baseUrl',
+      '',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Model: gpt-4 (default)',
+    });
+  });
+
   it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
