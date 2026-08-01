@@ -1472,6 +1472,7 @@ describe('AnthropicContentGenerator', () => {
         config: {
           temperature: 0.1,
           maxOutputTokens: 200,
+          thinkingConfig: { thinkingBudget: 199 },
           topP: 0.5,
           topK: 5,
           abortSignal: abortController.signal,
@@ -1503,7 +1504,7 @@ describe('AnthropicContentGenerator', () => {
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
-          thinking: { type: 'enabled', budget_tokens: 1000 },
+          thinking: { type: 'enabled', budget_tokens: 199 },
           output_config: { effort: 'high' },
         }),
       );

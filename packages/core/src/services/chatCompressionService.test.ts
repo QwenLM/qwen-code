@@ -2251,13 +2251,19 @@ describe('ChatCompressionService.compress cache sharing', () => {
       systemInstruction?: string;
       config?: {
         tools?: unknown;
-        thinkingConfig?: { includeThoughts?: boolean };
+        thinkingConfig?: {
+          includeThoughts?: boolean;
+          thinkingBudget?: number;
+        };
         maxOutputTokens?: number;
       };
     };
     expect(request.systemInstruction).toBe(mainSystemInstruction);
     expect(request.config?.tools).toBe(tools);
     expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
+    expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
+      COMPACT_MAX_OUTPUT_TOKENS - 1,
+    );
     expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expect(request.contents.slice(0, -1)).toEqual(history);
     expect(request.contents).toHaveLength(43);

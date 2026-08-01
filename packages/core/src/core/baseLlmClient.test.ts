@@ -622,6 +622,7 @@ describe('BaseLlmClient', () => {
       mockGenerateContentStream.mockImplementation(async () =>
         mockTextStream(['  Hello', ', ', 'world  '], usage),
       );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
       const result = await client.generateText({
         contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
@@ -648,6 +649,7 @@ describe('BaseLlmClient', () => {
       // Deltas are concatenated, then trimmed once at the end.
       expect(result.text).toBe('Hello, world');
       expect(result.usage).toEqual(usage);
+      expect(result.hadToolCall).toBe(false);
     });
 
     it('forwards tool declarations and reports function calls without executing them', async () => {

@@ -19,7 +19,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { resolveModelId } from '../utils/modelId.js';
-import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
+import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/index.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
@@ -324,7 +324,7 @@ function supportsCompressionCacheSharing(config: Config): boolean {
   return (
     (provider.authType === AuthType.QWEN_OAUTH ||
       provider.authType === AuthType.USE_OPENAI) &&
-    DashScopeOpenAICompatibleProvider.isDashScopeProvider(provider)
+    supportsOpenAIPrefixCaching(provider)
   );
 }
 
@@ -672,6 +672,18 @@ export class ChatCompressionService {
           systemInstruction: mainSystemInstruction,
           config: {
             ...generationConfig,
+            ...(config.getContentGeneratorConfig().authType ===
+            AuthType.USE_ANTHROPIC
+              ? {
+                  thinkingConfig: {
+                    ...generationConfig.thinkingConfig,
+                    // Manual Anthropic thinking requires budget_tokens to be
+                    // strictly below max_tokens. Preserve thinking for cache
+                    // compatibility while keeping this bounded request valid.
+                    thinkingBudget: COMPACT_MAX_OUTPUT_TOKENS - 1,
+                  },
+                }
+              : {}),
             maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
           },
           abortSignal,
@@ -983,6 +995,8 @@ export class ChatCompressionService {
         tokens_after: newTokenCount,
         compression_input_token_count: compressionInputTokenCount,
         compression_output_token_count: compressionOutputTokenCount,
+        cache_sharing_attempted: canShareCache,
+        cache_sharing_used: usedCacheSharing,
       }),
     );
 
