@@ -1421,6 +1421,33 @@ function mergeConsecutiveAssistantMessages(
 }
 
 /**
+ * Builds a first-wins predicate for deduplicating tool_result blocks by
+ * tool_use_id. Anthropic rejects a message with more than one tool_result
+ * for the same tool_use_id ("each `tool_use` block must have a single
+ * result" -- HTTP 400); a duplicate can happen when a tool call's result is
+ * recorded twice in history (a retried conversion pass, or a history source
+ * that double-appends a function response). In the cases observed so far
+ * the duplicate blocks are byte-identical, so first-wins vs. last-wins is
+ * indistinguishable in practice -- first-wins is chosen only because it
+ * requires no lookahead. id-less blocks always pass through unfiltered,
+ * preserving prior behavior for blocks Anthropic doesn't validate this way.
+ *
+ * Two independent call sites need this: `cleanOrphanedToolCalls` (the
+ * common case, a duplicate within one message) and
+ * `mergeConsecutiveUserMessages` (a duplicate that only becomes
+ * co-located after two originally-separate messages are combined).
+ */
+function makeToolResultDeduper(): (id: string | undefined) => boolean {
+  const seen = new Set<string>();
+  return (id) => {
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  };
+}
+
+/**
  * Remove tool_use blocks that have no matching tool_result in the
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
@@ -1538,6 +1565,8 @@ function cleanOrphanedToolCalls(
     }
 
     let toolUseRemoved = false;
+    const keepToolResult = makeToolResultDeduper();
+
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
@@ -1548,7 +1577,9 @@ function cleanOrphanedToolCalls(
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        return !id || validToolResultBlocks.has(b as object);
+        if (!id) return true;
+        if (!validToolResultBlocks.has(b as object)) return false;
+        return keepToolResult(id);
       }
       return true;
     });
@@ -1681,10 +1712,20 @@ function mergeConsecutiveUserMessages(
         ...(lastMessage.content as AnthropicContentBlockParam[]),
         ...(message.content as AnthropicContentBlockParam[]),
       ];
+      // Two originally-separate user messages can each carry a valid
+      // tool_result for the same tool_use_id (cleanOrphanedToolCalls only
+      // dedupes within a single message, before this merge combines
+      // several into one). Re-apply the same first-wins dedup here so a
+      // cross-message duplicate can't survive the merge and reach the
+      // wire as two tool_result blocks for one tool_use_id.
+      const keepToolResult = makeToolResultDeduper();
+      const toolResults = combined.filter((b) => {
+        if ((b as { type?: string }).type !== 'tool_result') return false;
+        const id = (b as { tool_use_id?: string }).tool_use_id;
+        return keepToolResult(id);
+      });
       lastMessage.content = [
-        ...combined.filter(
-          (b) => (b as { type?: string }).type === 'tool_result',
-        ),
+        ...toolResults,
         ...combined.filter(
           (b) => (b as { type?: string }).type !== 'tool_result',
         ),
