@@ -56,6 +56,30 @@ function daemonDown(): Partial<SpawnSyncReturns<string>> {
 }
 
 /**
+ * A runtime that exits non-zero but prints nothing — a wrapper that swallows
+ * output, or a silent permission failure. The empty output is the point: it is
+ * what makes the `?? synthesized message` fallback in `probeSandboxCommand`
+ * load-bearing. Without that fallback the probe would return `undefined` here
+ * and the broken runtime would be declared usable.
+ */
+function brokenSilently(): Partial<SpawnSyncReturns<string>> {
+  return { status: 1, stdout: '', stderr: '' };
+}
+
+/**
+ * A wedged daemon killed at the timeout: `spawnSync` reports an `error` and a
+ * null status. This is the path `SANDBOX_PROBE_TIMEOUT_MS` exists for.
+ */
+function timedOut(): Partial<SpawnSyncReturns<string>> {
+  return {
+    error: new Error('spawnSync docker ETIMEDOUT'),
+    status: null,
+    stdout: '',
+    stderr: '',
+  };
+}
+
+/**
  * Route probe results per command so a test can mix healthy and broken.
  *
  * The stub validates argv and the timeout, not just the command name. Both are
@@ -111,6 +135,19 @@ describe('loadSandboxConfig sandbox command selection', () => {
     );
   });
 
+  it('treats a non-zero exit with no output as broken and falls through', async () => {
+    // Pins the `?? synthesized message` fallback: with empty output the probe
+    // must still report a failure so selection moves on. Drop the fallback and
+    // probeSandboxCommand returns undefined here, docker is called usable, and
+    // the original bug returns with every selection assertion still green.
+    installed('docker', 'podman');
+    probes({ docker: brokenSilently(), podman: healthy() });
+
+    const config = await loadSandboxConfig({}, { sandbox: true });
+
+    expect(config?.command).toBe('podman');
+  });
+
   it('still prefers docker when it is usable', async () => {
     installed('docker', 'podman');
     probes({ docker: healthy(), podman: healthy() });
@@ -127,6 +164,17 @@ describe('loadSandboxConfig sandbox command selection', () => {
     await expect(loadSandboxConfig({}, { sandbox: true })).rejects.toThrow(
       /docker.*cannot run.*Cannot connect to the Docker daemon/s,
     );
+  });
+
+  it('surfaces the timeout error when a probe is killed at the cap', async () => {
+    // Pins the `result.error` branch — the wedged-daemon path the timeout
+    // exists for. Delete that branch and the throw degrades from the ETIMEDOUT
+    // text to "exited with null" with the suite still green.
+    process.env['QWEN_SANDBOX'] = 'docker';
+    installed('docker');
+    probes({ docker: timedOut() });
+
+    await expect(loadSandboxConfig({}, {})).rejects.toThrow(/ETIMEDOUT/);
   });
 
   it('does not blame QWEN_SANDBOX when --sandbox enabled the auto-detect path', async () => {
