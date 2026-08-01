@@ -9,8 +9,7 @@ export type OverlayRecoveryScheduler = (
   delayMs: number,
 ) => () => void;
 
-const OVERLAY_RECOVERY_DELAY_MS = 250;
-const MAX_OVERLAY_RECOVERY_ATTEMPTS = 3;
+const OVERLAY_RECOVERY_DELAY_MS = 500;
 
 const scheduleOverlayRecovery: OverlayRecoveryScheduler = (
   callback,
@@ -29,7 +28,6 @@ export function isRecoverableOverlayLoadFailure(
 }
 
 export class OverlayRecoveryController {
-  private attempts = 0;
   private cancelRecovery: (() => void) | undefined;
   private stopped = false;
 
@@ -42,13 +40,7 @@ export class OverlayRecoveryController {
   handleFailure(reason: OverlayFailureReason): void {
     if (this.stopped) return;
     this.onFailure(reason);
-    if (
-      this.cancelRecovery ||
-      this.attempts >= MAX_OVERLAY_RECOVERY_ATTEMPTS
-    ) {
-      return;
-    }
-    this.attempts += 1;
+    if (this.cancelRecovery) return;
     this.cancelRecovery = this.scheduler(() => {
       this.cancelRecovery = undefined;
       if (!this.stopped) this.onRecover();

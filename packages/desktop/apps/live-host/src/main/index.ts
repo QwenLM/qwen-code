@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   app,
@@ -11,7 +13,8 @@ import {
   systemPreferences,
   Tray,
 } from 'electron';
-import { CuaReadinessMonitor } from './cua-readiness.ts';
+import { AppshotReadinessMonitor } from './appshot-readiness.ts';
+import { AppshotCaptureService } from './appshot-capture.ts';
 import {
   LiveDaemonConnection,
   type ConnectionSnapshot,
@@ -39,7 +42,9 @@ import {
 import {
   canToggleLive,
   isActiveLiveCall,
+  projectLiveStatusForCapture,
   shouldCaptureLiveAudio,
+  shouldStopLiveOnToggle,
 } from './live-state-policy.ts';
 
 if (process.platform !== 'darwin') {
@@ -59,17 +64,20 @@ let overlayReady = false;
 let rendererAudioEventsEnabled = false;
 let tray: Tray | undefined;
 let daemon: LiveDaemonConnection;
-let cuaMonitor: CuaReadinessMonitor;
+let appshotReadiness: AppshotReadinessMonitor;
 let shortcut: LiveGlobalShortcut;
 let overlayRecovery: OverlayRecoveryController;
+let appshotCapture: AppshotCaptureService;
 let quitting = false;
 let nativeServicesActive = false;
 let audioTransportFailed = false;
-let cuaInstalled = false;
 let readinessReconnectTimer: NodeJS.Timeout | undefined;
 let microphonePermissionTimer: NodeJS.Timeout | undefined;
 let overlayHideTimer: NodeJS.Timeout | undefined;
 let pointerInteractive = false;
+let captureReadyEpoch: number | undefined;
+let liveStartPending = false;
+const READINESS_RECONNECT_DEBOUNCE_MS = 2_500;
 
 const permissions: HostPermissions = {
   microphone: 'not_determined',
@@ -87,9 +95,122 @@ let live: LiveStatus = {
   v: 1,
   available: false,
   state: 'unavailable',
-  shortcut: 'Command+Q',
+  shortcut: 'Command+E',
   blocker: 'host_disconnected',
 };
+
+function writeLiveDiagnostic(
+  event: string,
+  details: Readonly<Record<string, unknown>> = {},
+): void {
+  if (process.env['QWEN_LIVE_DIAGNOSTICS'] !== '1') return;
+  process.stderr.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      source: 'live-host',
+      event,
+      ...details,
+    })}\n`,
+  );
+}
+
+interface HostAudioCapture {
+  source: 'host-output' | 'host-input';
+  epoch: number;
+  path: string;
+  stream: ReturnType<typeof createWriteStream>;
+  hash: ReturnType<typeof createHash>;
+  bytes: number;
+}
+
+let hostAudioCapture: HostAudioCapture | undefined;
+let hostInputCapture: HostAudioCapture | undefined;
+
+function openHostAudioCapture(
+  source: HostAudioCapture['source'],
+  epoch: number,
+): HostAudioCapture | undefined {
+  const directory = process.env['QWEN_LIVE_DIAGNOSTICS_DIR'];
+  if (
+    process.env['QWEN_LIVE_DIAGNOSTICS'] !== '1' ||
+    !directory?.trim()
+  ) {
+    return undefined;
+  }
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, `${source}-${Date.now()}-epoch-${epoch}.pcm`);
+    const stream = createWriteStream(path, { flags: 'wx', mode: 0o600 });
+    stream.on('error', () => undefined);
+    const capture = {
+      source,
+      epoch,
+      path,
+      stream,
+      hash: createHash('sha256'),
+      bytes: 0,
+    };
+    writeLiveDiagnostic('host_audio_capture_opened', {
+      captureSource: source,
+      path,
+      epoch,
+    });
+    return capture;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendAudioCapture(
+  capture: HostAudioCapture,
+  audio: Uint8Array,
+): void {
+  capture.bytes += audio.byteLength;
+  capture.hash.update(audio);
+  capture.stream.write(Buffer.from(audio));
+}
+
+function closeAudioCapture(
+  capture: HostAudioCapture | undefined,
+  reason: string,
+): void {
+  if (!capture) return;
+  capture.stream.end();
+  writeLiveDiagnostic('host_audio_capture_closed', {
+    captureSource: capture.source,
+    path: capture.path,
+    bytes: capture.bytes,
+    sha256: capture.hash.digest('hex'),
+    reason,
+  });
+}
+
+function appendHostAudio(audio: Uint8Array, epoch: number): void {
+  if (!hostAudioCapture) {
+    hostAudioCapture = openHostAudioCapture('host-output', epoch);
+  }
+  if (hostAudioCapture) appendAudioCapture(hostAudioCapture, audio);
+}
+
+function closeHostAudioCapture(reason: string): void {
+  const capture = hostAudioCapture;
+  hostAudioCapture = undefined;
+  closeAudioCapture(capture, reason);
+}
+
+function appendHostInputAudio(audio: Uint8Array, epoch: number): void {
+  if (hostInputCapture?.epoch !== epoch) {
+    closeAudioCapture(hostInputCapture, 'epoch_changed');
+    hostInputCapture = openHostAudioCapture('host-input', epoch);
+  }
+  if (hostInputCapture) appendAudioCapture(hostInputCapture, audio);
+}
+
+function closeHostInputCapture(reason: string): void {
+  const capture = hostInputCapture;
+  hostInputCapture = undefined;
+  closeAudioCapture(capture, reason);
+}
 
 function hostReadinessBlocker(): string | undefined {
   if (permissions.microphone !== 'granted') return 'microphone_permission';
@@ -110,8 +231,13 @@ function isHostReady(): boolean {
 
 function effectiveLiveStatus(): LiveStatus {
   const blocker = hostReadinessBlocker();
-  if (!live.available || !blocker) return live;
-  return { ...live, available: false, state: 'unavailable', blocker };
+  if (live.available && blocker) {
+    return { ...live, available: false, state: 'unavailable', blocker };
+  }
+  return projectLiveStatusForCapture(
+    live,
+    captureReadyEpoch === daemon?.getEpoch(),
+  );
 }
 
 function microphonePermission(): PermissionState {
@@ -128,7 +254,6 @@ function publicState(): HostPublicState {
     live: effectiveLiveStatus(),
     permissions: { ...permissions },
     selfChecks: { ...selfChecks },
-    cuaInstalled,
   };
 }
 
@@ -182,7 +307,7 @@ function scheduleReadinessReconnect(): void {
   readinessReconnectTimer = setTimeout(() => {
     readinessReconnectTimer = undefined;
     daemon.reconnectNow();
-  }, 250);
+  }, READINESS_RECONNECT_DEBOUNCE_MS);
   readinessReconnectTimer.unref();
 }
 
@@ -203,6 +328,7 @@ function sendAudioCommand(channel: string, value?: unknown): void {
 }
 
 function stopLocalAudio(): void {
+  captureReadyEpoch = undefined;
   sendAudioCommand('live:audio:clear');
   sendAudioCommand('live:audio:set-capture', {
     enabled: false,
@@ -212,6 +338,7 @@ function stopLocalAudio(): void {
 }
 
 function failRequiredAction(action: HostAction['action']): void {
+  liveStartPending = false;
   audioTransportFailed = true;
   selfChecks.audioInput = false;
   selfChecks.audioOutput = false;
@@ -241,11 +368,13 @@ function sendRequiredAction(action: HostAction): boolean {
 }
 
 function stopLive(): void {
+  liveStartPending = false;
   stopLocalAudio();
+  cancelOverlayHide();
+  overlay?.hide();
   sendRequiredAction({
     type: 'host.action',
     action: 'stop',
-    epoch: daemon.getEpoch(),
   });
 }
 
@@ -267,16 +396,37 @@ function failAudioAndRecheck(reason: string): void {
 
 function applyLiveStatus(status: LiveStatus): void {
   live = status;
-  if (nativeServicesActive) shortcut.replace(status.shortcut);
+  if (status.state !== 'idle') liveStartPending = false;
+  if (nativeServicesActive) {
+    const state = shortcut.replace(status.shortcut);
+    if (!state.healthy && selfChecks.globalShortcut) {
+      selfChecks.globalShortcut = false;
+      failClosedForReadinessLoss();
+      scheduleReadinessReconnect();
+    }
+  }
   const captureEnabled =
     !audioTransportFailed && shouldCaptureLiveAudio(status, isHostReady());
+  const captureEpoch = daemon.getEpoch();
+  if (!captureEnabled || captureReadyEpoch !== captureEpoch) {
+    captureReadyEpoch = undefined;
+  }
+  writeLiveDiagnostic('status_applied', {
+    epoch: daemon.getEpoch(),
+    state: status.state,
+    captureEnabled,
+    available: status.available,
+  });
   sendAudioCommand('live:audio:set-capture', {
     enabled: captureEnabled,
     muted: status.inputMuted ?? false,
-    epoch: daemon.getEpoch(),
+    epoch: captureEpoch,
   });
   sendAudioCommand('live:audio:set-output-muted', status.outputMuted ?? false);
   if (!captureEnabled || status.state === 'stopping') {
+    closeHostInputCapture(
+      status.state === 'stopping' ? 'call_stopping' : 'capture_disabled',
+    );
     sendAudioCommand('live:audio:clear');
   }
   if (captureEnabled) showOverlay();
@@ -289,23 +439,39 @@ function applyLiveStatus(status: LiveStatus): void {
 }
 
 function toggleLive(): void {
+  writeLiveDiagnostic('shortcut_toggle', {
+    epoch: daemon.getEpoch(),
+    state: live.state,
+  });
+  if (shouldStopLiveOnToggle(live, liveStartPending)) {
+    stopLive();
+    return;
+  }
   showOverlay();
   if (!canToggleLive(live, connection.phase === 'ready', isHostReady())) return;
-  sendRequiredAction({
-    type: 'host.action',
-    action: 'toggle',
-    epoch: daemon.getEpoch(),
-  });
+  if (
+    sendRequiredAction({
+      type: 'host.action',
+      action: 'toggle',
+      epoch: daemon.getEpoch(),
+    })
+  ) {
+    liveStartPending = true;
+  }
 }
 
 function newConversation(): void {
   showOverlay();
   if (connection.phase !== 'ready' || !live.available || !isHostReady()) return;
-  sendRequiredAction({
-    type: 'host.action',
-    action: 'new',
-    epoch: daemon.getEpoch(),
-  });
+  if (
+    sendRequiredAction({
+      type: 'host.action',
+      action: 'new',
+      epoch: daemon.getEpoch(),
+    })
+  ) {
+    liveStartPending = true;
+  }
 }
 
 function beginMicrophonePermissionMonitor(): void {
@@ -331,15 +497,16 @@ function activateNativeServices(): void {
   if (nativeServicesActive) return;
   nativeServicesActive = true;
   audioTransportFailed = false;
+  captureReadyEpoch = undefined;
+  liveStartPending = false;
   permissions.microphone = microphonePermission();
   permissions.accessibility = 'not_determined';
   permissions.screenRecording = 'not_determined';
-  cuaInstalled = false;
   selfChecks.audioInput = false;
   selfChecks.audioOutput = false;
   selfChecks.globalShortcut = false;
   selfChecks.appshot = false;
-  cuaMonitor.start();
+  appshotReadiness.start();
   beginMicrophonePermissionMonitor();
   sendAudioCommand(
     'live:audio:initialize',
@@ -351,17 +518,18 @@ function deactivateNativeServices(): void {
   if (!nativeServicesActive) return;
   nativeServicesActive = false;
   audioTransportFailed = false;
+  captureReadyEpoch = undefined;
+  liveStartPending = false;
   if (readinessReconnectTimer) clearTimeout(readinessReconnectTimer);
   readinessReconnectTimer = undefined;
   if (microphonePermissionTimer) clearInterval(microphonePermissionTimer);
   microphonePermissionTimer = undefined;
   shortcut.stop();
-  cuaMonitor.stop();
+  appshotReadiness.stop();
   sendAudioCommand('live:audio:deactivate');
   permissions.microphone = 'not_determined';
   permissions.accessibility = 'not_determined';
   permissions.screenRecording = 'not_determined';
-  cuaInstalled = false;
   selfChecks.audioInput = false;
   selfChecks.audioOutput = false;
   selfChecks.globalShortcut = false;
@@ -385,6 +553,11 @@ function registerIpc(): void {
   });
   ipcMain.handle('live:stop', (event) => {
     if (isTrustedSender(event)) stopLive();
+  });
+  ipcMain.handle('live:open-web-shell-permission', async (event) => {
+    if (!isTrustedSender(event) || !live.pendingPermission) return;
+    const url = daemon.getWebShellSessionUrl(live.pendingPermission);
+    if (url) await shell.openExternal(url);
   });
   ipcMain.handle('live:set-input-muted', (event, muted: unknown) => {
     if (!isTrustedSender(event) || typeof muted !== 'boolean') return;
@@ -445,7 +618,7 @@ function registerIpc(): void {
         return;
       }
       if (permission === 'accessibility' || permission === 'screenRecording') {
-        if (cuaInstalled) cuaMonitor.requestPermission(permission);
+        appshotReadiness.requestPermission(permission);
       }
     },
   );
@@ -482,12 +655,58 @@ function registerIpc(): void {
       valueView.byteOffset,
       valueView.byteLength,
     );
-    if (
-      isValidInputAudioFrame(frame) &&
-      !daemon.sendAudio(frame, record.epoch)
-    ) {
-      failAudioAndRecheck('audio_transport_rejected');
+    if (isValidInputAudioFrame(frame)) {
+      appendHostInputAudio(frame, record.epoch);
+      if (!daemon.sendAudio(frame, record.epoch)) {
+        failAudioAndRecheck('audio_transport_rejected');
+      }
     }
+  });
+  ipcMain.on('live:audio:diagnostic', (event, value: unknown) => {
+    if (
+      !isTrustedSender(event) ||
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value)
+    ) {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.event !== 'string' ||
+      record.event.length > 128 ||
+      typeof record.details !== 'object' ||
+      record.details === null ||
+      Array.isArray(record.details)
+    ) {
+      return;
+    }
+    writeLiveDiagnostic(record.event, record.details as Record<string, unknown>);
+  });
+  ipcMain.on('live:audio:capture-ready', (event, value: unknown) => {
+    if (
+      !isTrustedSender(event) ||
+      !rendererAudioEventsEnabled ||
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value)
+    ) {
+      return;
+    }
+    const epoch = (value as Record<string, unknown>).epoch;
+    if (
+      typeof epoch !== 'number' ||
+      !Number.isSafeInteger(epoch) ||
+      epoch < 0 ||
+      epoch !== daemon.getEpoch() ||
+      audioTransportFailed ||
+      !shouldCaptureLiveAudio(live, isHostReady())
+    ) {
+      return;
+    }
+    captureReadyEpoch = epoch;
+    writeLiveDiagnostic('capture_ready_acknowledged', { epoch });
+    publishState();
   });
   ipcMain.on('live:audio:self-check', (event, value: unknown) => {
     if (
@@ -532,8 +751,8 @@ function registerIpc(): void {
 
 function createOverlay(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 420,
-    height: 300,
+    width: 384,
+    height: 400,
     show: false,
     frame: false,
     transparent: true,
@@ -562,6 +781,9 @@ function createOverlay(): BrowserWindow {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event) => event.preventDefault());
   let rendererLoadHealthy = true;
+  window.webContents.on('did-start-loading', () => {
+    rendererLoadHealthy = true;
+  });
   const handleFailure = (reason: OverlayFailureReason): void => {
     if (window !== overlay || quitting) return;
     rendererLoadHealthy = false;
@@ -585,7 +807,7 @@ function createOverlay(): BrowserWindow {
     },
   );
   window.once('ready-to-show', showOverlay);
-  window.webContents.once('did-finish-load', () => {
+  window.webContents.on('did-finish-load', () => {
     if (window !== overlay || !rendererLoadHealthy) return;
     overlayRecovery.markReady();
     overlayReady = true;
@@ -602,15 +824,13 @@ function createOverlay(): BrowserWindow {
   return window;
 }
 
-function recreateOverlay(): void {
+function recoverOverlay(): void {
   if (quitting) return;
-  const previous = overlay;
-  overlayReady = false;
-  rendererAudioEventsEnabled = false;
-  pointerInteractive = false;
-  const replacement = createOverlay();
-  overlay = replacement;
-  if (previous && !previous.isDestroyed()) previous.destroy();
+  if (!overlay || overlay.isDestroyed() || overlay.webContents.isDestroyed()) {
+    overlay = createOverlay();
+    return;
+  }
+  overlay.webContents.reload();
 }
 
 function trayIconPath(): string {
@@ -679,6 +899,7 @@ app.on('before-quit', () => {
   overlayRecovery?.stop();
   deactivateNativeServices();
   daemon?.stop();
+  appshotCapture?.dispose();
 });
 
 void app.whenReady().then(() => {
@@ -688,7 +909,7 @@ void app.whenReady().then(() => {
     rendererAudioEventsEnabled = false;
     failAudioAndRecheck(reason);
     overlayReady = false;
-  }, recreateOverlay);
+  }, recoverOverlay);
   overlay = createOverlay();
   createTray();
 
@@ -700,14 +921,12 @@ void app.whenReady().then(() => {
     if (changed) scheduleReadinessReconnect();
   });
 
-  cuaMonitor = new CuaReadinessMonitor((state) => {
+  appshotReadiness = new AppshotReadinessMonitor((state) => {
     if (!nativeServicesActive) return;
     const changed =
-      cuaInstalled !== state.installed ||
       permissions.accessibility !== state.accessibility ||
       permissions.screenRecording !== state.screenRecording ||
       selfChecks.appshot !== state.appshot;
-    cuaInstalled = state.installed;
     permissions.accessibility = state.accessibility;
     permissions.screenRecording = state.screenRecording;
     selfChecks.appshot = state.appshot;
@@ -721,6 +940,7 @@ void app.whenReady().then(() => {
     publishState();
     if (changed) scheduleReadinessReconnect();
   });
+  appshotCapture = new AppshotCaptureService();
 
   daemon = new LiveDaemonConnection(app.getVersion(), {
     getReadiness: () => ({
@@ -750,15 +970,49 @@ void app.whenReady().then(() => {
     },
     onOutputAudio: (audio) => {
       if (nativeServicesActive && !live.outputMuted) {
+        appendHostAudio(audio, daemon.getEpoch());
+        writeLiveDiagnostic('output_frame_received', {
+          epoch: daemon.getEpoch(),
+          bytes: audio.byteLength,
+        });
         sendAudioCommand('live:audio:play', audio);
       }
     },
-    onClearOutput: () => sendAudioCommand('live:audio:clear'),
+    onClearOutput: () => {
+      closeHostAudioCapture('clear_output');
+      writeLiveDiagnostic('clear_output_received', {
+        epoch: daemon.getEpoch(),
+      });
+      sendAudioCommand('live:audio:clear');
+    },
+    setShortcut: (accelerator) => {
+      if (!nativeServicesActive) {
+        return {
+          success: false,
+          error: 'Qwen Live Host is not ready.',
+        };
+      }
+      const state = shortcut.replace(accelerator);
+      return {
+        success: state.healthy,
+        ...(state.error ? { error: state.error } : {}),
+      };
+    },
+    captureScreenContext: () => {
+      appshotReadiness.refresh();
+      if (!nativeServicesActive || !isHostReady()) {
+        throw new Error('Appshot permissions or Host readiness were lost.');
+      }
+      return appshotCapture.capture();
+    },
   });
 
   daemon.start();
 });
 
 app.on('activate', () => {
-  if (!quitting) showOverlay();
+  if (!quitting) {
+    appshotReadiness?.refresh();
+    showOverlay();
+  }
 });

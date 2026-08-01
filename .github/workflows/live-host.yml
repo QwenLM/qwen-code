@@ -6,7 +6,6 @@ on:
       - '.github/workflows/live-host.yml'
       - '.github/workflows/desktop-release.yml'
       - 'packages/cli/src/serve/live/**'
-      - 'packages/core/src/tools/computer-use/constants.ts'
       - 'packages/desktop/apps/live-host/**'
       - 'packages/desktop/bun.lock'
       - 'packages/desktop/package.json'
@@ -85,8 +84,10 @@ jobs:
             echo '::error::Packaged app.asar contains a removed keyboard monitor or native helper.'
             exit 1
           fi
-          if [ -d "$app/Contents/Resources/native" ] || find "$app/Contents/Resources" -type f -print | grep -Eiq 'command[-_]?monitor|commandtap'; then
-            echo '::error::Packaged resources contain a removed keyboard monitor or native helper.'
+          native_files="$(find "$app/Contents/Resources/native" -type f -print 2>/dev/null || true)"
+          expected_native="$app/Contents/Resources/native/qwen-live-appshot.node"
+          if [ "$native_files" != "$expected_native" ] || find "$app/Contents/Resources" -type f -print | grep -Eiq 'command[-_]?monitor|commandtap'; then
+            echo '::error::Packaged resources do not contain exactly the built-in Appshot module.'
             exit 1
           fi
 
@@ -95,8 +96,8 @@ jobs:
           trap 'rm -rf "$extracted_asar"; rm -f "$packaged_entitlements"' EXIT
           node ../../node_modules/@electron/asar/bin/asar.mjs extract "$app/Contents/Resources/app.asar" "$extracted_asar"
           test -d "$extracted_asar/dist"
-          if grep -RIEq 'openWebShellWindow|web-shell-security|host\.open_session|inputMonitoring|installUrl|loadURL\(' "$extracted_asar/dist"; then
-            echo '::error::Packaged app still contains removed WebShell/session-window or Input Monitoring logic.'
+          if grep -RIEq 'openWebShellWindow|web-shell-security|host\.open_session|inputMonitoring|installUrl|loadURL\(|@modelcontextprotocol|node:child_process' "$extracted_asar/dist"; then
+            echo '::error::Packaged app contains a forbidden external backend, process launcher, WebShell window, or Input Monitoring path.'
             exit 1
           fi
 
@@ -105,6 +106,13 @@ jobs:
             echo '::error::Packaged app declares an Input Monitoring usage description.'
             exit 1
           fi
+          for unused_permission in NSBluetoothAlwaysUsageDescription NSBluetoothPeripheralUsageDescription NSCameraUsageDescription; do
+            if /usr/libexec/PlistBuddy -c "Print :$unused_permission" "$info_plist" >/dev/null 2>&1; then
+              echo "::error::Packaged app declares unused permission $unused_permission."
+              exit 1
+            fi
+          done
+          /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$info_plist" >/dev/null
 
           assert_live_host_entitlements() {
             local entitlements_file="$1"

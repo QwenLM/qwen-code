@@ -967,6 +967,8 @@ export interface RunQwenServeDeps {
   liveDiscoveryStableBaseDir?: string;
   /** Test/embed override for stable Live locator ownership handoff. */
   liveDiscoveryRetryDelayMs?: number;
+  /** Test/embed override; production uses process.platform. */
+  runtimePlatform?: NodeJS.Platform;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -5189,6 +5191,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
@@ -5813,7 +5816,9 @@ async function runQwenServeImpl(
       let liveDiscoveryPublish: Promise<void> | undefined;
       let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
       let liveDiscoveryRetryTask: Promise<void> | undefined;
-      let liveDiscoveryRetryStopped = false;
+      let liveDiscoveryEnabled = false;
+      let liveDiscoveryShuttingDown = false;
+      let liveDiscoveryToggle: Promise<void> = Promise.resolve();
       let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
       const pendingLiveDiscoveryBaseDirs = new Set<string>();
       const warnedLiveDiscoveryOwners = new Set<string>();
@@ -5825,7 +5830,8 @@ async function runQwenServeImpl(
           : DEFAULT_LIVE_DISCOVERY_RETRY_MS;
       const scheduleLiveDiscoveryRetry = (): void => {
         if (
-          liveDiscoveryRetryStopped ||
+          liveDiscoveryShuttingDown ||
+          !liveDiscoveryEnabled ||
           liveDiscoveryRetryTimer ||
           liveDiscoveryRetryTask ||
           pendingLiveDiscoveryBaseDirs.size === 0 ||
@@ -5835,7 +5841,13 @@ async function runQwenServeImpl(
         }
         liveDiscoveryRetryTimer = setTimeout(() => {
           liveDiscoveryRetryTimer = undefined;
-          if (liveDiscoveryRetryStopped || !attemptPendingLiveDiscovery) return;
+          if (
+            liveDiscoveryShuttingDown ||
+            !liveDiscoveryEnabled ||
+            !attemptPendingLiveDiscovery
+          ) {
+            return;
+          }
           const retry = attemptPendingLiveDiscovery().finally(() => {
             if (liveDiscoveryRetryTask === retry) {
               liveDiscoveryRetryTask = undefined;
@@ -5846,8 +5858,7 @@ async function runQwenServeImpl(
         }, liveDiscoveryRetryDelayMs);
         liveDiscoveryRetryTimer.unref();
       };
-      const stopLiveDiscoveryRetry = (): void => {
-        liveDiscoveryRetryStopped = true;
+      const cancelLiveDiscoveryRetry = (): void => {
         if (!liveDiscoveryRetryTimer) return;
         clearTimeout(liveDiscoveryRetryTimer);
         liveDiscoveryRetryTimer = undefined;
@@ -5855,10 +5866,11 @@ async function runQwenServeImpl(
       const publishLiveDiscovery = (
         candidateApp: Application,
       ): Promise<void> => {
-        if (liveDiscoveryRetryStopped) return Promise.resolve();
+        if (liveDiscoveryShuttingDown) return Promise.resolve();
         if (!resolveAcpHttpEnabled()) return Promise.resolve();
-        if (candidateApp.locals?.['liveVoiceEnabledAtBoot'] !== true)
+        if (candidateApp.locals?.['liveVoiceEnabled'] !== true)
           return Promise.resolve();
+        liveDiscoveryEnabled = true;
         if (liveDiscoveryPublish) return liveDiscoveryPublish;
         const coordinator = candidateApp.locals?.['liveCoordinator'] as
           | { daemonInstanceNonce?: unknown }
@@ -5872,21 +5884,17 @@ async function runQwenServeImpl(
               LiveDiscoveryOwnerActiveError,
               writeLiveDiscoveryFile,
             }) => {
-              if (liveDiscoveryRetryStopped) return;
+              if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) return;
               const stableBaseDir = path.resolve(
                 deps.liveDiscoveryStableBaseDir ??
                   getStableLiveDiscoveryBaseDir(),
               );
               const runtimeBaseDir = path.resolve(liveRuntimeBaseDir);
-              const liveVoiceEnabledAtBoot =
-                candidateApp.locals?.['liveVoiceEnabledAtBoot'] === true;
               const targetBaseDirs = new Set<string>();
               if (runtimeBaseDir !== stableBaseDir) {
                 targetBaseDirs.add(runtimeBaseDir);
               }
-              if (liveVoiceEnabledAtBoot) {
-                targetBaseDirs.add(stableBaseDir);
-              }
+              targetBaseDirs.add(stableBaseDir);
               for (const baseDir of targetBaseDirs) {
                 pendingLiveDiscoveryBaseDirs.add(baseDir);
               }
@@ -5901,7 +5909,8 @@ async function runQwenServeImpl(
                 for (const runtimeBaseDir of [
                   ...pendingLiveDiscoveryBaseDirs,
                 ]) {
-                  if (liveDiscoveryRetryStopped) return;
+                  if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled)
+                    return;
                   try {
                     await writeLiveDiscoveryFile(runtimeBaseDir, record);
                     pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
@@ -5943,10 +5952,7 @@ async function runQwenServeImpl(
           });
         return liveDiscoveryPublish;
       };
-      const cleanupLiveDiscovery = async (): Promise<void> => {
-        stopLiveDiscoveryRetry();
-        await liveDiscoveryPublish;
-        await liveDiscoveryRetryTask;
+      const removeLiveDiscoveryOwners = async (): Promise<void> => {
         const owners = liveDiscoveryOwners.splice(0);
         if (owners.length === 0) return;
         let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
@@ -5971,6 +5977,38 @@ async function runQwenServeImpl(
             );
           }
         }
+      };
+      const unpublishLiveDiscovery = async (): Promise<void> => {
+        liveDiscoveryEnabled = false;
+        cancelLiveDiscoveryRetry();
+        pendingLiveDiscoveryBaseDirs.clear();
+        attemptPendingLiveDiscovery = undefined;
+        await liveDiscoveryPublish;
+        await liveDiscoveryRetryTask;
+        liveDiscoveryPublish = undefined;
+        liveDiscoveryRetryTask = undefined;
+        await removeLiveDiscoveryOwners();
+      };
+      const attachLiveDiscoveryControl = (candidateApp: Application): void => {
+        (
+          candidateApp.locals as {
+            setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+          }
+        ).setLiveDiscoveryEnabled = (enabled) => {
+          const operation = liveDiscoveryToggle.then(() =>
+            enabled
+              ? publishLiveDiscovery(candidateApp)
+              : unpublishLiveDiscovery(),
+          );
+          liveDiscoveryToggle = operation.catch(() => undefined);
+          return operation;
+        };
+      };
+      const cleanupLiveDiscovery = async (): Promise<void> => {
+        liveDiscoveryShuttingDown = true;
+        cancelLiveDiscoveryRetry();
+        await liveDiscoveryToggle;
+        await unpublishLiveDiscovery();
       };
       try {
         channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
@@ -6369,6 +6407,7 @@ async function runQwenServeImpl(
       ): Promise<void> => {
         if (runtimeStartupSettled) return;
         runtimeApp = candidateApp;
+        attachLiveDiscoveryControl(candidateApp);
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
@@ -6551,7 +6590,8 @@ async function runQwenServeImpl(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
-            stopLiveDiscoveryRetry();
+            liveDiscoveryShuttingDown = true;
+            cancelLiveDiscoveryRetry();
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
@@ -6849,6 +6889,7 @@ async function runQwenServeImpl(
       });
       const preparedRuntimeApp = runtimeApp ?? runtimeAppForCleanup;
       if (preparedRuntimeApp && bridgeRef && deps.bridge) {
+        attachLiveDiscoveryControl(preparedRuntimeApp);
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }

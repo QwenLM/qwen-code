@@ -99,6 +99,16 @@ describe('LiveVoiceButton', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
+  it('refreshes Live status when the dialog opens', () => {
+    const container = mount();
+    const trigger = container.querySelector('button');
+    if (!trigger) throw new Error('Live trigger was not rendered');
+
+    click(trigger);
+
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+  });
+
   it('shows the hard gate and refuses start while Host is missing', () => {
     const container = mount();
     const trigger = container.querySelector('button');
@@ -109,7 +119,7 @@ describe('LiveVoiceButton', () => {
     expect(buttonNamed('live.startOrResume').disabled).toBe(true);
     expect(buttonNamed('live.newConversation').disabled).toBe(true);
     click(buttonNamed('live.refresh'));
-    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+    expect(mocks.result.refresh).toHaveBeenCalledTimes(2);
     expect(mocks.result.start).not.toHaveBeenCalled();
   });
 
@@ -148,22 +158,9 @@ describe('LiveVoiceButton', () => {
       inputMuted: false,
       outputMuted: false,
       transcript: '看看当前页面',
-      coordinator: {
-        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
-        sessionId: 'coordinator-1',
-      },
-      workers: [
-        {
-          workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
-          sessionId: 'worker-1',
-        },
-      ],
+      caption: '当前页面是文档编辑器。',
+      statusText: 'Reading screen…',
     };
-    const opened: unknown[] = [];
-    const onOpen = (event: Event) => {
-      opened.push((event as CustomEvent<unknown>).detail);
-    };
-    window.addEventListener('qwen:open-session', onOpen);
     const container = mount();
     const trigger = container.querySelector('button');
     if (!trigger) throw new Error('Live trigger was not rendered');
@@ -171,27 +168,16 @@ describe('LiveVoiceButton', () => {
 
     click(buttonNamed('live.muteInput'));
     click(buttonNamed('live.muteOutput'));
-    click(buttonNamed('live.openCoordinator'));
-    click(buttonNamed('live.openWorker'));
-    click(buttonNamed('live.newConversation'));
     click(buttonNamed('live.stop'));
 
     expect(mocks.result.setMute).toHaveBeenCalledWith({ inputMuted: true });
     expect(mocks.result.setMute).toHaveBeenCalledWith({ outputMuted: true });
     expect(document.body.textContent).toContain('看看当前页面');
-    expect(opened).toEqual([
-      {
-        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
-        sessionId: 'coordinator-1',
-      },
-      {
-        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
-        sessionId: 'worker-1',
-      },
-    ]);
+    expect(document.body.textContent).toContain('当前页面是文档编辑器。');
+    expect(document.body.textContent).toContain('Reading screen…');
     expect(mocks.result.stop).toHaveBeenCalledOnce();
-    expect(mocks.result.start).toHaveBeenCalledWith('new');
+    expect(document.body.textContent).not.toContain('live.newConversation');
+    expect(mocks.result.start).not.toHaveBeenCalled();
     expect(navigator.mediaDevices?.getUserMedia).not.toHaveBeenCalled();
-    window.removeEventListener('qwen:open-session', onOpen);
   });
 });

@@ -468,76 +468,6 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
-      liveVoice: {
-        type: 'object',
-        label: 'Live Voice',
-        category: 'General',
-        requiresRestart: true,
-        default: {},
-        description: 'Realtime voice conversation settings for Qwen Live Host.',
-        showInDialog: false,
-        properties: {
-          enabled: {
-            type: 'boolean',
-            label: 'Live Voice',
-            category: 'General',
-            requiresRestart: true,
-            default: false,
-            description:
-              'Enable realtime voice conversations through the installed Qwen Live Host.',
-            showInDialog: false,
-          },
-          model: {
-            type: 'string',
-            label: 'Live Voice Model',
-            category: 'General',
-            requiresRestart: true,
-            default: 'qwen3.5-omni-plus-realtime' as string,
-            description: 'Upstream Realtime model used for Live Voice.',
-            showInDialog: false,
-          },
-          providerModel: {
-            type: 'string',
-            label: 'Live Voice Provider Model',
-            category: 'General',
-            requiresRestart: true,
-            default: 'openai:qwen3.8-max-preview' as string,
-            description:
-              'Explicit modelProviders selector whose endpoint and credential authorize Realtime requests.',
-            showInDialog: false,
-          },
-          endpoint: {
-            type: 'string',
-            label: 'Live Voice Endpoint',
-            category: 'General',
-            requiresRestart: true,
-            default:
-              'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
-            description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
-            showInDialog: false,
-          },
-          voice: {
-            type: 'string',
-            label: 'Live Voice Output Voice',
-            category: 'General',
-            requiresRestart: true,
-            default: 'Tina' as string,
-            description: 'Voice used for Realtime model audio output.',
-            showInDialog: false,
-          },
-          shortcut: {
-            type: 'string',
-            label: 'Live Voice Global Shortcut',
-            category: 'General',
-            requiresRestart: true,
-            default: 'Command+Q' as string,
-            description:
-              'Electron accelerator registered globally by Qwen Live Host.',
-            showInDialog: false,
-          },
-        },
-      },
       enableAutoUpdate: {
         type: 'boolean',
         label: 'Enable Auto Update',
@@ -3401,6 +3331,77 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      liveVoice: {
+        type: 'object',
+        label: 'Live Voice',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Live Voice',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Enable experimental realtime voice conversations on macOS WebShell.',
+            showInDialog: false,
+          },
+          apiKey: {
+            type: 'string',
+            label: 'DashScope Realtime API Key',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: '' as string,
+            description:
+              'Dedicated DashScope API key for qwen3.5-omni-plus-realtime.',
+            showInDialog: false,
+          },
+          model: {
+            type: 'string',
+            label: 'Live Voice Model',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: 'qwen3.5-omni-plus-realtime' as string,
+            description: 'Upstream Realtime model used for Live Voice.',
+            showInDialog: false,
+          },
+          endpoint: {
+            type: 'string',
+            label: 'Live Voice Endpoint',
+            category: 'Experimental',
+            requiresRestart: false,
+            default:
+              'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
+            description:
+              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+            showInDialog: false,
+          },
+          voice: {
+            type: 'string',
+            label: 'Live Voice Output Voice',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: 'Tina' as string,
+            description: 'Voice used for Realtime model audio output.',
+            showInDialog: false,
+          },
+          shortcut: {
+            type: 'string',
+            label: 'Live Voice Global Shortcut',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: 'Command+E' as string,
+            description:
+              'Electron accelerator registered globally by Qwen Live Host.',
+            showInDialog: false,
+          },
+        },
+      },
       cron: {
         type: 'boolean',
         label: 'Enable Cron/Loop Tools',

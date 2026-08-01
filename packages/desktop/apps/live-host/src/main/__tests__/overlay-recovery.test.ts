@@ -70,17 +70,17 @@ describe('Live Host overlay recovery', () => {
     assert.equal(isRecoverableOverlayLoadFailure(-105, true), true);
   });
 
-  it('bounds repeated recovery attempts across load-crash loops', () => {
+  it('recovers once for each distinct load-crash loop', () => {
     const value = fixture();
     for (let attempt = 0; attempt < 5; attempt += 1) {
       value.controller.handleFailure('preload_failed');
       value.runRecovery();
     }
-    assert.equal(value.recoveries(), 3);
+    assert.equal(value.recoveries(), 5);
 
     value.controller.markReady();
     value.controller.handleFailure('renderer_process_gone');
     value.runRecovery();
-    assert.equal(value.recoveries(), 3);
+    assert.equal(value.recoveries(), 6);
   });
 });

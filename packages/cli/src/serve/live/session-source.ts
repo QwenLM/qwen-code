@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:p1:h1:a1:';
+export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:';
 
 export interface LiveSessionCreationMetadata {
   parentSessionId?: string;
@@ -34,14 +34,25 @@ export function isCompatibleLiveSessionSource(source: {
   );
 }
 
-export async function readCompatibleLiveSessionMetadata(
+function isStandaloneConversationSessionSource(source: {
+  sourceType?: string;
+  sourceId?: string;
+}): boolean {
+  return (
+    source.sourceId === undefined &&
+    (source.sourceType === undefined || source.sourceType === 'default')
+  );
+}
+
+export async function readLoadableLiveConversationMetadata(
   sessionId: string,
   readMetadata: (sessionId: string) => Promise<LiveSessionCreationMetadata>,
 ): Promise<LiveSessionCreationMetadata | undefined> {
   const metadata = await readMetadata(sessionId);
   if (
     metadata.parentSessionId === undefined &&
-    isCompatibleLiveSessionSource(metadata)
+    (isCompatibleLiveSessionSource(metadata) ||
+      isStandaloneConversationSessionSource(metadata))
   ) {
     return metadata;
   }
@@ -54,7 +65,8 @@ export async function readCompatibleLiveSessionMetadata(
   }
   const parent = await readMetadata(metadata.parentSessionId);
   return parent.parentSessionId === undefined &&
-    isCompatibleLiveSessionSource(parent)
+    (isCompatibleLiveSessionSource(parent) ||
+      isStandaloneConversationSessionSource(parent))
     ? metadata
     : undefined;
 }

@@ -173,6 +173,7 @@ export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
 export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+export const SESSION_SOURCE_META_KEY = 'qwen.session.source';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
@@ -889,6 +890,24 @@ export interface AcpSessionBridge {
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 
   /**
+   * Installs the daemon-owned capture handler used by the dedicated Live
+   * `capture_screen_context` tool. Undefined disables the child-to-daemon
+   * route. The bridge authenticates the caller session before invoking it.
+   */
+  setLiveScreenContextCaptureHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveScreenContextCaptureHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the five Codex-parity Live task tools. */
+  setLiveTaskToolRequestHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveTaskToolRequestHandler
+      | undefined,
+  ): void;
+
+  /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
    */
@@ -1364,6 +1383,12 @@ export interface AcpSessionBridge {
     outputLanguage: string | null;
     refreshed: boolean;
   }>;
+
+  /** Apply Codex's realtime-active world-state transition to one session. */
+  setSessionLiveConversationActive(
+    sessionId: string,
+    active: boolean,
+  ): Promise<void>;
 
   /**
    * Change the approval mode of a live session and broadcast an

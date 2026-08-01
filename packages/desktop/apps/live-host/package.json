@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test src/main/__tests__/*.test.ts",
     "dist:mac": "npm run build && electron-builder --config electron-builder.yml --mac",
-    "dist:mac:no-publish": "npm run build && electron-builder --config electron-builder.yml --mac --publish never"
+    "dist:mac:no-publish": "npm run build && electron-builder --config electron-builder.yml --mac --publish never && node scripts/create-release-manifest.mjs"
   },
   "dependencies": {
     "ws": "^8.19.0"

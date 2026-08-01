@@ -1,4 +1,4 @@
-export const LIVE_PROTOCOL_VERSION = 3;
+export const LIVE_PROTOCOL_VERSION = 6;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
 export const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 export const MAX_INPUT_AUDIO_FRAME_BYTES = 64 * 1024;
@@ -44,6 +44,12 @@ export type LiveStatus = {
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
+  caption?: string;
+  statusText?: string;
+  pendingPermission?: {
+    workspaceId: string;
+    sessionId: string;
+  };
   requirements?: Partial<
     Record<
       | 'host'
@@ -84,7 +90,29 @@ export type HostAction =
 export type HostControlMessage =
   | HostHello
   | HostAction
-  | { type: 'host.pong'; pingId: string };
+  | { type: 'host.pong'; pingId: string }
+  | {
+      type: 'host.shortcut_result';
+      requestId: string;
+      shortcut: string;
+      success: boolean;
+      error?: string;
+    }
+  | {
+      type: 'host.screen_context_result';
+      requestId: string;
+      success: true;
+      appName: string;
+      windowTitle?: string;
+      accessibilityText: string;
+      screenshotPath: string;
+    }
+  | {
+      type: 'host.screen_context_result';
+      requestId: string;
+      success: false;
+      error: string;
+    };
 
 export type DaemonControlMessage =
   | {
@@ -98,6 +126,8 @@ export type DaemonControlMessage =
   | { type: 'host.state'; epoch: number; status: LiveStatus }
   | { type: 'host.ping'; pingId: string }
   | { type: 'host.clear_output'; epoch: number }
+  | { type: 'host.set_shortcut'; requestId: string; shortcut: string }
+  | { type: 'host.capture_screen_context'; requestId: string; epoch: number }
   | { type: 'host.error'; code: string; message?: string };
 
 const LIVE_STATES = new Set<LiveCallState>([
@@ -145,11 +175,14 @@ const REQUIREMENT_KEYS = [
 ] as const;
 
 export function parseLiveStatus(value: unknown): LiveStatus | undefined {
+  const shortcut = isRecord(value)
+    ? boundedString(value.shortcut, 128)
+    : undefined;
   if (
     !isRecord(value) ||
     value.v !== 1 ||
     typeof value.available !== 'boolean' ||
-    !boundedString(value.shortcut, 128)
+    shortcut === undefined
   ) {
     return undefined;
   }
@@ -164,16 +197,27 @@ export function parseLiveStatus(value: unknown): LiveStatus | undefined {
     v: 1,
     available: value.available,
     state: value.state as LiveCallState,
-    shortcut: value.shortcut as string,
+    shortcut,
   };
   const blocker = boundedString(value.blocker, 128);
   const message = boundedString(value.message, 1_024);
   const callId = boundedString(value.callId, 256);
   const transcript = boundedString(value.transcript, 8_192);
+  const caption = boundedString(value.caption, 8_192);
+  const statusText = boundedString(value.statusText, 512);
   if (blocker) status.blocker = blocker;
   if (message) status.message = message;
   if (callId) status.callId = callId;
   if (transcript) status.transcript = transcript;
+  if (caption) status.caption = caption;
+  if (statusText) status.statusText = statusText;
+  if (isRecord(value.pendingPermission)) {
+    const workspaceId = boundedString(value.pendingPermission.workspaceId, 512);
+    const sessionId = boundedString(value.pendingPermission.sessionId, 256);
+    if (workspaceId && sessionId) {
+      status.pendingPermission = { workspaceId, sessionId };
+    }
+  }
   if (typeof value.inputMuted === 'boolean')
     status.inputMuted = value.inputMuted;
   if (typeof value.outputMuted === 'boolean')
@@ -263,6 +307,27 @@ export function parseDaemonControlMessage(
   if (value.type === 'host.clear_output') {
     return Number.isSafeInteger(value.epoch) && Number(value.epoch) >= 0
       ? { type: 'host.clear_output', epoch: Number(value.epoch) }
+      : undefined;
+  }
+
+  if (value.type === 'host.set_shortcut') {
+    const requestId = boundedString(value.requestId, 128);
+    const shortcut = boundedString(value.shortcut, 128);
+    return requestId && shortcut !== undefined
+      ? { type: 'host.set_shortcut', requestId, shortcut }
+      : undefined;
+  }
+
+  if (value.type === 'host.capture_screen_context') {
+    const requestId = boundedString(value.requestId, 128);
+    return requestId &&
+      Number.isSafeInteger(value.epoch) &&
+      Number(value.epoch) >= 0
+      ? {
+          type: 'host.capture_screen_context',
+          requestId,
+          epoch: Number(value.epoch),
+        }
       : undefined;
   }
 

@@ -12,6 +12,7 @@ import type { LiveHostCoordinator } from '../live/live-host-coordinator.js';
 export interface RegisterLiveRoutesDeps {
   coordinator: LiveHostCoordinator;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
+  persistShortcut?: (shortcut: string) => Promise<void>;
 }
 
 function sendUnavailable(res: Parameters<RequestHandler>[1], error: unknown) {
@@ -77,4 +78,51 @@ export function registerLiveRoutes(
       }),
     );
   });
+
+  app.post(
+    '/live/shortcut',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const shortcut = safeBody(req)['shortcut'];
+      if (typeof shortcut !== 'string' || shortcut.trim().length > 128) {
+        res.status(400).json({
+          error:
+            '`shortcut` must be an Electron accelerator or an empty string.',
+          code: 'invalid_live_shortcut',
+        });
+        return;
+      }
+      if (!deps.persistShortcut) {
+        res.status(501).json({
+          error: 'Live shortcut persistence is unavailable.',
+          code: 'live_shortcut_persistence_unavailable',
+        });
+        return;
+      }
+      const previous = deps.coordinator.getStatus().shortcut;
+      try {
+        const status = await deps.coordinator.setShortcut(shortcut);
+        try {
+          await deps.persistShortcut(status.shortcut);
+        } catch {
+          await deps.coordinator.setShortcut(previous);
+          res.status(500).json({
+            error: 'The Live shortcut could not be saved.',
+            code: 'live_shortcut_persist_failed',
+          });
+          return;
+        }
+        res.status(200).json(status);
+      } catch (error) {
+        res.status(409).json({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'The Live shortcut could not be changed.',
+          code: 'live_shortcut_unavailable',
+          status: deps.coordinator.getStatus(),
+        });
+      }
+    },
+  );
 }

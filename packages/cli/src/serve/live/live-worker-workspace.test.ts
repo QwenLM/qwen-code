@@ -5,7 +5,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -168,18 +168,6 @@ describe('Live worker workspace isolation', () => {
     expect(dirname(fake.cwdChanges[0]!.path)).toBe(root);
     expect(dirname(fake.cwdChanges[1]!.path)).toBe(root);
 
-    const artifact = join(fake.cwdChanges[0]!.path, 'result.txt');
-    await writeFile(artifact, 'worker result');
-    const recycled = await workspace.recycleConversationDirectory(
-      first.sessionId,
-    );
-    expect(recycled).toBeDefined();
-    await expect(lstat(fake.cwdChanges[0]!.path)).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-    expect(await readFile(join(recycled!, 'result.txt'), 'utf8')).toBe(
-      'worker result',
-    );
     expect((await lstat(fake.cwdChanges[1]!.path)).isDirectory()).toBe(true);
   });
 

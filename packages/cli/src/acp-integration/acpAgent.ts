@@ -194,6 +194,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { isCompatibleLiveSessionSource } from '../serve/live/session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -8546,6 +8547,9 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
+        if (isCompatibleLiveSessionSource(source)) {
+          await session.enableLiveScreenContext();
+        }
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
@@ -8562,6 +8566,24 @@ class QwenAgent implements Agent {
             : {}),
           persisted: ok,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
+        const sessionId = params['sessionId'];
+        const active = params['active'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof active !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing active state',
+          );
+        }
+        await this.sessionOrThrow(sessionId).setLiveConversationActive(active);
+        return { sessionId, active };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
         const sessionId = params['sessionId'];

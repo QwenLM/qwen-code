@@ -56,6 +56,26 @@ export function buildHostWebSocketUrl(value: string): string {
   return url.toString();
 }
 
+export function buildWebShellSessionUrl(
+  record: LiveDiscoveryRecord,
+  target: { workspaceId: string; sessionId: string },
+): string {
+  buildHostWebSocketUrl(record.url);
+  const url = new URL(record.url);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('daemon URL is not HTTP');
+  }
+  url.username = '';
+  url.password = '';
+  url.pathname = `/session/${encodeURIComponent(target.sessionId)}`;
+  url.search = '';
+  url.searchParams.set('workspace', target.workspaceId);
+  url.hash = record.token
+    ? new URLSearchParams({ token: record.token }).toString()
+    : '';
+  return url.toString();
+}
+
 export async function readDiscoveryFile(
   path: string,
 ): Promise<DiscoveryResult> {

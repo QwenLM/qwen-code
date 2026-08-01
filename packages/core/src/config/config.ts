@@ -1711,6 +1711,7 @@ export class Config {
   private readonly question: string | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
+  private liveAppendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -4586,7 +4587,14 @@ export class Config {
   }
 
   getAppendSystemPrompt(): string | undefined {
-    return this.appendSystemPrompt;
+    const parts = [this.appendSystemPrompt, this.liveAppendSystemPrompt].filter(
+      (part): part is string => Boolean(part?.trim()),
+    );
+    return parts.length > 0 ? parts.join('\n\n') : undefined;
+  }
+
+  setLiveAppendSystemPrompt(prompt: string | undefined): void {
+    this.liveAppendSystemPrompt = prompt;
   }
 
   /** @deprecated Use getPermissionsAllow() instead. */

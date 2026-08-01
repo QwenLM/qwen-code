@@ -4,7 +4,6 @@ import {
   LiveGlobalShortcut,
   type GlobalShortcutBackend,
   type GlobalShortcutState,
-  type ShortcutRetryScheduler,
 } from '../global-shortcut.ts';
 
 function fixture(registerResult: boolean | (() => boolean) = true) {
@@ -12,8 +11,6 @@ function fixture(registerResult: boolean | (() => boolean) = true) {
   const unregistered: string[] = [];
   const callbacks = new Map<string, () => void>();
   const states: GlobalShortcutState[] = [];
-  const retryDelays: number[] = [];
-  const retries = new Set<() => void>();
   const backend: GlobalShortcutBackend = {
     register: (accelerator, callback) => {
       registered.push(accelerator);
@@ -29,11 +26,6 @@ function fixture(registerResult: boolean | (() => boolean) = true) {
       callbacks.delete(accelerator);
     },
   };
-  const retryScheduler: ShortcutRetryScheduler = (callback, delayMs) => {
-    retryDelays.push(delayMs);
-    retries.add(callback);
-    return () => retries.delete(callback);
-  };
   let toggles = 0;
   const shortcut = new LiveGlobalShortcut(
     backend,
@@ -41,19 +33,10 @@ function fixture(registerResult: boolean | (() => boolean) = true) {
       toggles += 1;
     },
     (state) => states.push(state),
-    retryScheduler,
   );
   return {
     callbacks,
-    pendingRetries: () => retries.size,
     registered,
-    retryDelays,
-    runRetry: () => {
-      const callback = retries.values().next().value;
-      if (!callback) return;
-      retries.delete(callback);
-      callback();
-    },
     shortcut,
     states,
     toggles: () => toggles,
@@ -64,60 +47,90 @@ function fixture(registerResult: boolean | (() => boolean) = true) {
 describe('LiveGlobalShortcut', () => {
   it('registers an ordinary Electron accelerator and dispatches toggles', () => {
     const value = fixture();
-    value.shortcut.replace('Command+Q');
-    value.callbacks.get('Command+Q')?.();
+    value.shortcut.replace('Command+E');
+    value.callbacks.get('Command+E')?.();
 
-    assert.deepEqual(value.registered, ['Command+Q']);
+    assert.deepEqual(value.registered, ['Command+E']);
     assert.equal(value.toggles(), 1);
     assert.deepEqual(value.states, [
-      { accelerator: 'Command+Q', healthy: true },
+      { accelerator: 'Command+E', healthy: true },
     ]);
   });
 
-  it('unregisters the previous accelerator before replacing it', () => {
+  it('registers the replacement before unregistering the previous shortcut', () => {
     const value = fixture();
-    value.shortcut.replace('Command+Q');
-    value.shortcut.replace('Command+Shift+Q');
+    value.shortcut.replace('Command+E');
+    value.shortcut.replace('Command+Shift+E');
 
-    assert.deepEqual(value.registered, ['Command+Q', 'Command+Shift+Q']);
-    assert.deepEqual(value.unregistered, ['Command+Q']);
+    assert.deepEqual(value.registered, ['Command+E', 'Command+Shift+E']);
+    assert.deepEqual(value.unregistered, ['Command+E']);
   });
 
-  it('reports registration failure and unregisters on stop', () => {
-    const failed = fixture(false);
-    failed.shortcut.replace('Command+Q');
-    assert.deepEqual(failed.states, [
-      { accelerator: 'Command+Q', healthy: false },
+  it('preserves the previous shortcut when a replacement conflicts', () => {
+    let calls = 0;
+    const value = fixture(() => ++calls === 1);
+    value.shortcut.replace('Command+E');
+
+    const state = value.shortcut.replace('Command+Shift+E');
+
+    assert.deepEqual(state, {
+      accelerator: 'Command+Shift+E',
+      healthy: false,
+      error: 'That shortcut is already in use.',
+    });
+    assert.deepEqual(value.unregistered, []);
+    value.callbacks.get('Command+E')?.();
+    assert.equal(value.toggles(), 1);
+    assert.deepEqual(value.states, [
+      { accelerator: 'Command+E', healthy: true },
     ]);
-    assert.equal(failed.pendingRetries(), 1);
-    failed.shortcut.replace('Command+Q');
-    assert.deepEqual(failed.registered, ['Command+Q']);
-    assert.equal(failed.pendingRetries(), 1);
+  });
+
+  it('reports initial registration failure and unregisters on stop', () => {
+    const failed = fixture(false);
+    failed.shortcut.replace('Command+E');
+    assert.deepEqual(failed.states, [
+      {
+        accelerator: 'Command+E',
+        healthy: false,
+        error: 'That shortcut is already in use.',
+      },
+    ]);
+    failed.shortcut.replace('Command+E');
+    assert.deepEqual(failed.registered, ['Command+E', 'Command+E']);
     failed.shortcut.stop();
-    assert.equal(failed.pendingRetries(), 0);
 
     const active = fixture();
-    active.shortcut.replace('Command+Q');
+    active.shortcut.replace('Command+E');
     active.shortcut.stop();
-    assert.deepEqual(active.unregistered, ['Command+Q']);
+    assert.deepEqual(active.unregistered, ['Command+E']);
     assert.deepEqual(active.states.at(-1), { healthy: false });
   });
 
-  it('recovers after the conflicting application releases the shortcut', () => {
+  it('supports Off without making the Host self-check unhealthy', () => {
+    const value = fixture();
+    value.shortcut.replace('Command+E');
+
+    const state = value.shortcut.replace('');
+
+    assert.deepEqual(state, { accelerator: '', healthy: true });
+    assert.deepEqual(value.unregistered, ['Command+E']);
+    assert.equal(value.callbacks.size, 0);
+  });
+
+  it('retries only when registration is explicitly synchronized again', () => {
     let conflicted = true;
     const value = fixture(() => !conflicted);
-    value.shortcut.replace('Command+Q');
+    value.shortcut.replace('Command+E');
 
-    assert.equal(value.pendingRetries(), 1);
-    assert.deepEqual(value.retryDelays, [5_000]);
+    assert.deepEqual(value.registered, ['Command+E']);
     conflicted = false;
-    value.runRetry();
+    value.shortcut.replace('Command+E');
 
-    assert.deepEqual(value.registered, ['Command+Q', 'Command+Q']);
+    assert.deepEqual(value.registered, ['Command+E', 'Command+E']);
     assert.deepEqual(value.states.at(-1), {
-      accelerator: 'Command+Q',
+      accelerator: 'Command+E',
       healthy: true,
     });
-    assert.equal(value.pendingRetries(), 0);
   });
 });

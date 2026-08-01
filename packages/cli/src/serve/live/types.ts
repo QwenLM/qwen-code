@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const LIVE_HOST_PROTOCOL_VERSION = 3 as const;
+export const LIVE_HOST_PROTOCOL_VERSION = 6 as const;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host' as const;
 export const LIVE_INPUT_AUDIO_EPOCH_BYTES = 8;
 
@@ -41,6 +41,7 @@ export type LiveRequirementState =
 
 export interface LiveSessionLocator {
   workspaceCwd: string;
+  workspaceId?: string;
   sessionId: string;
 }
 
@@ -55,8 +56,12 @@ export interface LiveStatus {
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
-  coordinator?: LiveSessionLocator;
-  workers?: LiveSessionLocator[];
+  caption?: string;
+  statusText?: string;
+  pendingPermission?: {
+    workspaceId: string;
+    sessionId: string;
+  };
   requirements?: Partial<
     Record<
       | 'host'
@@ -77,7 +82,7 @@ export interface LiveStatus {
   };
 }
 
-export type LiveHostStatus = Omit<LiveStatus, 'coordinator' | 'workers'>;
+export type LiveHostStatus = LiveStatus;
 
 export type LivePermissionState = 'granted' | 'denied' | 'not_determined';
 
@@ -119,7 +124,37 @@ export interface LiveHostPong {
   pingId: string;
 }
 
-export type LiveHostMessage = LiveHostHello | LiveHostAction | LiveHostPong;
+export interface LiveHostShortcutResult {
+  type: 'host.shortcut_result';
+  requestId: string;
+  shortcut: string;
+  success: boolean;
+  error?: string;
+}
+
+export type LiveHostScreenContextResult =
+  | {
+      type: 'host.screen_context_result';
+      requestId: string;
+      success: true;
+      appName: string;
+      windowTitle?: string;
+      accessibilityText: string;
+      screenshotPath: string;
+    }
+  | {
+      type: 'host.screen_context_result';
+      requestId: string;
+      success: false;
+      error: string;
+    };
+
+export type LiveHostMessage =
+  | LiveHostHello
+  | LiveHostAction
+  | LiveHostPong
+  | LiveHostShortcutResult
+  | LiveHostScreenContextResult;
 
 export type LiveDaemonMessage =
   | {
@@ -133,6 +168,12 @@ export type LiveDaemonMessage =
   | { type: 'host.state'; epoch: number; status: LiveHostStatus }
   | { type: 'host.ping'; pingId: string }
   | { type: 'host.clear_output'; epoch: number }
+  | { type: 'host.set_shortcut'; requestId: string; shortcut: string }
+  | {
+      type: 'host.capture_screen_context';
+      requestId: string;
+      epoch: number;
+    }
   | {
       type: 'host.error';
       code: 'invalid_message' | 'stale_epoch';

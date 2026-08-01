@@ -7,16 +7,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   isReservedLiveSessionSource,
-  readCompatibleLiveSessionMetadata,
+  readLoadableLiveConversationMetadata,
 } from './session-source.js';
 
-describe('readCompatibleLiveSessionMetadata', () => {
+describe('readLoadableLiveConversationMetadata', () => {
   const records = new Map([
     [
       'coordinator',
       {
         sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        sourceId: 'realtime_voice:call-1',
       },
     ],
     ['worker', { parentSessionId: 'coordinator' }],
@@ -26,15 +26,12 @@ describe('readCompatibleLiveSessionMetadata', () => {
       {
         parentSessionId: 'coordinator',
         sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:forged-worker',
+        sourceId: 'realtime_voice:forged-worker',
       },
     ],
-    ['generic', {}],
+    ['generic', { sourceType: 'default' }],
     ['generic-child', { parentSessionId: 'generic' }],
-    [
-      'empty-call-id',
-      { sourceType: 'default', sourceId: 'realtime_voice:p1:h1:a1:' },
-    ],
+    ['empty-call-id', { sourceType: 'default', sourceId: 'realtime_voice:' }],
   ]);
   const read = async (sessionId: string) => records.get(sessionId) ?? {};
 
@@ -42,35 +39,38 @@ describe('readCompatibleLiveSessionMetadata', () => {
     expect(
       isReservedLiveSessionSource({
         sourceType: 'default',
-        sourceId: 'realtime_voice:p1:h1:a1:',
+        sourceId: 'realtime_voice:',
       }),
     ).toBe(true);
   });
 
   it('accepts a versioned Coordinator and its direct worker', async () => {
     await expect(
-      readCompatibleLiveSessionMetadata('coordinator', read),
+      readLoadableLiveConversationMetadata('coordinator', read),
     ).resolves.toEqual(records.get('coordinator'));
     await expect(
-      readCompatibleLiveSessionMetadata('worker', read),
+      readLoadableLiveConversationMetadata('worker', read),
     ).resolves.toEqual(records.get('worker'));
   });
 
-  it('rejects unattributed sessions and children without a Live parent', async () => {
+  it('accepts a standalone projectless task and its direct child', async () => {
     await expect(
-      readCompatibleLiveSessionMetadata('generic', read),
+      readLoadableLiveConversationMetadata('generic', read),
+    ).resolves.toEqual(records.get('generic'));
+    await expect(
+      readLoadableLiveConversationMetadata('generic-child', read),
+    ).resolves.toEqual(records.get('generic-child'));
+  });
+
+  it('rejects nested, attributed, and malformed Live sessions', async () => {
+    await expect(
+      readLoadableLiveConversationMetadata('nested-worker', read),
     ).resolves.toBeUndefined();
     await expect(
-      readCompatibleLiveSessionMetadata('generic-child', read),
+      readLoadableLiveConversationMetadata('attributed-worker', read),
     ).resolves.toBeUndefined();
     await expect(
-      readCompatibleLiveSessionMetadata('nested-worker', read),
-    ).resolves.toBeUndefined();
-    await expect(
-      readCompatibleLiveSessionMetadata('attributed-worker', read),
-    ).resolves.toBeUndefined();
-    await expect(
-      readCompatibleLiveSessionMetadata('empty-call-id', read),
+      readLoadableLiveConversationMetadata('empty-call-id', read),
     ).resolves.toBeUndefined();
   });
 });

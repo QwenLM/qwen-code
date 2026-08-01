@@ -14,6 +14,8 @@ import {
   type LiveDaemonMessage,
   type LiveHostAction,
   type LiveHostHello,
+  type LiveHostShortcutResult,
+  type LiveHostScreenContextResult,
   type LiveHostStatus,
   type LiveHostMessage,
   type LiveMuteUpdate,
@@ -27,6 +29,7 @@ import {
 const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000;
+const DEFAULT_SHORTCUT_TIMEOUT_MS = 5_000;
 const MAX_HOST_TEXT_BYTES = 64 * 1024;
 const MAX_HOST_AUDIO_BYTES = 64 * 1024;
 const MAX_HOST_AUDIO_WIRE_BYTES =
@@ -36,8 +39,26 @@ const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
 const MAX_ID_LENGTH = 128;
 const MAX_VERSION_LENGTH = 128;
 const MAX_TRANSCRIPT_LENGTH = 8_192;
-const DEFAULT_SHORTCUT = 'Command+Q';
+const MAX_STATUS_TEXT_LENGTH = 512;
+const DEFAULT_SHORTCUT = 'Command+E';
 const MAX_SHORTCUT_LENGTH = 128;
+const MAX_APPSHOT_TEXT_LENGTH = 32_000;
+const DEFAULT_APPSHOT_TIMEOUT_MS = 15_000;
+
+function writeLiveHostDiagnostic(
+  event: string,
+  details: Readonly<Record<string, string | number | boolean | undefined>>,
+): void {
+  if (process.env['QWEN_LIVE_DIAGNOSTICS'] !== '1') return;
+  process.stderr.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      source: 'live-host-coordinator',
+      event,
+      ...details,
+    })}\n`,
+  );
+}
 
 interface LiveCall {
   epoch: number;
@@ -45,7 +66,10 @@ interface LiveCall {
   mode: 'resume' | 'new';
   state: Exclude<LiveState, 'unavailable' | 'idle'>;
   transcript?: string;
+  caption?: string;
+  statusText?: string;
   coordinator?: LiveSessionLocator;
+  pendingPermission: boolean;
   workers: LiveSessionLocator[];
 }
 
@@ -84,7 +108,30 @@ export interface LiveHostCoordinatorOptions {
   helloTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
+  appshotTimeoutMs?: number;
   now?: () => number;
+}
+
+export interface LiveScreenContextCapture {
+  appName: string;
+  windowTitle?: string;
+  accessibilityText: string;
+  screenshotPath: string;
+}
+
+interface PendingAppshot {
+  epoch: number;
+  timer: NodeJS.Timeout;
+  resolve: (capture: LiveScreenContextCapture) => void;
+  reject: (error: Error) => void;
+}
+
+interface PendingShortcut {
+  requestId: string;
+  shortcut: string;
+  timer: NodeJS.Timeout;
+  resolve: (status: LiveStatus) => void;
+  reject: (error: Error) => void;
 }
 
 export class LiveUnavailableError extends Error {
@@ -190,6 +237,61 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
   if (value['type'] === 'host.pong' && isBoundedString(value['pingId'])) {
     return { type: 'host.pong', pingId: value['pingId'] as string };
   }
+  if (value['type'] === 'host.shortcut_result') {
+    const requestId = value['requestId'];
+    const shortcut = value['shortcut'];
+    const success = value['success'];
+    const error = value['error'];
+    if (
+      isBoundedString(requestId) &&
+      typeof shortcut === 'string' &&
+      shortcut.length <= MAX_SHORTCUT_LENGTH &&
+      typeof success === 'boolean' &&
+      (error === undefined ||
+        (typeof error === 'string' && error.length <= 1_024))
+    ) {
+      return {
+        type: 'host.shortcut_result',
+        requestId: requestId as string,
+        shortcut,
+        success,
+        ...(error ? { error } : {}),
+      };
+    }
+  }
+  if (value['type'] === 'host.screen_context_result') {
+    const requestId = value['requestId'];
+    if (!isBoundedString(requestId)) return undefined;
+    if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
+      return {
+        type: 'host.screen_context_result',
+        requestId: requestId as string,
+        success: false,
+        error: value['error'] as string,
+      };
+    }
+    if (
+      value['success'] === true &&
+      isBoundedString(value['appName'], 512) &&
+      (value['windowTitle'] === undefined ||
+        isBoundedString(value['windowTitle'], 2_048)) &&
+      typeof value['accessibilityText'] === 'string' &&
+      value['accessibilityText'].length <= MAX_APPSHOT_TEXT_LENGTH &&
+      isBoundedString(value['screenshotPath'], 4_096)
+    ) {
+      return {
+        type: 'host.screen_context_result',
+        requestId: requestId as string,
+        success: true,
+        appName: value['appName'] as string,
+        ...(value['windowTitle']
+          ? { windowTitle: value['windowTitle'] as string }
+          : {}),
+        accessibilityText: value['accessibilityText'],
+        screenshotPath: value['screenshotPath'] as string,
+      };
+    }
+  }
   return undefined;
 }
 
@@ -217,6 +319,11 @@ function projectStatusForHost(status: LiveStatus): LiveHostStatus {
       ? { outputMuted: status.outputMuted }
       : {}),
     ...(status.transcript ? { transcript: status.transcript } : {}),
+    ...(status.caption ? { caption: status.caption } : {}),
+    ...(status.statusText ? { statusText: status.statusText } : {}),
+    ...(status.pendingPermission
+      ? { pendingPermission: { ...status.pendingPermission } }
+      : {}),
     ...(status.requirements
       ? { requirements: { ...status.requirements } }
       : {}),
@@ -230,7 +337,8 @@ export class LiveHostCoordinator {
   private readonly helloTimeoutMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
-  private readonly shortcut: string;
+  private readonly appshotTimeoutMs: number;
+  private shortcut: string;
   private handlers: LiveCallHandlers;
   private host?: HostLease;
   private hadConnectedHost = false;
@@ -238,7 +346,7 @@ export class LiveHostCoordinator {
   private providerOverride?: LiveProviderReadiness;
   private appshotReadiness: LiveAppshotReadiness = {
     state: 'unavailable',
-    message: 'Appshot readiness has not been verified.',
+    message: 'The dedicated Appshot channel has not been verified.',
   };
   private call?: LiveCall;
   private pendingStartMode?: 'new';
@@ -246,6 +354,9 @@ export class LiveHostCoordinator {
   private inputMuted = false;
   private outputMuted = false;
   private lastCallError?: string;
+  private readonly pendingAppshots = new Map<string, PendingAppshot>();
+  private pendingShortcut?: PendingShortcut;
+  private readonly inactiveWaiters = new Set<() => void>();
 
   constructor(private readonly options: LiveHostCoordinatorOptions) {
     this.daemonInstanceNonce = options.daemonInstanceNonce ?? randomUUID();
@@ -256,6 +367,8 @@ export class LiveHostCoordinator {
       options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    this.appshotTimeoutMs =
+      options.appshotTimeoutMs ?? DEFAULT_APPSHOT_TIMEOUT_MS;
     const shortcut = options.shortcut?.trim();
     this.shortcut =
       shortcut && shortcut.length <= MAX_SHORTCUT_LENGTH
@@ -265,6 +378,33 @@ export class LiveHostCoordinator {
 
   setHandlers(handlers: LiveCallHandlers): void {
     this.handlers = handlers;
+  }
+
+  setConfiguredShortcut(shortcut: string): LiveStatus {
+    const normalized = shortcut.trim();
+    if (normalized.length > MAX_SHORTCUT_LENGTH) {
+      throw new Error('The Live shortcut is too long.');
+    }
+    this.shortcut = normalized;
+    this.broadcastState();
+    return this.getStatus();
+  }
+
+  async deactivate(): Promise<void> {
+    this.pendingStartMode = undefined;
+    if (this.call) {
+      const stopped = new Promise<void>((resolve) => {
+        this.inactiveWaiters.add(resolve);
+      });
+      this.stop();
+      await stopped;
+    }
+    if (!this.host) return;
+    const lease = this.host;
+    if (lease.socket.readyState === WebSocket.OPEN) {
+      lease.socket.close(1001, 'Live Voice disabled.');
+    }
+    this.detachHost(lease, 'host_disconnected');
   }
 
   attachHost(socket: WebSocket, daemonNonce: string | undefined): void {
@@ -391,9 +531,15 @@ export class LiveHostCoordinator {
       inputMuted: this.inputMuted,
       outputMuted: this.outputMuted,
       ...(active?.transcript ? { transcript: active.transcript } : {}),
-      ...(active?.coordinator ? { coordinator: active.coordinator } : {}),
-      ...(active && active.workers.length > 0
-        ? { workers: [...active.workers] }
+      ...(active?.caption ? { caption: active.caption } : {}),
+      ...(active?.statusText ? { statusText: active.statusText } : {}),
+      ...(active?.pendingPermission && active.coordinator?.workspaceId
+        ? {
+            pendingPermission: {
+              workspaceId: active.coordinator.workspaceId,
+              sessionId: active.coordinator.sessionId,
+            },
+          }
         : {}),
       requirements,
       ...(hello
@@ -445,6 +591,7 @@ export class LiveHostCoordinator {
       callId: randomUUID(),
       mode,
       state: 'starting',
+      pendingPermission: false,
       workers: [],
     };
     this.call = call;
@@ -484,6 +631,54 @@ export class LiveHostCoordinator {
     return this.getStatus();
   }
 
+  setShortcut(shortcut: string): Promise<LiveStatus> {
+    const normalized = shortcut.trim();
+    if (normalized.length > MAX_SHORTCUT_LENGTH) {
+      return Promise.reject(new Error('The Live shortcut is too long.'));
+    }
+    if (normalized === this.shortcut) {
+      return Promise.resolve(this.getStatus());
+    }
+    if (this.pendingShortcut) {
+      return Promise.reject(
+        new Error('Another Live shortcut update is already in progress.'),
+      );
+    }
+    const host = this.host;
+    if (!host?.hello || !this.isLeaseHealthy(host)) {
+      return Promise.reject(
+        new Error('Qwen Live Host must be connected to change the shortcut.'),
+      );
+    }
+    const requestId = randomUUID();
+    return new Promise<LiveStatus>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rejectPendingShortcut(
+          new Error('Qwen Live Host did not confirm the shortcut change.'),
+        );
+      }, DEFAULT_SHORTCUT_TIMEOUT_MS);
+      timer.unref?.();
+      this.pendingShortcut = {
+        requestId,
+        shortcut: normalized,
+        timer,
+        resolve,
+        reject,
+      };
+      if (
+        !this.sendHost({
+          type: 'host.set_shortcut',
+          requestId,
+          shortcut: normalized,
+        })
+      ) {
+        this.rejectPendingShortcut(
+          new Error('Qwen Live Host is unavailable for shortcut changes.'),
+        );
+      }
+    });
+  }
+
   setCallState(epoch: number, state: LiveCall['state']): boolean {
     if (!this.call || this.call.epoch !== epoch) return false;
     if (this.call.state === state) return true;
@@ -499,11 +694,37 @@ export class LiveHostCoordinator {
     return true;
   }
 
+  setPendingPermission(epoch: number, pending: boolean): boolean {
+    if (!this.call || this.call.epoch !== epoch) return false;
+    if (this.call.pendingPermission === pending) return true;
+    this.call.pendingPermission = pending;
+    this.broadcastState();
+    return true;
+  }
+
   setTranscript(epoch: number, transcript: string): boolean {
     if (!this.call || this.call.epoch !== epoch) return false;
     const truncated = transcript.slice(0, MAX_TRANSCRIPT_LENGTH);
     if (this.call.transcript === truncated) return true;
     this.call.transcript = truncated;
+    this.broadcastState();
+    return true;
+  }
+
+  setCaption(epoch: number, caption: string): boolean {
+    if (!this.call || this.call.epoch !== epoch) return false;
+    const truncated = caption.slice(0, MAX_TRANSCRIPT_LENGTH);
+    if (this.call.caption === truncated) return true;
+    this.call.caption = truncated || undefined;
+    this.broadcastState();
+    return true;
+  }
+
+  setStatusText(epoch: number, statusText?: string): boolean {
+    if (!this.call || this.call.epoch !== epoch) return false;
+    const truncated = statusText?.trim().slice(0, MAX_STATUS_TEXT_LENGTH);
+    if (this.call.statusText === truncated) return true;
+    this.call.statusText = truncated || undefined;
     this.broadcastState();
     return true;
   }
@@ -524,6 +745,54 @@ export class LiveHostCoordinator {
     );
   }
 
+  captureScreenContext(
+    callerSessionId: string,
+  ): Promise<LiveScreenContextCapture> {
+    const call = this.call;
+    const host = this.host;
+    if (
+      !call ||
+      call.coordinator?.sessionId !== callerSessionId ||
+      !host?.hello ||
+      !this.isLeaseHealthy(host) ||
+      host.hello.permissions.accessibility !== 'granted' ||
+      host.hello.permissions.screenRecording !== 'granted' ||
+      !host.hello.selfChecks.appshot
+    ) {
+      return Promise.reject(
+        new Error(
+          'Appshot is available only to the active Live Coordinator with a ready Host.',
+        ),
+      );
+    }
+    const requestId = randomUUID();
+    return new Promise<LiveScreenContextCapture>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAppshots.delete(requestId);
+        reject(new Error('Live Host Appshot timed out.'));
+      }, this.appshotTimeoutMs);
+      timer.unref?.();
+      this.pendingAppshots.set(requestId, {
+        epoch: call.epoch,
+        timer,
+        resolve,
+        reject,
+      });
+      if (
+        !this.sendHost({
+          type: 'host.capture_screen_context',
+          requestId,
+          epoch: call.epoch,
+        })
+      ) {
+        this.rejectPendingAppshot(
+          requestId,
+          new Error('Live Host is unavailable for Appshot.'),
+        );
+      }
+    });
+  }
+
   setProviderReachability(readiness?: LiveProviderReadiness): void {
     this.providerOverride = readiness;
     const status = this.getStatus();
@@ -532,8 +801,7 @@ export class LiveHostCoordinator {
 
   setAppshotReadiness(readiness: LiveAppshotReadiness): void {
     this.appshotReadiness = { ...readiness };
-    const status = this.getStatus();
-    this.sendState(status);
+    this.sendState(this.getStatus());
   }
 
   failCall(epoch: number, message = 'Live Voice failed.'): boolean {
@@ -565,11 +833,17 @@ export class LiveHostCoordinator {
       return false;
     }
     socket.send(pcm16, { binary: true });
+    writeLiveHostDiagnostic('output_audio_sent', {
+      epoch,
+      bytes: pcm16.byteLength,
+      socketBufferedBytes: socket.bufferedAmount,
+    });
     return true;
   }
 
   clearOutput(epoch: number): void {
     if (this.call && this.call.epoch !== epoch) return;
+    writeLiveHostDiagnostic('clear_output_sent', { epoch });
     this.sendHost({ type: 'host.clear_output', epoch });
   }
 
@@ -584,6 +858,9 @@ export class LiveHostCoordinator {
         lease.socket.close(1001, 'Daemon shutting down.');
       }
     }
+    this.rejectPendingAppshots(new Error('Live Voice is shutting down.'));
+    this.rejectPendingShortcut(new Error('Live Voice is shutting down.'));
+    this.notifyInactive();
   }
 
   private readProviderReadiness(): LiveProviderReadiness {
@@ -698,7 +975,67 @@ export class LiveHostCoordinator {
       }
       return;
     }
+    if (message.type === 'host.screen_context_result') {
+      this.handleScreenContextResult(message);
+      return;
+    }
+    if (message.type === 'host.shortcut_result') {
+      this.handleShortcutResult(message);
+      return;
+    }
     this.handleAction(message);
+  }
+
+  private handleShortcutResult(message: LiveHostShortcutResult): void {
+    const pending = this.pendingShortcut;
+    if (!pending || message.requestId !== pending.requestId) return;
+    this.pendingShortcut = undefined;
+    clearTimeout(pending.timer);
+    if (message.shortcut !== pending.shortcut) {
+      pending.reject(
+        new Error('Qwen Live Host returned a mismatched shortcut.'),
+      );
+      return;
+    }
+    if (!message.success) {
+      pending.reject(
+        new Error(
+          message.error || 'The Live shortcut could not be registered.',
+        ),
+      );
+      return;
+    }
+    this.shortcut = pending.shortcut;
+    const status = this.getStatus();
+    this.sendState(status);
+    pending.resolve(status);
+  }
+
+  private handleScreenContextResult(
+    message: LiveHostScreenContextResult,
+  ): void {
+    const pending = this.pendingAppshots.get(message.requestId);
+    if (!pending) return;
+    const call = this.call;
+    if (!call || call.epoch !== pending.epoch) {
+      this.rejectPendingAppshot(
+        message.requestId,
+        new Error('The Live call changed before Appshot completed.'),
+      );
+      return;
+    }
+    this.pendingAppshots.delete(message.requestId);
+    clearTimeout(pending.timer);
+    if (!message.success) {
+      pending.reject(new Error(message.error));
+      return;
+    }
+    pending.resolve({
+      appName: message.appName,
+      ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
+      accessibilityText: message.accessibilityText,
+      screenshotPath: message.screenshotPath,
+    });
   }
 
   private handleHello(lease: HostLease, hello: LiveHostHello): void {
@@ -811,7 +1148,14 @@ export class LiveHostCoordinator {
     }
     const epoch = Number(encodedEpoch);
     const call = this.call;
-    if (!call || epoch !== call.epoch || this.inputMuted) return;
+    if (
+      !call ||
+      epoch !== call.epoch ||
+      call.state === 'stopping' ||
+      this.inputMuted
+    ) {
+      return;
+    }
     const pcm16 = audio.subarray(LIVE_INPUT_AUDIO_EPOCH_BYTES);
     try {
       const accepted = this.handlers.onInputAudio?.({
@@ -845,6 +1189,11 @@ export class LiveHostCoordinator {
     this.sendState(this.buildStatus(false));
     this.clearOutput(call.epoch);
     this.call = undefined;
+    this.notifyInactive();
+    this.rejectPendingAppshots(
+      new Error('The Live call ended before Appshot completed.'),
+      call.epoch,
+    );
     ++this.nextEpoch;
     try {
       void Promise.resolve(
@@ -891,6 +1240,11 @@ export class LiveHostCoordinator {
       return;
     }
     this.call = undefined;
+    this.notifyInactive();
+    this.rejectPendingAppshots(
+      new Error('The Live call ended before Appshot completed.'),
+      call.epoch,
+    );
     ++this.nextEpoch;
     const pendingStartMode = this.pendingStartMode;
     this.pendingStartMode = undefined;
@@ -908,6 +1262,8 @@ export class LiveHostCoordinator {
     if (this.call !== call || call.state !== 'stopping') return;
     this.pendingStartMode = undefined;
     this.call = undefined;
+    this.notifyInactive();
+    this.rejectPendingAppshots(new Error(message), call.epoch);
     this.lastCallError = message;
     ++this.nextEpoch;
     this.broadcastState();
@@ -935,7 +1291,32 @@ export class LiveHostCoordinator {
     this.host = undefined;
     this.clearLeaseTimers(lease);
     this.lastHostFailure = failure;
+    this.rejectPendingAppshots(new Error('Qwen Live Host disconnected.'));
+    this.rejectPendingShortcut(new Error('Qwen Live Host disconnected.'));
     this.stopForReadinessLoss();
+  }
+
+  private rejectPendingShortcut(error: Error): void {
+    const pending = this.pendingShortcut;
+    if (!pending) return;
+    this.pendingShortcut = undefined;
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private rejectPendingAppshot(requestId: string, error: Error): void {
+    const pending = this.pendingAppshots.get(requestId);
+    if (!pending) return;
+    this.pendingAppshots.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private rejectPendingAppshots(error: Error, epoch?: number): void {
+    for (const [requestId, pending] of this.pendingAppshots) {
+      if (epoch !== undefined && pending.epoch !== epoch) continue;
+      this.rejectPendingAppshot(requestId, error);
+    }
   }
 
   private clearLeaseTimers(lease: HostLease): void {
@@ -972,5 +1353,11 @@ export class LiveHostCoordinator {
     }
     socket.send(JSON.stringify(message));
     return true;
+  }
+
+  private notifyInactive(): void {
+    if (this.call) return;
+    for (const resolve of this.inactiveWaiters) resolve();
+    this.inactiveWaiters.clear();
   }
 }

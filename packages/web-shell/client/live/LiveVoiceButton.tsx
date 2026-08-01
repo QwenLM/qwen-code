@@ -7,7 +7,6 @@
 import type React from 'react';
 import type {
   DaemonLiveRequirementState,
-  DaemonLiveSessionLocator,
   DaemonLiveStatus,
 } from '@qwen-code/sdk';
 import { Button } from '../components/ui/button';
@@ -73,10 +72,12 @@ function stateLabel(
   return t(`live.requirementState.${state ?? 'missing'}`);
 }
 
-function openSession(locator: DaemonLiveSessionLocator): void {
-  window.dispatchEvent(
-    new CustomEvent('qwen:open-session', { detail: locator }),
-  );
+function liveStateLabel(
+  status: DaemonLiveStatus | undefined,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  if (status?.statusText) return status.statusText;
+  return t(`live.state.${status?.state ?? 'unavailable'}`);
 }
 
 export function LiveVoiceButton(): React.JSX.Element | null {
@@ -99,7 +100,11 @@ export function LiveVoiceButton(): React.JSX.Element | null {
   const requirements = status?.requirements ?? {};
 
   return (
-    <Dialog>
+    <Dialog
+      onOpenChange={(open) => {
+        if (open) void refresh();
+      }}
+    >
       <DialogTrigger asChild>
         <button
           type="button"
@@ -123,72 +128,62 @@ export function LiveVoiceButton(): React.JSX.Element | null {
           </DialogDescription>
         </DialogHeader>
 
-        <ul className={styles.requirements}>
-          {REQUIREMENTS.map(([key, messageKey]) => {
-            const requirementState = requirements[key];
-            return (
-              <li className={styles.requirement} key={key}>
-                <span>{t(messageKey)}</span>
-                <span className={styles.requirementState}>
-                  <span
-                    className={styles.dot}
-                    data-ready={requirementState === 'ready'}
-                    data-denied={requirementState === 'denied'}
-                  />
-                  {stateLabel(requirementState, t)}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+        {!status?.available ? (
+          <ul className={styles.requirements}>
+            {REQUIREMENTS.map(([key, messageKey]) => {
+              const requirementState = requirements[key];
+              return (
+                <li className={styles.requirement} key={key}>
+                  <span>{t(messageKey)}</span>
+                  <span className={styles.requirementState}>
+                    <span
+                      className={styles.dot}
+                      data-ready={requirementState === 'ready'}
+                      data-denied={requirementState === 'denied'}
+                    />
+                    {stateLabel(requirementState, t)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className={styles.liveState} data-state={status.state}>
+            <span className={styles.liveStateOrb} />
+            <span>{liveStateLabel(status, t)}</span>
+          </div>
+        )}
 
         {status?.message ? (
           <p className={styles.error}>{status.message}</p>
         ) : null}
         {status?.transcript ? (
-          <p className={styles.transcript}>{status.transcript}</p>
+          <p className={styles.transcript} data-role="user">
+            {status.transcript}
+          </p>
+        ) : null}
+        {status?.caption ? (
+          <p className={styles.transcript} data-role="assistant">
+            {status.caption}
+          </p>
         ) : null}
         {status?.shortcut ? (
           <p className={styles.hint}>
             {t('live.shortcutHint', { shortcut: status.shortcut })}
           </p>
         ) : null}
-        {status?.coordinator || status?.workers?.length ? (
-          <div className={styles.sessions}>
-            {status.coordinator ? (
-              <Button
-                variant="outline"
-                onClick={() => openSession(status.coordinator!)}
-              >
-                {t('live.openCoordinator')}
-              </Button>
-            ) : null}
-            {status.workers?.map((worker, index) => (
-              <Button
-                key={`${worker.workspaceCwd}\0${worker.sessionId}`}
-                variant="outline"
-                onClick={() => openSession(worker)}
-              >
-                {t('live.openWorker', { index: index + 1 })}
-              </Button>
-            ))}
-          </div>
+        {!status?.available ? (
+          <p className={styles.hint}>{t('live.noFallback')}</p>
         ) : null}
-        <p className={styles.hint}>{t('live.noFallback')}</p>
 
         <DialogFooter>
-          <Button variant="outline" disabled={busy} onClick={() => refresh()}>
-            {t('live.refresh')}
-          </Button>
+          {!status?.available ? (
+            <Button variant="outline" disabled={busy} onClick={() => refresh()}>
+              {t('live.refresh')}
+            </Button>
+          ) : null}
           {active ? (
             <>
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => start('new')}
-              >
-                {t('live.newConversation')}
-              </Button>
               <Button
                 variant="outline"
                 disabled={busy}

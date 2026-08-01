@@ -2,9 +2,19 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { HostPublicState, LiveHostApi } from '../shared/host-api.ts';
 import type { HostPermissions } from '../shared/protocol.ts';
 import { HostAudioEngine } from './audio-engine.ts';
-import { AUDIO_OUTPUT_BACKPRESSURE } from './audio-output-queue.ts';
 
-const audio = new HostAudioEngine();
+const inputLevelListeners = new Set<(level: number) => void>();
+const diagnosticsEnabled = process.env['QWEN_LIVE_DIAGNOSTICS'] === '1';
+const audio = new HostAudioEngine(
+  (level) => {
+    for (const listener of inputLevelListeners) listener(level);
+  },
+  (event, details) => {
+    if (diagnosticsEnabled) {
+      ipcRenderer.send('live:audio:diagnostic', { event, details });
+    }
+  },
+);
 
 const invoke = (channel: string, ...args: unknown[]): Promise<void> =>
   ipcRenderer.invoke(channel, ...args) as Promise<void>;
@@ -13,10 +23,17 @@ const api: LiveHostApi = {
   toggle: () => invoke('live:toggle'),
   newConversation: () => invoke('live:new-conversation'),
   stop: () => invoke('live:stop'),
+  openWebShellForPermission: () => invoke('live:open-web-shell-permission'),
   setInputMuted: (muted) => invoke('live:set-input-muted', muted),
   setOutputMuted: (muted) => invoke('live:set-output-muted', muted),
   requestPermission: (permission: keyof HostPermissions) =>
     invoke('live:request-permission', permission),
+  listInputDevices: () => audio.listInputDevices(),
+  setInputDevice: (deviceId) => audio.setInputDevice(deviceId),
+  onInputLevel: (listener) => {
+    inputLevelListeners.add(listener);
+    return () => inputLevelListeners.delete(listener);
+  },
   getState: () =>
     ipcRenderer.invoke('live:get-state') as Promise<HostPublicState>,
   onState: (listener) => {
@@ -50,6 +67,11 @@ ipcRenderer.on(
   (_event, value: { enabled: boolean; muted: boolean; epoch?: number }) => {
     void audio
       .setCapture(value.enabled, value.muted, value.epoch)
+      .then(() => {
+        if (value.enabled) {
+          ipcRenderer.send('live:audio:capture-ready', { epoch: value.epoch });
+        }
+      })
       .catch((error: unknown) => {
         ipcRenderer.send('live:audio:capture-error', {
           code:
@@ -64,13 +86,10 @@ ipcRenderer.on('live:audio:set-output-muted', (_event, muted: boolean) => {
   audio.setOutputMuted(muted);
 });
 ipcRenderer.on('live:audio:play', (_event, frame: Uint8Array) => {
-  void audio.play(frame).catch((error: unknown) => {
+  void audio.play(frame).catch(() => {
     audio.clearOutput();
     ipcRenderer.send('live:audio:output-error', {
-      code:
-        error instanceof Error && error.message === AUDIO_OUTPUT_BACKPRESSURE
-          ? AUDIO_OUTPUT_BACKPRESSURE
-          : 'audio_output_unavailable',
+      code: 'audio_output_unavailable',
     });
   });
 });

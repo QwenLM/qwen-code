@@ -44,7 +44,7 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
-  readCompatibleLiveSessionMetadata,
+  readLoadableLiveConversationMetadata,
 } from '../live/session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
@@ -1422,7 +1422,7 @@ export class AcpDispatcher {
               // REST restore handler); the bridge creates the entry without it.
               const sessionService = new SessionService(cwd);
               const metadata = this.liveSessionIsolation
-                ? await readCompatibleLiveSessionMetadata(
+                ? await readLoadableLiveConversationMetadata(
                     sessionId,
                     (candidateId) =>
                       sessionService.readCreationMetadata(candidateId),

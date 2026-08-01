@@ -114,6 +114,139 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it('routes one correlated Appshot only for the active Coordinator', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+
+    await expect(value.captureScreenContext('worker-1')).rejects.toThrow(
+      'active Live Coordinator',
+    );
+    const capture = value.captureScreenContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_screen_context');
+    expect(request).toMatchObject({
+      type: 'host.capture_screen_context',
+      epoch: call.epoch,
+    });
+    if (!request || request.type !== 'host.capture_screen_context') {
+      throw new Error('Missing Appshot request');
+    }
+    socket.receive({
+      type: 'host.screen_context_result',
+      requestId: request.requestId,
+      success: true,
+      appName: 'Google Chrome',
+      windowTitle: 'LIVE_APP_A',
+      accessibilityText: 'AXWindow LIVE_APP_A',
+      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+    });
+
+    await expect(capture).resolves.toEqual({
+      appName: 'Google Chrome',
+      windowTitle: 'LIVE_APP_A',
+      accessibilityText: 'AXWindow LIVE_APP_A',
+      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+    });
+    value.stop();
+  });
+
+  it('projects a WebShell target only while the coordinator awaits permission', () => {
+    const value = coordinator();
+    connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      workspaceId: 'conversations-workspace',
+      sessionId: 'coordinator-1',
+    });
+
+    expect(value.setPendingPermission(call.epoch, true)).toBe(true);
+    expect(value.getStatus().pendingPermission).toEqual({
+      workspaceId: 'conversations-workspace',
+      sessionId: 'coordinator-1',
+    });
+
+    expect(value.setPendingPermission(call.epoch, false)).toBe(true);
+    expect(value.getStatus().pendingPermission).toBeUndefined();
+    expect(value.setPendingPermission(call.epoch + 1, true)).toBe(false);
+  });
+
+  it('lets the current Coordinator finish Appshot during stop drain', async () => {
+    let finishStop: (() => void) | undefined;
+    const value = coordinator({
+      handlers: {
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+
+    expect(value.stop()).toMatchObject({
+      state: 'stopping',
+      callId: call.callId,
+    });
+    expect(
+      value.setCoordinator(call.epoch, {
+        workspaceCwd: '/conversations/live-1',
+        sessionId: 'coordinator-1',
+      }),
+    ).toBe(true);
+
+    const capture = value.captureScreenContext('coordinator-1');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.capture_screen_context');
+    if (!request || request.type !== 'host.capture_screen_context') {
+      throw new Error('Missing Appshot request');
+    }
+    socket.receive({
+      type: 'host.screen_context_result',
+      requestId: request.requestId,
+      success: true,
+      appName: 'TextEdit',
+      accessibilityText: 'APPSHOT-MARKER-AMBER-4827',
+      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+    });
+
+    await expect(capture).resolves.toMatchObject({
+      appName: 'TextEdit',
+      accessibilityText: 'APPSHOT-MARKER-AMBER-4827',
+    });
+    finishStop?.();
+    await vi.waitFor(() => {
+      expect(value.getStatus()).toMatchObject({ state: 'idle' });
+    });
+  });
+
+  it('bounds a Host capture that never answers', async () => {
+    vi.useFakeTimers();
+    const value = coordinator({ appshotTimeoutMs: 100 });
+    connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'coordinator-1',
+    });
+    const capture = value.captureScreenContext('coordinator-1');
+    const settled = capture.catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(settled).resolves.toMatchObject({
+      message: expect.stringContaining('timed out'),
+    });
+    value.stop();
+  });
+
   it('fails closed until Appshot has been verified', () => {
     const value = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_instance_nonce_0002',
@@ -128,6 +261,82 @@ describe('LiveHostCoordinator', () => {
       blocker: 'appshot',
       shortcut: 'Command+Shift+L',
       requirements: { appshot: 'unavailable' },
+    });
+  });
+
+  it('commits a shortcut only after the Host confirms registration', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+
+    const update = value.setShortcut('Command+Shift+E');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.set_shortcut');
+    expect(request).toMatchObject({
+      type: 'host.set_shortcut',
+      shortcut: 'Command+Shift+E',
+    });
+    expect(value.getStatus().shortcut).toBe('Command+E');
+    if (!request || request.type !== 'host.set_shortcut') {
+      throw new Error('Missing shortcut request');
+    }
+    socket.receive({
+      type: 'host.shortcut_result',
+      requestId: request.requestId,
+      shortcut: request.shortcut,
+      success: true,
+    });
+
+    await expect(update).resolves.toMatchObject({
+      shortcut: 'Command+Shift+E',
+    });
+    expect(value.getStatus().shortcut).toBe('Command+Shift+E');
+  });
+
+  it('keeps the previous shortcut when the Host rejects a conflict', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+
+    const update = value.setShortcut('Command+Shift+E');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.set_shortcut');
+    if (!request || request.type !== 'host.set_shortcut') {
+      throw new Error('Missing shortcut request');
+    }
+    socket.receive({
+      type: 'host.shortcut_result',
+      requestId: request.requestId,
+      shortcut: request.shortcut,
+      success: false,
+      error: 'That shortcut is already in use.',
+    });
+
+    await expect(update).rejects.toThrow('already in use');
+    expect(value.getStatus().shortcut).toBe('Command+E');
+  });
+
+  it('can turn the global shortcut off without disabling Live', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+
+    const update = value.setShortcut('');
+    const request = socket
+      .messages()
+      .find((message) => message.type === 'host.set_shortcut');
+    if (!request || request.type !== 'host.set_shortcut') {
+      throw new Error('Missing shortcut request');
+    }
+    socket.receive({
+      type: 'host.shortcut_result',
+      requestId: request.requestId,
+      shortcut: '',
+      success: true,
+    });
+
+    await expect(update).resolves.toMatchObject({
+      available: true,
+      shortcut: '',
     });
   });
 
@@ -195,10 +404,8 @@ describe('LiveHostCoordinator', () => {
       },
     ]);
 
-    expect(value.getStatus()).toMatchObject({
-      coordinator: { sessionId: 'coordinator-session' },
-      workers: [{ sessionId: 'worker-session' }],
-    });
+    expect(value.getStatus()).not.toHaveProperty('coordinator');
+    expect(value.getStatus()).not.toHaveProperty('workers');
     expect(value.isActiveSession('coordinator-session')).toBe(true);
     expect(value.isActiveSession('worker-session')).toBe(true);
     expect(value.isActiveSession('unrelated-session')).toBe(false);
@@ -233,13 +440,13 @@ describe('LiveHostCoordinator', () => {
     });
   });
 
-  it('hard-gates start when Conversations computer-use tools are unavailable', () => {
+  it('hard-gates start when the built-in Appshot channel is unavailable', () => {
     const value = coordinator();
     connectReady(value);
 
     value.setAppshotReadiness({
       state: 'unavailable',
-      message: 'Computer Use is disabled in the Conversations runtime.',
+      message: 'The built-in Appshot channel is unavailable.',
     });
 
     expect(() => value.start('resume')).toThrow(LiveUnavailableError);
@@ -247,7 +454,7 @@ describe('LiveHostCoordinator', () => {
       available: false,
       state: 'unavailable',
       blocker: 'appshot',
-      message: 'Computer Use is disabled in the Conversations runtime.',
+      message: 'The built-in Appshot channel is unavailable.',
       requirements: { appshot: 'unavailable' },
     });
   });
@@ -319,6 +526,30 @@ describe('LiveHostCoordinator', () => {
     await vi.waitFor(() => {
       expect(value.getStatus()).toMatchObject({ state: 'idle' });
       expect(value.getStatus().callId).toBeUndefined();
+    });
+  });
+
+  it('projects user transcript, assistant caption, and task status separately', () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+    const call = value.start('resume');
+
+    expect(value.setTranscript(call.epoch, '检查当前页面')).toBe(true);
+    expect(value.setCaption(call.epoch, '当前页面是文档编辑器。')).toBe(true);
+    expect(value.setStatusText(call.epoch, 'Reading screen…')).toBe(true);
+
+    expect(value.getStatus()).toMatchObject({
+      transcript: '检查当前页面',
+      caption: '当前页面是文档编辑器。',
+      statusText: 'Reading screen…',
+    });
+    expect(socket.messages().at(-1)).toMatchObject({
+      type: 'host.state',
+      status: {
+        transcript: '检查当前页面',
+        caption: '当前页面是文档编辑器。',
+        statusText: 'Reading screen…',
+      },
     });
   });
 
@@ -528,6 +759,39 @@ describe('LiveHostCoordinator', () => {
     });
   });
 
+  it('drops same-epoch audio while stop is draining', async () => {
+    let finishStop: (() => void) | undefined;
+    const onInputAudio = vi.fn(() => false);
+    const onStop = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStop = resolve;
+        }),
+    );
+    const value = coordinator({ handlers: { onInputAudio, onStop } });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+
+    value.stop();
+    socket.receiveAudio(call.epoch, [0, 0]);
+
+    expect(onInputAudio).not.toHaveBeenCalled();
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(value.getStatus()).toMatchObject({
+      state: 'stopping',
+      callId: call.callId,
+    });
+    expect(value.getStatus().message).toBeUndefined();
+
+    finishStop?.();
+    await vi.waitFor(() => {
+      expect(value.getStatus()).toMatchObject({ state: 'idle' });
+    });
+    expect(value.getStatus().callId).toBeUndefined();
+    expect(value.getStatus().message).toBeUndefined();
+    expect(value.start('resume').epoch).toBeGreaterThan(call.epoch);
+  });
+
   it('drops audio from the previous epoch after starting a new call', () => {
     const onInputAudio = vi.fn();
     const value = coordinator({ handlers: { onInputAudio } });
@@ -649,10 +913,6 @@ describe('LiveHostCoordinator', () => {
       available: false,
       state: 'starting',
       callId: call.callId,
-      coordinator: {
-        workspaceCwd: '/conversations/live-1',
-        sessionId: 'session-live-1',
-      },
       requirements: { provider: 'checking' },
     });
     expect(value.getStatus().blocker).toBeUndefined();
@@ -766,5 +1026,33 @@ describe('LiveHostCoordinator', () => {
       blocker: 'host_disconnected',
     });
     expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it('stops the active call before disconnecting the Host on disable', async () => {
+    let finishStop: (() => void) | undefined;
+    const value = coordinator({
+      handlers: {
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    const socket = connectReady(value);
+    value.start('resume');
+
+    const deactivating = value.deactivate();
+    expect(socket.closeCode).toBeUndefined();
+    expect(value.getStatus().state).toBe('stopping');
+
+    finishStop?.();
+    await deactivating;
+    expect(socket.closeCode).toBe(1001);
+    expect(value.getStatus().callId).toBeUndefined();
+  });
+
+  it('applies a configured shortcut before a Host connects', () => {
+    const value = coordinator();
+    expect(value.setConfiguredShortcut('Command+K').shortcut).toBe('Command+K');
   });
 });

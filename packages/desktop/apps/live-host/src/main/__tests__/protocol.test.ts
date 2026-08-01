@@ -41,9 +41,7 @@ type IsEqual<Left, Right> = [Left] extends [Right]
     : false
   : false;
 
-type MessageType<Message> = Message extends { type: infer Type }
-  ? Type
-  : never;
+type MessageType<Message> = Message extends { type: infer Type } ? Type : never;
 type HostVisibleDaemonStatus = Omit<
   DaemonLiveStatus,
   'coordinator' | 'workers'
@@ -62,18 +60,12 @@ type DaemonMuteAction = Extract<DaemonHostAction, { action: 'mute' }>;
 const PROTOCOL_TYPE_PARITY: {
   helloAssignable: HostHello extends DaemonHostHello ? true : false;
   helloKeys: HasSameKeys<HostHello, DaemonHostHello>;
-  permissionKeys: HasSameKeys<
-    HostPermissions,
-    DaemonHostHello['permissions']
-  >;
+  permissionKeys: HasSameKeys<HostPermissions, DaemonHostHello['permissions']>;
   permissionStates: IsEqual<
     HostPermissions[keyof HostPermissions],
     DaemonHostHello['permissions'][keyof DaemonHostHello['permissions']]
   >;
-  selfCheckKeys: HasSameKeys<
-    HostSelfChecks,
-    DaemonHostHello['selfChecks']
-  >;
+  selfCheckKeys: HasSameKeys<HostSelfChecks, DaemonHostHello['selfChecks']>;
   actionAssignable: HostAction extends DaemonHostAction ? true : false;
   actionNames: IsEqual<HostAction['action'], DaemonHostAction['action']>;
   simpleActionKeys: HasSameKeys<HostSimpleAction, DaemonSimpleAction>;
@@ -123,7 +115,10 @@ const DAEMON_PROTOCOL_TYPES_URL = new URL(
 
 describe('Live Host protocol', () => {
   it('stays synchronized with the daemon protocol contract', async () => {
-    const source = await readFile(fileURLToPath(DAEMON_PROTOCOL_TYPES_URL), 'utf8');
+    const source = await readFile(
+      fileURLToPath(DAEMON_PROTOCOL_TYPES_URL),
+      'utf8',
+    );
     const daemonVersion = Number(
       source.match(/LIVE_HOST_PROTOCOL_VERSION = (\d+)/u)?.[1],
     );
@@ -131,7 +126,7 @@ describe('Live Host protocol', () => {
       /LIVE_HOST_BUNDLE_ID = '([^']+)'/u,
     )?.[1];
 
-    assert.equal(LIVE_PROTOCOL_VERSION, 3);
+    assert.equal(LIVE_PROTOCOL_VERSION, 6);
     assert.equal(daemonVersion, LIVE_PROTOCOL_VERSION);
     assert.equal(daemonBundleId, LIVE_HOST_BUNDLE_ID);
     assert.equal(Object.values(PROTOCOL_TYPE_PARITY).every(Boolean), true);
@@ -145,7 +140,7 @@ describe('Live Host protocol', () => {
     const hello = {
       type: 'host.hello',
       protocolVersion: LIVE_PROTOCOL_VERSION,
-      hostVersion: '0.0.5',
+      hostVersion: '0.0.6',
       bundleId: LIVE_HOST_BUNDLE_ID,
       instanceNonce: 'host-instance-nonce',
       permissions: {
@@ -161,10 +156,7 @@ describe('Live Host protocol', () => {
       },
     } satisfies HostHello;
     const daemonHello: DaemonHostHello = hello;
-    assert.deepEqual(
-      JSON.parse(encodeHostControlMessage(hello)),
-      daemonHello,
-    );
+    assert.deepEqual(JSON.parse(encodeHostControlMessage(hello)), daemonHello);
 
     const actions = [
       { type: 'host.action', action: 'toggle' },
@@ -183,6 +175,22 @@ describe('Live Host protocol', () => {
       actions.map((action) => JSON.parse(encodeHostControlMessage(action))),
       daemonActions,
     );
+    assert.deepEqual(
+      JSON.parse(
+        encodeHostControlMessage({
+          type: 'host.shortcut_result',
+          requestId: 'shortcut-1',
+          shortcut: 'Command+E',
+          success: true,
+        }),
+      ),
+      {
+        type: 'host.shortcut_result',
+        requestId: 'shortcut-1',
+        shortcut: 'Command+E',
+        success: true,
+      },
+    );
   });
 
   it('parses the complete daemon status into the Host-visible projection', () => {
@@ -197,16 +205,12 @@ describe('Live Host protocol', () => {
       inputMuted: true,
       outputMuted: false,
       transcript: 'Check the current screen.',
-      coordinator: {
-        workspaceCwd: '/conversations/live-1',
+      caption: 'The current window is a document editor.',
+      statusText: 'Reading screen…',
+      pendingPermission: {
+        workspaceId: 'conversations-workspace',
         sessionId: 'coordinator-1',
       },
-      workers: [
-        {
-          workspaceCwd: '/work/task-1',
-          sessionId: 'worker-1',
-        },
-      ],
       requirements: {
         host: 'ready',
         microphone: 'denied',
@@ -218,7 +222,7 @@ describe('Live Host protocol', () => {
         appshot: 'checking',
         provider: 'unavailable',
       },
-      host: { version: '0.0.5', protocolVersion: LIVE_PROTOCOL_VERSION },
+      host: { version: '0.0.6', protocolVersion: LIVE_PROTOCOL_VERSION },
     } satisfies DaemonLiveStatus;
     const daemonMessage = {
       type: 'host.state',
@@ -236,6 +240,9 @@ describe('Live Host protocol', () => {
       inputMuted: true,
       outputMuted: false,
       transcript: 'Check the current screen.',
+      caption: 'The current window is a document editor.',
+      statusText: 'Reading screen…',
+      pendingPermission: daemonStatus.pendingPermission,
       requirements: daemonStatus.requirements,
       host: daemonStatus.host,
     } satisfies HostLiveStatus;
@@ -366,6 +373,38 @@ describe('Live Host protocol', () => {
         }),
       ),
       { type: 'host.action', action: 'new', epoch: 4 },
+    );
+  });
+
+  it('parses shortcut replacement commands including Off', () => {
+    assert.deepEqual(
+      parseDaemonControlMessage(
+        JSON.stringify({
+          type: 'host.set_shortcut',
+          requestId: 'shortcut-1',
+          shortcut: 'Command+E',
+        }),
+      ),
+      {
+        type: 'host.set_shortcut',
+        requestId: 'shortcut-1',
+        shortcut: 'Command+E',
+      },
+    );
+    assert.deepEqual(
+      parseDaemonControlMessage(
+        JSON.stringify({
+          type: 'host.state',
+          epoch: 1,
+          status: {
+            v: 1,
+            available: true,
+            state: 'idle',
+            shortcut: '',
+          },
+        }),
+      )?.type,
+      'host.state',
     );
   });
 

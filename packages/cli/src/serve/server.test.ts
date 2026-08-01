@@ -874,6 +874,12 @@ interface FakeCloseSessionOpts {
 }
 
 interface FakeBridge extends AcpSessionBridge {
+  readonly liveScreenContextHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveScreenContextCaptureHandler']>
+  >[0];
+  readonly liveTaskToolRequestHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveTaskToolRequestHandler']>
+  >[0];
   calls: BridgeSpawnRequest[];
   loadCalls: BridgeRestoreSessionRequest[];
   resumeCalls: BridgeRestoreSessionRequest[];
@@ -1143,6 +1149,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
+  let liveScreenContextHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveScreenContextCaptureHandler']>
+  >[0];
+  let liveTaskToolRequestHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveTaskToolRequestHandler']>
+  >[0];
   const spawnImpl =
     opts.spawnImpl ??
     (async (req) => ({
@@ -1647,6 +1659,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     // exercise mediation; pin to the pre-F3 default ('first-responder')
     // so existing assertions stay shape-compatible.
     permissionPolicy: 'first-responder' as const,
+    get liveScreenContextHandler() {
+      return liveScreenContextHandler;
+    },
+    setLiveScreenContextCaptureHandler(handler) {
+      liveScreenContextHandler = handler;
+    },
+    get liveTaskToolRequestHandler() {
+      return liveTaskToolRequestHandler;
+    },
+    setLiveTaskToolRequestHandler(handler) {
+      liveTaskToolRequestHandler = handler;
+    },
     calls,
     loadCalls,
     resumeCalls,
@@ -3388,6 +3412,50 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('classifies the daemon-owned Live runtime without exposing provenance', async () => {
+      const primaryBridge = fakeBridge();
+      const liveRuntime: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'live-id',
+          workspaceCwd: '/conversations',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        displayName: 'Conversations',
+        provenance: 'live-conversation',
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+            bridge: primaryBridge,
+          }),
+          liveRuntime,
+        ]),
+      });
+
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(response.status).toBe(200);
+      expect(
+        response.body.workspaces.find(
+          (entry: { id: string }) => entry.id === 'live-id',
+        ),
+      ).toEqual({
+        id: 'live-id',
+        cwd: '/conversations',
+        displayName: 'Conversations',
+        primary: false,
+        trusted: true,
+        kind: 'live',
+      });
     });
 
     it('reports the current primary runtime permission policy after replacement', async () => {
@@ -25549,7 +25617,11 @@ describe('Live conversation runtime lifecycle', () => {
     await fsp.mkdir(qwenHome, { recursive: true });
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -25569,7 +25641,7 @@ describe('Live conversation runtime lifecycle', () => {
     await fsp.mkdir(qwenHome, { recursive: true });
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: false } } }),
+      JSON.stringify({ experimental: { liveVoice: { enabled: false } } }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -25605,19 +25677,7 @@ describe('Live conversation runtime lifecycle', () => {
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
     } as unknown as LiveConversationWorkspace;
-    const liveBridge = fakeBridge({
-      ...liveBridgeOptions,
-      workspaceToolsImpl: async () => ({
-        v: 1,
-        workspaceCwd: root.canonicalRoot,
-        initialized: true,
-        acpChannelLive: true,
-        tools: [
-          { name: 'computer_use__list_windows', enabled: true },
-          { name: 'computer_use__get_window_state', enabled: true },
-        ],
-      }),
-    });
+    const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-conversations',
@@ -25657,6 +25717,8 @@ describe('Live conversation runtime lifecycle', () => {
       workspaceRuntimeRemoval,
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
       daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
+      runtimePlatform: 'darwin',
+      webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     } as Parameters<typeof createServeApp>[2]);
     const coordinator = app.locals['liveSessionCoordinator'] as {
       start(call: {
@@ -25776,7 +25838,7 @@ describe('Live conversation runtime lifecycle', () => {
       await vi.waitFor(() => {
         expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
       });
-      expect(setup.app.locals['liveVoiceEnabledAtBoot']).toBe(true);
+      expect(setup.app.locals['liveVoiceEnabled']).toBe(true);
       expect(
         (setup.app.locals['liveCoordinator'] as LiveHostCoordinator).getStatus()
           .host,
@@ -25784,16 +25846,22 @@ describe('Live conversation runtime lifecycle', () => {
       expect(preheat).not.toHaveBeenCalled();
       expect(setup.liveBridge.workspaceToolsCalls).toBe(0);
 
-      setup.resolveCreation();
-      await vi.waitFor(() => {
-        expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
-          setup.liveRuntime,
-        );
-      });
-
-      const capabilities = await request(setup.app)
+      const capabilitiesRequest = request(setup.app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      let capabilitiesSettled = false;
+      const capabilitiesPromise = capabilitiesRequest.then((response) => {
+        capabilitiesSettled = true;
+        return response;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(capabilitiesSettled).toBe(false);
+
+      setup.resolveCreation();
+      const capabilities = await capabilitiesPromise;
+      expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+        setup.liveRuntime,
+      );
       expect(capabilities.body.features).toContain('realtime_voice');
       expect(capabilities.body.workspaces).toContainEqual(
         expect.objectContaining({
@@ -25814,7 +25882,44 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('rejects generic REST creation and relocates compatible Live restores', async () => {
+  it('hot-enables and disables the Live runtime without restarting the daemon', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    try {
+      const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+        | ((enabled: boolean) => Promise<void>)
+        | undefined;
+      if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+      const enabling = setEnabled(true);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      await enabling;
+
+      expect(setup.app.locals['liveVoiceEnabled']).toBe(true);
+      const enabledCapabilities = await request(setup.app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabledCapabilities.body.features).toContain('realtime_voice');
+
+      await setEnabled(false);
+      expect(setup.app.locals['liveVoiceEnabled']).toBe(false);
+      const disabledCapabilities = await request(setup.app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabledCapabilities.body.features).not.toContain(
+        'realtime_voice',
+      );
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('rejects generic REST creation and relocates loadable Live restores', async () => {
     const restoreLiveSession = async (req: BridgeRestoreSessionRequest) => ({
       sessionId: req.sessionId,
       workspaceCwd: req.workspaceCwd,
@@ -25855,12 +25960,15 @@ describe('Live conversation runtime lifecycle', () => {
       expect(rejectedNew.body.code).toBe('live_session_creation_reserved');
       expect(setup.liveBridge.calls).toHaveLength(0);
 
-      const rejectedRestore = await request(setup.app)
+      const standaloneRestore = await request(setup.app)
         .post('/session/generic-session/load')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: setup.root.canonicalRoot });
-      expect(rejectedRestore.status).toBe(404);
-      expect(setup.liveBridge.loadCalls).toHaveLength(0);
+      expect(standaloneRestore.status).toBe(200);
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId: 'generic-session',
+        path: `${setup.root.canonicalRoot}/conversation-generic-session`,
+      });
 
       for (const action of ['load', 'resume'] as const) {
         const sessionId = `live-${action}`;
@@ -25905,8 +26013,8 @@ describe('Live conversation runtime lifecycle', () => {
       );
       expect(
         setup.conversationWorkspace.materializeConversationDirectory,
-      ).toHaveBeenCalledTimes(5);
-      expect(setup.liveBridge.loadCalls).toHaveLength(4);
+      ).toHaveBeenCalledTimes(6);
+      expect(setup.liveBridge.loadCalls).toHaveLength(5);
       expect(setup.liveBridge.resumeCalls).toHaveLength(1);
     } finally {
       readCreationMetadata.mockRestore();
@@ -25944,7 +26052,10 @@ describe('Live conversation runtime lifecycle', () => {
         expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
           setup.liveRuntime,
         );
-        expect(setup.liveBridge.workspaceToolsCalls).toBe(1);
+        expect(setup.liveBridge.workspaceToolsCalls).toBe(0);
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
       });
     } finally {
       await (
@@ -25952,39 +26063,6 @@ describe('Live conversation runtime lifecycle', () => {
       )();
       await restoreLiveSettings();
     }
-  });
-
-  it('revalidates the owned runtime for every Live call', async () => {
-    const setup = setupLiveRuntime();
-    const first = setup.coordinator.start({
-      epoch: 1,
-      callId: 'first',
-      mode: 'new',
-    });
-    await vi.waitFor(() => {
-      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
-    });
-    setup.coordinator.stop({ epoch: 1, callId: 'first' });
-    setup.resolveCreation();
-    await first;
-
-    const second = setup.coordinator.start({
-      epoch: 2,
-      callId: 'second',
-      mode: 'new',
-    });
-    setup.coordinator.stop({ epoch: 2, callId: 'second' });
-    await second;
-
-    expect(setup.conversationWorkspace.revalidate).toHaveBeenCalledTimes(2);
-    expect(setup.conversationWorkspace.assertExactRoot).toHaveBeenCalledTimes(
-      2,
-    );
-    expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
-    expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
-      setup.liveRuntime,
-    );
-    (setup.app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
   });
 
   it('shutdown waits for the in-flight boot publication', async () => {
@@ -26058,24 +26136,9 @@ class FakeLiveHostSocket extends EventEmitter {
 }
 
 describe('Live Appshot server integration', () => {
-  function readyAppshotTools(workspaceCwd: string): ServeWorkspaceToolsStatus {
-    return {
-      v: 1,
-      workspaceCwd,
-      initialized: true,
-      acpChannelLive: true,
-      tools: [
-        { name: 'computer_use__list_windows', enabled: true },
-        { name: 'computer_use__get_window_state', enabled: true },
-      ],
-    };
-  }
-
   async function setupAppshotProbe(
     options: {
-      preheat?: () => Promise<void>;
-      workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
-      probeIntervalMs?: number;
+      beforeRevalidate?: () => Promise<void>;
     } = {},
   ) {
     const tmp = await fsp.mkdtemp(
@@ -26085,7 +26148,11 @@ describe('Live Appshot server integration', () => {
     await fsp.mkdir(qwenHome, { recursive: true });
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -26096,14 +26163,8 @@ describe('Live Appshot server integration', () => {
       'work',
       'live-appshot-conversations',
     );
-    const conversationBridge = fakeBridge({
-      workspaceToolsImpl:
-        options.workspaceToolsImpl ??
-        (async () => readyAppshotTools(conversationCwd)),
-    });
-    const preheat = vi
-      .spyOn(conversationBridge, 'preheat')
-      .mockImplementation(options.preheat ?? (async () => undefined));
+    const conversationBridge = fakeBridge();
+    const preheat = vi.spyOn(conversationBridge, 'preheat');
     const getWorkspaceToolsStatus = vi.spyOn(
       conversationBridge,
       'getWorkspaceToolsStatus',
@@ -26134,15 +26195,19 @@ describe('Live Appshot server integration', () => {
       inode: 2,
     };
     const conversationWorkspace = {
-      revalidate: vi.fn(async () => root),
+      revalidate: vi.fn(async () => {
+        await options.beforeRevalidate?.();
+        return root;
+      }),
       assertExactRoot: vi.fn(async () => root),
     } as unknown as LiveConversationWorkspace;
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_live_appshot_nonce_0001',
       getProviderReadiness: () => ({ state: 'ready' }),
     });
+    const probeProvider = vi.fn(async () => undefined);
     const liveSessionCoordinator = {
-      probeProvider: vi.fn(async () => undefined),
+      probeProvider,
       start: vi.fn(async () => undefined),
       stop: vi.fn(),
       pushAudio: vi.fn(() => true),
@@ -26153,7 +26218,8 @@ describe('Live Appshot server integration', () => {
       liveConversationWorkspace: conversationWorkspace,
       liveCoordinator: coordinator,
       liveSessionCoordinator,
-      liveAppshotProbeIntervalMs: options.probeIntervalMs ?? 60_000,
+      runtimePlatform: 'darwin',
+      webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     });
     return {
       app,
@@ -26161,6 +26227,10 @@ describe('Live Appshot server integration', () => {
       conversationWorkspace,
       preheat,
       getWorkspaceToolsStatus,
+      probeProvider,
+      get captureHandler() {
+        return conversationBridge.liveScreenContextHandler;
+      },
       connectHost(instanceNonce: string) {
         const socket = new FakeLiveHostSocket();
         coordinator.attachHost(
@@ -26179,6 +26249,51 @@ describe('Live Appshot server integration', () => {
     };
   }
 
+  it.each([
+    {
+      name: 'non-macOS',
+      options: baseOpts,
+      deps: {
+        runtimePlatform: 'linux' as const,
+        webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
+      },
+    },
+    {
+      name: 'API-only mode',
+      options: { ...baseOpts, serveWebShell: false },
+      deps: {
+        runtimePlatform: 'darwin' as const,
+        webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
+      },
+    },
+  ])('does not expose Live in $name', async ({ options, deps }) => {
+    const app = createServeApp(options, undefined, {
+      bridge: fakeBridge(),
+      persistSetting: vi.fn(async () => undefined),
+      ...deps,
+    });
+    try {
+      const live = await request(app)
+        .get('/live/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(live.status).toBe(404);
+      const capabilities = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capabilities.body.features).not.toContain('realtime_voice');
+      const settings = await request(app)
+        .get('/workspace/settings')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(
+        settings.body.settings.some((setting: { key: string }) =>
+          setting.key.startsWith('experimental.liveVoice.'),
+        ),
+      ).toBe(false);
+    } finally {
+      (app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
+    }
+  });
+
   it('does not initialize Live dependencies when disabled at daemon startup', async () => {
     const tmp = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-live-disabled-host-'),
@@ -26187,7 +26302,7 @@ describe('Live Appshot server integration', () => {
     await fsp.mkdir(qwenHome, { recursive: true });
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: false } } }),
+      JSON.stringify({ experimental: { liveVoice: { enabled: false } } }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -26241,6 +26356,8 @@ describe('Live Appshot server integration', () => {
         liveConversationWorkspace: conversationWorkspace,
         createWorkspaceRuntime,
         liveSessionCoordinator,
+        runtimePlatform: 'darwin',
+        webShellDir: path.join(tmp, 'web-shell'),
       });
       const capabilities = await request(app)
         .get('/capabilities')
@@ -26250,29 +26367,16 @@ describe('Live Appshot server integration', () => {
       const liveStatus = await request(app)
         .get('/live/status')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(liveStatus.status).toBe(404);
-      await fsp.writeFile(
-        path.join(qwenHome, 'settings.json'),
-        JSON.stringify({ general: { liveVoice: { enabled: true } } }),
-      );
-      const afterHotEnable = await request(app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(afterHotEnable.body.features).not.toContain('realtime_voice');
-      const coordinator = app.locals['liveCoordinator'] as LiveHostCoordinator;
-      const socket = new FakeLiveHostSocket();
-      coordinator.attachHost(
-        socket as unknown as WebSocket,
-        coordinator.daemonInstanceNonce,
-      );
-      socket.hello('host_live_disabled_nonce_0001');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-
-      expect(coordinator.getStatus()).toMatchObject({
+      expect(liveStatus.status).toBe(200);
+      expect(liveStatus.body).toMatchObject({
         available: false,
         state: 'unavailable',
         blocker: 'provider_config',
-        message: 'Live Voice is disabled in settings.',
+      });
+      const coordinator = app.locals['liveCoordinator'] as LiveHostCoordinator;
+      expect(coordinator.getStatus()).toMatchObject({
+        available: false,
+        blocker: 'provider_config',
         requirements: {
           provider: 'unavailable',
           appshot: 'unavailable',
@@ -26299,7 +26403,11 @@ describe('Live Appshot server integration', () => {
     await fsp.mkdir(qwenHome, { recursive: true });
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -26346,6 +26454,8 @@ describe('Live Appshot server integration', () => {
         liveConversationWorkspace: conversationWorkspace,
         createWorkspaceRuntime,
         daemonEnv,
+        runtimePlatform: 'darwin',
+        webShellDir: path.join(tmp, 'web-shell'),
       });
       daemonEnv['QWEN_SERVE_ACP_HTTP'] = '1';
 
@@ -26354,7 +26464,7 @@ describe('Live Appshot server integration', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(capabilities.status).toBe(200);
       expect(capabilities.body.features).not.toContain('realtime_voice');
-      expect(app.locals['liveVoiceEnabledAtBoot']).toBe(false);
+      expect(app.locals['liveVoiceEnabled']).toBe(false);
       expect(app.locals['acpHandle']).toBeUndefined();
 
       const liveStatus = await request(app)
@@ -26379,18 +26489,18 @@ describe('Live Appshot server integration', () => {
     }
   });
 
-  it('probes the Conversations runtime after Host hello and gates start until ready', async () => {
-    const preheatGate = deferred<void>();
+  it('binds the dedicated Appshot channel after Host hello and gates start until ready', async () => {
+    const channelGate = deferred<void>();
     const setup = await setupAppshotProbe({
-      preheat: () => preheatGate.promise,
+      beforeRevalidate: () => channelGate.promise,
     });
     try {
       setup.connectHost('host_live_appshot_nonce_0001');
       await vi.waitFor(() => {
-        expect(setup.preheat).toHaveBeenCalledOnce();
+        expect(setup.conversationWorkspace.revalidate).toHaveBeenCalledOnce();
       });
 
-      expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
+      expect(setup.captureHandler).toBeUndefined();
       expect(setup.coordinator.getStatus()).toMatchObject({
         available: false,
         blocker: 'appshot',
@@ -26409,49 +26519,49 @@ describe('Live Appshot server integration', () => {
         },
       });
 
-      preheatGate.resolve(undefined);
+      channelGate.resolve(undefined);
       await vi.waitFor(() => {
-        expect(setup.getWorkspaceToolsStatus).toHaveBeenCalledOnce();
+        expect(setup.captureHandler).toEqual(expect.any(Function));
         expect(setup.coordinator.getStatus()).toMatchObject({
           available: true,
           state: 'idle',
           requirements: { appshot: 'ready' },
         });
       });
-      expect(setup.preheat.mock.invocationCallOrder[0]).toBeLessThan(
-        setup.getWorkspaceToolsStatus.mock.invocationCallOrder[0]!,
-      );
+      expect(setup.preheat).not.toHaveBeenCalled();
+      expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
+      expect(setup.probeProvider).not.toHaveBeenCalled();
     } finally {
-      preheatGate.resolve(undefined);
+      channelGate.resolve(undefined);
       await setup.cleanup();
     }
   });
 
-  it('retries a failed Appshot probe when a new Host says hello', async () => {
-    const preheat = vi
+  it('retries a failed Appshot channel bind when a new Host says hello', async () => {
+    const beforeRevalidate = vi
       .fn<() => Promise<void>>()
-      .mockRejectedValueOnce(new Error('preheat failed'))
+      .mockRejectedValueOnce(new Error('runtime unavailable'))
       .mockResolvedValue(undefined);
-    const setup = await setupAppshotProbe({ preheat });
+    const setup = await setupAppshotProbe({ beforeRevalidate });
     try {
       const firstHost = setup.connectHost('host_live_appshot_nonce_0001');
       await vi.waitFor(() => {
-        expect(setup.preheat).toHaveBeenCalledOnce();
+        expect(beforeRevalidate).toHaveBeenCalledOnce();
         expect(setup.coordinator.getStatus()).toMatchObject({
           available: false,
           blocker: 'appshot',
           requirements: { appshot: 'unavailable' },
         });
       });
-      expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
+      expect(setup.captureHandler).toBeUndefined();
 
       await new Promise<void>((resolve) => setImmediate(resolve));
       firstHost.close();
       setup.connectHost('host_live_appshot_nonce_0002');
 
       await vi.waitFor(() => {
-        expect(setup.preheat).toHaveBeenCalledTimes(2);
-        expect(setup.getWorkspaceToolsStatus).toHaveBeenCalledOnce();
+        expect(beforeRevalidate).toHaveBeenCalledTimes(2);
+        expect(setup.captureHandler).toEqual(expect.any(Function));
         expect(setup.coordinator.getStatus()).toMatchObject({
           available: true,
           requirements: { appshot: 'ready' },
@@ -26463,53 +26573,30 @@ describe('Live Appshot server integration', () => {
     }
   });
 
-  it('fails an active call closed when a periodic Appshot probe loses its tools', async () => {
-    let toolsReady = true;
-    const setup = await setupAppshotProbe({
-      probeIntervalMs: 20,
-      workspaceToolsImpl: async () =>
-        toolsReady
-          ? readyAppshotTools(path.resolve('/work/live-appshot-conversations'))
-          : {
-              ...readyAppshotTools(
-                path.resolve('/work/live-appshot-conversations'),
-              ),
-              acpChannelLive: false,
-            },
-    });
+  it('never probes ordinary Computer Use tools for Live readiness', async () => {
+    const setup = await setupAppshotProbe();
     try {
       setup.connectHost('host_live_appshot_nonce_periodic');
       await vi.waitFor(() => {
         expect(setup.coordinator.getStatus().available).toBe(true);
       });
-      const call = setup.coordinator.start('resume');
-      expect(setup.coordinator.getStatus().callId).toBe(call.callId);
-
-      toolsReady = false;
-      await vi.waitFor(
-        () => {
-          expect(setup.coordinator.getStatus()).toMatchObject({
-            available: false,
-            blocker: 'appshot',
-          });
-          expect(setup.coordinator.getStatus().callId).toBeUndefined();
-        },
-        { timeout: 2_000 },
-      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(setup.preheat).not.toHaveBeenCalled();
+      expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
       await setup.cleanup();
     }
   });
 
-  it('waits for an in-flight Appshot probe during shutdown', async () => {
-    const preheatGate = deferred<void>();
+  it('waits for an in-flight Appshot channel bind during shutdown', async () => {
+    const channelGate = deferred<void>();
     const setup = await setupAppshotProbe({
-      preheat: () => preheatGate.promise,
+      beforeRevalidate: () => channelGate.promise,
     });
     try {
       setup.connectHost('host_live_appshot_nonce_0001');
       await vi.waitFor(() => {
-        expect(setup.preheat).toHaveBeenCalledOnce();
+        expect(setup.conversationWorkspace.revalidate).toHaveBeenCalledOnce();
       });
 
       const seal = setup.app.locals['sealAndWaitLiveCoordinator'] as
@@ -26523,12 +26610,13 @@ describe('Live Appshot server integration', () => {
       await Promise.resolve();
       expect(settled).toBe(false);
 
-      preheatGate.resolve(undefined);
+      channelGate.resolve(undefined);
       await shutdown;
       expect(settled).toBe(true);
-      expect(setup.getWorkspaceToolsStatus).toHaveBeenCalledOnce();
+      expect(setup.captureHandler).toBeUndefined();
+      expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
-      preheatGate.resolve(undefined);
+      channelGate.resolve(undefined);
       await setup.cleanup();
     }
   });
@@ -26544,22 +26632,17 @@ describe('Live Appshot server integration', () => {
     await fsp.writeFile(
       path.join(qwenHome, 'settings.json'),
       JSON.stringify({
-        general: { liveVoice: { enabled: true } },
-        modelProviders: {
-          openai: [
-            {
-              id: 'qwen3.8-max-preview',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'LIVE_USER_KEY',
-            },
-          ],
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            apiKey: 'dedicated-user-realtime-key',
+          },
         },
-        env: { LIVE_USER_KEY: 'user-secret' },
       }),
     );
     await fsp.writeFile(
       path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: false } } }),
+      JSON.stringify({ experimental: { liveVoice: { enabled: false } } }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -26571,16 +26654,10 @@ describe('Live Appshot server integration', () => {
       app = createServeApp({ ...baseOpts, workspace }, undefined, {
         bridge: fakeBridge(),
         daemonEnv: {},
+        runtimePlatform: 'darwin',
+        webShellDir: path.join(tmp, 'web-shell'),
       });
       const coordinator = app.locals['liveCoordinator'] as LiveHostCoordinator;
-      expect(coordinator.getStatus()).toMatchObject({
-        blocker: 'host_missing',
-        requirements: { provider: 'ready' },
-      });
-      await fsp.writeFile(
-        path.join(qwenHome, 'settings.json'),
-        JSON.stringify({ general: { liveVoice: { enabled: false } } }),
-      );
       expect(coordinator.getStatus()).toMatchObject({
         blocker: 'host_missing',
         requirements: { provider: 'ready' },

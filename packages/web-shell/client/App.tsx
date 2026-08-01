@@ -60,6 +60,7 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
+import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -1410,7 +1411,8 @@ export function App({
     ? workspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label: workspaceLabel(entry),
+        label:
+          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))
@@ -3982,6 +3984,11 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const liveSetup = useLiveVoiceSetup(
+    workspaceSettings.some(
+      (setting) => setting.key === 'experimental.liveVoice.enabled',
+    ),
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -4022,6 +4029,7 @@ export function App({
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
+    liveSetup,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,

@@ -96,6 +96,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  buildPermissionCheckContext,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -176,6 +177,18 @@ import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import { normalizeChannelDeliveryText } from '../../serve/channel-delivery.js';
+import {
+  CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+  CaptureScreenContextTool,
+} from '../../serve/live/capture-screen-context.js';
+import {
+  createLiveTaskTools,
+  type LiveTaskTool,
+} from '../../serve/live/live-task-tools.js';
+import {
+  LIVE_BACKEND_END_INSTRUCTIONS,
+  LIVE_BACKEND_START_INSTRUCTIONS,
+} from '../../serve/live/live-backend-instructions.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -288,7 +301,6 @@ const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
 const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
   ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
-
 // Content has no private metadata slot, so history cleanup recognizes only
 // these exact templates; byte-identical user text is intentionally ambiguous.
 function isTodoStopGuardPromptText(text: unknown): text is string {
@@ -1318,6 +1330,10 @@ export class Session implements SessionContext {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private liveScreenContextTool?: CaptureScreenContextTool;
+  private liveTaskTools: readonly LiveTaskTool[] = [];
+  private liveConversationActive: boolean | undefined;
+  private liveEndInstructionPending = false;
 
   // Message rewrite middleware (optional, installed after history replay)
   messageRewriter?: MessageRewriteMiddleware;
@@ -1798,6 +1814,111 @@ export class Session implements SessionContext {
           : {}),
       };
     });
+  }
+
+  async enableLiveScreenContext(): Promise<void> {
+    const registry = this.config.getToolRegistry();
+    const existing = registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
+    if (existing && existing !== this.liveScreenContextTool) {
+      throw new Error(
+        'capture_screen_context is reserved for the trusted Live Appshot channel.',
+      );
+    }
+    if (!this.liveScreenContextTool) {
+      const tool = new CaptureScreenContextTool(async () => {
+        const response = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
+          { callerSessionId: this.sessionId },
+        );
+        const appName = response['appName'];
+        const windowTitle = response['windowTitle'];
+        const accessibilityText = response['accessibilityText'];
+        const screenshotPath = response['screenshotPath'];
+        if (
+          typeof appName !== 'string' ||
+          !appName ||
+          (windowTitle !== undefined && typeof windowTitle !== 'string') ||
+          typeof accessibilityText !== 'string' ||
+          typeof screenshotPath !== 'string' ||
+          !screenshotPath
+        ) {
+          throw new Error('capture_screen_context: invalid daemon response');
+        }
+        return {
+          appName,
+          ...(windowTitle ? { windowTitle } : {}),
+          accessibilityText,
+          screenshotPath,
+        };
+      });
+      registry.registerTool(tool);
+      if (registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME) !== tool) {
+        throw new Error(
+          'capture_screen_context is required for Live Voice but is disabled.',
+        );
+      }
+      this.liveScreenContextTool = tool;
+    }
+
+    if (this.liveTaskTools.length === 0) {
+      const tools = createLiveTaskTools(async (name, args) =>
+        this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveTaskTool, {
+          callerSessionId: this.sessionId,
+          name,
+          arguments: args,
+        }),
+      );
+      for (const tool of tools) {
+        if (registry.getTool(tool.name)) {
+          throw new Error(
+            `${tool.name} is reserved for the trusted Live task channel.`,
+          );
+        }
+      }
+      for (const tool of tools) registry.registerTool(tool);
+      for (const tool of tools) {
+        if (registry.getTool(tool.name) !== tool) {
+          throw new Error(
+            `${tool.name} is required for Live Voice but is disabled.`,
+          );
+        }
+      }
+      this.liveTaskTools = tools;
+    }
+    await this.#syncLiveToolDeclarations();
+  }
+
+  async #syncLiveToolDeclarations(): Promise<void> {
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient) {
+      throw new Error('The Live Coordinator model client is unavailable.');
+    }
+    await geminiClient.setTools();
+  }
+
+  async setLiveConversationActive(active: boolean): Promise<void> {
+    if (this.liveConversationActive === active) return;
+    if (active) {
+      this.liveConversationActive = true;
+      this.liveEndInstructionPending = false;
+      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_START_INSTRUCTIONS);
+    } else {
+      if (this.liveConversationActive !== true) {
+        this.liveConversationActive = false;
+        return;
+      }
+      this.liveConversationActive = false;
+      this.liveEndInstructionPending = true;
+      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
+    }
+    await this.config.getGeminiClient()?.refreshSystemInstruction();
+  }
+
+  async #consumeLiveEndInstruction(): Promise<void> {
+    if (this.liveConversationActive || !this.liveEndInstructionPending) return;
+    this.liveEndInstructionPending = false;
+    this.config.setLiveAppendSystemPrompt(undefined);
+    await this.config.getGeminiClient()?.refreshSystemInstruction();
   }
 
   getId(): string {
@@ -2308,6 +2429,9 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
+    if (this.liveScreenContextTool || this.liveTaskTools.length > 0) {
+      await this.#syncLiveToolDeclarations();
+    }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -2468,6 +2592,7 @@ export class Session implements SessionContext {
       void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
+      await this.#consumeLiveEndInstruction();
     }
   }
 
@@ -7240,8 +7365,18 @@ export class Session implements SessionContext {
     try {
       return await runInToolSpanContext(toolSpan, async () => {
         // ---- L1: Tool enablement check ----
+        const isTrustedLiveScreenContextTool =
+          tool === this.liveScreenContextTool;
+        const isTrustedLiveTaskTool = this.liveTaskTools.includes(
+          tool as LiveTaskTool,
+        );
         const pm = this.config.getPermissionManager?.();
-        if (pm && !(await pm.isToolEnabled(policyToolName))) {
+        if (
+          pm &&
+          !isTrustedLiveScreenContextTool &&
+          !isTrustedLiveTaskTool &&
+          !(await pm.isToolEnabled(policyToolName))
+        ) {
           return earlyErrorResponse(
             new Error(`Tool "${toolName}" is disabled.`),
             toolName,
@@ -7341,22 +7476,32 @@ export class Session implements SessionContext {
           // The VS Code extension is just a UI layer for requestPermission.
           const isAskUserQuestionTool =
             policyToolName === ToolNames.ASK_USER_QUESTION;
-
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
-          const flowResult = await evaluatePermissionFlow(
-            this.config,
-            invocation,
-            policyToolName,
-            toolParams,
-          );
-          const {
-            finalPermission,
-            pmForcedAsk,
-            pmCtx,
-            denyMessage,
-            requiresUserInteraction,
-          } = flowResult;
+          const flowResult =
+            isTrustedLiveScreenContextTool || isTrustedLiveTaskTool
+              ? {
+                  defaultPermission: 'allow' as const,
+                  finalPermission: 'allow' as const,
+                  pmForcedAsk: false,
+                  pmCtx: buildPermissionCheckContext(
+                    policyToolName,
+                    toolParams,
+                    this.config.getTargetDir(),
+                    invocation.permissionAliases,
+                  ),
+                  requiresUserInteraction: false,
+                  denyMessage: undefined,
+                }
+              : await evaluatePermissionFlow(
+                  this.config,
+                  invocation,
+                  policyToolName,
+                  toolParams,
+                );
+          const finalPermission = flowResult.finalPermission;
+          const pmForcedAsk = flowResult.pmForcedAsk;
+          const { pmCtx, denyMessage, requiresUserInteraction } = flowResult;
 
           // ---- L5: ApprovalMode overrides ----
           approvalMode = this.config.getApprovalMode();

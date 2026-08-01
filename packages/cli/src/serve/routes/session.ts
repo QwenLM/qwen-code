@@ -34,7 +34,7 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
-  readCompatibleLiveSessionMetadata,
+  readLoadableLiveConversationMetadata,
 } from '../live/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -149,9 +149,6 @@ interface RegisterSessionRoutesDeps {
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
-  recycleLiveConversationDirectory?: (
-    sessionId: string,
-  ) => Promise<string | undefined>;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
   isLiveSessionActive?: (sessionId: string) => boolean;
 }
@@ -1189,41 +1186,6 @@ export function registerSessionRoutes(
       error: e.error instanceof Error ? e.error.message : String(e.error),
     }));
 
-  const recycleRemovedLiveConversationDirectories = async (
-    removed: string[],
-    runtime: WorkspaceRuntime,
-    route: string,
-  ): Promise<Array<{ sessionId: string; error: string }>> => {
-    const recycle = deps.recycleLiveConversationDirectory;
-    if (runtime.provenance !== 'live-conversation' || !recycle) return [];
-
-    const outcomes = await Promise.all(
-      removed.map(async (sessionId) => {
-        try {
-          await recycle(sessionId);
-          return undefined;
-        } catch (error) {
-          const message = `Live conversation directory cleanup failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`;
-          writeStderrLine(
-            `qwen serve: cleanupSession failed for ${safeLogValue(sessionId)}: ${safeLogValue(message)}`,
-          );
-          daemonLog?.error(
-            'live conversation directory cleanup failed',
-            error instanceof Error ? error : new Error(String(error)),
-            { route, sessionId },
-          );
-          return { sessionId, error: message };
-        }
-      }),
-    );
-    return outcomes.filter(
-      (entry): entry is { sessionId: string; error: string } =>
-        entry !== undefined,
-    );
-  };
-
   const resolveWorkspaceParam = (
     req: Request,
     res: Response,
@@ -1982,7 +1944,7 @@ export function registerSessionRoutes(
             const sessionService = new SessionService(workspaceCwd);
             const metadata =
               runtime.provenance === 'live-conversation'
-                ? await readCompatibleLiveSessionMetadata(
+                ? await readLoadableLiveConversationMetadata(
                     sessionId,
                     (candidateId) =>
                       sessionService.readCreationMetadata(candidateId),
@@ -3480,20 +3442,7 @@ export function registerSessionRoutes(
       for (const removedId of result.removed) {
         clearBranchSessionEntry(removedId);
       }
-      const cleanupErrors = await recycleRemovedLiveConversationDirectories(
-        result.removed,
-        workspaceRegistry.primary,
-        'POST /sessions/delete',
-      );
-      res.status(200).json({
-        ...result,
-        ...(cleanupErrors.length > 0
-          ? {
-              cleanupErrors,
-              errors: [...result.errors, ...cleanupErrors],
-            }
-          : {}),
-      });
+      res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
     }
@@ -3579,20 +3528,7 @@ export function registerSessionRoutes(
         for (const removedId of result.removed) {
           clearBranchSessionEntry(removedId);
         }
-        const cleanupErrors = await recycleRemovedLiveConversationDirectories(
-          result.removed,
-          runtime,
-          route,
-        );
-        res.status(200).json({
-          ...result,
-          ...(cleanupErrors.length > 0
-            ? {
-                cleanupErrors,
-                errors: [...result.errors, ...cleanupErrors],
-              }
-            : {}),
-        });
+        res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route });
       }

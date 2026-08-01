@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Stats } from 'node:fs';
-import { lstat, mkdir, realpath, rename, rmdir } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rmdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -25,8 +25,6 @@ const isSamePath = (left: string, right: string): boolean =>
   process.platform === 'win32'
     ? left.toLowerCase() === right.toLowerCase()
     : left === right;
-
-const LIVE_CONVERSATION_TRASH_NAME = '.trash';
 
 function conversationDirectoryName(sessionId: string): string {
   if (sessionId.length === 0 || sessionId.length > 256) {
@@ -179,10 +177,6 @@ export async function assertExactLiveConversationRoot(
 export class LiveConversationWorkspace {
   readonly rootPath: string;
   private rootPromise?: Promise<LiveConversationRootIdentity>;
-  private readonly recyclePromises = new Map<
-    string,
-    Promise<string | undefined>
-  >();
 
   constructor(options: LiveConversationWorkspaceOptions = {}) {
     this.rootPath = getLiveConversationRootPath(options.homeDir);
@@ -260,138 +254,5 @@ export class LiveConversationWorkspace {
     }
     await revalidateLiveConversationRoot(root);
     return true;
-  }
-
-  async recycleConversationDirectory(
-    sessionId: string,
-  ): Promise<string | undefined> {
-    const active = this.recyclePromises.get(sessionId);
-    if (active) return active.then(() => undefined);
-    const pending = this.recycleConversationDirectoryOnce(sessionId).finally(
-      () => {
-        if (this.recyclePromises.get(sessionId) === pending) {
-          this.recyclePromises.delete(sessionId);
-        }
-      },
-    );
-    this.recyclePromises.set(sessionId, pending);
-    return pending;
-  }
-
-  private async recycleConversationDirectoryOnce(
-    sessionId: string,
-  ): Promise<string | undefined> {
-    const root = await this.revalidate();
-    const sourceName = conversationDirectoryName(sessionId);
-    const sourceCandidate = join(root.canonicalRoot, sourceName);
-    let source: string;
-    let sourceStats: Stats;
-    try {
-      source = await validateConversationDirectory(
-        root,
-        sourceName,
-        sourceCandidate,
-      );
-      sourceStats = await lstat(source);
-    } catch (error) {
-      if (
-        error &&
-        typeof error === 'object' &&
-        (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ) {
-        return undefined;
-      }
-      throw error;
-    }
-
-    const trashCandidate = join(
-      root.canonicalRoot,
-      LIVE_CONVERSATION_TRASH_NAME,
-    );
-    try {
-      await mkdir(trashCandidate, { mode: 0o700 });
-    } catch (error) {
-      if (
-        !error ||
-        typeof error !== 'object' ||
-        (error as NodeJS.ErrnoException).code !== 'EEXIST'
-      ) {
-        throw error;
-      }
-    }
-    const trash = await validateConversationDirectory(
-      root,
-      LIVE_CONVERSATION_TRASH_NAME,
-      trashCandidate,
-    );
-    const trashStats = await lstat(trash);
-    const sourceBeforeRename = await validateConversationDirectory(
-      root,
-      sourceName,
-      source,
-    );
-    const sourceBeforeRenameStats = await lstat(sourceBeforeRename);
-    if (
-      sourceBeforeRenameStats.dev !== sourceStats.dev ||
-      sourceBeforeRenameStats.ino !== sourceStats.ino
-    ) {
-      throw new Error(
-        'Live conversation directory identity changed before recycle',
-      );
-    }
-    const trashBeforeRename = await validateConversationDirectory(
-      root,
-      LIVE_CONVERSATION_TRASH_NAME,
-      trash,
-    );
-    const trashBeforeRenameStats = await lstat(trashBeforeRename);
-    if (
-      trashBeforeRenameStats.dev !== trashStats.dev ||
-      trashBeforeRenameStats.ino !== trashStats.ino
-    ) {
-      throw new Error(
-        'Live conversation trash identity changed before recycle',
-      );
-    }
-
-    const recycledName = `${sourceName}-${randomBytes(32).toString('hex')}`;
-    const recycledCandidate = join(trash, recycledName);
-    try {
-      await rename(source, recycledCandidate);
-    } catch (error) {
-      await revalidateLiveConversationRoot(root);
-      throw error;
-    }
-
-    const currentTrash = await validateConversationDirectory(
-      root,
-      LIVE_CONVERSATION_TRASH_NAME,
-      trash,
-    );
-    const currentTrashStats = await lstat(currentTrash);
-    if (
-      currentTrashStats.dev !== trashStats.dev ||
-      currentTrashStats.ino !== trashStats.ino
-    ) {
-      throw new Error(
-        'Live conversation trash identity changed during recycle',
-      );
-    }
-    const recycled = await validateConversationDirectory(
-      await revalidateLiveConversationRoot(root),
-      recycledName,
-      recycledCandidate,
-      trash,
-    );
-    const recycledStats = await lstat(recycled);
-    if (
-      recycledStats.dev !== sourceStats.dev ||
-      recycledStats.ino !== sourceStats.ino
-    ) {
-      throw new Error(
-        'Live conversation directory identity changed during recycle',
-      );
-    }
-    return recycled;
   }
 }

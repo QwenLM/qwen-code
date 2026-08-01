@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import {
   buildHostWebSocketUrl,
+  buildWebShellSessionUrl,
   DiscoveryMonitor,
   readDiscoveryFile,
   type DiscoveryResult,
@@ -67,6 +68,32 @@ describe('Live daemon discovery', () => {
       'ws://127.23.45.67:9527/live/host',
     );
     assert.throws(() => buildHostWebSocketUrl('https://localhost.example.com'));
+  });
+
+  it('builds a scoped WebShell link without putting auth in the query', () => {
+    const url = new URL(
+      buildWebShellSessionUrl(
+        {
+          url: 'http://127.0.0.1:9527/ignored?old=value',
+          token: 'secret-not-logged',
+          protocolVersion: LIVE_PROTOCOL_VERSION,
+          pid: process.pid,
+          instanceNonce: 'abcdefghijklmnop',
+        },
+        {
+          workspaceId: 'conversations/workspace',
+          sessionId: 'live/session',
+        },
+      ),
+    );
+
+    assert.equal(url.pathname, '/session/live%2Fsession');
+    assert.equal(url.searchParams.get('workspace'), 'conversations/workspace');
+    assert.equal(url.searchParams.has('token'), false);
+    assert.equal(
+      new URLSearchParams(url.hash.slice(1)).get('token'),
+      'secret-not-logged',
+    );
   });
 
   it('coalesces overlapping polls so an older read cannot win', async () => {

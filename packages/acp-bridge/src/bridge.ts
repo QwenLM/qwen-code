@@ -106,6 +106,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  SESSION_SOURCE_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
 } from './bridgeTypes.js';
@@ -146,6 +147,8 @@ import type {
   BridgeOptions,
   BridgeSessionLifecycleEvent,
   BridgeTelemetry,
+  LiveScreenContextCaptureHandler,
+  LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
@@ -1359,6 +1362,10 @@ const DEFAULT_SESSION_REAP_INTERVAL_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
+  let liveScreenContextCaptureHandler:
+    | LiveScreenContextCaptureHandler
+    | undefined;
+  let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
@@ -2286,6 +2293,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () =>
           channelInfo?.sessionIds === sessionIds &&
           channelInfo.sessionSpawnsInFlight > 0,
+        () => liveScreenContextCaptureHandler,
+        () => liveTaskToolRequestHandler,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -2608,6 +2617,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 telemetry.injectPromptContext({
                   cwd: boundWorkspace,
                   mcpServers: [],
+                  ...(sourceType
+                    ? {
+                        _meta: {
+                          [SESSION_SOURCE_META_KEY]: {
+                            sourceType,
+                            ...(sourceId !== undefined ? { sourceId } : {}),
+                          },
+                        },
+                      }
+                    : {}),
                 }),
               ),
               initTimeoutMs,
@@ -4541,14 +4560,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
-                ...(historyReplay === 'response'
+                ...(historyReplay === 'response' || req.sourceType
                   ? {
                       _meta: {
-                        [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
-                        ...(req.historyPageSize !== undefined
+                        ...(historyReplay === 'response'
                           ? {
-                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
-                                req.historyPageSize,
+                              [LOAD_REPLAY_MODE_META_KEY]:
+                                LOAD_REPLAY_BULK_MODE,
+                              ...(req.historyPageSize !== undefined
+                                ? {
+                                    [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
+                                      req.historyPageSize,
+                                  }
+                                : {}),
+                            }
+                          : {}),
+                        ...(req.sourceType
+                          ? {
+                              [SESSION_SOURCE_META_KEY]: {
+                                sourceType: req.sourceType,
+                                ...(req.sourceId !== undefined
+                                  ? { sourceId: req.sourceId }
+                                  : {}),
+                              },
                             }
                           : {}),
                       },
@@ -4567,6 +4601,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
                 mcpServers: [],
+                ...(req.sourceType
+                  ? {
+                      _meta: {
+                        [SESSION_SOURCE_META_KEY]: {
+                          sourceType: req.sourceType,
+                          ...(req.sourceId !== undefined
+                            ? { sourceId: req.sourceId }
+                            : {}),
+                        },
+                      },
+                    }
+                  : {}),
               }),
               initTimeoutMs,
               'resumeSession',
@@ -4670,6 +4716,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
         },
       );
+      // Source metadata can activate source-scoped child capabilities, so a
+      // fresh ACP child must receive it again after loading the transcript.
+      if (entry.sourceType) {
+        await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionSource,
+              {
+                sessionId: entry.sessionId,
+                sourceType: entry.sourceType,
+                ...(entry.sourceId !== undefined
+                  ? { sourceId: entry.sourceId }
+                  : {}),
+              },
+            ),
+            initTimeoutMs,
+            'sessionSource',
+          ),
+          transportClosed,
+        ]);
+      }
       releaseAdmissionOnce();
       const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
       const publicState = publicRestoreState(state);
@@ -4952,6 +5019,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   startSessionReaper();
 
   const bridgeApi: AcpSessionBridge = {
+    setLiveScreenContextCaptureHandler(handler) {
+      liveScreenContextCaptureHandler = handler;
+    },
+    setLiveTaskToolRequestHandler(handler) {
+      liveTaskToolRequestHandler = handler;
+    },
     getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
       return {
         limits: {
@@ -7317,6 +7390,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         outputLanguage: result.outputLanguage ?? null,
         refreshed: result.refreshed ?? false,
       };
+    },
+
+    async setSessionLiveConversationActive(sessionId, active) {
+      await requestSessionStatus<Record<string, unknown>>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionLiveConversation,
+        { active },
+      );
     },
 
     async setSessionApprovalMode(sessionId, mode, opts, context) {

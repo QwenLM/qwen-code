@@ -6,100 +6,76 @@ export type GlobalShortcutBackend = {
 export type GlobalShortcutState = {
   accelerator?: string;
   healthy: boolean;
-};
-
-export type ShortcutRetryScheduler = (
-  callback: () => void,
-  delayMs: number,
-) => () => void;
-
-const SHORTCUT_RETRY_DELAY_MS = 5_000;
-
-const scheduleShortcutRetry: ShortcutRetryScheduler = (callback, delayMs) => {
-  const timer = setTimeout(callback, delayMs);
-  timer.unref();
-  return () => clearTimeout(timer);
+  error?: string;
 };
 
 export class LiveGlobalShortcut {
   private accelerator: string | undefined;
-  private desiredAccelerator: string | undefined;
   private healthy = false;
-  private cancelRetry: (() => void) | undefined;
 
   constructor(
     private readonly backend: GlobalShortcutBackend,
     private readonly onToggle: () => void,
     private readonly onState: (state: GlobalShortcutState) => void,
-    private readonly retryScheduler = scheduleShortcutRetry,
   ) {}
 
-  replace(accelerator: string): void {
-    const unchanged = accelerator === this.desiredAccelerator;
-    this.desiredAccelerator = accelerator;
-    if (
-      unchanged &&
-      ((accelerator === this.accelerator && this.healthy) || this.cancelRetry)
-    ) {
-      return;
+  replace(accelerator: string): GlobalShortcutState {
+    if (this.healthy && accelerator === (this.accelerator ?? '')) {
+      return { accelerator, healthy: true };
     }
-    this.cancelScheduledRetry();
-    this.attemptRegistration();
+    if (accelerator === '') {
+      this.unregisterCurrent();
+      return this.publish({ accelerator, healthy: true });
+    }
+    const previous = this.accelerator;
+    const previousHealthy = this.healthy;
+    let registered = false;
+    let invalid = false;
+    try {
+      registered = this.backend.register(accelerator, this.onToggle);
+    } catch {
+      invalid = true;
+    }
+    if (!registered) {
+      const state = {
+        accelerator,
+        healthy: false,
+        error: invalid
+          ? 'That shortcut is invalid.'
+          : 'That shortcut is already in use.',
+      };
+      if (!previousHealthy) this.publish(state);
+      return state;
+    }
+    this.accelerator = accelerator;
+    this.healthy = true;
+    if (previous && previous !== accelerator) this.unregister(previous);
+    return this.publish({ accelerator, healthy: true });
   }
 
   stop(): void {
-    this.desiredAccelerator = undefined;
-    this.cancelScheduledRetry();
     const wasRegistered = Boolean(this.accelerator) || this.healthy;
     this.unregisterCurrent();
     if (wasRegistered) this.publish({ healthy: false });
   }
 
-  private attemptRegistration(): void {
-    const accelerator = this.desiredAccelerator;
-    if (!accelerator || (this.healthy && accelerator === this.accelerator)) {
-      return;
-    }
-    this.unregisterCurrent();
-
-    let registered = false;
-    try {
-      registered = this.backend.register(accelerator, this.onToggle);
-    } catch {
-      registered = false;
-    }
-    this.accelerator = registered ? accelerator : undefined;
-    this.publish({ accelerator, healthy: registered });
-    if (!registered) this.scheduleRetry();
-  }
-
   private unregisterCurrent(): void {
-    if (this.accelerator) {
-      try {
-        this.backend.unregister(this.accelerator);
-      } catch {
-        // A failed unregister must not leave the shortcut marked healthy.
-      }
-    }
+    if (this.accelerator) this.unregister(this.accelerator);
     this.accelerator = undefined;
     this.healthy = false;
   }
 
-  private scheduleRetry(): void {
-    if (this.cancelRetry || this.healthy || !this.desiredAccelerator) return;
-    this.cancelRetry = this.retryScheduler(() => {
-      this.cancelRetry = undefined;
-      this.attemptRegistration();
-    }, SHORTCUT_RETRY_DELAY_MS);
+  private unregister(accelerator: string): void {
+    try {
+      this.backend.unregister(accelerator);
+    } catch {
+      // A failed unregister must not leave the shortcut marked healthy.
+    }
   }
 
-  private cancelScheduledRetry(): void {
-    this.cancelRetry?.();
-    this.cancelRetry = undefined;
-  }
-
-  private publish(state: GlobalShortcutState): void {
+  private publish(state: GlobalShortcutState): GlobalShortcutState {
     this.healthy = state.healthy;
     this.onState(state);
+    return state;
   }
 }

@@ -297,6 +297,25 @@ async function withStoredLiveCoordinators<T>(
   });
 }
 
+async function withStoredProjectlessLiveTasks<T>(
+  sessionIds: readonly string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withRuntimeDir(async () => {
+    for (const sessionId of sessionIds) {
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'projectless Live task',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+        sourceType: 'default',
+      });
+    }
+    return fn();
+  });
+}
+
 async function withStoredLiveWorkers<T>(
   sessionIds: readonly string[],
   fn: () => Promise<T>,
@@ -1781,6 +1800,50 @@ describe('multi-workspace session dispatch', () => {
           },
         ]);
         expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
+      },
+    );
+  });
+
+  it('loads a projectless task created from Live in the Conversations runtime', async () => {
+    await withStoredProjectlessLiveTasks(
+      ['live-projectless-task'],
+      async () => {
+        const materializeConversationDirectory = vi.fn(
+          async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        );
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory,
+          } as unknown as LiveConversationWorkspace,
+        });
+
+        const response = await request(app)
+          .post('/session/live-projectless-task/load')
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
+
+        expect(response.status).toBe(200);
+        expect(secondaryBridge.restoreCalls).toEqual([
+          {
+            action: 'load',
+            req: expect.objectContaining({
+              sessionId: 'live-projectless-task',
+              workspaceCwd: SECONDARY_CWD,
+              sourceType: 'default',
+            }),
+          },
+        ]);
+        expect(materializeConversationDirectory).toHaveBeenCalledWith(
+          'live-projectless-task',
+        );
       },
     );
   });
@@ -4972,121 +5035,6 @@ describe('multi-workspace session dispatch', () => {
       });
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
-    });
-  });
-
-  it('recycles only removed sessions owned by the Live conversation runtime', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440150';
-      await writeStoredSession({
-        sessionId,
-        cwd: SECONDARY_CWD,
-        timestamp: '2026-07-08T00:15:00.000Z',
-        prompt: 'live conversation cleanup target',
-        mtime: new Date('2026-07-08T00:15:00.000Z'),
-      });
-      const recycleConversationDirectory = vi.fn(async () => '/trash/item');
-      const liveConversationWorkspace = {
-        recycleConversationDirectory,
-      } as unknown as LiveConversationWorkspace;
-      const { app } = makeHarness({
-        secondarySummaries: [],
-        secondaryProvenance: 'live-conversation',
-        liveConversationWorkspace,
-      });
-
-      const response = await request(app)
-        .post('/workspaces/secondary-id/sessions/delete')
-        .set('Host', host())
-        .send({ sessionIds: [sessionId, 'missing-live-session'] })
-        .expect(200);
-
-      expect(response.body).toMatchObject({
-        removed: [sessionId],
-        notFound: ['missing-live-session'],
-        errors: [],
-      });
-      expect(response.body.cleanupErrors).toBeUndefined();
-      expect(recycleConversationDirectory).toHaveBeenCalledOnce();
-      expect(recycleConversationDirectory).toHaveBeenCalledWith(sessionId);
-    });
-  });
-
-  it('does not recycle a removed session from another runtime provenance', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440151';
-      await writeStoredSession({
-        sessionId,
-        cwd: SECONDARY_CWD,
-        timestamp: '2026-07-08T00:16:00.000Z',
-        prompt: 'ordinary workspace cleanup target',
-        mtime: new Date('2026-07-08T00:16:00.000Z'),
-      });
-      const recycleConversationDirectory = vi.fn(async () => '/trash/item');
-      const { app } = makeHarness({
-        secondarySummaries: [],
-        secondaryProvenance: 'existing',
-        liveConversationWorkspace: {
-          recycleConversationDirectory,
-        } as unknown as LiveConversationWorkspace,
-      });
-
-      const response = await request(app)
-        .post('/workspaces/secondary-id/sessions/delete')
-        .set('Host', host())
-        .send({ sessionIds: [sessionId] })
-        .expect(200);
-
-      expect(response.body).toMatchObject({
-        removed: [sessionId],
-        notFound: [],
-        errors: [],
-      });
-      expect(recycleConversationDirectory).not.toHaveBeenCalled();
-    });
-  });
-
-  it('reports partial cleanup when a removed Live directory cannot be recycled', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440152';
-      await writeStoredSession({
-        sessionId,
-        cwd: SECONDARY_CWD,
-        timestamp: '2026-07-08T00:17:00.000Z',
-        prompt: 'cleanup failure target',
-        mtime: new Date('2026-07-08T00:17:00.000Z'),
-      });
-      const daemonLog = makeDaemonLog();
-      const { app } = makeHarness({
-        secondarySummaries: [],
-        secondaryProvenance: 'live-conversation',
-        daemonLog,
-        liveConversationWorkspace: {
-          recycleConversationDirectory: vi.fn(async () => {
-            throw new Error('conversation child was replaced');
-          }),
-        } as unknown as LiveConversationWorkspace,
-      });
-
-      const response = await request(app)
-        .post('/workspaces/secondary-id/sessions/delete')
-        .set('Host', host())
-        .send({ sessionIds: [sessionId] })
-        .expect(200);
-
-      const cleanupError = {
-        sessionId,
-        error:
-          'Live conversation directory cleanup failed: conversation child was replaced',
-      };
-      expect(response.body.removed).toEqual([sessionId]);
-      expect(response.body.cleanupErrors).toEqual([cleanupError]);
-      expect(response.body.errors).toEqual([cleanupError]);
-      expect(daemonLog.error).toHaveBeenCalledWith(
-        'live conversation directory cleanup failed',
-        expect.objectContaining({ message: 'conversation child was replaced' }),
-        expect.objectContaining({ sessionId }),
-      );
     });
   });
 

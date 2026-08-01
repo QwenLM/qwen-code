@@ -19,12 +19,15 @@ extraMetadata:
 
 asar: true
 
+afterPack: 'scripts/after-pack.cjs'
+
 mac:
   category: 'public.app-category.utilities'
   icon: 'dist/icon.icns'
   minimumSystemVersion: '12.0.0'
   extendInfo:
     LSUIElement: true
+    QwenLiveProtocolVersion: 6
     NSMicrophoneUsageDescription: 'Qwen Live Host uses the microphone for live voice conversations with Qwen Code.'
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -33,6 +36,8 @@ mac:
   extraResources:
     - from: 'dist/icon.png'
       to: 'live-host-icon.png'
+    - from: 'dist/native/qwen-live-appshot.node'
+      to: 'native/qwen-live-appshot.node'
   target:
     - target: 'dmg'
       arch:

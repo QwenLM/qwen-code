@@ -34,6 +34,8 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+  /** Daemon-owned Live conversation runtime. */
+  kind?: 'live';
 }
 
 export interface DaemonWorkspaceUpdate {
@@ -2500,11 +2502,6 @@ export type DaemonLiveRequirementState =
   | 'unavailable'
   | 'checking';
 
-export interface DaemonLiveSessionLocator {
-  workspaceCwd: string;
-  sessionId: string;
-}
-
 /** Process-global Live Voice state. It never contains provider credentials. */
 export interface DaemonLiveStatus {
   v: 1;
@@ -2517,8 +2514,8 @@ export interface DaemonLiveStatus {
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
-  coordinator?: DaemonLiveSessionLocator;
-  workers?: DaemonLiveSessionLocator[];
+  caption?: string;
+  statusText?: string;
   requirements?: Partial<
     Record<
       | 'host'
@@ -2537,6 +2534,45 @@ export interface DaemonLiveStatus {
     version?: string;
     protocolVersion?: number;
   };
+}
+
+export type DaemonLiveHostInstallState =
+  | 'missing'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'launching'
+  | 'installed'
+  | 'error';
+
+export interface DaemonLiveHostInstallStatus {
+  state: DaemonLiveHostInstallState;
+  version?: string;
+  progress?: number;
+  message?: string;
+  retryable?: boolean;
+}
+
+/** WebShell-only Live onboarding state. Provider credentials are never returned. */
+export interface DaemonLiveSetupStatus {
+  v: 1;
+  enabled: boolean;
+  keyConfigured: boolean;
+  model: string;
+  shortcut: string;
+  install: DaemonLiveHostInstallStatus;
+  live: DaemonLiveStatus;
+}
+
+export type DaemonLiveSetupApiKeyMutation =
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonLiveSetupUpdate {
+  enabled?: boolean;
+  shortcut?: string;
+  apiKey?: DaemonLiveSetupApiKeyMutation;
 }
 
 export interface DaemonLiveMuteUpdate {

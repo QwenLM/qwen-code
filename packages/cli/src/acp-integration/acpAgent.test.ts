@@ -1812,6 +1812,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
+        enableLiveScreenContext: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
@@ -3063,6 +3064,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enqueueBackgroundNotification: vi
           .fn()
           .mockResolvedValue({ accepted: true }),
+        enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),
@@ -4192,6 +4194,34 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     expect(recording.recordParentSession).toHaveBeenCalledWith('parent-A');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('enables the dedicated screen tool for a compatible Live source', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      recordSessionSource: vi.fn().mockResolvedValue(true),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+        sessionId,
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+      }),
+    ).resolves.toMatchObject({ persisted: true });
+
+    expect(lastSessionMock?.enableLiveScreenContext).toHaveBeenCalledOnce();
+    expect(recording.recordSessionSource).toHaveBeenCalledWith(
+      'default',
+      'realtime_voice:p1:h1:a1:call-1',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

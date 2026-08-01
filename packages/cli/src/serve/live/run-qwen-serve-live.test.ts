@@ -49,7 +49,11 @@ describe('qwen serve Live Host discovery', () => {
     await fs.mkdir(qwenHome, { recursive: true });
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -66,13 +70,13 @@ describe('qwen serve Live Host discovery', () => {
           mode: 'http-bridge',
           workspace,
           maxSessions: 1,
-          serveWebShell: false,
           token,
         },
         {
           preheatBridge: false,
           daemonLogBaseDir: path.join(runtime, 'debug'),
           liveDiscoveryStableBaseDir: runtime,
+          runtimePlatform: 'darwin',
         },
       );
 
@@ -102,6 +106,28 @@ describe('qwen serve Live Host discovery', () => {
           path.resolve(String(baseDir)),
         ),
       ).toEqual([path.resolve(runtime)]);
+
+      const disabled = await fetch(`${handle.url}/live/setup`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(disabled.status).toBe(200);
+      expect(await disabled.json()).toMatchObject({ enabled: false });
+      await vi.waitFor(async () => {
+        await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      });
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(
+        ((await capabilities.json()) as { features: string[] }).features,
+      ).not.toContain('realtime_voice');
     } finally {
       await handle?.close();
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -127,7 +153,11 @@ describe('qwen serve Live Host discovery', () => {
     await fs.mkdir(workspace, { recursive: true });
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
@@ -143,11 +173,11 @@ describe('qwen serve Live Host discovery', () => {
           mode: 'http-bridge',
           workspace,
           maxSessions: 1,
-          serveWebShell: false,
         },
         {
           preheatBridge: false,
           liveDiscoveryStableBaseDir: stable,
+          runtimePlatform: 'darwin',
         },
       );
 
@@ -210,7 +240,11 @@ describe('qwen serve Live Host discovery', () => {
     await fs.mkdir(workspaceTwo, { recursive: true });
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
     );
     const previousQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = qwenHome;
@@ -225,13 +259,13 @@ describe('qwen serve Live Host discovery', () => {
           mode: 'http-bridge',
           workspace: workspaceOne,
           maxSessions: 1,
-          serveWebShell: false,
         },
         {
           preheatBridge: false,
           daemonLogBaseDir: path.join(runtimeOne, 'debug'),
           liveDiscoveryStableBaseDir: stable,
           liveDiscoveryRetryDelayMs: 20,
+          runtimePlatform: 'darwin',
         },
       );
       second = await runQwenServe(
@@ -241,13 +275,13 @@ describe('qwen serve Live Host discovery', () => {
           mode: 'http-bridge',
           workspace: workspaceTwo,
           maxSessions: 1,
-          serveWebShell: false,
         },
         {
           preheatBridge: false,
           daemonLogBaseDir: path.join(runtimeTwo, 'debug'),
           liveDiscoveryStableBaseDir: stable,
           liveDiscoveryRetryDelayMs: 20,
+          runtimePlatform: 'darwin',
         },
       );
       const stablePath = getLiveDiscoveryPath(stable);

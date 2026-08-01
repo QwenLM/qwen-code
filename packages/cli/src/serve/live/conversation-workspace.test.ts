@@ -10,8 +10,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readdir,
-  readFile,
   rename,
   rm,
   symlink,
@@ -213,103 +211,5 @@ describe('Live conversation workspace root', () => {
       workspace.discardEmptyConversationDirectory('occupied'),
     ).resolves.toBe(false);
     expect((await lstat(occupied)).isDirectory()).toBe(true);
-  });
-
-  it('atomically recycles a non-empty conversation into private internal trash', async () => {
-    const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
-    const source = await workspace.materializeConversationDirectory('kept');
-    await mkdir(join(source, 'nested'), { mode: 0o700 });
-    await writeFile(join(source, 'nested', 'result.txt'), 'preserved');
-
-    const recycled = await workspace.recycleConversationDirectory('kept');
-
-    expect(recycled).toBeDefined();
-    await expect(lstat(source)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(dirname(recycled!)).toBe(join(workspace.rootPath, '.trash'));
-    expect(
-      await readFile(join(recycled!, 'nested', 'result.txt'), 'utf8'),
-    ).toBe('preserved');
-    expect(recycled).toMatch(/conversation-[a-f0-9]{64}-[a-f0-9]{64}$/);
-    if (process.platform !== 'win32') {
-      expect((await lstat(dirname(recycled!))).mode & 0o777).toBe(0o700);
-    }
-  });
-
-  it('treats a concurrently recycled or missing conversation as a no-op', async () => {
-    const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
-    await workspace.materializeConversationDirectory('concurrent');
-
-    const results = await Promise.all([
-      workspace.recycleConversationDirectory('concurrent'),
-      workspace.recycleConversationDirectory('concurrent'),
-    ]);
-
-    expect(results.filter((value) => value !== undefined)).toHaveLength(1);
-    expect(results.filter((value) => value === undefined)).toHaveLength(1);
-    await expect(
-      workspace.recycleConversationDirectory('never-created'),
-    ).resolves.toBeUndefined();
-    expect(await readdir(join(workspace.rootPath, '.trash'))).toHaveLength(1);
-  });
-
-  it('fails closed for replaced source or trash symlinks', async () => {
-    const sourceHome = await tempHome();
-    const sourceWorkspace = new LiveConversationWorkspace({
-      homeDir: sourceHome,
-    });
-    const source =
-      await sourceWorkspace.materializeConversationDirectory('source-link');
-    const sourceOutside = join(sourceHome, 'source-outside');
-    await mkdir(sourceOutside, { mode: 0o700 });
-    await rm(source, { recursive: true });
-    await symlink(sourceOutside, source);
-    await expect(
-      sourceWorkspace.recycleConversationDirectory('source-link'),
-    ).rejects.toThrow(/non-symlink/);
-
-    const trashHome = await tempHome();
-    const trashWorkspace = new LiveConversationWorkspace({
-      homeDir: trashHome,
-    });
-    const trashSource =
-      await trashWorkspace.materializeConversationDirectory('trash-link');
-    const trashOutside = join(trashHome, 'trash-outside');
-    await mkdir(trashOutside, { mode: 0o700 });
-    await symlink(trashOutside, join(trashWorkspace.rootPath, '.trash'));
-    await expect(
-      trashWorkspace.recycleConversationDirectory('trash-link'),
-    ).rejects.toThrow(/non-symlink/);
-    expect((await lstat(trashSource)).isDirectory()).toBe(true);
-  });
-
-  it('rejects permissive source and trash directory modes', async () => {
-    if (process.platform === 'win32') return;
-
-    const sourceHome = await tempHome();
-    const sourceWorkspace = new LiveConversationWorkspace({
-      homeDir: sourceHome,
-    });
-    const source =
-      await sourceWorkspace.materializeConversationDirectory('source-mode');
-    await chmod(source, 0o755);
-    await expect(
-      sourceWorkspace.recycleConversationDirectory('source-mode'),
-    ).rejects.toThrow(/only to its owner/);
-
-    const trashHome = await tempHome();
-    const trashWorkspace = new LiveConversationWorkspace({
-      homeDir: trashHome,
-    });
-    const trashSource =
-      await trashWorkspace.materializeConversationDirectory('trash-mode');
-    const trash = join(trashWorkspace.rootPath, '.trash');
-    await mkdir(trash, { mode: 0o700 });
-    await chmod(trash, 0o755);
-    await expect(
-      trashWorkspace.recycleConversationDirectory('trash-mode'),
-    ).rejects.toThrow(/only to its owner/);
-    expect((await lstat(trashSource)).isDirectory()).toBe(true);
   });
 });

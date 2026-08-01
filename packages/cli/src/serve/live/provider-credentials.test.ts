@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 import type { Settings } from '../../config/settings.js';
 import {
   DEFAULT_LIVE_ENDPOINT,
-  DEFAULT_LIVE_PROVIDER_MODEL,
   DEFAULT_LIVE_SHORTCUT,
   DEFAULT_LIVE_VOICE,
   DEFAULT_LIVE_VOICE_MODEL,
@@ -19,25 +18,12 @@ import {
 
 function settings(overrides: Partial<Settings> = {}): Settings {
   return {
-    general: {
+    experimental: {
       liveVoice: {
         enabled: true,
+        apiKey: 'settings-secret',
       },
     },
-    model: {
-      name: 'unrelated-selected-model',
-      baseUrl: 'https://unrelated.example/v1',
-    },
-    modelProviders: {
-      openai: [
-        {
-          id: 'qwen3.8-max-preview',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY_PRE',
-        },
-      ],
-    },
-    env: { DASHSCOPE_API_KEY_PRE: 'settings-secret' },
     ...overrides,
   } as Settings;
 }
@@ -47,158 +33,104 @@ describe('Live provider credentials', () => {
     expect(readLiveVoiceConfiguration({} as Settings)).toEqual({
       enabled: false,
       model: DEFAULT_LIVE_VOICE_MODEL,
-      providerModel: DEFAULT_LIVE_PROVIDER_MODEL,
       endpoint: DEFAULT_LIVE_ENDPOINT,
       voice: DEFAULT_LIVE_VOICE,
       shortcut: DEFAULT_LIVE_SHORTCUT,
     });
+    expect(DEFAULT_LIVE_SHORTCUT).toBe('Command+E');
   });
 
-  it('resolves the explicit provider entry and settings.env credential', () => {
-    const resolved = resolveLiveProviderCredential(settings(), { env: {} });
+  it('preserves an empty shortcut as Off', () => {
+    expect(
+      readLiveVoiceConfiguration({
+        experimental: { liveVoice: { shortcut: '' } },
+      } as Settings).shortcut,
+    ).toBe('');
+  });
+
+  it('resolves the dedicated Realtime credential', () => {
+    const resolved = resolveLiveProviderCredential(settings());
 
     expect(resolved).toMatchObject({
-      providerId: 'openai',
-      authType: 'openai',
-      modelId: 'qwen3.8-max-preview',
-      envKey: 'DASHSCOPE_API_KEY_PRE',
       realtimeModel: DEFAULT_LIVE_VOICE_MODEL,
+      endpoint: DEFAULT_LIVE_ENDPOINT,
     });
     expect(resolved.apiKey).toBe('settings-secret');
     expect(JSON.stringify(resolved)).not.toContain('settings-secret');
     expect(Object.keys(resolved)).not.toContain('apiKey');
   });
 
-  it('uses the effective daemon environment before settings.env', () => {
-    const resolved = resolveLiveProviderCredential(settings(), {
-      env: { DASHSCOPE_API_KEY_PRE: 'runtime-secret' },
-    });
-
-    expect(resolved.apiKey).toBe('runtime-secret');
-    expect(JSON.stringify(resolved)).not.toContain('runtime-secret');
-  });
-
-  it('does not consult the selected chat model', () => {
-    const resolved = resolveLiveProviderCredential(settings(), { env: {} });
-    expect(resolved.modelId).toBe('qwen3.8-max-preview');
-    expect(resolved.baseUrl).not.toContain('unrelated.example');
-  });
-
-  it('supports custom provider ids mapped to an explicit protocol', () => {
+  it('accepts a one-shot key override while validating enablement', () => {
     const resolved = resolveLiveProviderCredential(
-      settings({
-        providerProtocol: { bailian: 'openai' },
-        modelProviders: {
-          bailian: [
-            {
-              id: 'qwen3.8-max-preview',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'BAILIAN_KEY',
-            },
-          ],
-        },
-        env: { BAILIAN_KEY: 'custom-secret' },
-      }),
-      { env: {} },
+      settings({ experimental: { liveVoice: { enabled: false } } }),
+      {
+        apiKey: 'candidate-secret',
+        allowDisabled: true,
+      },
     );
 
-    expect(resolved.providerId).toBe('bailian');
-    expect(resolved.authType).toBe('openai');
-    expect(resolved.apiKey).toBe('custom-secret');
+    expect(resolved.apiKey).toBe('candidate-secret');
+    expect(JSON.stringify(resolved)).not.toContain('candidate-secret');
   });
 
-  it('fails closed for an ambiguous provider selector', () => {
-    expect(() =>
-      resolveLiveProviderCredential(
-        settings({
-          modelProviders: {
-            openai: [
-              {
-                id: 'qwen3.8-max-preview',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'KEY_A',
-              },
-              {
-                id: 'qwen3.8-max-preview',
-                baseUrl:
-                  'https://other.dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'KEY_B',
-              },
-            ],
-          },
-          env: { KEY_A: 'a', KEY_B: 'b' },
-        }),
-        { env: {} },
-      ),
-    ).toThrow(/ambiguous/);
+  it('does not consult the selected chat model or provider entries', () => {
+    const resolved = resolveLiveProviderCredential(
+      settings({
+        model: {
+          name: 'unrelated-selected-model',
+          baseUrl: 'https://unrelated.example/v1',
+        },
+        modelProviders: {},
+      }),
+    );
+
+    expect(resolved.realtimeModel).toBe(DEFAULT_LIVE_VOICE_MODEL);
+    expect(JSON.stringify(resolved)).not.toContain('unrelated.example');
+  });
+
+  it('requires the dedicated key instead of a chat-provider env key', () => {
+    const input = settings({
+      experimental: { liveVoice: { enabled: true, apiKey: '' } },
+      env: { DASHSCOPE_API_KEY: 'chat-secret' },
+    });
+
+    expect(() => resolveLiveProviderCredential(input)).toThrow(
+      /not configured/,
+    );
   });
 
   it.each([
     [
-      'plaintext provider',
-      {
-        baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
-        endpoint: DEFAULT_LIVE_ENDPOINT,
-      },
-    ],
-    [
-      'foreign provider',
-      {
-        baseUrl: 'https://example.com/v1',
-        endpoint: DEFAULT_LIVE_ENDPOINT,
-      },
-    ],
-    [
       'plaintext realtime endpoint',
-      {
-        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        endpoint: 'ws://dashscope.aliyuncs.com/api-ws/v1/realtime',
-      },
-    ],
-    [
-      'credential-bearing provider URL',
-      {
-        baseUrl:
-          'https://dashscope.aliyuncs.com/compatible-mode/v1?api_key=secret',
-        endpoint: DEFAULT_LIVE_ENDPOINT,
-      },
+      'ws://dashscope.aliyuncs.com/api-ws/v1/realtime',
     ],
     [
       'credential-bearing realtime URL',
-      {
-        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        endpoint:
-          'wss://dashscope.aliyuncs.com/api-ws/v1/realtime?token=secret',
-      },
+      'wss://dashscope.aliyuncs.com/api-ws/v1/realtime?token=secret',
     ],
-  ])('rejects %s', (_name, values) => {
+    ['foreign realtime endpoint', 'wss://example.com/realtime'],
+  ])('rejects %s', (_name, endpoint) => {
     const input = settings({
-      general: {
+      experimental: {
         liveVoice: {
           enabled: true,
-          endpoint: values.endpoint,
+          apiKey: 'settings-secret',
+          endpoint,
         },
-      },
-      modelProviders: {
-        openai: [
-          {
-            id: 'qwen3.8-max-preview',
-            baseUrl: values.baseUrl,
-            envKey: 'DASHSCOPE_API_KEY_PRE',
-          },
-        ],
       },
     });
 
-    expect(() => resolveLiveProviderCredential(input, { env: {} })).toThrow(
+    expect(() => resolveLiveProviderCredential(input)).toThrow(
       LiveProviderConfigError,
     );
   });
 
-  it('reports the env key but never the missing secret value', () => {
-    const input = settings({ env: {} });
-    expect(() => resolveLiveProviderCredential(input, { env: {} })).toThrow(
-      /DASHSCOPE_API_KEY_PRE/,
+  it('does not expose a missing or configured secret in errors', () => {
+    const input = settings({
+      experimental: { liveVoice: { enabled: true, apiKey: '' } },
+    });
+    expect(() => resolveLiveProviderCredential(input)).toThrow(
+      /not configured/,
     );
   });
 });

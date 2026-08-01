@@ -47,7 +47,7 @@ const readyStatus = {
   v: 1 as const,
   available: true,
   state: 'idle' as const,
-  shortcut: 'Command+Q',
+  shortcut: 'Command+E',
   requirements: {
     host: 'ready' as const,
     microphone: 'ready' as const,
@@ -55,6 +55,16 @@ const readyStatus = {
     screenRecording: 'ready' as const,
     provider: 'ready' as const,
   },
+};
+
+const setupStatus = {
+  v: 1 as const,
+  enabled: false,
+  keyConfigured: false,
+  model: 'qwen3.5-omni-plus-realtime',
+  shortcut: 'Command+E',
+  install: { state: 'missing' as const },
+  live: readyStatus,
 };
 
 describe('DaemonClient Live Voice helpers', () => {
@@ -74,6 +84,7 @@ describe('DaemonClient Live Voice helpers', () => {
       { inputMuted: true, outputMuted: false },
       'client-5',
     );
+    await client.setLiveShortcut('Command+E', 'client-6');
 
     expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
       { url: 'http://daemon/live/status', method: 'GET' },
@@ -81,9 +92,10 @@ describe('DaemonClient Live Voice helpers', () => {
       { url: 'http://daemon/live/new', method: 'POST' },
       { url: 'http://daemon/live/stop', method: 'POST' },
       { url: 'http://daemon/live/mute', method: 'POST' },
+      { url: 'http://daemon/live/shortcut', method: 'POST' },
     ]);
     expect(calls.map((call) => call.headers['authorization'])).toEqual(
-      new Array(5).fill('Bearer daemon-token'),
+      new Array(6).fill('Bearer daemon-token'),
     );
     expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
       'client-1',
@@ -91,10 +103,14 @@ describe('DaemonClient Live Voice helpers', () => {
       'client-3',
       'client-4',
       'client-5',
+      'client-6',
     ]);
     expect(JSON.parse(String(calls[4]?.body))).toEqual({
       inputMuted: true,
       outputMuted: false,
+    });
+    expect(JSON.parse(String(calls[5]?.body))).toEqual({
+      shortcut: 'Command+E',
     });
   });
 
@@ -105,10 +121,46 @@ describe('DaemonClient Live Voice helpers', () => {
 
     await expect(workspace.liveStatus()).resolves.toEqual(readyStatus);
     await workspace.startLive('new');
+    await workspace.setLiveShortcut('Command+K');
 
     expect(calls.map((call) => call.url)).toEqual([
       'http://daemon/live/status',
       'http://daemon/live/new',
+      'http://daemon/live/shortcut',
+    ]);
+  });
+
+  it('uses the dedicated process-global setup routes without reading a key', async () => {
+    const { fetch, calls } = recordingFetch(setupStatus);
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const workspace = client.workspaceByCwd('/work');
+
+    await workspace.liveSetupStatus('client-setup-1');
+    await workspace.updateLiveSetup(
+      {
+        shortcut: 'Command+K',
+        apiKey: { operation: 'replace', value: 'test-dashscope-key' },
+      },
+      'client-setup-2',
+    );
+    await workspace.retryLiveHostInstall('client-setup-3');
+    await workspace.launchLiveHost('client-setup-4');
+
+    expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
+      { url: 'http://daemon/live/setup', method: 'GET' },
+      { url: 'http://daemon/live/setup', method: 'POST' },
+      { url: 'http://daemon/live/setup/install', method: 'POST' },
+      { url: 'http://daemon/live/setup/launch', method: 'POST' },
+    ]);
+    expect(JSON.parse(String(calls[1]?.body))).toEqual({
+      shortcut: 'Command+K',
+      apiKey: { operation: 'replace', value: 'test-dashscope-key' },
+    });
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-setup-1',
+      'client-setup-2',
+      'client-setup-3',
+      'client-setup-4',
     ]);
   });
 });

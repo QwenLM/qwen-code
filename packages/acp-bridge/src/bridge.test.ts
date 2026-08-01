@@ -62,6 +62,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_MODEL_PROMPT_META_KEY,
+  SESSION_SOURCE_META_KEY,
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
@@ -10810,6 +10811,12 @@ describe('createAcpSessionBridge', () => {
           sourceId: 'task-123',
         },
       });
+      expect(handles[0]?.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
 
       await bridge.shutdown();
     });
@@ -10836,6 +10843,38 @@ describe('createAcpSessionBridge', () => {
         sourceId: 'task-1',
       });
 
+      await bridge.shutdown();
+    });
+
+    it('reasserts source metadata when a fresh child resumes a session', async () => {
+      const handle = makeChannel({
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.resumeSession({
+        sessionId: 'persisted-live-session',
+        workspaceCwd: WS_A,
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+      });
+
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: 'persisted-live-session',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
+      expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
       await bridge.shutdown();
     });
   });

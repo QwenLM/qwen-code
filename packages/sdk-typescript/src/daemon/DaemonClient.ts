@@ -185,6 +185,8 @@ import type {
   DaemonWorkspaceVoiceTranscriptionResult,
   DaemonWorkspaceVoiceUpdate,
   DaemonLiveMuteUpdate,
+  DaemonLiveSetupStatus,
+  DaemonLiveSetupUpdate,
   DaemonLiveStatus,
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
@@ -3129,6 +3131,43 @@ export class DaemonClient {
     );
   }
 
+  async liveSetupStatus(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup',
+      'GET /live/setup',
+      { clientId },
+    );
+  }
+
+  async updateLiveSetup(
+    update: DaemonLiveSetupUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup',
+      'POST /live/setup',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async retryLiveHostInstall(
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup/install',
+      'POST /live/setup/install',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async launchLiveHost(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup/launch',
+      'POST /live/setup/launch',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
   async startLive(
     mode: 'resume' | 'new' = 'resume',
     clientId?: string,
@@ -3157,6 +3196,17 @@ export class DaemonClient {
       '/live/mute',
       'POST /live/mute',
       { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async setLiveShortcut(
+    shortcut: string,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/shortcut',
+      'POST /live/shortcut',
+      { method: 'POST', body: { shortcut }, clientId },
     );
   }
 
@@ -4801,6 +4851,25 @@ export class WorkspaceDaemonClient {
     return this.client.liveStatus(clientId);
   }
 
+  liveSetupStatus(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.liveSetupStatus(clientId);
+  }
+
+  updateLiveSetup(
+    update: DaemonLiveSetupUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return this.client.updateLiveSetup(update, clientId);
+  }
+
+  retryLiveHostInstall(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.retryLiveHostInstall(clientId);
+  }
+
+  launchLiveHost(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.launchLiveHost(clientId);
+  }
+
   startLive(
     mode: 'resume' | 'new' = 'resume',
     clientId?: string,
@@ -4817,6 +4886,13 @@ export class WorkspaceDaemonClient {
     clientId?: string,
   ): Promise<DaemonLiveStatus> {
     return this.client.setLiveMute(update, clientId);
+  }
+
+  setLiveShortcut(
+    shortcut: string,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.setLiveShortcut(shortcut, clientId);
   }
 
   workspaceGit(opts?: {

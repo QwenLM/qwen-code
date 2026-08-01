@@ -38,3 +38,25 @@ export function shouldCaptureLiveAudio(
     hostReady && status.available && CAPTURE_READY_STATES.has(status.state)
   );
 }
+
+export function shouldStopLiveOnToggle(
+  status: Pick<LiveStatus, 'state'>,
+  startPending: boolean,
+): boolean {
+  return startPending || isActiveLiveCall(status);
+}
+
+export function projectLiveStatusForCapture(
+  status: LiveStatus,
+  captureReady: boolean,
+): LiveStatus {
+  if (status.state !== 'listening' || captureReady) return status;
+  return { ...status, state: 'starting', statusText: undefined };
+}
+
+export function shouldRenderSetup(
+  status: Pick<LiveStatus, 'available' | 'state'>,
+  connectionReady: boolean,
+): boolean {
+  return !connectionReady || (!status.available && !isActiveLiveCall(status));
+}

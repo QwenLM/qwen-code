@@ -143,6 +143,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',
+  sessionLiveConversation: 'qwen/control/session/live-conversation',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
@@ -195,6 +196,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
+  liveTaskTool: 'qwen/control/live/task-tool',
   channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 

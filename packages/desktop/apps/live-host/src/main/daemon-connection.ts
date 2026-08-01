@@ -14,10 +14,12 @@ import {
   type HostAction,
   type HostPermissions,
   type HostSelfChecks,
+  type HostControlMessage,
   type LiveStatus,
 } from '../shared/protocol.ts';
 import {
   buildHostWebSocketUrl,
+  buildWebShellSessionUrl,
   DiscoveryMonitor,
   resolveDiscoveryPath,
   type DiscoveryResult,
@@ -65,7 +67,54 @@ type ConnectionCallbacks = {
   onSnapshot: (snapshot: ConnectionSnapshot) => void;
   onOutputAudio: (audio: Uint8Array) => void;
   onClearOutput: () => void;
+  setShortcut?: (shortcut: string) => { success: boolean; error?: string };
+  captureScreenContext?: () => Promise<{
+    appName: string;
+    windowTitle?: string;
+    accessibilityText: string;
+    screenshotPath: string;
+  }>;
 };
+
+type ScreenContextCapture = Awaited<
+  ReturnType<NonNullable<ConnectionCallbacks['captureScreenContext']>>
+>;
+
+const MAX_APPSHOT_ERROR_CHARS = 1_024;
+
+function screenContextResultMessage(
+  requestId: string,
+  result: ScreenContextCapture,
+): HostControlMessage {
+  const message = (accessibilityText: string): HostControlMessage => ({
+    type: 'host.screen_context_result',
+    requestId,
+    success: true,
+    ...result,
+    accessibilityText,
+  });
+  const fits = (candidate: HostControlMessage) =>
+    Buffer.byteLength(JSON.stringify(candidate), 'utf8') <=
+    MAX_CONTROL_FRAME_BYTES;
+  if (fits(message(result.accessibilityText))) {
+    return message(result.accessibilityText);
+  }
+  let lower = 0;
+  let upper = result.accessibilityText.length;
+  while (lower < upper) {
+    const middle = Math.ceil((lower + upper) / 2);
+    if (fits(message(result.accessibilityText.slice(0, middle)))) {
+      lower = middle;
+    } else {
+      upper = middle - 1;
+    }
+  }
+  const bounded = message(result.accessibilityText.slice(0, lower));
+  if (!fits(bounded)) {
+    throw new Error('Appshot metadata exceeds the protocol limit.');
+  }
+  return bounded;
+}
 
 function rawDataToBuffer(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) return data;
@@ -160,6 +209,14 @@ export class LiveDaemonConnection {
 
   getEpoch(): number {
     return this.epoch;
+  }
+
+  getWebShellSessionUrl(
+    target: NonNullable<LiveStatus['pendingPermission']>,
+  ): string | undefined {
+    return this.currentRecord
+      ? buildWebShellSessionUrl(this.currentRecord, target)
+      : undefined;
   }
 
   private handleDiscovery(result: DiscoveryResult): void {
@@ -297,6 +354,31 @@ export class LiveDaemonConnection {
             this.callbacks.onClearOutput();
           }
           break;
+        case 'host.set_shortcut': {
+          const result = this.callbacks.setShortcut?.(message.shortcut) ?? {
+            success: false,
+            error: 'Global shortcut registration is unavailable.',
+          };
+          this.sendControl({
+            type: 'host.shortcut_result',
+            requestId: message.requestId,
+            shortcut: message.shortcut,
+            ...result,
+          });
+          break;
+        }
+        case 'host.capture_screen_context':
+          if (message.epoch !== this.epoch) {
+            this.sendControl({
+              type: 'host.screen_context_result',
+              requestId: message.requestId,
+              success: false,
+              error: 'The Appshot request belongs to a stale Live call.',
+            });
+            break;
+          }
+          void this.captureScreenContext(message.requestId, message.epoch);
+          break;
         case 'host.error':
           this.publish({
             ...this.snapshot,
@@ -359,9 +441,7 @@ export class LiveDaemonConnection {
     this.reconnectTimer.unref();
   }
 
-  private sendControl(
-    message: Parameters<typeof encodeHostControlMessage>[0],
-  ): boolean {
+  private sendControl(message: HostControlMessage): boolean {
     const socket = this.socket;
     if (
       !socket ||
@@ -376,6 +456,39 @@ export class LiveDaemonConnection {
     }
     socket.send(encodeHostControlMessage(message));
     return true;
+  }
+
+  private async captureScreenContext(
+    requestId: string,
+    epoch: number,
+  ): Promise<void> {
+    const capture = this.callbacks.captureScreenContext;
+    if (!capture) {
+      this.sendControl({
+        type: 'host.screen_context_result',
+        requestId,
+        success: false,
+        error: 'Appshot capture is unavailable.',
+      });
+      return;
+    }
+    try {
+      const result = await capture();
+      if (!this.welcomed || epoch !== this.epoch) return;
+      this.sendControl(screenContextResultMessage(requestId, result));
+    } catch (error) {
+      if (!this.welcomed || epoch !== this.epoch) return;
+      const message =
+        error instanceof Error && error.message
+          ? error.message.slice(0, MAX_APPSHOT_ERROR_CHARS)
+          : 'Appshot failed.';
+      this.sendControl({
+        type: 'host.screen_context_result',
+        requestId,
+        success: false,
+        error: message,
+      });
+    }
   }
 
   private closeSocket(code: number, reason: string): void {

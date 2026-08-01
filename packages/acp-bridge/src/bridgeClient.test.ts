@@ -1168,6 +1168,88 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 });
 
+describe('BridgeClient — Live screen-context extMethod dispatch', () => {
+  function makeLiveClient(
+    handler:
+      | (() => Promise<{
+          appName: string;
+          accessibilityText: string;
+          screenshotPath: string;
+        }>)
+      | undefined,
+  ): BridgeClient {
+    const noFlow = () => {
+      throw new Error('test: unexpected flow');
+    };
+    return new BridgeClient(
+      (() => undefined) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sessionId) => sessionId === 'live-coordinator',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+      () =>
+        handler
+          ? async ({ callerSessionId }) => {
+              expect(callerSessionId).toBe('live-coordinator');
+              return handler();
+            }
+          : undefined,
+    );
+  }
+
+  it('authenticates and forwards the argument-free Live capture', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    const client = makeLiveClient(handler);
+
+    await expect(
+      client.extMethod('qwen/control/live/capture-screen-context', {
+        callerSessionId: 'live-coordinator',
+      }),
+    ).resolves.toEqual({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('rejects unowned sessions and a missing daemon handler', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: '',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    await expect(
+      makeLiveClient(handler).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'worker-or-forged' },
+      ),
+    ).rejects.toThrow(/callerSessionId/u);
+    expect(handler).not.toHaveBeenCalled();
+    await expect(
+      makeLiveClient(undefined).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'live-coordinator' },
+      ),
+    ).rejects.toThrow();
+  });
+});
+
 describe('BridgeClient — channel-delivery extMethod dispatch', () => {
   const METHOD = 'qwen/control/channel-delivery';
 

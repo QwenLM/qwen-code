@@ -93,6 +93,33 @@
   overflow-wrap: anywhere;
 }
 
+.liveState {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.liveStateOrb {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff, #8b6bf0 45%, #4b35a7);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+
+.liveState[data-state='thinking'] .liveStateOrb,
+.liveState[data-state='starting'] .liveStateOrb,
+.liveState[data-state='speaking'] .liveStateOrb {
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
 .transcript {
   margin: 0;
   padding: 10px 12px;
@@ -103,10 +130,14 @@
   overflow-wrap: anywhere;
 }
 
-.sessions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.transcript[data-role='assistant'] {
+  border-radius: 18px;
+  font-style: italic;
+}
+
+.transcript[data-role='user'] {
+  color: var(--muted-foreground);
+  background: transparent;
 }
 
 .hint {

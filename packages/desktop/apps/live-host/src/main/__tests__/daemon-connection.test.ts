@@ -12,6 +12,7 @@ import { BoundedReconnectPolicy } from '../reconnect-policy.ts';
 import {
   INPUT_AUDIO_EPOCH_BYTES,
   LIVE_PROTOCOL_VERSION,
+  MAX_CONTROL_FRAME_BYTES,
   MAX_SOCKET_BUFFERED_BYTES,
   type HostAction,
   type HostControlMessage,
@@ -77,8 +78,10 @@ describe('LiveDaemonConnection', () => {
     );
     const snapshots: string[] = [];
     const outputFrames: Uint8Array[] = [];
+    const shortcuts: string[] = [];
+    let captureCalls = 0;
     const connection = new LiveDaemonConnection(
-      '0.0.5',
+      '0.0.6',
       {
         getReadiness: () => ({
           permissions: {
@@ -96,6 +99,25 @@ describe('LiveDaemonConnection', () => {
         onSnapshot: (snapshot) => snapshots.push(snapshot.phase),
         onOutputAudio: (frame) => outputFrames.push(frame),
         onClearOutput: () => undefined,
+        setShortcut: (shortcut) => {
+          shortcuts.push(shortcut);
+          return { success: true };
+        },
+        captureScreenContext: async () => {
+          captureCalls += 1;
+          if (captureCalls === 3) {
+            throw new Error('x'.repeat(100_000));
+          }
+          return {
+            appName: 'Safari',
+            windowTitle: 'LIVE_APP_A',
+            accessibilityText:
+              captureCalls === 1
+                ? 'AXWindow LIVE_APP_A'
+                : '\u0001'.repeat(32_000),
+            screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+          };
+        },
       },
       discoveryPath,
     );
@@ -159,6 +181,81 @@ describe('LiveDaemonConnection', () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(snapshots.at(-1), 'ready');
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.set_shortcut',
+        requestId: 'shortcut-1',
+        shortcut: 'Command+E',
+      }),
+    );
+    const shortcutFrame = await nextMessage(peer);
+    assert.deepEqual(JSON.parse(shortcutFrame.data.toString('utf8')), {
+      type: 'host.shortcut_result',
+      requestId: 'shortcut-1',
+      shortcut: 'Command+E',
+      success: true,
+    });
+    assert.deepEqual(shortcuts, ['Command+E']);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_screen_context',
+        requestId: 'capture-1',
+        epoch: 0,
+      }),
+    );
+    const captureFrame = await nextMessage(peer);
+    assert.deepEqual(JSON.parse(captureFrame.data.toString('utf8')), {
+      type: 'host.screen_context_result',
+      requestId: 'capture-1',
+      success: true,
+      appName: 'Safari',
+      windowTitle: 'LIVE_APP_A',
+      accessibilityText: 'AXWindow LIVE_APP_A',
+      screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
+    });
+    assert.equal(captureCalls, 1);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_screen_context',
+        requestId: 'capture-2',
+        epoch: 0,
+      }),
+    );
+    const boundedCaptureFrame = await nextMessage(peer);
+    const boundedCapture = JSON.parse(
+      boundedCaptureFrame.data.toString('utf8'),
+    ) as { accessibilityText: string; success: boolean };
+    assert.equal(boundedCapture.success, true);
+    assert.equal(
+      Buffer.byteLength(boundedCaptureFrame.data.toString('utf8'), 'utf8') <=
+        MAX_CONTROL_FRAME_BYTES,
+      true,
+    );
+    assert.equal(boundedCapture.accessibilityText.length < 32_000, true);
+    assert.equal(captureCalls, 2);
+
+    peer.send(
+      JSON.stringify({
+        type: 'host.capture_screen_context',
+        requestId: 'capture-3',
+        epoch: 0,
+      }),
+    );
+    const failedCaptureFrame = await nextMessage(peer);
+    const failedCapture = JSON.parse(
+      failedCaptureFrame.data.toString('utf8'),
+    ) as { success: boolean; error: string };
+    assert.equal(failedCapture.success, false);
+    assert.equal(failedCapture.error.length, 1_024);
+    assert.equal(
+      Buffer.byteLength(failedCaptureFrame.data.toString('utf8'), 'utf8') <=
+        MAX_CONTROL_FRAME_BYTES,
+      true,
+    );
+    assert.equal(captureCalls, 3);
 
     peer.send(JSON.stringify({ type: 'host.ping', pingId: 'ping-1' }));
     const pongFrame = await nextMessage(peer);
@@ -236,7 +333,7 @@ describe('LiveDaemonConnection', () => {
 
     const errors: Array<string | undefined> = [];
     const connection = new LiveDaemonConnection(
-      '0.0.5',
+      '0.0.6',
       {
         getReadiness: () => ({
           permissions: {

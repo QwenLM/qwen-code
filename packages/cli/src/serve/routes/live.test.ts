@@ -8,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { WebSocket } from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LiveHostCoordinator } from '../live/live-host-coordinator.js';
 import {
   LIVE_HOST_BUNDLE_ID,
@@ -20,7 +20,28 @@ class FakeSocket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
   bufferedAmount = 0;
 
-  send(): void {}
+  shortcutError?: string;
+
+  send(data: string | Uint8Array): void {
+    if (typeof data !== 'string') return;
+    const message = JSON.parse(data) as Record<string, unknown>;
+    if (message['type'] !== 'host.set_shortcut') return;
+    queueMicrotask(() => {
+      this.emit(
+        'message',
+        Buffer.from(
+          JSON.stringify({
+            type: 'host.shortcut_result',
+            requestId: message['requestId'],
+            shortcut: message['shortcut'],
+            success: !this.shortcutError,
+            ...(this.shortcutError ? { error: this.shortcutError } : {}),
+          }),
+        ),
+        false,
+      );
+    });
+  }
 
   close(): void {
     this.readyState = WebSocket.CLOSED;
@@ -57,7 +78,10 @@ class FakeSocket extends EventEmitter {
 
 const coordinators: LiveHostCoordinator[] = [];
 
-function harness(providerReady = true) {
+function harness(
+  providerReady = true,
+  persistShortcut?: (shortcut: string) => Promise<void>,
+) {
   const coordinator = new LiveHostCoordinator({
     daemonInstanceNonce: 'daemon_instance_nonce_0001',
     getProviderReadiness: () =>
@@ -72,17 +96,19 @@ function harness(providerReady = true) {
   registerLiveRoutes(app, {
     coordinator,
     mutate: () => ((_req, _res, next) => next()) as RequestHandler,
+    ...(persistShortcut ? { persistShortcut } : {}),
   });
   return { app, coordinator };
 }
 
-function connectReady(coordinator: LiveHostCoordinator): void {
+function connectReady(coordinator: LiveHostCoordinator): FakeSocket {
   const socket = new FakeSocket();
   coordinator.attachHost(
     socket as unknown as WebSocket,
     coordinator.daemonInstanceNonce,
   );
   socket.hello();
+  return socket;
 }
 
 afterEach(() => {
@@ -171,5 +197,60 @@ describe('Live routes', () => {
       expect(response.status).toBe(400);
       expect(response.body.code).toBe('invalid_live_mute');
     }
+  });
+
+  it('persists a Host-confirmed user shortcut and supports Off', async () => {
+    const persistShortcut = vi.fn(async () => {});
+    const { app, coordinator } = harness(true, persistShortcut);
+    connectReady(coordinator);
+
+    const changed = await request(app)
+      .post('/live/shortcut')
+      .send({ shortcut: 'Command+Shift+E' });
+    expect(changed.status).toBe(200);
+    expect(changed.body.shortcut).toBe('Command+Shift+E');
+    expect(persistShortcut).toHaveBeenCalledWith('Command+Shift+E');
+
+    const off = await request(app)
+      .post('/live/shortcut')
+      .send({ shortcut: '' });
+    expect(off.status).toBe(200);
+    expect(off.body).toMatchObject({ available: true, shortcut: '' });
+    expect(persistShortcut).toHaveBeenLastCalledWith('');
+  });
+
+  it('reports a conflict without persisting or replacing the old shortcut', async () => {
+    const persistShortcut = vi.fn(async () => {});
+    const { app, coordinator } = harness(true, persistShortcut);
+    const socket = connectReady(coordinator);
+    socket.shortcutError = 'That shortcut is already in use.';
+
+    const response = await request(app)
+      .post('/live/shortcut')
+      .send({ shortcut: 'Command+Shift+E' });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: 'live_shortcut_unavailable',
+      status: { shortcut: 'Command+E' },
+    });
+    expect(persistShortcut).not.toHaveBeenCalled();
+    expect(coordinator.getStatus().shortcut).toBe('Command+E');
+  });
+
+  it('restores the old registration when user persistence fails', async () => {
+    const persistShortcut = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const { app, coordinator } = harness(true, persistShortcut);
+    connectReady(coordinator);
+
+    const response = await request(app)
+      .post('/live/shortcut')
+      .send({ shortcut: 'Command+Shift+E' });
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('live_shortcut_persist_failed');
+    expect(coordinator.getStatus().shortcut).toBe('Command+E');
   });
 });

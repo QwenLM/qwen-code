@@ -246,17 +246,20 @@ import {
 } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import { registerLiveRoutes } from './routes/live.js';
+import { registerLiveSetupRoutes } from './routes/live-setup.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
+import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
+import { LiveSetupController } from './live/live-setup-controller.js';
+import { LiveTaskService } from './live/live-task-service.js';
 import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
-import { probeLiveAppshotReadiness } from './live/appshot-readiness.js';
-import type { LiveAppshotReadiness } from './live/types.js';
 import {
   LiveProviderConfigError,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
+  type LiveProviderCredential,
 } from './live/provider-credentials.js';
 
 export {
@@ -545,12 +548,16 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
   liveCoordinator?: LiveHostCoordinator;
+  liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
   liveConversationWorkspace?: LiveConversationWorkspace;
-  liveAppshotProbeIntervalMs?: number;
+  validateLiveProviderCredential?: (
+    credential: LiveProviderCredential,
+  ) => Promise<void>;
 }
 
 /**
@@ -589,7 +596,6 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 // timeout) and ≤10min (stay well inside the 30-min default reaper window).
 const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
 const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
-const LIVE_APPSHOT_PROBE_INTERVAL_MS = 5_000;
 
 /**
  * Sizes the keepalive heartbeat interval so a resident task session is beaten
@@ -781,6 +787,12 @@ export function createServeApp(
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const runtimePlatform = deps.runtimePlatform ?? process.platform;
+  const liveVoiceSurfaceAvailable =
+    runtimePlatform === 'darwin' &&
+    opts.serveWebShell !== false &&
+    typeof deps.webShellDir === 'string' &&
+    acpHttpEnabledAtBoot;
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -876,8 +888,8 @@ export function createServeApp(
             ),
           ),
       realtimeVoiceEnabled: () =>
-        (app.locals as { liveVoiceEnabledAtBoot?: boolean })
-          .liveVoiceEnabledAtBoot === true,
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+        true,
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
@@ -1108,13 +1120,15 @@ export function createServeApp(
   const primaryRouteFileSystemFactory = createLiveWorkspaceDelegate(
     () => workspaceRegistry.primary.routeFileSystemFactory,
   );
+  const loadLiveSettings = () =>
+    loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    }).merged;
   const liveSettingsAtBoot = (() => {
     try {
-      return loadSettings(primaryBoundWorkspace, {
-        skipLoadEnvironment: true,
-        skipWorkspaceSettings: true,
-        workspaceTrusted: false,
-      }).merged;
+      return loadLiveSettings();
     } catch {
       return undefined;
     }
@@ -1122,19 +1136,30 @@ export function createServeApp(
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
-  const liveVoiceEnabledAtBoot =
-    liveConfigAtBoot?.enabled === true && acpHttpEnabledAtBoot;
-  (app.locals as { liveVoiceEnabledAtBoot?: boolean }).liveVoiceEnabledAtBoot =
-    liveVoiceEnabledAtBoot;
+  let liveVoiceEnabled =
+    liveVoiceSurfaceAvailable && liveConfigAtBoot?.enabled === true;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceEnabled = liveVoiceEnabled;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceSurfaceAvailable = liveVoiceSurfaceAvailable;
   const resolveLiveCredential = () => {
-    if (!liveSettingsAtBoot) {
+    let settings;
+    try {
+      settings = loadLiveSettings();
+    } catch {
       throw new LiveProviderConfigError(
-        'Live provider settings could not be loaded at daemon startup.',
+        'Live provider settings could not be loaded.',
       );
     }
-    return resolveLiveProviderCredential(liveSettingsAtBoot, {
-      env: daemonEnvAtBoot,
-    });
+    return resolveLiveProviderCredential(settings);
   };
   const liveCoordinator =
     deps.liveCoordinator ??
@@ -1158,27 +1183,38 @@ export function createServeApp(
       },
     });
   liveCoordinator.setAppshotReadiness(
-    !liveVoiceEnabledAtBoot
+    liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
-          state: 'unavailable',
-          message: 'Live Voice is disabled in settings.',
+          state: 'checking',
+          message: 'Checking the dedicated Live Appshot channel.',
         }
-      : deps.liveConversationWorkspace
-        ? {
-            state: 'checking',
-            message:
-              'Checking Computer Use tools in the Conversations runtime.',
-          }
-        : {
-            state: 'unavailable',
-            message: 'The Conversations runtime is unavailable for Appshot.',
-          },
+      : {
+          state: 'unavailable',
+          message: 'The Live Appshot channel is unavailable.',
+        },
   );
   let liveRuntime: WorkspaceRuntime | undefined;
   let liveRuntimePromise: Promise<WorkspaceRuntime> | undefined;
-  let liveAppshotProbePromise: Promise<void> | undefined;
-  let liveAppshotProbeTimer: NodeJS.Timeout | undefined;
+  let liveRuntimeBootPromise: Promise<void> | undefined;
+  let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
+  const bindLiveAppshotHandler = (runtime: WorkspaceRuntime): void => {
+    if (liveCoordinatorSealed) {
+      throw new Error('Live Voice is shutting down.');
+    }
+    const setHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
+    if (!setHandler) {
+      throw new Error('Live conversation runtime has no Appshot channel.');
+    }
+    setHandler.call(runtime.bridge, ({ callerSessionId }) =>
+      liveCoordinator.captureScreenContext(callerSessionId),
+    );
+    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
+    if (!setTaskHandler) {
+      throw new Error('Live conversation runtime has no task-tool channel.');
+    }
+    setTaskHandler.call(runtime.bridge, (info) => liveTaskService.handle(info));
+  };
   const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
     if (liveCoordinatorSealed) {
       return Promise.reject(new Error('Live Voice is shutting down.'));
@@ -1207,6 +1243,7 @@ export function createServeApp(
             'Live conversation runtime is no longer an active owned runtime.',
           );
         }
+        bindLiveAppshotHandler(liveRuntime);
         return liveRuntime;
       }
       const existing = workspaceRegistry.getByWorkspaceCwd(root.canonicalRoot);
@@ -1222,6 +1259,7 @@ export function createServeApp(
         }
         await conversationWorkspace.assertExactRoot(existing.workspaceCwd);
         liveRuntime = existing;
+        bindLiveAppshotHandler(existing);
         return existing;
       }
       const created = await runtimePublisher.publishOwnedRuntime(
@@ -1241,6 +1279,7 @@ export function createServeApp(
         },
       );
       liveRuntime = created;
+      bindLiveAppshotHandler(created);
       invalidateServeFeaturesCache();
       return created;
     })().finally(() => {
@@ -1249,48 +1288,52 @@ export function createServeApp(
     liveRuntimePromise = pending;
     return pending;
   };
-  const startLiveAppshotProbe = (): Promise<void> => {
-    if (liveAppshotProbePromise) return liveAppshotProbePromise;
-    const pending = (async () => {
-      let readiness: LiveAppshotReadiness;
-      try {
-        const runtime = await ensureLiveConversationRuntime();
-        readiness = await probeLiveAppshotReadiness(runtime.bridge);
-      } catch {
-        readiness = {
-          state: 'unavailable' as const,
-          message: 'The Conversations runtime is unavailable for Appshot.',
-        };
-      }
-      if (!liveCoordinatorSealed) {
-        liveCoordinator.setAppshotReadiness(readiness);
-      }
-    })().finally(() => {
-      if (liveAppshotProbePromise === pending) {
-        liveAppshotProbePromise = undefined;
-      }
-    });
-    liveAppshotProbePromise = pending;
+  const verifyLiveAppshotChannel = (): Promise<void> => {
+    if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
+    const pending = ensureLiveConversationRuntime()
+      .then(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({ state: 'ready' });
+        }
+      })
+      .catch(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The dedicated Live Appshot channel is unavailable.',
+          });
+        }
+      })
+      .finally(() => {
+        if (liveAppshotChannelPromise === pending) {
+          liveAppshotChannelPromise = undefined;
+        }
+      });
+    liveAppshotChannelPromise = pending;
     return pending;
   };
-  if (liveVoiceEnabledAtBoot) {
-    liveAppshotProbeTimer = setInterval(
-      () => {
-        if (liveCoordinatorSealed || !liveCoordinator.getStatus().host) return;
-        void startLiveAppshotProbe();
-      },
-      Math.max(
-        10,
-        deps.liveAppshotProbeIntervalMs ?? LIVE_APPSHOT_PROBE_INTERVAL_MS,
-      ),
-    );
-    liveAppshotProbeTimer.unref?.();
-  }
+  const liveTaskService = new LiveTaskService({
+    workspaceRegistry,
+    ensureConversationRuntime: ensureLiveConversationRuntime,
+    materializeConversationDirectory: async (sessionId) => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      if (!conversationWorkspace) {
+        throw new Error('Live conversation workspace is unavailable.');
+      }
+      return conversationWorkspace.materializeConversationDirectory(sessionId);
+    },
+    discardEmptyConversationDirectory: async (sessionId) => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      if (!conversationWorkspace) return false;
+      return conversationWorkspace.discardEmptyConversationDirectory(sessionId);
+    },
+  });
   const liveSessionCoordinator =
     deps.liveSessionCoordinator ??
     new LiveSessionCoordinator({
       host: liveCoordinator,
       ensureConversationRuntime: ensureLiveConversationRuntime,
+      workspaceRegistry,
       getProviderCredential: resolveLiveCredential,
       materializeConversationDirectory: async (sessionId) => {
         const conversationWorkspace = deps.liveConversationWorkspace;
@@ -1308,25 +1351,73 @@ export function createServeApp(
           sessionId,
         );
       },
-      startNewConversation: () => {
-        liveCoordinator.start('new');
-      },
-      canReprobeProvider: () => {
-        if (!liveVoiceEnabledAtBoot) return false;
-        const status = liveCoordinator.getStatus();
-        return status.host !== undefined && status.callId === undefined;
-      },
+      interruptTaskWaits: (callerSessionId) =>
+        liveTaskService.interruptWait(callerSessionId),
     });
   liveCoordinator.setHandlers({
     onHostReady: () => {
-      if (!liveVoiceEnabledAtBoot) return;
-      void startLiveAppshotProbe();
-      void liveSessionCoordinator.probeProvider();
+      if (!liveVoiceEnabled) return;
+      void verifyLiveAppshotChannel();
     },
     onStart: (call) => liveSessionCoordinator.start(call),
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
   });
+  const publishLiveVoiceEnabled = (enabled: boolean): void => {
+    const updateDiscovery = (
+      app.locals as {
+        setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+      }
+    ).setLiveDiscoveryEnabled;
+    if (!updateDiscovery) return;
+    void updateDiscovery(enabled).catch((error) => {
+      daemonLog?.warn(
+        `failed to update Live Host discovery: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  };
+  const setLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
+    if (enabled && !liveVoiceSurfaceAvailable) {
+      throw new Error('Live Voice is available only in WebShell on macOS.');
+    }
+    if (enabled === liveVoiceEnabled) return;
+    if (enabled) {
+      await ensureLiveConversationRuntime();
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      liveCoordinator.setAppshotReadiness({
+        state: 'checking',
+        message: 'Checking the dedicated Live Appshot channel.',
+      });
+      invalidateServeFeaturesCache();
+      publishLiveVoiceEnabled(true);
+      void verifyLiveAppshotChannel();
+      return;
+    }
+    liveVoiceEnabled = false;
+    (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = false;
+    invalidateServeFeaturesCache();
+    try {
+      await liveCoordinator.deactivate();
+    } catch (error) {
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      invalidateServeFeaturesCache();
+      throw error;
+    }
+    liveCoordinator.setAppshotReadiness({
+      state: 'unavailable',
+      message: 'The Live Appshot channel is unavailable.',
+    });
+    publishLiveVoiceEnabled(false);
+  };
+  (
+    app.locals as {
+      setLiveVoiceEnabled?: (enabled: boolean) => Promise<void>;
+    }
+  ).setLiveVoiceEnabled = setLiveVoiceEnabled;
   (
     app.locals as {
       liveCoordinator?: LiveHostCoordinator;
@@ -1348,8 +1439,8 @@ export function createServeApp(
     liveCoordinatorSealed = true;
     if (liveCoordinatorStopped) return;
     liveCoordinatorStopped = true;
-    if (liveAppshotProbeTimer) clearInterval(liveAppshotProbeTimer);
-    liveAppshotProbeTimer = undefined;
+    liveRuntime?.bridge.setLiveScreenContextCaptureHandler?.(undefined);
+    liveRuntime?.bridge.setLiveTaskToolRequestHandler?.(undefined);
     liveSessionCoordinator.dispose();
     liveCoordinator.dispose();
   };
@@ -1366,7 +1457,7 @@ export function createServeApp(
     stopLiveCoordinator();
     await Promise.all([
       liveRuntimePromise?.catch(() => undefined),
-      liveAppshotProbePromise?.catch(() => undefined),
+      liveAppshotChannelPromise?.catch(() => undefined),
     ]);
   };
   if (deps.workspaceTrustHotReloadAvailable === true) {
@@ -1592,6 +1683,11 @@ export function createServeApp(
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
   });
 
+  if (liveVoiceEnabled) {
+    app.use('/capabilities', (_req, _res, next) => {
+      void (liveRuntimeBootPromise ?? Promise.resolve()).then(() => next());
+    });
+  }
   registerCapabilitiesRoutes(app, {
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
@@ -1605,8 +1701,61 @@ export function createServeApp(
     languageCodes,
   });
 
-  if (liveVoiceEnabledAtBoot) {
-    registerLiveRoutes(app, { coordinator: liveCoordinator, mutate });
+  if (liveVoiceSurfaceAvailable) {
+    registerLiveRoutes(app, {
+      coordinator: liveCoordinator,
+      mutate,
+      ...(deps.persistSetting
+        ? {
+            persistShortcut: async (shortcut: string) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSetting!(
+                primaryBoundWorkspace,
+                SettingScope.User,
+                'experimental.liveVoice.shortcut',
+                shortcut,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+    });
+    const liveHostInstaller =
+      deps.liveHostInstaller ??
+      new LiveHostInstaller({ platform: runtimePlatform });
+    const liveSetupController = new LiveSetupController({
+      loadSettings: loadLiveSettings,
+      coordinator: liveCoordinator,
+      installer: liveHostInstaller,
+      getEnabled: () => liveVoiceEnabled,
+      setEnabled: setLiveVoiceEnabled,
+      ...(deps.persistSettings
+        ? {
+            persistSettings: async (writes) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSettings!(
+                primaryBoundWorkspace,
+                writes,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+      ...(deps.validateLiveProviderCredential
+        ? {
+            validateCredential: deps.validateLiveProviderCredential,
+          }
+        : {}),
+    });
+    (
+      app.locals as { liveSetupController?: LiveSetupController }
+    ).liveSetupController = liveSetupController;
+    registerLiveSetupRoutes(app, {
+      controller: liveSetupController,
+      mutate,
+    });
   }
 
   registerChannelNotifyRoutes(app, {
@@ -1821,12 +1970,14 @@ export function createServeApp(
   (
     app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
   ).workspaceManagementHandle = workspaceManagementHandle;
-  if (liveVoiceEnabledAtBoot) {
+  if (liveVoiceEnabled) {
     // Publish the daemon-owned runtime at boot so persisted Live sessions are
     // visible in the Web Shell even before the native Host connects. Runtime
     // construction is lazy with respect to ACP/Appshot/provider initialization;
     // Host readiness remains the only path that starts those probes.
-    void ensureLiveConversationRuntime().catch(() => undefined);
+    liveRuntimeBootPromise = ensureLiveConversationRuntime()
+      .then(() => undefined)
+      .catch(() => undefined);
   }
   (
     app.locals as {
@@ -1862,6 +2013,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      includeLiveVoice: liveVoiceSurfaceAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1985,10 +2137,6 @@ export function createServeApp(
       liveCoordinator.isActiveSession(sessionId),
     ...(liveConversationWorkspaceForRoutes
       ? {
-          recycleLiveConversationDirectory: (sessionId: string) =>
-            liveConversationWorkspaceForRoutes.recycleConversationDirectory(
-              sessionId,
-            ),
           materializeLiveConversationDirectory: (sessionId: string) =>
             liveConversationWorkspaceForRoutes.materializeConversationDirectory(
               sessionId,
@@ -2380,11 +2528,15 @@ export function createServeApp(
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
     extraWsRoutes: [
-      ...(liveVoiceEnabledAtBoot
+      ...(liveVoiceSurfaceAvailable
         ? [
             {
               path: '/live/host',
               onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
                 const header = req.headers['x-qwen-live-nonce'];
                 liveCoordinator.attachHost(
                   ws,
