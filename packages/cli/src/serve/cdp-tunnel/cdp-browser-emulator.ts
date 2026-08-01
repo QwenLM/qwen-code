@@ -265,7 +265,7 @@ export class CdpBrowserEmulator {
 
     // ── page session: forward to the real tab via the extension ──
     if (
-      (sessionId === PAGE_SESSION_ID && this.autoAttachActive) ||
+      sessionId === PAGE_SESSION_ID ||
       this.attachedPageSessions.has(sessionId)
     ) {
       try {
