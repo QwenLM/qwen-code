@@ -50,9 +50,12 @@ export interface DaemonMemoryBudget {
   /** `effectiveBudgetMb` minus the root reserve. */
   readonly childPoolMb: number;
   /**
-   * The ceiling an ACP child receives today, with no budget involved:
-   * `min(50% of host, 16 GB)`. Reported so the gap between current behavior
-   * and any future policy is visible before that policy exists.
+   * A conservative model of the ceiling an ACP child receives today, with no
+   * budget involved: `min(50% of available memory, 16 GB)`. Re-derived rather
+   * than read from the spawn path, so it can sit below the figure a child
+   * actually receives; the divergences are documented on `legacyChildCeilingMb`.
+   * Reported so the gap between current behavior and any future policy is
+   * visible before that policy exists.
    */
   readonly legacyChildCeilingMb: number;
   /**

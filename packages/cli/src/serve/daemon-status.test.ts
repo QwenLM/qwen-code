@@ -201,6 +201,31 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('models no registered share when no workspace is registered', async () => {
+    // With no registered entries the registered share must be null — the same
+    // guard the active share already has — not the undivided child pool.
+    const options = makeOptions();
+    options.workspaceRegistry = {
+      list: () => [],
+      listManaged: () => [],
+      listEntries: () => [],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory).toEqual({
+      registeredWorkspaces: 0,
+      activeAcpChildren: 0,
+      childRssCoverage: 'primary_only',
+      modeled: {
+        recommendedShareAtRegisteredMb: null,
+        recommendedShareAtActiveMb: null,
+      },
+    });
+  });
+
   it('counts dynamically registered workspaces and only their live children', async () => {
     // The registered-vs-active gap this section exists to expose: two
     // workspaces registered, one with a live ACP child.
@@ -217,20 +242,23 @@ describe('buildDaemonStatusResponse', () => {
     } as unknown as AcpSessionBridge;
     const options = makeOptions();
     options.bridge = liveBridge;
+    const runtimes = [
+      {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        bridge: liveBridge,
+      },
+      {
+        workspaceId: 'dynamic',
+        workspaceCwd: '/work/dynamic',
+        bridge: dormantBridge,
+      },
+    ];
     options.workspaceRegistry = {
       primary: { workspaceCwd: BASE_WORKSPACE, bridge: liveBridge },
-      list: () => [
-        {
-          workspaceId: 'primary',
-          workspaceCwd: BASE_WORKSPACE,
-          bridge: liveBridge,
-        },
-        {
-          workspaceId: 'dynamic',
-          workspaceCwd: '/work/dynamic',
-          bridge: dormantBridge,
-        },
-      ],
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => [{}, {}],
     } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
     options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
       availableMemoryMb: 32_768,
@@ -247,6 +275,52 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory?.modeled).toEqual({
       recommendedShareAtRegisteredMb: 7_680,
       recommendedShareAtActiveMb: 15_360,
+    });
+  });
+
+  it('counts a draining workspace that still holds a live child', async () => {
+    // A workspace mid-drain (or mid-replacement, or blocked) is dropped by
+    // list() — active-state only — yet its ACP child is still alive. The live
+    // count must reflect the process actually held, not the narrower
+    // active-state view, or an admission policy would see free capacity that
+    // does not exist.
+    const primaryBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const drainingBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT, // channelLive: true
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const primaryRuntime = {
+      workspaceId: 'primary',
+      workspaceCwd: BASE_WORKSPACE,
+      bridge: primaryBridge,
+    };
+    const drainingRuntime = {
+      workspaceId: 'draining',
+      workspaceCwd: '/work/draining',
+      bridge: drainingBridge,
+    };
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: primaryRuntime,
+      // list() is active-state only: the draining workspace is absent.
+      list: () => [primaryRuntime],
+      // listManaged() is the process-holding set: both children are alive.
+      listManaged: () => [primaryRuntime, drainingRuntime],
+      listEntries: () => [{}, {}],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory).toMatchObject({
+      registeredWorkspaces: 2,
+      activeAcpChildren: 2,
     });
   });
 

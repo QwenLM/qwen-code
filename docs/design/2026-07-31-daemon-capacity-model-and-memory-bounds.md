@@ -86,7 +86,7 @@ Resolve the daemon's memory figures once and report them. Nothing consumes them 
 availableMemoryMb        = cgroup limit, else os.totalmem()          (capped at the host total)
 configuredBudgetMb  = --memory-budget-mb ?? floor(availableMemoryMb * 0.5)
 effectiveBudgetMb   = min(configuredBudgetMb, availableMemoryMb)
-rootReserveMb       = clamp(floor(effectiveBudgetMb * 0.1), 256, 1024)
+rootReserveMb       = min(clamp(floor(effectiveBudgetMb * 0.1), 256, 1024), effectiveBudgetMb)
 childPoolMb         = effectiveBudgetMb - rootReserveMb
 legacyChildCeilingMb     = min(floor(availableMemoryMb * 0.5), 16384)     // what a child gets today
 insufficientMemory  = effectiveBudgetMb < 1024
@@ -147,7 +147,7 @@ Scope and constants for this belong after Part 2, for the same reason its consta
 
 ### Shared helpers, extracted on the second consumer
 
-`truncateUtf8` exists in four private copies. A container bounded by count, bytes, and TTL is implemented correctly once (`session-transcript-reader.ts:148-150`) and approximated elsewhere. REST and ACP maintain two hand-written mappings over one shared error-class set, of which `FsError` (`fs/errors.ts:101`) is the only member carrying its own HTTP status. Each is worth unifying when a second consumer appears in this work, and not before.
+`truncateUtf8` exists in two private copies. A container bounded by count, bytes, and TTL is implemented correctly once (`session-transcript-reader.ts:148-150`) and approximated elsewhere. REST and ACP maintain two hand-written mappings over one shared error-class set, of which `FsError` (`fs/errors.ts:101`) is the only member carrying its own HTTP status. Each is worth unifying when a second consumer appears in this work, and not before.
 
 ## Rejected alternatives
 

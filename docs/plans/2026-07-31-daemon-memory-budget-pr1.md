@@ -54,7 +54,7 @@ acp-bridge 新增 `daemon-memory-budget.ts`（纯算术，无 I/O，宿主内存
 availableMemoryMb        = cgroup limit, else os.totalmem()      （封顶在宿主总量）
 configuredBudgetMb  = --memory-budget-mb ?? floor(availableMemoryMb * 0.5)
 effectiveBudgetMb   = min(configuredBudgetMb, availableMemoryMb)
-rootReserveMb       = clamp(floor(effectiveBudgetMb * 0.1), 256, 1024)
+rootReserveMb       = min(clamp(floor(effectiveBudgetMb * 0.1), 256, 1024), effectiveBudgetMb)
 childPoolMb         = effectiveBudgetMb - rootReserveMb
 legacyChildCeilingMb     = min(floor(availableMemoryMb * 0.5), 16384)
 insufficientMemory  = effectiveBudgetMb < 1024

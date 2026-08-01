@@ -197,7 +197,11 @@ interface DaemonStatusMemoryLimits {
   /** Cgroup limit when one applies, otherwise host total. */
   availableMemoryMb: number;
   availableMemorySource: 'constrained' | 'host';
-  /** The ceiling an ACP child receives today, with no budget involved. */
+  /**
+   * A conservative model of the ceiling an ACP child receives today, with no
+   * budget involved. Re-derived rather than observed, so it can sit below the
+   * figure a child actually receives (see the spawn-path divergences).
+   */
   legacyChildCeilingMb: number;
   insufficientMemory: boolean;
   /**
@@ -271,13 +275,20 @@ interface DaemonStatusRuntime {
 }
 
 interface DaemonStatusRuntimeMemory {
+  /**
+   * Registration count: every non-removed workspace entry, including ones
+   * mid-drain, mid-replacement, or blocked. Registration is not allocation, so
+   * this can exceed the live child count and is unsafe to divide the pool by.
+   */
   registeredWorkspaces: number;
   /**
-   * Daemon-managed ACP children with a live channel. Deliberately narrow: it
-   * excludes channel workers, MCP descendants, and spawn reservations that
-   * have not attached, so a later admission policy cannot mistake it for a
-   * process-tree count. Such a policy will additionally need an in-flight
-   * spawn count to admit without racing.
+   * Daemon-managed ACP children with a live channel: every runtime that still
+   * holds a process, including draining, transitioning, or blocked entries
+   * whose child has not exited. Deliberately narrow — it excludes channel
+   * workers, MCP descendants, and spawn reservations that have not attached,
+   * so a later admission policy cannot mistake it for a process-tree count.
+   * Such a policy will additionally need an in-flight spawn count to admit
+   * without racing.
    */
   activeAcpChildren: number;
   /**
@@ -286,9 +297,14 @@ interface DaemonStatusRuntimeMemory {
    * process-tree observation.
    */
   childRssCoverage: 'primary_only';
-  /** Modeled per-child shares. Advisory; nothing applies them. */
+  /**
+   * Modeled per-child shares. Advisory; nothing applies them. Each is floored
+   * at the minimum child heap, so share x count can exceed the child pool on a
+   * small host — read a share as a per-child floor, not a partition of the pool.
+   */
   modeled: {
-    recommendedShareAtRegisteredMb: number;
+    /** `null` when no workspace is registered — there is no share to divide. */
+    recommendedShareAtRegisteredMb: number | null;
     /** `null` when no ACP child is active — there is no share to divide. */
     recommendedShareAtActiveMb: number | null;
   };
@@ -411,13 +427,27 @@ export async function buildDaemonStatusResponse(
   const aggregatedChannelLive = workspaceSnapshots.some(
     (item) => item.snapshot.channelLive,
   );
-  // A live channel is a live ACP child. Registered-but-dormant workspaces have
-  // none, which is precisely why the registered count is unsafe to divide by.
-  const activeAcpChildCount = workspaceSnapshots.filter(
-    (item) => item.snapshot.channelLive,
-  ).length;
-  const registeredWorkspaceCount = workspaceSnapshots.length;
+  // Count what actually holds a process, not what is merely active-state. A
+  // workspace mid-drain, mid-replacement, or blocked still holds a live ACP
+  // child while `list()` (active-state only) drops it, which would under-report
+  // live children in exactly the window an admission policy must not treat as
+  // free capacity. `listManaged()` is the process-holding set; `listEntries()`
+  // is the registration count. Registered-but-dormant workspaces still have no
+  // live child, which is why the registered count remains unsafe to divide by.
   const memoryBudget = input.opts.daemonMemoryBudget;
+  // Resolved only when a budget is reported, since nothing else consumes them.
+  const managedRuntimes = memoryBudget
+    ? input.workspaceRegistry?.listManaged()
+    : undefined;
+  const activeAcpChildCount = managedRuntimes
+    ? managedRuntimes.filter(
+        (runtime) => runtime.bridge.getDaemonStatusSnapshot().channelLive,
+      ).length
+    : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
+  const registeredWorkspaceCount =
+    memoryBudget && input.workspaceRegistry
+      ? input.workspaceRegistry.listEntries().length
+      : workspaceSnapshots.length;
   const aggregatedLastActivity = workspaceSnapshots.reduce<number | null>(
     (latest, item) =>
       item.lastActivity !== null &&
@@ -661,10 +691,13 @@ export async function buildDaemonStatusResponse(
               activeAcpChildren: activeAcpChildCount,
               childRssCoverage: 'primary_only' as const,
               modeled: {
-                recommendedShareAtRegisteredMb: recommendedChildShareMb(
-                  memoryBudget,
-                  registeredWorkspaceCount,
-                ),
+                recommendedShareAtRegisteredMb:
+                  registeredWorkspaceCount > 0
+                    ? recommendedChildShareMb(
+                        memoryBudget,
+                        registeredWorkspaceCount,
+                      )
+                    : null,
                 recommendedShareAtActiveMb:
                   activeAcpChildCount > 0
                     ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)

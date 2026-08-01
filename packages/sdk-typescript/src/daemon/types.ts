@@ -682,14 +682,26 @@ export interface DaemonStatusReport {
     /**
      * Live counts against the resolved memory budget, with advisory per-child
      * shares. Additive and observation-only; absent when no budget resolved.
+     * Each share is floored at the minimum child heap, so on a small host
+     * share x count can exceed the child pool; read a share as a per-child
+     * floor, not a partition of the pool.
      */
     memory?: {
+      /**
+       * Registration count: non-removed workspace entries, including draining,
+       * transitioning, or blocked ones. Not a live-child count.
+       */
       registeredWorkspaces: number;
-      /** Daemon-managed ACP children only; not a process-tree count. */
+      /**
+       * Daemon-managed ACP children with a live channel; counts a runtime that
+       * still holds a process even while draining or blocked. Not a
+       * process-tree count.
+       */
       activeAcpChildren: number;
       childRssCoverage: 'primary_only';
       modeled: {
-        recommendedShareAtRegisteredMb: number;
+        /** `null` when no workspace is registered. */
+        recommendedShareAtRegisteredMb: number | null;
         /** `null` when no ACP child is active. */
         recommendedShareAtActiveMb: number | null;
       };

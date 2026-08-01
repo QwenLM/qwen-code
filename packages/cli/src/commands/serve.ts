@@ -328,9 +328,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Total memory budget in MB for the daemon and every `qwen --acp` ' +
           'child it spawns. When unset, derived as 50% of cgroup-constrained ' +
-          'or host memory, and capped at the resolved host memory either way. ' +
-          'Currently observed and reported under `limits.memory` in daemon ' +
-          'status; it does not yet size any child process. Minimum 1024.',
+          'or host memory, and capped at the resolved available memory either ' +
+          'way. Currently observed and reported under `limits.memory` in daemon ' +
+          'status; it does not yet size any child process. Must be an integer ' +
+          'in [1024, 1048576].',
       })
       .option('mcp-client-budget', {
         type: 'number',
