@@ -1684,7 +1684,6 @@ export class BackgroundAgentResumeService {
       executionAllowedTools: resolveForkExecutionAllowedTools(
         runtime.toolNames,
         buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
-        agentConfig.getToolRegistry().getAllToolNames(),
       ),
     };
 

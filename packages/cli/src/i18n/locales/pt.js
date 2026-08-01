@@ -54,7 +54,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to view transcript': 'para ver a transcrição',
+  'to expand details': 'para expandir os detalhes',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -248,9 +248,6 @@ export default {
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
   Transcript: 'Transcrição',
-  'to close': 'para fechar',
-  'to scroll': 'para rolar',
-  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
   'Read {{count}} file': 'Leu {{count}} arquivo',
   'Read {{count}} files': 'Leu {{count}} arquivos',
   'Reading {{count}} file': 'Lendo {{count}} arquivo',

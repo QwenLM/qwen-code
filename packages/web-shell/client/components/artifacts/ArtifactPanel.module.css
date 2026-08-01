@@ -594,6 +594,11 @@
   background: var(--accent);
 }
 
+.reviewOpenButton:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .fileIcon {
   min-width: 24px;
   height: 20px;

@@ -11,6 +11,7 @@ import {
   normalizeForkTurns,
   resolveForkExecutionAllowedTools,
   selectForkHistory,
+  validateForkToolList,
 } from './fork-subagent.js';
 
 describe('resolveForkExecutionAllowedTools', () => {
@@ -26,9 +27,9 @@ describe('resolveForkExecutionAllowedTools', () => {
     ).toBeUndefined();
   });
 
-  it('keeps inherited declarations but denies display_image by default', () => {
+  it('filters display_image from an explicit allowlist', () => {
     expect(
-      resolveForkExecutionAllowedTools(parentTools, undefined, [
+      resolveForkExecutionAllowedTools(parentTools, [
         ...parentTools,
         ToolNames.GLOB,
       ]),
@@ -42,6 +43,24 @@ describe('resolveForkExecutionAllowedTools', () => {
         ToolNames.READ_FILE,
       ]),
     ).toEqual([ToolNames.READ_FILE]);
+  });
+});
+
+describe('validateForkToolList', () => {
+  it('accepts the inline fork tool contract, including deny-all', () => {
+    expect(validateForkToolList([])).toBeUndefined();
+    expect(
+      validateForkToolList(['read_file', 'mcp__*', 'mcp__github__read_*']),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { tools: null, expected: /array of non-empty tool names/ },
+    { tools: [' read_file'], expected: /array of non-empty tool names/ },
+    { tools: ['*'], expected: /does not accept/ },
+    { tools: ['mcp__github__*__read'], expected: /wildcard entries/ },
+  ])('rejects an invalid tool list $tools', ({ tools, expected }) => {
+    expect(validateForkToolList(tools)).toMatch(expected);
   });
 });
 

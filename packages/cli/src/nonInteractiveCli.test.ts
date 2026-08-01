@@ -58,6 +58,7 @@ import {
 } from './utils/errors.js';
 
 // Mock core modules
+const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 vi.mock('./ui/hooks/atCommandProcessor.js');
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -73,6 +74,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     executeToolCall: vi.fn(),
+    runVisionBridge: runVisionBridgeSpy,
     shutdownTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn().mockReturnValue(true),
     ChatRecordingService: MockChatRecordingService,
@@ -221,6 +223,7 @@ describe('runNonInteractive', () => {
     _resetExitLatchForTest();
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
+    runVisionBridgeSpy.mockReset();
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetDebugResponses = vi.fn().mockReturnValue([]);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -425,6 +428,52 @@ describe('runNonInteractive', () => {
     for (const event of events) {
       yield event;
     }
+  }
+
+  const headlessImageParts: Part[] = [
+    { text: 'inspect this image' },
+    { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+  ];
+  const finishedEvents: ServerGeminiStreamEvent[] = [
+    {
+      type: GeminiEventType.Finished,
+      value: {
+        reason: undefined,
+        usageMetadata: { totalTokenCount: 1 },
+      },
+    },
+  ];
+
+  async function mockHeadlessImageInput(): Promise<void> {
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessImageParts,
+      shouldProceed: true,
+    });
+  }
+
+  function configureHeadlessVisionModel(model: {
+    id: string;
+    baseUrl?: string;
+    agentCapable?: boolean;
+  }) {
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: model.id,
+        authType: 'openai',
+      },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    mockConfig = {
+      ...mockConfig,
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(model),
+      getBaseLlmClient: vi.fn().mockReturnValue({ resolveForModel }),
+    } as unknown as Config;
+    return { resolveForModel, runtimeView };
   }
 
   it('should process input and write text output', async () => {
@@ -2648,6 +2697,369 @@ describe('runNonInteractive', () => {
 
     // 6. Assert the final output is correct
     expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
+  });
+
+  it('keeps an agent-capable image route for the full headless tool chain', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel, runtimeView } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      baseUrl: 'https://vision.example/v1',
+      agentCapable: true,
+    });
+    const selector = 'vision-agent\0https://vision.example/v1\0';
+    let acceptedSameSelector = false;
+    let rejectedDifferentSelector = false;
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'vision-tool-1',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-vision-route',
+      },
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        acceptedSameSelector =
+          options.onToolResultFullTurnModel?.(selector) ?? false;
+        rejectedDifferentSelector =
+          options.onToolResultFullTurnModel?.(
+            'different-model\0https://vision.example/v1\0',
+          ) === false;
+        return {
+          responseParts: [{ text: 'tool response' }],
+          modelOverride: 'other-model',
+        };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          ...finishedEvents,
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-route',
+    );
+
+    expect(resolveForModel).toHaveBeenCalledWith(selector.slice(0, -1), {
+      failClosed: true,
+    });
+    expect(acceptedSameSelector).toBe(true);
+    expect(rejectedDifferentSelector).toBe(true);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      1,
+      headlessImageParts,
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      { type: SendMessageType.UserQuery, modelOverride: selector },
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'tool response' }],
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      { type: SendMessageType.ToolResult, modelOverride: selector },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'vision-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView }),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Routing this image turn to vision-agent'),
+    );
+  });
+
+  it('does not leak a headless image route into a notification drain', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (callback) => {
+        callback?.('Task finished', 'task result', {
+          agentId: 'agent-1',
+          toolUseId: 'agent-tool-1',
+          status: 'completed',
+        });
+      },
+    );
+    const drainToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'drain-tool-1',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-drain-isolation',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'drain tool response' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-drain-isolation',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'task result' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      expect.objectContaining({
+        type: SendMessageType.Notification,
+        modelOverride: undefined,
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: 'drain tool response' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      { type: SendMessageType.ToolResult, modelOverride: undefined },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'drain-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView: undefined }),
+    );
+  });
+
+  it('converts headless images through a non-agent vision bridge', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'machine transcription' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Converted 1 image(s)'),
+    );
+  });
+
+  it('emits a stream-json system message for headless vision bridge notices', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'vision_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'vision_bridge',
+      data: { notice: expect.stringContaining('Converted 1 image(s)') },
+    });
+  });
+
+  it('emits a notice when a non-agent vision bridge fails', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-failed',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-failed',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Vision bridge failed; proceeding without the image(s).\n',
+    );
+  });
+
+  it('strips headless images when a non-agent vision bridge is skipped', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: false,
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-skipped',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-skipped',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Vision bridge cancelled.'),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('were sent to vision-bridge'),
+    );
+  });
+
+  it('does not select a headless image route after clamping removes the image', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-oversized-image',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(resolveForModel).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [
+        { text: 'inspect this image' },
+        expect.objectContaining({
+          text: expect.stringContaining('Media omitted'),
+        }),
+      ],
+      expect.any(AbortSignal),
+      'prompt-oversized-image',
+      { type: SendMessageType.UserQuery },
+    );
+  });
+
+  it('fails closed when the headless image route cannot be resolved', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    resolveForModel.mockRejectedValue(new Error('route unavailable'));
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-route-failure',
+      ),
+    ).rejects.toThrow('route unavailable');
+
+    expect(resolveForModel).toHaveBeenCalledWith('vision-agent', {
+      failClosed: true,
+    });
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('should process input and write JSON output with stats', async () => {

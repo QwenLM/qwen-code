@@ -38,6 +38,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
@@ -112,6 +113,17 @@ const VALID_APPROVAL_MODE_VALUES = [
   'auto',
   'yolo',
 ] as const;
+
+const SKILL_LEVELS: readonly SkillLevel[] = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+];
+
+function isSkillLevel(value: unknown): value is SkillLevel {
+  return SKILL_LEVELS.includes(value as SkillLevel);
+}
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
@@ -2102,6 +2114,10 @@ export async function loadCliConfig(
           return getTerminalImageRenderSupport();
         }
       : undefined,
+    disabledSkillLevels:
+      bareMode || safeMode || !Array.isArray(settings.skills?.disabledLevels)
+        ? undefined
+        : settings.skills.disabledLevels.filter(isSkillLevel),
     customSkillDirs:
       bareMode || safeMode
         ? undefined
