@@ -494,6 +494,7 @@ describe('isCollapsedFromUpstream', () => {
   it('fires when the recomputed diff is 4x smaller past the 200-line floor', () => {
     expect(
       isCollapsedFromUpstream({
+        baseFetchFailed: false,
         diffText: diff(50),
         additions: 200,
         deletions: 0,
@@ -506,6 +507,7 @@ describe('isCollapsedFromUpstream', () => {
     // signature is gone. Pinned so the comparison cannot drift to `<`.
     expect(
       isCollapsedFromUpstream({
+        baseFetchFailed: false,
         diffText: diff(51),
         additions: 200,
         deletions: 0,
@@ -518,6 +520,7 @@ describe('isCollapsedFromUpstream', () => {
     // out — a rename-threshold disagreement, not an upstream collapse.
     expect(
       isCollapsedFromUpstream({
+        baseFetchFailed: false,
         diffText: diff(40),
         additions: 199,
         deletions: 0,
@@ -525,6 +528,7 @@ describe('isCollapsedFromUpstream', () => {
     ).toBe(false);
     expect(
       isCollapsedFromUpstream({
+        baseFetchFailed: false,
         diffText: diff(40),
         additions: 100,
         deletions: 100,
@@ -532,9 +536,30 @@ describe('isCollapsedFromUpstream', () => {
     ).toBe(true);
   });
 
+  it('does not fire off a base the fetch could not confirm', () => {
+    // The sibling guard, for the sibling reason. `isEmptyDiff` refuses to rule
+    // on a possibly stale local base ref because such a base can already hold
+    // the head commits; the PARTIAL form of that lands here, shrinking the
+    // recomputed diff past the ratio. The flag then tells Agent 0 to read the
+    // body as description-of-history when the body may be perfectly current
+    // and the real cause is an infrastructure failure.
+    const collapsing = { diffText: diff(50), additions: 200, deletions: 0 };
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: false }),
+    ).toBe(true);
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: true }),
+    ).toBe(false);
+  });
+
   it('never fires on an empty diff — that is emptyDiff, a different claim', () => {
     expect(
-      isCollapsedFromUpstream({ diffText: '', additions: 5000, deletions: 0 }),
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: '',
+        additions: 5000,
+        deletions: 0,
+      }),
     ).toBe(false);
   });
 });

@@ -410,6 +410,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // twice.
     ...(isCollapsedFromUpstream({
       diffText,
+      baseFetchFailed,
       additions: meta.additions,
       deletions: meta.deletions,
     })
@@ -489,11 +490,24 @@ export function isEmptyDiff(i: {
  */
 export function isCollapsedFromUpstream(i: {
   diffText: string;
+  baseFetchFailed: boolean;
   additions: number;
   deletions: number;
 }): boolean {
+  // The sibling guard, for the sibling reason — and it is the guard, not the
+  // ratio, that was missing here. `isEmptyDiff` refuses to rule when the merge
+  // base came from a possibly stale local ref because such a base can already
+  // contain the head commits and diff to empty. The PARTIAL form of the same
+  // cause lands here instead: a stale ref holding most of the head commits
+  // shrinks the recomputed diff past the 4x ratio, and this flag then tells
+  // Agent 0 a story — "overlapping merged PRs collapsed this one, read the
+  // body as description-of-history" — that is wrong in the way that matters,
+  // because the body's claims may be perfectly current and the real cause is
+  // an infrastructure failure. A disclosure that steers how the body is read
+  // has to be as sure of its base as a gate does.
   const advertised = i.additions + i.deletions;
   return (
+    !i.baseFetchFailed &&
     i.diffText.trim() !== '' &&
     advertised >= 200 &&
     countDiffChangedLines(i.diffText) * 4 <= advertised

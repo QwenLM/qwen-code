@@ -1546,6 +1546,14 @@ export function runOneHunkProbe(
  * injected — the fabricated verdict this file's budget path already refuses
  * ("never a fabricated true or false"), and it would additionally discard the
  * whole mutant/hunk window over an I/O error.
+ *
+ * KNOWN BOUND: it validates ONE file, not the collection. The injection goes
+ * into `greenProbes[0]`, so a collector that silently drops a DIFFERENT probe
+ * file still passes the control while that file's survivors stand. The
+ * per-file baseline gate bounds the residual window — a file that collected
+ * nothing is never scored green to begin with — so what is left is a collector
+ * that runs one file and skips another. Named because a `true` here is read as
+ * covering the whole run.
  */
 export function runControlMutant(
   probeTree: string,
@@ -1956,10 +1964,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // under-reported by one. No budget for the control — and equally, a
           // control that could not be set up at all — means nothing was
           // validated (null), never a fabricated true or false.
-          if (!fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
-            mutantsSkippedForBudget = candidates.length;
-            hunksSkippedForBudget = hunkCandidates.length;
-          } else {
+          // Nothing to pre-set here: both loops below run with
+          // `harnessValidated` still null, re-check the same budget against a
+          // later clock, and set their own counters. Assigning full counts
+          // first was dead in every path and worse than dead in one — the hunk
+          // loop pushes collocated-probe inconclusives BEFORE its budget
+          // check, so its own figure excludes them and this one did not.
+          if (fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
             harnessValidated = runControlMutant(
               probeTree,
               greenProbes[0],
