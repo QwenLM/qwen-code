@@ -300,7 +300,11 @@ export function invokedCommandsOf(script: string): string[] {
       if (rawLine.trim() === heredocQueue[0]) heredocQueue.shift();
       continue;
     }
-    const joined = pending === null ? rawLine : pending + rawLine;
+    // Annotated because the narrowing is loop-carried: `pending`'s type at
+    // this line is the union of the entry value and the back edge below, and
+    // that back edge is derived from `joined` — a cycle the checker gives up
+    // on with an implicit `any` (TS7022) unless the type is stated outright.
+    const joined: string = pending === null ? rawLine : pending + rawLine;
     if (CONTINUES.test(joined)) {
       pending = `${joined.slice(0, -1)} `;
       continue;
