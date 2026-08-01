@@ -790,6 +790,18 @@ describe('WorkflowRunRegistry', () => {
     expect(handle.resume).toHaveBeenCalledOnce();
   });
 
+  it('ignores late dispatch state changes after cancellation', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_cancelled', { isBackgrounded: true }));
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    r.cancel(entry.runId, 2_000);
+    r.onDispatchStateChange(entry.runId, 'paused');
+    r.onDispatchStateChange(entry.runId, 'running');
+
+    expect(entry.status).toBe('cancelled');
+  });
+
   it('does not pause a foreground workflow', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_foreground'));
