@@ -560,6 +560,9 @@ export async function runNonInteractive(
       limitedTurnCount++;
       const maxSessionTurns = config.getMaxSessionTurns();
       if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
+        await failClosedActiveGoalTurn(
+          'Headless Goal stopped after the session turn limit',
+        );
         await settleBeforeTerminalOutput();
         await handleMaxTurnsExceededError(config);
       }

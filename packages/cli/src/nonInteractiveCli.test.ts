@@ -923,7 +923,11 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     await prepareGoalState('active');
     vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
-    mockFinishedGoalWorker();
+    let goalStatusAtExit: string | undefined;
+    vi.mocked(process.exit).mockImplementation((code) => {
+      goalStatusAtExit = goalRuntime.getSnapshot().goal?.status;
+      throw new Error(`process.exit(${code}) called`);
+    });
 
     await expect(
       runNonInteractive(
@@ -935,6 +939,7 @@ describe('runNonInteractive', () => {
     ).rejects.toThrow('process.exit(53) called');
 
     expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(goalStatusAtExit).toBe('paused');
   });
 
   it('keeps explicit tool-call budgets on runtime Goal work', async () => {
