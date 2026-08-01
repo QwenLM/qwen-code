@@ -221,7 +221,7 @@ The `/advisor` command runs an independent, read-only review of the conversation
 **How It Works:**
 
 - The review is sent as a separate, single-turn API call with recent conversation context (up to the last 40 messages)
-- The reviewer model has **no tools** — every claim must be grounded in the visible transcript, and the review never writes code or runs commands
+- The reviewer model **cannot execute tools** — it runs as a single-turn forked query whose tool calls are discarded, so the review never writes code or runs commands; every claim must be grounded in the visible transcript
 - The main conversation is **not** interrupted; the review is shown only to you
 - The review is rendered with four fixed sections: **Verdict**, **Risks**, **Missing evidence**, and **Recommendation**
 - By default the main model is used; set [`advisorModel`](../configuration/settings.md#advisormodel) to route the review to a different (typically stronger) model — the recent transcript is sent to that model even when it uses another provider

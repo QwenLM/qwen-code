@@ -1963,6 +1963,16 @@ export default {
   'not updatable': 'não atualizável',
   'Ask a quick side question without affecting the main conversation':
     'Fazer uma pergunta rápida paralela sem afetar a conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Obter uma segunda opinião sobre a conversa atual de um modelo revisor',
+  'Consulting advisor...': 'Consultando o assessor...',
+  'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
+  'No conversation context available for /advisor':
+    'Nenhum contexto de conversa disponível para /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Foco muito longo (máx. {{max}} caracteres)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Outra operação está em andamento, aguarde a conclusão antes de executar /advisor',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Iniciar uma sessão da Arena com vários modelos competindo na mesma tarefa',

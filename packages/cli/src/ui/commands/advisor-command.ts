@@ -55,7 +55,7 @@ async function askAdvisor(
   abortSignal: AbortSignal,
 ): Promise<string> {
   const { config } = context.services;
-  if (!config) throw new Error('Config not loaded');
+  if (!config) throw new Error(t('Config not loaded.'));
 
   const cacheSafeParams = buildBtwCacheSafeParams(config);
   if (!cacheSafeParams || cacheSafeParams.history.length === 0) {

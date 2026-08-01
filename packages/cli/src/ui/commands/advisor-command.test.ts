@@ -305,6 +305,20 @@ describe('advisorCommand', () => {
       expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
     });
 
+    it('should format non-Error rejections with a fallback', async () => {
+      mockRunForkedAgent.mockRejectedValue(null);
+
+      await advisorCommand.action!(mockContext, '');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Advisor review failed: Unknown error',
+        },
+        expect.any(Number),
+      );
+    });
+
     it('should block when another pendingItem exists', async () => {
       const busyContext = createMockCommandContext({
         services: { config: createConfig() },
