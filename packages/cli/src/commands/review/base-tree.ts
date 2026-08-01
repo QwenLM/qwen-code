@@ -48,6 +48,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -208,6 +209,19 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // mutating. `mkdirSync` without `recursive` is the atomic test-and-set; the
   // loser returns busy rather than waiting out a multi-minute build.
   const lock = `${tree}.lock`;
+  // Staleness: a builder killed without its finally leaves the lock forever,
+  // and within the same review every later probe reports busy until cleanup.
+  // A lock older than any plausible install+build (30 min) is a corpse — sweep
+  // it and take the build. mtime is the lock dir's creation time (nothing
+  // touches it after mkdir), so this cannot fire on a live build.
+  try {
+    const age = Date.now() - statSync(lock).mtimeMs;
+    if (age > 30 * 60 * 1000) {
+      rmSync(lock, { recursive: true, force: true });
+    }
+  } catch {
+    // No lock — the normal case.
+  }
   try {
     mkdirSync(lock);
   } catch {
