@@ -15,34 +15,34 @@ describe('findEffectiveWorkspace', () => {
     expect(findEffectiveWorkspace(bridge, ws)).toBe(ws);
   });
 
-  it('returns boundWorkspace when all sessions are at the workspace', () => {
+  it('returns boundWorkspace when no session has a worktree', () => {
     const bridge = {
       listWorkspaceSessions: () => [
-        { sessionId: 'a', workspaceCwd: ws },
-        { sessionId: 'b', workspaceCwd: ws },
+        { worktree: undefined },
+        { worktree: undefined },
       ],
     };
     expect(findEffectiveWorkspace(bridge, ws)).toBe(ws);
   });
 
-  it('returns the relocated session cwd when one exists', () => {
+  it('returns the worktree path when a session has one', () => {
     const worktree = '/repo/project/.qwen/worktrees/feat';
     const bridge = {
       listWorkspaceSessions: () => [
-        { sessionId: 'a', workspaceCwd: ws },
-        { sessionId: 'b', workspaceCwd: worktree },
+        { worktree: undefined },
+        { worktree: { path: worktree } },
       ],
     };
     expect(findEffectiveWorkspace(bridge, ws)).toBe(worktree);
   });
 
-  it('returns the first relocated session when multiple exist', () => {
+  it('returns the first worktree when multiple sessions have one', () => {
     const wt1 = '/repo/project/.qwen/worktrees/alpha';
     const wt2 = '/repo/project/.qwen/worktrees/beta';
     const bridge = {
       listWorkspaceSessions: () => [
-        { sessionId: 'a', workspaceCwd: wt1 },
-        { sessionId: 'b', workspaceCwd: wt2 },
+        { worktree: { path: wt1 } },
+        { worktree: { path: wt2 } },
       ],
     };
     expect(findEffectiveWorkspace(bridge, ws)).toBe(wt1);

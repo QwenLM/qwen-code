@@ -31,6 +31,8 @@ function makeMockConfig(targetDir = process.cwd()): Config {
     // setting when creating a worktree. Return empty so the symlink
     // loop is a no-op in tests.
     getWorktreeSymlinkDirectories: vi.fn(() => []),
+    getActiveWorktree: vi.fn(() => null),
+    setActiveWorktree: vi.fn(),
   } as unknown as Config;
 }
 
@@ -186,6 +188,8 @@ describe('ExitWorktreeTool', () => {
         getTargetDir: () => repoRoot,
         getSessionId: () => 'session-creator',
         getWorktreeSymlinkDirectories: () => [],
+        setActiveWorktree: () => {},
+        getActiveWorktree: () => null,
       } as unknown as Config;
       const enter = new EnterWorktreeTool(enterCfg);
       const inv = enter.build({ name: slug });

@@ -219,6 +219,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
           `Kept worktree "${this.params.name}" at ${worktreePath}. ` +
           `Resume work there by referencing this path in subsequent tool calls.`,
       };
+      if (this.config.getActiveWorktree?.() === worktreePath) {
+        this.config.setActiveWorktree?.(null);
+      }
       return {
         llmContent: JSON.stringify(output),
         returnDisplay: `Kept worktree **${this.params.name}** at \`${worktreePath}\``,
@@ -359,6 +362,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       };
     }
 
+    if (this.config.getActiveWorktree?.() === worktreePath) {
+      this.config.setActiveWorktree?.(null);
+    }
     debugLogger.debug(
       `Removed user worktree: ${worktreePath} (branch=${branch})`,
     );
