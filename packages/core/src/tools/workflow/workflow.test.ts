@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,7 @@ import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
+import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
 import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
@@ -42,6 +43,10 @@ describe('WorkflowTool', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: { run_in_background: { default?: boolean } };
+    };
+    expect(schema.properties.run_in_background.default).toBe(false);
   });
 
   it('rejects build() when script is missing', () => {
@@ -85,6 +90,172 @@ describe('WorkflowTool', () => {
     expect(invocation.params.scriptPath).toBe('/abs/deep-research.js');
     // Description reflects the saved-workflow filename, not a char count.
     expect(invocation.getDescription()).toContain('deep-research.js');
+  });
+
+  it('rejects background runs outside an interactive completion channel', () => {
+    const headlessRegistry = new WorkflowRunRegistry();
+    headlessRegistry.setCompletionCallback(vi.fn());
+    const headlessConfig = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => headlessRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(headlessConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+
+    const interactiveRegistry = new WorkflowRunRegistry();
+    const interactiveConfig = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(interactiveConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/completion channel/i);
+
+    interactiveRegistry.setCompletionCallback(vi.fn());
+    const acpConfig = {
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(acpConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+  });
+
+  it('does not register a background run when the caller is already aborted', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const dispatch = vi.fn(async () => 'unused');
+    const caller = new AbortController();
+    caller.abort();
+
+    const result = await new WorkflowTool(config, { dispatch })
+      .build({ script: 'return 1', run_in_background: true })
+      .execute(caller.signal);
+
+    expect(result).toEqual({
+      llmContent: 'Workflow was cancelled before it could start.',
+      returnDisplay: 'Workflow cancelled.',
+    });
+    expect(registry.list()).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('does not register when cancellation arrives during background preflight', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        caller.abort();
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+          run_in_background: true,
+        })
+        .execute(caller.signal);
+
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('run_in_background=true returns a live handle without late tool updates', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const updateOutput = vi.fn();
+    const execution = tool
+      .build({
+        script: `phase('slow'); return await agent('work');`,
+        run_in_background: true,
+      })
+      .execute(new AbortController().signal, updateOutput);
+
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const result = await execution;
+    const entry = registry.list()[0]!;
+    expect(entry.status).toBe('running');
+    expect(entry.isBackgrounded).toBe(true);
+    expect(result.llmContent).toEqual([
+      {
+        text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
+      },
+    ]);
+    expect(result.returnDisplay).toBe(
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe or stop it.`,
+    );
+    expect(updateOutput).not.toHaveBeenCalled();
+
+    resolveDispatch?.('done');
+    await registry.getHandle(entry.runId)!.completion;
+    expect(registry.get(entry.runId)?.status).toBe('completed');
+    expect(updateOutput).not.toHaveBeenCalled();
+  });
+
+  it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
+    const run = async (runInBackground: false | undefined) => {
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const params = {
+        script: `phase('one'); return { answer: 42 };`,
+        resumeFromRunId: 'wf_1234abcd',
+        ...(runInBackground === undefined
+          ? {}
+          : { run_in_background: runInBackground }),
+      };
+      return new WorkflowTool(config, { dispatch: async () => 'unused' })
+        .build(params)
+        .execute(new AbortController().signal);
+    };
+
+    await expect(run(false)).resolves.toEqual(await run(undefined));
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {

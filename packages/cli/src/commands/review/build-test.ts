@@ -109,6 +109,24 @@ export interface BuildTestReport {
 const KEEP_HEAD = 2_000;
 const KEEP_TAIL = 6_000;
 
+/**
+ * Did this spawn die on its deadline?
+ *
+ * Exported so `test-delta`'s rerun asks the SAME question rather than
+ * re-deriving it — a copy there used `error.message.includes('ETIMEDOUT')`,
+ * which misses an external SIGTERM and fed a silent "base is green".
+ */
+export function spawnTimedOut(r: {
+  error?: Error;
+  signal?: NodeJS.Signals | null;
+  status?: number | null;
+}): boolean {
+  return (
+    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
+    (r.signal === 'SIGTERM' && r.status === null)
+  );
+}
+
 /** The module-resolution errors the widening loop reads to grow the build set. */
 const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
 
@@ -232,9 +250,7 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
-  const timedOut =
-    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
-    (r.signal === 'SIGTERM' && r.status === null);
+  const timedOut = spawnTimedOut(r);
   return {
     command,
     exitCode: r.status,
