@@ -22,6 +22,8 @@ import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
+import type { InlineImageData } from '../../types.js';
+import { TerminalImage } from '../TerminalImage.js';
 
 const debugLogger = createDebugLogger('THINK_RENDER');
 
@@ -40,6 +42,7 @@ interface UserShellMessageProps {
 
 interface AssistantMessageProps {
   text: string;
+  images?: InlineImageData[];
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -48,6 +51,7 @@ interface AssistantMessageProps {
 
 interface AssistantMessageContentProps {
   text: string;
+  images?: InlineImageData[];
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -89,6 +93,7 @@ interface PrefixedTextMessageProps {
 
 interface PrefixedMarkdownMessageProps {
   text: string;
+  images?: InlineImageData[];
   prefix: string;
   prefixColor: string;
   isPending: boolean;
@@ -101,6 +106,7 @@ interface PrefixedMarkdownMessageProps {
 
 interface ContinuationMarkdownMessageProps {
   text: string;
+  images?: InlineImageData[];
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -148,6 +154,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
 
 const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   text,
+  images,
   prefix,
   prefixColor,
   isPending,
@@ -167,14 +174,24 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
         </Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={isPending}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - prefixWidth}
-          textColor={textColor}
-          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-        />
+        {text.length > 0 && (
+          <MarkdownDisplay
+            text={text}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth - prefixWidth}
+            textColor={textColor}
+            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          />
+        )}
+        {images?.map((image, index) => (
+          <TerminalImage
+            key={index}
+            image={image}
+            contentWidth={contentWidth - prefixWidth}
+            availableTerminalHeight={availableTerminalHeight}
+          />
+        ))}
       </Box>
     </Box>
   );
@@ -184,6 +201,7 @@ const ContinuationMarkdownMessage: React.FC<
   ContinuationMarkdownMessageProps
 > = ({
   text,
+  images,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -195,14 +213,24 @@ const ContinuationMarkdownMessage: React.FC<
 
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - prefixWidth}
-        textColor={textColor}
-        sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-      />
+      {text.length > 0 && (
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - prefixWidth}
+          textColor={textColor}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+        />
+      )}
+      {images?.map((image, index) => (
+        <TerminalImage
+          key={index}
+          image={image}
+          contentWidth={contentWidth - prefixWidth}
+          availableTerminalHeight={availableTerminalHeight}
+        />
+      ))}
     </Box>
   );
 };
@@ -236,6 +264,7 @@ export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
 
 export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   text,
+  images,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -243,6 +272,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
+    images={images}
     prefix={ICON.DIAMOND}
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
@@ -257,6 +287,7 @@ export const AssistantMessageContent: React.FC<
   AssistantMessageContentProps
 > = ({
   text,
+  images,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -264,6 +295,7 @@ export const AssistantMessageContent: React.FC<
 }) => (
   <ContinuationMarkdownMessage
     text={text}
+    images={images}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}

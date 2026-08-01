@@ -54,6 +54,12 @@ export enum ToolCallStatus {
   Error = 'Error',
 }
 
+export interface InlineImageData {
+  data: string;
+  mimeType: string;
+  displayName?: string;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   status: ToolCallStatus;
@@ -79,6 +85,8 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /** Inline images carried by this tool's persisted response parts. */
+  images?: InlineImageData[];
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -138,12 +146,14 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  images?: InlineImageData[];
   timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
+  images?: InlineImageData[];
 };
 
 export type HistoryItemGeminiThought = HistoryItemBase & {

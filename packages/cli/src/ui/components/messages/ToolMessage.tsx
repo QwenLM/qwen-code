@@ -55,6 +55,7 @@ import {
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { TerminalImage } from '../TerminalImage.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -686,6 +687,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  images,
   visionBridgeNotice,
   detailedDisplay,
   status,
@@ -955,6 +957,22 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
           </Box>
+        </Box>
+      )}
+      {images && images.length > 0 && (
+        <Box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          width="100%"
+          flexDirection="column"
+        >
+          {images.map((image, index) => (
+            <TerminalImage
+              key={index}
+              image={image}
+              contentWidth={innerWidth}
+              availableTerminalHeight={availableHeight}
+            />
+          ))}
         </Box>
       )}
       {isThisShellFocused && config && (

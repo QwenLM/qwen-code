@@ -5,11 +5,35 @@
  */
 
 import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { vi } from 'vitest';
 import {
+  AssistantMessage,
   ThinkMessage,
   ThinkMessageContent,
   toggleKeyHint,
 } from './ConversationMessages.js';
+
+vi.mock('../TerminalImage.js', () => ({
+  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
+    <Text>MockTerminalImage:{image.mimeType}</Text>
+  ),
+}));
+
+describe('<AssistantMessage />', () => {
+  it('routes assistant images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+});
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {

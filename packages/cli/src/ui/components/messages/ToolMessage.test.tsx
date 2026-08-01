@@ -70,6 +70,12 @@ vi.mock('../AnsiOutput.js', () => ({
   },
 }));
 
+vi.mock('../TerminalImage.js', () => ({
+  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
+    <Text>MockTerminalImage:{image.mimeType}</Text>
+  ),
+}));
+
 // Mock child components or utilities if they are complex or have side effects
 vi.mock('../GeminiRespondingSpinner.js', () => ({
   GeminiRespondingSpinner: ({
@@ -173,6 +179,18 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('renders inline images returned by a tool', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
   });
 
   it('always shows the vision bridge disclosure for a completed read', () => {

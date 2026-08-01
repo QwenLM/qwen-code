@@ -5,11 +5,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Part } from '@google/genai';
 import { mapToDisplay, type TrackedToolCall } from './useReactToolScheduler.js';
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
 // success branch reads. `displayName` drives the collapsible gate.
-const makeSuccess = (displayName: string): TrackedToolCall =>
+const makeSuccess = (
+  displayName: string,
+  responseMedia: Part[] = [],
+): TrackedToolCall =>
   ({
     status: 'success',
     request: { callId: 'call-1', name: 'read_file', args: {} },
@@ -23,6 +27,7 @@ const makeSuccess = (displayName: string): TrackedToolCall =>
             id: 'call-1',
             name: 'read_file',
             response: { output: 'FULL FILE CONTENT' },
+            ...(responseMedia.length > 0 ? { parts: responseMedia } : {}),
           },
         },
       ],
@@ -44,5 +49,27 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
     // (the transcript never reads it for edit/write/command/agent tools).
     const group = mapToDisplay(makeSuccess('Edit'));
     expect(group.tools[0].detailedDisplay).toBeUndefined();
+  });
+
+  it('extracts nested inline images from tool response parts', () => {
+    const group = mapToDisplay(
+      makeSuccess('Read File', [
+        {
+          inlineData: {
+            data: 'dG9vbC1pbWFnZQ==',
+            mimeType: 'image/png',
+            displayName: 'result.png',
+          },
+        },
+      ]),
+    );
+
+    expect(group.tools[0].images).toEqual([
+      {
+        data: 'dG9vbC1pbWFnZQ==',
+        mimeType: 'image/png',
+        displayName: 'result.png',
+      },
+    ]);
   });
 });

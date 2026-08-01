@@ -388,13 +388,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     ? []
     : inlineToolCalls.filter(
         (t) =>
-          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+          isCollapsibleTool(t.name) &&
+          t.status !== ToolCallStatus.Canceled &&
+          !t.images?.length,
       );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
     : inlineToolCalls.filter(
         (t) =>
-          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+          !isCollapsibleTool(t.name) ||
+          t.status === ToolCallStatus.Canceled ||
+          Boolean(t.images?.length),
       );
 
   // Memory badge — shared between all-collapsible and mixed paths.
@@ -448,7 +452,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
-    if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
+    if (
+      (tool.resultDisplay !== undefined && tool.resultDisplay !== '') ||
+      tool.images?.length
+    ) {
       countToolCallsWithResults++;
     }
   }

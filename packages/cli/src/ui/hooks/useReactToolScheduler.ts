@@ -38,6 +38,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { extractInlineImages } from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -386,7 +387,10 @@ export function mapToDisplay(
       };
 
       switch (trackedCall.status) {
-        case 'success':
+        case 'success': {
+          const images = extractInlineImages(
+            trackedCall.response.responseParts,
+          );
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -410,9 +414,14 @@ export function mapToDisplay(
             detailedDisplay: isCollapsibleTool(displayName)
               ? getToolResponseDisplayText(trackedCall.response.responseParts)
               : undefined,
+            ...(images.length > 0 ? { images } : {}),
             confirmationDetails: undefined,
           };
-        case 'error':
+        }
+        case 'error': {
+          const images = extractInlineImages(
+            trackedCall.response.responseParts,
+          );
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -424,9 +433,14 @@ export function mapToDisplay(
                   visionBridgeNotice: trackedCall.response.visionBridgeNotice,
                 }
               : {}),
+            ...(images.length > 0 ? { images } : {}),
             confirmationDetails: undefined,
           };
-        case 'cancelled':
+        }
+        case 'cancelled': {
+          const images = extractInlineImages(
+            trackedCall.response.responseParts,
+          );
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -438,8 +452,10 @@ export function mapToDisplay(
                   visionBridgeNotice: trackedCall.response.visionBridgeNotice,
                 }
               : {}),
+            ...(images.length > 0 ? { images } : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,

@@ -6093,6 +6093,400 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('preserves text and inline image ordering in streamed content', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'chart.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show a chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      const committedAssistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(committedAssistantItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+
+      act(() => result.current.cancelOngoingRequest());
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) => item.type === 'gemini' || item.type === 'gemini_content',
+          ),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('does not overwrite an image with whitespace before the next image', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const firstImage = {
+        data: 'Zmlyc3Q=',
+        mimeType: 'image/png',
+        displayName: 'first.png',
+      };
+      const secondImage = {
+        data: 'c2Vjb25k',
+        mimeType: 'image/png',
+        displayName: 'second.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '\n',
+            parts: [
+              { inlineData: firstImage },
+              { text: '\n' },
+              { inlineData: secondImage },
+            ],
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show two charts');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: '',
+          images: [firstImage],
+        }),
+        { type: 'gemini_content', text: '', images: [secondImage] },
+      ]);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('keeps an image committable when the stream pauses after whitespace', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'trailing-space.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '\n',
+            parts: [{ inlineData: image }, { text: '\n' }],
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show a chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: '',
+          images: [image],
+        }),
+      ]);
+
+      act(() => result.current.cancelOngoingRequest());
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) => item.type === 'gemini' || item.type === 'gemini_content',
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: '',
+          images: [image],
+        }),
+      ]);
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('discards every staged mixed-content run on a fresh retry', async () => {
+      vi.useFakeTimers();
+
+      let emitRetry!: () => void;
+      const waitForRetry = new Promise<void>((resolve) => {
+        emitRetry = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'failed.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          await waitForRetry;
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: false,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'replacement',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show a chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+
+      await act(async () => {
+        emitRetry();
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      const committedAssistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(committedAssistantItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'replacement' }),
+      ]);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('discards staged mixed content before an explicit retry after a thrown stream', async () => {
+      const failedImage = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'failed.png',
+      };
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'beforeafter',
+              parts: [
+                { text: 'before' },
+                { inlineData: failedImage },
+                { text: 'after' },
+              ],
+            };
+            throw new Error('stream failed');
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'replacement',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('show a chart');
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          { type: 'gemini_content', text: '', images: [failedImage] },
+          { type: 'gemini_content', text: 'after' },
+        ]),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('show a chart', SendMessageType.Retry);
+      });
+
+      const committedAssistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(committedAssistantItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'replacement' }),
+      ]);
+      expect(result.current.pendingHistoryItems).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ images: [failedImage] }),
+        ]),
+      );
+    });
+
+    it('commits staged mixed content before a new user turn after a thrown stream', async () => {
+      const failedImage = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'partial.png',
+      };
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'beforeafter',
+              parts: [
+                { text: 'before' },
+                { inlineData: failedImage },
+                { text: 'after' },
+              ],
+            };
+            throw new Error('stream failed');
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'next answer',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('first question');
+      });
+      await act(async () => {
+        await result.current.submitQuery('second question');
+      });
+
+      const relevantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'user' ||
+            item.type === 'gemini' ||
+            item.type === 'gemini_content' ||
+            item.type === 'error',
+        );
+      expect(relevantItems).toEqual([
+        expect.objectContaining({ type: 'user', text: 'first question' }),
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [failedImage] },
+        { type: 'gemini_content', text: 'after' },
+        expect.objectContaining({ type: 'error' }),
+        expect.objectContaining({ type: 'user', text: 'second question' }),
+        expect.objectContaining({ type: 'gemini', text: 'next answer' }),
+      ]);
+    });
+
     it('does not render leading blank content chunks as an empty assistant item', async () => {
       vi.useFakeTimers();
 
@@ -11878,12 +12272,22 @@ describe('useGeminiStream', () => {
   });
 
   describe('HookSystemMessage Event', () => {
-    it('commits buffered content before a displayed Goal state', async () => {
+    it('commits staged inline content before a displayed Goal state', async () => {
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'goal.png',
+      };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
             type: ServerGeminiEventType.Content,
             value: 'Final Goal output',
+            parts: [
+              { text: 'Final ' },
+              { inlineData: image },
+              { text: 'Goal output' },
+            ],
           };
           yield {
             type: ServerGeminiEventType.GoalState,
@@ -11910,14 +12314,21 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await result.current.submitQuery('finish the Goal');
       });
-      const contentIndex = mockAddItem.mock.calls.findIndex(
-        ([item]) => item.type === 'gemini' && item.text === 'Final Goal output',
-      );
-      const goalIndex = mockAddItem.mock.calls.findIndex(
-        ([item]) => item.type === 'goal_state' && item.cause === 'complete',
-      );
-      expect(contentIndex).toBeGreaterThanOrEqual(0);
-      expect(goalIndex).toBeGreaterThan(contentIndex);
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) =>
+              item.type === 'gemini' ||
+              item.type === 'gemini_content' ||
+              item.type === 'goal_state',
+          ),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'Final ' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'Goal output' },
+        expect.objectContaining({ type: 'goal_state', cause: 'complete' }),
+      ]);
     });
 
     it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
