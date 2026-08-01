@@ -355,6 +355,8 @@ export interface ChatCompressionInfo {
   newTokenCount: number;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
+  /** Set when the compaction model was swapped for the main model at runtime. */
+  warning?: string;
 }
 
 export type ServerGeminiChatCompressedEvent = {

@@ -1802,6 +1802,9 @@ export const useGeminiStream = (
         eventValue?.triggerReason === 'image_overflow'
           ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
           : `approached the input token limit for ${activeModel}`;
+      const warningSuffix = eventValue?.warning
+        ? `\n⚠️ ${eventValue.warning}`
+        : '';
       return addItem(
         {
           type: 'info',
@@ -1809,7 +1812,8 @@ export const useGeminiStream = (
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
-            `${eventValue?.newTokenCount ?? 'unknown'} tokens).`,
+            `${eventValue?.newTokenCount ?? 'unknown'} tokens).` +
+            warningSuffix,
         },
         Date.now(),
       );
