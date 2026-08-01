@@ -53,3 +53,48 @@ distro, then confirm:
 qwen-rc-gateway -f`; verify lines arrive in near-real-time and stop when
   `stopLogs()` is called (e.g., on window close) — no orphaned `wsl.exe`
   child processes should remain after the app quits (check Task Manager).
+
+## Task 4 slice (renderer + build)
+
+Build first with `npm run build` from `packages/launcher-app` (this is the
+one step already exercised by CI/dev-machine automation on Linux — the rest
+of this section is GUI/WSL behavior that still needs a human on Windows):
+
+- [ ] **Three tabs render** — Control, Logs, Config tab buttons switch the
+      visible panel; the active tab button is visually distinguished. If the
+      window is blank/dead on first load, open devtools and check the
+      console for a Content-Security-Policy violation first — `index.html`
+      is loaded via `loadFile` (a `file://` origin), and CSP behavior there
+      can differ subtly from `https://`; that's the first suspect before
+      assuming a JS bug.
+- [ ] **Control tab — Start** — with the target distro's `qwen-rc` stopped,
+      clicking **Start** calls `up()`; on success the status dot turns
+      green/"Running", the connect URL appears, and a QR code image renders
+      for that URL (scan it with a phone camera and confirm it opens the
+      same URL).
+- [ ] **Control tab — pairing code** — the pairing code shown in the UI
+      matches `cat ~/.qwen/rc/owner-bootstrap.code` inside the WSL distro.
+- [ ] **Control tab — Stop** — clicking **Stop** calls `down()`; the status
+      dot returns to red/"Stopped" and the connect URL/QR/pairing code
+      clear.
+- [ ] **Control tab — failure hint** — force a failure (e.g., stop the WSL
+      distro's network, or point `distro-select` at a distro without
+      `qwen-rc` installed) and click **Start**: the banner shows the `hint`
+      text from the failed `up()` call instead of silently doing nothing.
+- [ ] **Logs tab** — switching to **Logs** starts a live-tailed `<pre>` of
+      `journalctl --user -u qwen-rc-gateway -f` output; switching away (or
+      to another tab) stops the tail — no orphaned `wsl.exe` process for the
+      log stream after leaving the tab (check Task Manager).
+- [ ] **Config tab — load** — opening **Config** pre-fills
+      `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` from the current
+      `~/.qwen/.env` inside WSL.
+- [ ] **Config tab — save + restart prompt** — editing a field and clicking
+      **Save** persists it to `~/.qwen/.env` (verify with `cat` inside WSL),
+      shows a confirm-to-restart prompt, and — if confirmed — stops and
+      restarts the service (`down()` then `up()`), after which the Control
+      tab reflects the new running state.
+- [ ] **Secret hygiene (renderer)** — with browser devtools open on the
+      renderer (`Ctrl+Shift+I`), confirm neither the API key nor the pairing
+      code appear in `localStorage`, `sessionStorage`, or any JS global
+      (`window.__...`) — they should exist only inside the Config form's
+      `<input>` / Control tab's `<code>` elements while the app is open.

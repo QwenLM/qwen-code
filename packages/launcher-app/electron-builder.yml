@@ -1,0 +1,21 @@
+# @license
+# Copyright 2025 Qwen Team
+# SPDX-License-Identifier: Apache-2.0
+#
+# Windows unpacked-directory target for the launcher-app control panel.
+# Deferred (not in scope for this task): nsis installer, code signing,
+# publish/auto-update.
+
+appId: com.qwen-code.launcher-app
+productName: Qwen Remote Launcher
+
+directories:
+  output: release
+
+files:
+  - dist/**
+  - package.json
+
+win:
+  target:
+    - dir

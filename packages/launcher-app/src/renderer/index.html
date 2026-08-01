@@ -1,0 +1,102 @@
+<!--
+  @license
+  Copyright 2025 Qwen Team
+  SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <title>Qwen Remote Launcher</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="tabs" role="tablist">
+      <button
+        type="button"
+        class="tab-button active"
+        data-tab="control"
+        role="tab"
+        aria-selected="true"
+      >
+        Control
+      </button>
+      <button
+        type="button"
+        class="tab-button"
+        data-tab="logs"
+        role="tab"
+        aria-selected="false"
+      >
+        Logs
+      </button>
+      <button
+        type="button"
+        class="tab-button"
+        data-tab="config"
+        role="tab"
+        aria-selected="false"
+      >
+        Config
+      </button>
+    </header>
+
+    <main>
+      <section id="panel-control" class="panel active" data-panel="control">
+        <div id="control-banner" class="banner hidden"></div>
+
+        <div class="status-row">
+          <span id="status-dot" class="status-dot stopped"></span>
+          <span id="status-text">Stopped</span>
+        </div>
+
+        <div class="field-row">
+          <label for="distro-select">Distro</label>
+          <select id="distro-select"></select>
+        </div>
+
+        <button type="button" id="toggle-button">Start</button>
+
+        <div id="connect-info" class="connect-info hidden">
+          <p>Connect URL: <code id="connect-url"></code></p>
+          <p>Pairing code: <code id="pairing-code"></code></p>
+          <img id="qr-image" alt="QR code for connect URL" />
+        </div>
+      </section>
+
+      <section id="panel-logs" class="panel" data-panel="logs">
+        <pre id="log-output" class="log-output"></pre>
+      </section>
+
+      <section id="panel-config" class="panel" data-panel="config">
+        <form id="config-form">
+          <div class="field-row">
+            <label for="cfg-base-url">OPENAI_BASE_URL</label>
+            <input type="text" id="cfg-base-url" name="OPENAI_BASE_URL" />
+          </div>
+          <div class="field-row">
+            <label for="cfg-api-key">OPENAI_API_KEY</label>
+            <input
+              type="password"
+              id="cfg-api-key"
+              name="OPENAI_API_KEY"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field-row">
+            <label for="cfg-model">OPENAI_MODEL</label>
+            <input type="text" id="cfg-model" name="OPENAI_MODEL" />
+          </div>
+          <button type="submit" id="config-save">Save</button>
+        </form>
+        <div id="config-status" class="banner hidden"></div>
+      </section>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

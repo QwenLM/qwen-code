@@ -257,7 +257,10 @@ export default tseslint.config(
   },
   // Specific esbuild configs not covered by scripts pattern
   {
-    files: ['packages/vscode-ide-companion/esbuild.js'],
+    files: [
+      'packages/vscode-ide-companion/esbuild.js',
+      'packages/launcher-app/esbuild.js',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,

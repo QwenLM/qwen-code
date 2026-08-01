@@ -1,0 +1,130 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  color-scheme: light dark;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid #8888;
+}
+
+.tab-button {
+  flex: 1;
+  padding: 0.75rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.tab-button.active {
+  border-bottom: 2px solid #4a9eff;
+  font-weight: 600;
+}
+
+main {
+  padding: 1rem;
+}
+
+.panel {
+  display: none;
+}
+
+.panel.active {
+  display: block;
+}
+
+.banner {
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  background: #f8d7da;
+  color: #842029;
+  margin-bottom: 0.75rem;
+}
+
+.banner.hidden {
+  display: none;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.status-dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  display: inline-block;
+  background: #999;
+}
+
+.status-dot.running {
+  background: #2e7d32;
+}
+
+.status-dot.stopped {
+  background: #c62828;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.field-row label {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.connect-info {
+  margin-top: 1rem;
+}
+
+.connect-info.hidden {
+  display: none;
+}
+
+.connect-info img {
+  max-width: 200px;
+  height: auto;
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.log-output {
+  height: 70vh;
+  overflow-y: auto;
+  background: #111;
+  color: #ddd;
+  padding: 0.75rem;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+.hidden {
+  display: none !important;
+}
