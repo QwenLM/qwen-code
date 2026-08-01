@@ -21,6 +21,8 @@ export const EVENT_EXTENSION_UNINSTALL = 'qwen-code.extension_uninstall';
 export const EVENT_EXTENSION_UPDATE = 'qwen-code.extension_update';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_RIPGREP_FALLBACK = 'qwen-code.ripgrep_fallback';
+export const EVENT_RIPGREP_RUNTIME_RECOVERY =
+  'qwen-code.ripgrep_runtime_recovery';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
 export const EVENT_SLASH_COMMAND = 'qwen-code.slash_command';
 export const EVENT_IDE_CONNECTION = 'qwen-code.ide_connection';

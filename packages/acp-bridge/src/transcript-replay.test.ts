@@ -193,6 +193,135 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  describe('UserPromptSubmit hook context provenance', () => {
+    const tagged =
+      '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    it('prefers displayText over the tag-strip fallback and keeps image parts', () => {
+      // Without displayText the tag-strip path would also emit the middle
+      // "expanded extra" text part. displayText must win, and the image
+      // part must survive (the previous early-return path dropped it).
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-1', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'my prompt' },
+              { text: 'expanded extra' },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'my prompt',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(2);
+    });
+
+    it('appends displayText after images when the record has no text part to replace', () => {
+      // Exercises the !replaced fallback: after stripping the trailing tagged
+      // block, only the image remains, so displayText is appended.
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-img-only', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'my image prompt',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my image prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(2);
+    });
+
+    it('strips a trailing whole-part tagged block when displayText is absent', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-2', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'my prompt' }, { text: tagged }],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
+    it('keeps a sole part that matches the tag shape', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-3', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: tagged }],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: tagged },
+        },
+      ]);
+    });
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(
@@ -414,7 +543,15 @@ describe('createTranscriptReplayMachine', () => {
           callId: 'todo-call',
           resultDisplay: {
             type: 'todo_list',
-            todos: [{ content: 'Ship it', status: 'completed' }],
+            planId: 'plan-1',
+            todos: [
+              {
+                id: 'ship',
+                content: 'Ship it',
+                status: 'completed',
+                blockedBy: ['test'],
+              },
+            ],
           },
         },
       }),
@@ -422,7 +559,14 @@ describe('createTranscriptReplayMachine', () => {
     expect(plan[0]).toMatchObject({
       sessionUpdate: 'plan',
       entries: [
-        { content: 'Ship it', priority: 'medium', status: 'completed' },
+        {
+          content: 'Ship it',
+          priority: 'medium',
+          status: 'completed',
+          _meta: {
+            qwenTodo: { id: 'ship', blockedBy: ['test'] },
+          },
+        },
       ],
       _meta: {
         stats: {
@@ -430,6 +574,11 @@ describe('createTranscriptReplayMachine', () => {
           candidateTokens: 3,
           cachedTokens: 0,
           apiTimeMs: 0,
+        },
+        qwenTodoPlan: { id: 'plan-1' },
+        qwenTranscript: {
+          planToolCallId: 'todo-call',
+          sourceRecordIds: ['todo-result'],
         },
       },
     });

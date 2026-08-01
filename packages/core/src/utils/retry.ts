@@ -107,9 +107,16 @@ function defaultShouldRetry(
   const status = getErrorStatus(error);
   // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
   // so an explicit `status === 429` check here would be redundant.
-  return (
+  if (
     isRateLimitError(error, extraRetryErrorCodes) ||
     (status !== undefined && status >= 500 && status < 600)
+  ) {
+    return true;
+  }
+  // Transport errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP status and
+  // would otherwise fall through every predicate above.
+  return (
+    classifyRetryError(error, { extraRetryErrorCodes }).kind === 'transport'
   );
 }
 

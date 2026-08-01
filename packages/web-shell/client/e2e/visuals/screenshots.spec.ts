@@ -288,6 +288,25 @@ for (const theme of THEMES) {
             },
           },
         },
+        pairingRequests: {
+          dingtalk: [
+            {
+              senderId: 'user-42',
+              senderName: 'Ada',
+              code: 'ABCD1234',
+              createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+            },
+            {
+              senderId: 'user-91',
+              senderName: 'Lin',
+              code: 'WXYZ5678',
+              createdAt: Date.parse('2026-07-28T00:04:00.000Z'),
+            },
+          ],
+        },
+        pairingApprovals: {
+          dingtalk: ['user-18', 'release-manager'],
+        },
       });
       await page.addInitScript(() => {
         window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
@@ -323,7 +342,15 @@ for (const theme of THEMES) {
         name: 'Edit DingTalk',
       });
       await expect(editHeading).toBeVisible();
+      await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await expect(page.getByText('user-18', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('release-manager', { exact: true }),
+      ).toBeVisible();
       await editHeading.click();
+      await page
+        .getByRole('heading', { name: 'Pairing approvals' })
+        .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 

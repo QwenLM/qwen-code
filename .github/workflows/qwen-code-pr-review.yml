@@ -354,6 +354,21 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — probing only .qwen
+      # and .git first skips the recovery exactly when workspace-wide poisoning
+      # (root-owned node_modules/dist) needs it.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`), or
@@ -500,7 +515,9 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
-          trap 'rm -f "$LOG_PATH"' EXIT
+          # Set by configure_qwen_network once the wrapper dir exists.
+          PROXY_BIN=""
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -535,8 +552,16 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # A fixed path is a landmine on the shared self-hosted runner:
+            # RUNNER_TEMP survives across jobs, and the triage workflow's
+            # containerised jobs write this same path as root through the
+            # RUNNER_TEMP bind mount. This job runs as the unprivileged runner
+            # user, so once that happens it can neither overwrite the wrapper
+            # nor remove the root-owned directory holding it, and every review
+            # landing on that runner dies here with EACCES. Use a private
+            # directory per run, cleaned up by the EXIT trap.
+            proxy_bin="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-network-bin.XXXXXX")"
+            PROXY_BIN="$proxy_bin"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh

@@ -49,7 +49,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // must not be polled in a tight loop.
   session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
+  session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_mid_turn_message_mutation: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -135,6 +137,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // advertise the text/list/stat/glob surface without byte-window
   // support.
   workspace_file_bytes: { since: 'v1' },
+  // Daemon supports byte-cursor paging on `GET /file`: responses carry
+  // `nextCursor`/`hasMore` and requests accept `cursor`. A separate tag from
+  // `workspace_file_read` because the convention here is that new behavior
+  // gets a new tag — a client that preflighted the old one must not silently
+  // receive a surface it cannot recognise. Same split as
+  // `workspace_file_bytes` from `workspace_file_read`, and
+  // `session_transcript_pagination` from `session_transcript`.
+  workspace_file_read_cursor: { since: 'v1' },
   // Daemon supports hash-aware text mutation routes
   // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
   // gate. Clients should still pre-flight `require_auth` separately for
@@ -335,6 +345,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // to discover plural modalities because legacy Voice tags describe only
   // the primary runtime and may be absent for a secondary-only setup.
   workspace_qualified_voice: { since: 'v1' },
+  // Workspace-qualified managed-memory routes
+  // (`/workspaces/:workspace/memory/{remember,forget,dream}`). Each
+  // registered workspace gets its own task lane; the primary lane is the
+  // same instance as the singular `/workspace/memory` surface.
+  workspace_qualified_memory: { since: 'v1' },
   // Global extension catalog/mutations plus workspace-qualified activation
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
@@ -578,6 +593,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_qualified_voice',
     // Like qualified ACP, the plural Voice surface is mounted ahead of time
     // but only becomes useful once the daemon has a secondary runtime.
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_memory',
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,

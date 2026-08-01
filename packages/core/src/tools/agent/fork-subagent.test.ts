@@ -6,7 +6,69 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { normalizeForkTurns, selectForkHistory } from './fork-subagent.js';
+import { ToolNames } from '../tool-names.js';
+import {
+  normalizeForkTurns,
+  resolveForkExecutionAllowedTools,
+  selectForkHistory,
+  validateForkToolList,
+} from './fork-subagent.js';
+
+describe('resolveForkExecutionAllowedTools', () => {
+  const parentTools = [
+    ToolNames.READ_FILE,
+    ToolNames.DISPLAY_IMAGE,
+    ToolNames.EDIT,
+  ];
+
+  it('preserves unrestricted execution when display_image is not advertised', () => {
+    expect(
+      resolveForkExecutionAllowedTools([ToolNames.READ_FILE], undefined),
+    ).toBeUndefined();
+  });
+
+  it('filters display_image from an explicit allowlist', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, [
+        ...parentTools,
+        ToolNames.GLOB,
+      ]),
+    ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.GLOB]);
+  });
+
+  it('cannot re-enable display_image through fork_tools', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, [
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.READ_FILE,
+      ]),
+    ).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('fails closed when display_image is advertised without an allowlist', () => {
+    expect(resolveForkExecutionAllowedTools(parentTools, undefined)).toEqual(
+      [],
+    );
+  });
+});
+
+describe('validateForkToolList', () => {
+  it('accepts the inline fork tool contract, including deny-all', () => {
+    expect(validateForkToolList([])).toBeUndefined();
+    expect(
+      validateForkToolList(['read_file', 'mcp__*', 'mcp__github__read_*']),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { tools: null, expected: /array of non-empty tool names/ },
+    { tools: [' read_file'], expected: /array of non-empty tool names/ },
+    { tools: ['*'], expected: /does not accept/ },
+    { tools: ['mcp__github__*__read'], expected: /wildcard entries/ },
+  ])('rejects an invalid tool list $tools', ({ tools, expected }) => {
+    expect(validateForkToolList(tools)).toMatch(expected);
+  });
+});
 
 describe('selectForkHistory', () => {
   const startup: Content = {

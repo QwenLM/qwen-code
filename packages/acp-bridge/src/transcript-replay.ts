@@ -21,6 +21,10 @@ import {
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core/goalWire';
+// Narrow path — the helper is Node-free. Importing the core package barrel
+// here would pull the whole Node-bound core graph into the browser
+// transcript bundle (sdk-typescript daemon/transcript).
+import { stripTrailingUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -88,6 +92,7 @@ interface UpdateMetaOptions {
   readonly timestamp?: string | number;
   readonly sourceRecordIds?: readonly string[];
   readonly planToolCallId?: string;
+  readonly todoPlanId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -121,6 +126,12 @@ export interface TranscriptTodoItem {
   readonly id?: string;
   readonly content: string;
   readonly status: 'pending' | 'in_progress' | 'completed';
+  readonly blockedBy?: readonly string[];
+}
+
+export interface TranscriptTodoPlan {
+  readonly planId?: string;
+  readonly todos: TranscriptTodoItem[];
 }
 
 export interface TranscriptUsageUpdateOptions extends UpdateMetaOptions {
@@ -311,6 +322,9 @@ export function createTranscriptPlanUpdate(
     ...options,
     extra: {
       ...(cumulativeUsage ? { stats: { ...cumulativeUsage } } : {}),
+      ...(options.todoPlanId
+        ? { qwenTodoPlan: { id: options.todoPlanId } }
+        : {}),
       ...(options.extra ?? {}),
     },
   });
@@ -320,6 +334,16 @@ export function createTranscriptPlanUpdate(
       content: todo.content,
       priority: 'medium' as const,
       status: todo.status,
+      ...(todo.id || todo.blockedBy
+        ? {
+            _meta: {
+              qwenTodo: {
+                ...(todo.id ? { id: todo.id } : {}),
+                ...(todo.blockedBy ? { blockedBy: [...todo.blockedBy] } : {}),
+              },
+            },
+          }
+        : {}),
     })),
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
@@ -329,10 +353,18 @@ export function extractTranscriptTodos(
   resultDisplay: unknown,
   args?: Readonly<Record<string, unknown>>,
 ): TranscriptTodoItem[] | null {
-  const fromDisplay = extractTodosFromDisplay(resultDisplay);
+  return extractTranscriptTodoPlan(resultDisplay, args)?.todos ?? null;
+}
+
+export function extractTranscriptTodoPlan(
+  resultDisplay: unknown,
+  args?: Readonly<Record<string, unknown>>,
+): TranscriptTodoPlan | null {
+  const fromDisplay = extractTodoPlanFromDisplay(resultDisplay);
   if (fromDisplay) return fromDisplay;
+  if (resultDisplay !== null && resultDisplay !== undefined) return null;
   return args && Array.isArray(args['todos'])
-    ? normalizeTodos(args['todos'])
+    ? { todos: normalizeTodos(args['todos']) }
     : null;
 }
 
@@ -513,8 +545,99 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
+    } else if (!record.subtype) {
+      // Plain user records — including UserPromptSubmit-augmented ones —
+      // prefer the recorded display projection, then strip a trailing
+      // whole-part tagged hook-context block. Matches resumeHistoryUtils.
+      // Always go through projectMessageParts so multimodal inlineData
+      // (images) survives even when displayText replaces the text parts.
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const displayText =
+        payload && typeof payload['displayText'] === 'string'
+          ? payload['displayText']
+          : undefined;
+      yield* this.projectMessageParts(
+        displayText
+          ? this.withUserPromptDisplayText(record, displayText)
+          : this.withoutTrailingUserPromptSubmitContext(record),
+        'user',
+        emit,
+        meta,
+      );
+      return;
     }
     yield* this.projectMessageParts(record, 'user', emit, meta);
+  }
+
+  /**
+   * Drops a trailing message part that is entirely a tagged UserPromptSubmit
+   * context block. Injection always appends after the user's own part(s), so
+   * a sole matching part is treated as user-authored and kept.
+   */
+  private withoutTrailingUserPromptSubmitContext(
+    record: TranscriptRecordInput,
+  ): TranscriptRecordInput {
+    const parts = record.message?.parts;
+    if (!Array.isArray(parts)) {
+      return record;
+    }
+    const nextParts = stripTrailingUserPromptSubmitContextPart(parts);
+    if (nextParts === parts) {
+      return record;
+    }
+    return {
+      ...record,
+      message: {
+        ...record.message,
+        parts: [...nextParts],
+      },
+    };
+  }
+
+  /**
+   * Rebuilds a plain user record for display: strip trailing tagged hook
+   * context, then replace every text part with a single `displayText` part at
+   * the first text position so images keep their relative order.
+   */
+  private withUserPromptDisplayText(
+    record: TranscriptRecordInput,
+    displayText: string,
+  ): TranscriptRecordInput {
+    const stripped = this.withoutTrailingUserPromptSubmitContext(record);
+    const parts = stripped.message?.parts;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return {
+        ...stripped,
+        message: {
+          ...stripped.message,
+          parts: [{ text: displayText }],
+        },
+      };
+    }
+    let replaced = false;
+    const nextParts: unknown[] = [];
+    for (const part of parts) {
+      if (isObjectRecord(part) && typeof part['text'] === 'string') {
+        if (!replaced) {
+          nextParts.push({ text: displayText });
+          replaced = true;
+        }
+        continue;
+      }
+      nextParts.push(part);
+    }
+    if (!replaced) {
+      nextParts.push({ text: displayText });
+    }
+    return {
+      ...stripped,
+      message: {
+        ...stripped.message,
+        parts: nextParts,
+      },
+    };
   }
 
   private *projectAssistantRecord(
@@ -682,12 +805,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const resultDisplay = result?.['resultDisplay'];
     if (toolName === 'todo_write') {
-      const todos = extractTranscriptTodos(resultDisplay);
-      if (todos) {
+      const plan = extractTranscriptTodoPlan(resultDisplay);
+      if (plan) {
         yield emit(
-          createTranscriptPlanUpdate(todos, this.usage, {
+          createTranscriptPlanUpdate(plan.todos, this.usage, {
             ...meta,
             planToolCallId: callId,
+            todoPlanId: plan.planId,
           }),
         );
       }
@@ -1239,10 +1363,15 @@ function extractToolResultCallId(
   return undefined;
 }
 
-function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
+function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
   if (isObjectRecord(value) && value['type'] === 'todo_list') {
     return Array.isArray(value['todos'])
-      ? normalizeTodos(value['todos'])
+      ? {
+          ...(typeof value['planId'] === 'string'
+            ? { planId: value['planId'] }
+            : {}),
+          todos: normalizeTodos(value['todos']),
+        }
       : null;
   }
   if (typeof value !== 'string') return null;
@@ -1251,7 +1380,12 @@ function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
     return isObjectRecord(parsed) &&
       parsed['type'] === 'todo_list' &&
       Array.isArray(parsed['todos'])
-      ? normalizeTodos(parsed['todos'])
+      ? {
+          ...(typeof parsed['planId'] === 'string'
+            ? { planId: parsed['planId'] }
+            : {}),
+          todos: normalizeTodos(parsed['todos']),
+        }
       : null;
   } catch {
     return null;
@@ -1275,6 +1409,10 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
         ...(typeof value['id'] === 'string' ? { id: value['id'] } : {}),
         content: value['content'],
         status,
+        ...(Array.isArray(value['blockedBy']) &&
+        value['blockedBy'].every((dependency) => typeof dependency === 'string')
+          ? { blockedBy: value['blockedBy'] as string[] }
+          : {}),
       },
     ];
   });

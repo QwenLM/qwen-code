@@ -34,6 +34,7 @@ import {
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { GeminiChat } from './geminiChat.js';
+import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import {
@@ -347,6 +348,8 @@ vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetectionDisabled: vi.fn(),
 }));
 
+import * as telemetryIndex from '../telemetry/index.js';
+
 const { mockClientDebugLogger } = vi.hoisted(() => ({
   mockClientDebugLogger: {
     isEnabled: vi.fn().mockReturnValue(false),
@@ -532,6 +535,7 @@ describe('Gemini Client (client.ts)', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       revealDeferredTool: vi.fn(),
+      preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
@@ -548,6 +552,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockReturnValue(contentGeneratorConfig),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getToolSearchThreshold: vi.fn().mockReturnValue(10),
       getModel: vi.fn().mockReturnValue('test-model'),
       getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
       getApiKey: vi.fn().mockReturnValue('test-key'),
@@ -557,8 +562,15 @@ describe('Gemini Client (client.ts)', () => {
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
+      setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -1056,6 +1068,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toEqual([
         'resume_deferred_tool_reveal',
+        'deferred_tool_preload',
         'deferred_reminder_setup',
         'skill_reminder_seed',
         'system_instruction',
@@ -1239,6 +1252,7 @@ describe('Gemini Client (client.ts)', () => {
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
+        preloadDeferredToolsWithinBudget: ReturnType<typeof vi.fn>;
       };
     }
 
@@ -1312,6 +1326,98 @@ describe('Gemini Client (client.ts)', () => {
 
       // No history scan match, ToolSearch available → no reveal at all.
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+    });
+
+    it('preloads deferred tools with a threshold-derived budget', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      // contentGeneratorConfig has no contextWindowSize, so the budget
+      // falls back to tokenLimit('test-model') = DEFAULT_TOKEN_LIMIT,
+      // scaled by the mocked 10% threshold.
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(
+        Math.floor(DEFAULT_TOKEN_LIMIT / 10),
+      );
+    });
+
+    it('uses the configured context window for the preload budget', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 50_000,
+      });
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(5_000);
+    });
+
+    it('skips deferred preload when the threshold is 0', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(0);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+    });
+
+    it('skips deferred preload when the threshold is not finite', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(NaN);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+    });
+
+    it('clamps a threshold above 100% to a full-context budget', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      // A misconfigured threshold (e.g. 200) must not produce a budget larger
+      // than the context window, which would unconditionally preload every
+      // deferred tool. It is clamped to 100%.
+      vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(200);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(
+        DEFAULT_TOKEN_LIMIT,
+      );
+    });
+
+    it('skips deferred preload when ToolSearch is unavailable', async () => {
+      // The eager-reveal branch already exposes everything; running the
+      // budget check as well would be redundant.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
     });
 
     it('injects SessionStart additionalContext into the startup system instruction', async () => {
@@ -1709,6 +1815,153 @@ describe('Gemini Client (client.ts)', () => {
       }
     }
 
+    it('carries active todos after tool results and clears them for new work', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: run tests</system-reminder>';
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        [
+          { functionResponse: { name: 'read_file', response: { ok: true } } },
+          'user changed priority mid-turn',
+        ],
+        new AbortController().signal,
+        'prompt-tool-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      const functionResponseIndex = request.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'functionResponse' in part,
+      );
+      expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
+      expect(request.indexOf(reminder)).toBeGreaterThan(functionResponseIndex);
+      expect(request.indexOf(reminder)).toBeLessThan(
+        request.indexOf('user changed priority mid-turn'),
+      );
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-tool-result',
+      );
+
+      await runTurn(SendMessageType.UserQuery);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-userQuery',
+      );
+
+      await runTurn(SendMessageType.Cron);
+
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-cron',
+        undefined,
+      );
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-cron',
+      );
+
+      await runTurn(SendMessageType.Retry);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-retry',
+        'prompt-userQuery',
+      );
+    });
+
+    it('includes active Todo context on the first retry request', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: run tests</system-reminder>';
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+
+      await runTurn(SendMessageType.UserQuery);
+      await runTurn(SendMessageType.Retry);
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(request).toContain(reminder);
+    });
+
+    it('continues the carried Todo work chain for related notifications', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'related notification' }],
+        new AbortController().signal,
+        'prompt-related-notification',
+        {
+          type: SendMessageType.Notification,
+          todoWorkChainId: 'prompt-owner',
+        },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-related-notification',
+        'prompt-owner',
+      );
+    });
+
+    it('keeps automatic Todo ownership through its tool-result turns', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: finish automatic work</system-reminder>';
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+      mockTurnRunFn
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: { callId: 'call-1', name: 'read_file', args: {} },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'automatic work' }],
+        new AbortController().signal,
+        'prompt-automatic',
+        { type: SendMessageType.Notification },
+      )) {
+        // drain
+      }
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).not.toHaveBeenCalled();
+
+      for await (const _ of client.sendMessageStream(
+        [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-automatic',
+        { type: SendMessageType.ToolResult },
+      )) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-automatic',
+      );
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-automatic',
+      );
+    });
+
     it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
@@ -2081,6 +2334,26 @@ describe('Gemini Client (client.ts)', () => {
       await client.addHistory(newContent);
 
       expect(mockChat.addHistory).toHaveBeenCalledWith(newContent);
+    });
+  });
+
+  describe('getMainSessionSystemInstruction', () => {
+    it('records the gitStatus-free base as the static system prefix on Config', () => {
+      vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
+      vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
+
+      const instruction = (
+        client as unknown as { getMainSessionSystemInstruction: () => string }
+      ).getMainSessionSystemInstruction();
+
+      // The recorded prefix must be exactly the instruction minus the
+      // volatile git tail — that's the boundary the Anthropic converter's
+      // startsWith split relies on for the early cache breakpoint.
+      const recorded = vi
+        .mocked(client['config'].setStaticSystemPrefix)
+        .mock.calls.at(-1)?.[0];
+      expect(recorded).toBeTruthy();
+      expect(instruction).toBe(`${recorded}\n\nGit snapshot A`);
     });
   });
 
@@ -3578,7 +3851,7 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(client.tryCompressChat).mockRestore();
     });
 
-    it('forwards prompt id, model, force, and signal to chat.tryCompress', async () => {
+    it('forwards prompt id, force, and signal to chat.tryCompress', async () => {
       const tryCompress = vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -3588,21 +3861,14 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
       const signal = new AbortController().signal;
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag — undefined when the caller supplies no
+      // 4th arg is the `options` bag — undefined when the caller supplies no
       // customInstructions (the output reservation was retired in favor of
       // the send-path window clamp).
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        signal,
-        undefined,
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, signal, undefined);
     });
 
     it('forwards customInstructions through the options bag when supplied', async () => {
@@ -3615,17 +3881,12 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
 
       await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
 
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        undefined,
-        { customInstructions: 'focus on auth bug' },
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, undefined, {
+        customInstructions: 'focus on auth bug',
+      });
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
@@ -9384,6 +9645,166 @@ Other open files:
           prompt: 'expanded model prompt',
           submitted_prompt: 'raw @file prompt',
         });
+      });
+
+      it('wraps injected additionalContext in the reserved tag and records display provenance', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'my prompt' }],
+            new AbortController().signal,
+            'prompt-hook-context-tag',
+          ),
+        );
+
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+
+        // The model-bound request keeps the user prompt intact and carries
+        // the injected context inside the reserved tag.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).toContain(taggedContext);
+
+        // The recorded message is the exact model-bound request, with the
+        // user-authored projection preserved separately.
+        expect(recordUserMessage).toHaveBeenCalledWith(
+          [{ text: 'my prompt' }, { text: taggedContext }],
+          undefined,
+          { displayText: 'my prompt' },
+        );
+      });
+
+      it('uses the pre-injection prompt for managed auto-memory recall', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'my prompt' }],
+            new AbortController().signal,
+            'prompt-hook-context-recall',
+          ),
+        );
+
+        expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+          '/test/project/root',
+          'my prompt',
+          expect.any(Object),
+        );
+      });
+
+      it('uses the pre-injection prompt for telemetry user-prompt attributes', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        Object.assign(mockConfig, {
+          getTelemetryIncludeSensitiveSpanAttributes: vi
+            .fn()
+            .mockReturnValue(true),
+        });
+        const startSpy = vi
+          .spyOn(telemetryIndex, 'startInteractionSpan')
+          .mockImplementation(() => {});
+        const spanSpy = vi
+          .spyOn(telemetryIndex, 'getActiveInteractionSpan')
+          .mockReturnValue({} as never);
+        const addSpy = vi
+          .spyOn(telemetryIndex, 'addUserPromptAttributes')
+          .mockImplementation(() => {});
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        try {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'prompt-hook-context-telemetry',
+            ),
+          );
+
+          expect(addSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.anything(),
+            'my prompt',
+          );
+          const promptArg = addSpy.mock.calls[0]?.[2] as string;
+          expect(promptArg).not.toContain('extra hook context');
+          expect(promptArg).not.toContain('qwen:user-prompt-submit-context');
+        } finally {
+          startSpy.mockRestore();
+          spanSpy.mockRestore();
+          addSpy.mockRestore();
+        }
       });
 
       it.each([

@@ -37,13 +37,11 @@
  * they have a separate lifecycle and their inclusion is deferred to a
  * follow-up.
  *
- * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry` and
- * differs from the others in that the registry NEVER emits a
- * `<task-notification>` envelope — `WorkflowTool` already returns its
- * own llmContent + returnDisplay payload to the model on terminal, so
- * a second envelope would duplicate the signal. The kind is widened
- * here so the UI surfaces (pill / dialog / detail body) can switch on
- * `entry.kind === 'workflow'`.
+ * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry`.
+ * Foreground workflows return through their normal tool result; background
+ * workflows emit one terminal notification through a separate completion
+ * channel. The kind is widened here so the UI surfaces (pill / dialog /
+ * detail body) can switch on `entry.kind === 'workflow'`.
  */
 export type TaskKind = 'agent' | 'shell' | 'monitor' | 'workflow';
 
@@ -98,6 +96,8 @@ export interface TaskBase {
   outputOffset: number;
   /** True once the kind's terminal notification has fired. */
   notified: boolean;
+  /** Todo work chain that created this task, when it was model-launched. */
+  todoWorkChainId?: string;
   /** Unified cancellation handle. */
   abortController: AbortController;
 }

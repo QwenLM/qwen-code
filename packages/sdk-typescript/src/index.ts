@@ -74,6 +74,9 @@ export {
   type DaemonChannelPairingRequestsSnapshot,
   type DaemonChannelPairingApprovalRequest,
   type DaemonChannelPairingApprovalResult,
+  type DaemonChannelPairingApprovalsSnapshot,
+  type DaemonChannelPairingRevocationRequest,
+  type DaemonChannelPairingRevocationResult,
   type DaemonChannelManagementOptions,
   type DaemonSessionRecapResult,
   type DaemonShellCommandResult,
@@ -136,6 +139,7 @@ export {
   type DaemonPendingPromptSummary,
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
+  type DaemonRemoveMidTurnMessageResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,

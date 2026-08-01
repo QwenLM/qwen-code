@@ -24,6 +24,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -157,6 +158,7 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
@@ -380,7 +382,7 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.client.cancel(this.sessionId, this.clientId).catch(() => {});
+          this.cancel().catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -475,7 +477,16 @@ export class DaemonSessionClient {
   }
 
   async cancel(): Promise<void> {
-    await this.client.cancel(this.sessionId, this.clientId);
+    const cancelling =
+      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+    this.cancelling = cancelling;
+    try {
+      await cancelling;
+    } finally {
+      if (this.cancelling === cancelling) {
+        this.cancelling = undefined;
+      }
+    }
   }
 
   /**
@@ -599,6 +610,14 @@ export class DaemonSessionClient {
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removeMidTurnMessage(
+    messageId: string,
+  ): Promise<DaemonRemoveMidTurnMessageResult> {
+    return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

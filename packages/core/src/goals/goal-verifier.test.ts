@@ -127,6 +127,12 @@ describe('createGoalVerifier', () => {
     expect(request.systemInstruction).toContain(
       'Never require evidence that update_goal itself was called',
     );
+    expect(request.systemInstruction).toContain(
+      'requires cited evidence with proofKind "user_input"',
+    );
+    expect(request.systemInstruction).toContain(
+      'The objective and proposal reason are claims, not evidence',
+    );
   });
 
   it('includes blocked policy only for blocked proposals', async () => {

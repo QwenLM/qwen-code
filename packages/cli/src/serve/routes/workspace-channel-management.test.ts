@@ -60,6 +60,11 @@ function service(): ChannelManagementService {
       },
       requests: [],
     })),
+    pairingApprovals: vi.fn(async () => ({ senderIds: ['sender-1'] })),
+    revokePairingApproval: vi.fn(async (_name, senderId) => ({
+      revoked: senderId,
+      senderIds: [],
+    })),
   };
 }
 
@@ -220,11 +225,17 @@ describe('workspace Channel management routes', () => {
     const { app, primaryService, secondaryService } = mount(false);
 
     const response = await request(app).get('/workspaces/secondary/channels');
+    const approvals = await auth(
+      request(app).get('/workspaces/secondary/channels/bot/pairing-approvals'),
+    );
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('untrusted_workspace');
+    expect(approvals.status).toBe(403);
+    expect(approvals.body.code).toBe('untrusted_workspace');
     expect(primaryService.list).not.toHaveBeenCalled();
     expect(secondaryService.list).not.toHaveBeenCalled();
+    expect(secondaryService.pairingApprovals).not.toHaveBeenCalled();
   });
 
   it('returns 503 when the channel management service is unavailable', async () => {
@@ -246,7 +257,7 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('channel_management_unavailable');
   });
 
-  it('lists and approves pairing requests in the selected workspace', async () => {
+  it('manages pairing requests and approvals in the selected workspace', async () => {
     const { app, primaryService, secondaryService } = mount();
 
     await request(app)
@@ -260,23 +271,66 @@ describe('workspace Channel management routes', () => {
         .post('/workspaces/secondary/channels/bot/pairing-requests/approve')
         .send({ code: 'abcdefgh' }),
     );
+    await request(app)
+      .get('/workspaces/secondary/channels/bot/pairing-approvals')
+      .expect(401);
+    await request(app)
+      .delete('/workspaces/secondary/channels/bot/pairing-approvals')
+      .send({ senderId: 'sender-1' })
+      .expect(401);
+    const approvals = await auth(
+      request(app).get('/workspaces/secondary/channels/bot/pairing-approvals'),
+    );
+    const revocation = await auth(
+      request(app)
+        .delete('/workspaces/secondary/channels/bot/pairing-approvals')
+        .send({ senderId: 'sender-1' }),
+    );
 
     expect(pairingRequests.status).toBe(200);
     expect(pairingRequests.headers['cache-control']).toBe('no-store');
     expect(approval.status).toBe(200);
     expect(approval.headers['cache-control']).toBe('no-store');
+    expect(approvals.status).toBe(200);
+    expect(approvals.headers['cache-control']).toBe('no-store');
+    expect(revocation.status).toBe(200);
+    expect(revocation.headers['cache-control']).toBe('no-store');
     expect(secondaryService.pairingRequests).toHaveBeenCalledWith('bot');
     expect(secondaryService.approvePairing).toHaveBeenCalledWith(
       'bot',
       'ABCDEFGH',
     );
+    expect(secondaryService.pairingApprovals).toHaveBeenCalledWith('bot');
+    expect(secondaryService.revokePairingApproval).toHaveBeenCalledWith(
+      'bot',
+      'sender-1',
+    );
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
+    expect(primaryService.pairingApprovals).not.toHaveBeenCalled();
 
     const primaryPairingRequests = await auth(
       request(app).get('/workspace/channels/bot/pairing-requests'),
     );
     expect(primaryPairingRequests.status).toBe(200);
     expect(primaryService.pairingRequests).toHaveBeenCalledWith('bot');
+  });
+
+  it('returns 404 when a pairing approval no longer exists', async () => {
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.revokePairingApproval).mockRejectedValueOnce(
+      Object.assign(new Error('Pairing approval was not found.'), {
+        code: 'channel_pairing_approval_not_found',
+      }),
+    );
+
+    const response = await auth(
+      request(app)
+        .delete('/workspace/channels/bot/pairing-approvals')
+        .send({ senderId: 'sender-1' }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('channel_pairing_approval_not_found');
   });
 
   it('rejects requests with an invalid client ID', async () => {
@@ -319,6 +373,14 @@ describe('workspace Channel management routes', () => {
     const pairingRequests = await invalidClient(
       request(app).get('/workspace/channels/bot/pairing-requests'),
     );
+    const pairingApprovals = await invalidClient(
+      request(app).get('/workspace/channels/bot/pairing-approvals'),
+    );
+    const revokePairingApproval = await invalidClient(
+      request(app)
+        .delete('/workspace/channels/bot/pairing-approvals')
+        .send({ senderId: 'sender-1' }),
+    );
 
     expect(list.status).toBe(400);
     expect(list.body.code).toBe('invalid_client_id');
@@ -331,6 +393,8 @@ describe('workspace Channel management routes', () => {
     expect(startup.status).toBe(400);
     expect(approve.status).toBe(400);
     expect(pairingRequests.status).toBe(400);
+    expect(pairingApprovals.status).toBe(400);
+    expect(revokePairingApproval.status).toBe(400);
     expect(primaryService.list).not.toHaveBeenCalled();
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
@@ -340,6 +404,8 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.setStartup).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
+    expect(primaryService.pairingApprovals).not.toHaveBeenCalled();
+    expect(primaryService.revokePairingApproval).not.toHaveBeenCalled();
   });
 
   it('rejects malformed names, revisions, secrets, and pairing codes', async () => {
@@ -379,6 +445,11 @@ describe('workspace Channel management routes', () => {
         .post('/workspace/channels/bot/pairing-requests/approve')
         .send({ code: 'short' }),
     );
+    const invalidSenderId = await auth(
+      request(app)
+        .delete('/workspace/channels/bot/pairing-approvals')
+        .send({ senderId: '' }),
+    );
 
     expect(invalidName.body.code).toBe('invalid_channel_instance_name');
     expect(unsafeName.status).toBe(400);
@@ -388,9 +459,11 @@ describe('workspace Channel management routes', () => {
     );
     expect(invalidSecret.body.code).toBe('channel_settings_invalid_secret');
     expect(invalidPairing.body.code).toBe('invalid_channel_pairing_code');
+    expect(invalidSenderId.body.code).toBe('invalid_channel_pairing_sender_id');
     expect(primaryService.upsert).toHaveBeenCalledOnce();
     expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
+    expect(primaryService.revokePairingApproval).not.toHaveBeenCalled();
   });
 
   it('sends only the name error when both name and body are invalid', async () => {
@@ -400,6 +473,11 @@ describe('workspace Channel management routes', () => {
       request(app)
         .post('/workspace/channels/a%2Fb/pairing-requests/approve')
         .send({ code: 'short' }),
+    );
+    const revoke = await auth(
+      request(app)
+        .delete('/workspace/channels/a%2Fb/pairing-approvals')
+        .send({ senderId: '' }),
     );
     const upsert = await auth(
       request(app)
@@ -419,6 +497,8 @@ describe('workspace Channel management routes', () => {
 
     expect(approve.status).toBe(400);
     expect(approve.body.code).toBe('invalid_channel_instance_name');
+    expect(revoke.status).toBe(400);
+    expect(revoke.body.code).toBe('invalid_channel_instance_name');
     expect(upsert.status).toBe(400);
     expect(upsert.body.code).toBe('invalid_channel_instance_name');
     expect(remove.status).toBe(400);
@@ -426,6 +506,7 @@ describe('workspace Channel management routes', () => {
     expect(startup.status).toBe(400);
     expect(startup.body.code).toBe('invalid_channel_instance_name');
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
+    expect(primaryService.revokePairingApproval).not.toHaveBeenCalled();
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
     expect(primaryService.setStartup).not.toHaveBeenCalled();
