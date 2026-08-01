@@ -70,7 +70,10 @@ describe('net-guard host classification', () => {
     expect(isPrivateNetworkIp('fd00::1')).toBe(true)
     expect(isPrivateNetworkIp('fe90::1')).toBe(true)
     expect(isPrivateNetworkIp('::192.168.1.1')).toBe(true)
+    expect(isPrivateNetworkIp('::a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('::a9fe:a9fe')).toBe(true)
     expect(isPrivateNetworkIp('8.8.8.8')).toBe(false)
+    expect(isPrivateNetworkIp('::5db8:d822')).toBe(false)
     expect(isPrivateNetworkIp('127.0.0.1')).toBe(false) // loopback, not private
   })
 })
@@ -200,6 +203,13 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
         lookup,
       ),
     ).rejects.toThrow(/private-network/)
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'https://[::a9fe:a9fe]',
+        'm',
+        lookup,
+      ),
+    ).rejects.toThrow(/private-network/)
     expect(called).toBe(false)
   })
 
@@ -253,8 +263,13 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
 
   it('keeps metadata and link-local addresses blocked when trusted', async () => {
     for (const address of [
+      '0.0.0.0',
       '169.254.169.254',
       '100.100.100.200',
+      '[::]',
+      '[::ffff:127.0.0.1]',
+      '[::ffff:7f00:1]',
+      '[::a9fe:a9fe]',
       '[fd00:ec2::254]',
       '[fd00:0ec2:0000:0000:0000:0000:0000:0254]',
       '[fe80::1]',
@@ -277,6 +292,23 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
         true,
       ),
     ).rejects.toThrow(/private-network/)
+
+    for (const address of [
+      '0.0.0.0',
+      '::',
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '::a9fe:a9fe',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          'http://voice.internal.example/v1',
+          'm',
+          async () => [{ address }],
+          true,
+        ),
+      ).rejects.toThrow(/private-network/)
+    }
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(

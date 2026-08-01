@@ -41,16 +41,16 @@ interface ResolveDesktopVoiceConfigDeps {
 }
 
 /**
- * Normalize a base URL: prepend `https://` when no scheme is present (an explicit
- * `http://` is preserved here and rejected later by the cleartext guard), strip
- * trailing slashes, and ensure a `/v1` suffix. Throws on embedded credentials
+ * Normalize a base URL: prepend `https://` when no authority scheme is present,
+ * preserve explicit schemes for protocol validation later, strip trailing
+ * slashes, and ensure a `/v1` suffix. Throws on embedded credentials
  * (`user:pass@host`), which a legitimate endpoint never carries. Exported for tests.
  */
 export function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
-  const withProto = /^https?:\/\//i.test(trimmed)
+  const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
     ? trimmed
-    : `https://${trimmed}`;
+    : 'https://' + trimmed;
   let url: URL;
   try {
     url = new URL(withProto);
@@ -196,17 +196,16 @@ function mergeTrustedQwenSettings(
   system: QwenSettings | undefined,
 ): QwenSettings {
   const scopes = [systemDefaults, user, system];
-  let modelProviders: QwenSettings['modelProviders'];
-  let hasModelProviders = false;
-  for (const scope of scopes) {
-    if (
+  const hasModelProviders = scopes.some(
+    (scope) =>
       scope &&
-      Object.prototype.hasOwnProperty.call(scope, 'modelProviders')
-    ) {
-      modelProviders = scope.modelProviders;
-      hasModelProviders = true;
-    }
-  }
+      Object.prototype.hasOwnProperty.call(scope, 'modelProviders'),
+  );
+  const modelProviders = {
+    ...(systemDefaults?.modelProviders ?? {}),
+    ...(user?.modelProviders ?? {}),
+    ...(system?.modelProviders ?? {}),
+  };
 
   return {
     env: {
@@ -270,10 +269,11 @@ function fromQwenSettings(
   if (!settings) return undefined;
   const settingsEnv = settings.env ?? {};
   const keyFor = (p: QwenProvider): string | undefined => {
-    if (!p.envKey) return undefined;
+    const envKey = p.envKey?.trim();
+    if (!envKey) return undefined;
     return (
-      envSource[p.envKey]?.trim() ||
-      settingsEnv[p.envKey]?.trim() ||
+      envSource[envKey]?.trim() ||
+      settingsEnv[envKey]?.trim() ||
       undefined
     );
   };
@@ -283,18 +283,34 @@ function fromQwenSettings(
     throw new Error(`Voice model '${voiceModel}' is ambiguous.`);
   }
   const provider = matches[0];
-  if (provider?.baseUrl) {
-    const baseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
-    if (
-      baseUrl &&
-      (isDashscopeCompatible(provider.baseUrl) ||
-        isInsecureVoiceBaseUrlAllowed(settings, baseUrl))
-    ) {
-      const apiKey = keyFor(provider);
-      if (apiKey) return { baseUrl, apiKey };
+  if (provider) {
+    if (!provider.baseUrl?.trim()) {
+      throw new Error(
+        `Voice model '${voiceModel}' does not define a baseUrl.`,
+      );
     }
+    const baseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
+    if (!baseUrl) {
+      throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
+    }
+    if (
+      !isDashscopeCompatible(baseUrl) &&
+      !isInsecureVoiceBaseUrlAllowed(settings, baseUrl)
+    ) {
+      throw new Error(
+        `Voice model '${voiceModel}' uses a custom baseUrl that is not listed in security.allowedInsecureVoiceBaseUrls.`,
+      );
+    }
+    const envKey = provider.envKey?.trim();
+    if (!envKey) {
+      throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
+    }
+    const apiKey = keyFor(provider);
+    if (!apiKey) {
+      throw new Error(`Voice model '${voiceModel}' requires ${envKey}.`);
+    }
+    return { baseUrl, apiKey };
   }
-  if (provider) return undefined;
 
   // Preserve the pre-existing API-key flow for settings that provide a shared
   // DashScope endpoint rather than a model-specific voice entry. Custom
@@ -380,8 +396,11 @@ export async function resolveDesktopVoiceConfig(
     creds.baseUrl,
   );
   const parsed = new URL(creds.baseUrl);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Voice endpoint must use an http or https baseUrl.');
+  }
   if (
-    parsed.protocol !== 'https:' &&
+    parsed.protocol === 'http:' &&
     !isLoopbackHost(parsed.hostname) &&
     !allowInsecureBaseUrl
   ) {

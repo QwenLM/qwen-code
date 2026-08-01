@@ -192,6 +192,27 @@ describe('voice-transcriber', () => {
     expect(funStreamConfig.keytermsContext).toBeUndefined();
   });
 
+  it('propagates an exact private URL opt-in to realtime stream config', () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    const streamConfig = resolveVoiceStreamConfig({
+      config: createConfig([
+        {
+          id: 'qwen3-asr-flash-realtime',
+          label: 'Private Qwen ASR Realtime',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }, undefined, [
+        baseUrl,
+      ]),
+      voiceModel: 'qwen3-asr-flash-realtime',
+    });
+
+    expect(streamConfig.allowInsecureBaseUrl).toBe(true);
+  });
+
   it('threads a custom keyterms file term into the realtime keytermsContext', () => {
     const workspaceDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'voice-transcriber-keyterms-'),
@@ -623,8 +644,12 @@ describe('voice-transcriber', () => {
 
   it('keeps metadata and link-local addresses blocked after an exact opt-in', () => {
     for (const blockedBaseUrl of [
+      'http://0.0.0.0/v1',
       'http://169.254.169.254/v1',
       'http://100.100.100.200/v1',
+      'http://[::]/v1',
+      'http://[::ffff:127.0.0.1]/v1',
+      'http://[::ffff:7f00:1]/v1',
       'http://[fd00:ec2::254]/v1',
       'http://[fd00:0ec2:0000:0000:0000:0000:0000:0254]/v1',
       'http://[fe80::1]/v1',

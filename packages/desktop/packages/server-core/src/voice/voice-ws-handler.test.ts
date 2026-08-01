@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { createVoiceConnectionHandler, toStreamConfig } from './voice-ws-handler'
+import {
+  assertVoiceConfigNetworkAllowed,
+  createVoiceConnectionHandler,
+  toStreamConfig,
+} from './voice-ws-handler'
 
 class FakeWebSocket {
   readonly OPEN = 1
@@ -41,6 +45,22 @@ async function flush() {
 }
 
 describe('createVoiceConnectionHandler', () => {
+  it('forwards the private-network opt-in through the shared default guard', async () => {
+    const config = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://10.0.0.8/v1',
+      allowInsecureBaseUrl: true,
+    }
+
+    await expect(assertVoiceConfigNetworkAllowed(config)).resolves.toBeUndefined()
+    await expect(
+      assertVoiceConfigNetworkAllowed({
+        ...config,
+        allowInsecureBaseUrl: undefined,
+      }),
+    ).rejects.toThrow(/private-network/)
+  })
+
   it('passes configured language to streaming transports', () => {
     expect(
       toStreamConfig({
