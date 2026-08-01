@@ -44,9 +44,35 @@ const RENDER_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
 const renderCache = new Map<string, TerminalImageRenderResult>();
 let renderCacheBytes = 0;
 
+// A Kitty terminal keeps a transmitted image and redraws it from the placeholder
+// cells alone. The live-row -> Static-row move and every resize remount
+// TerminalImage, which would re-transmit the same base64 payload (megabytes at
+// the size cap) even though the terminal already holds that image id. This
+// session-scoped set remembers which render keys were written so a remount only
+// re-emits the cheap placeholders. It is bounded so a long session cannot grow
+// it without limit; evicting an old key costs at most a re-transmit, never a
+// blank image, because the payload is rebuilt from the still-cached render.
+export const TRANSMITTED_KEY_LIMIT = 256;
+const transmittedKeys = new Set<string>();
+
+export function wasKittyImageWritten(key: string): boolean {
+  return transmittedKeys.has(key);
+}
+
+export function markKittyImageWritten(key: string): void {
+  transmittedKeys.add(key);
+  if (transmittedKeys.size > TRANSMITTED_KEY_LIMIT) {
+    const oldest = transmittedKeys.values().next().value;
+    if (oldest !== undefined) {
+      transmittedKeys.delete(oldest);
+    }
+  }
+}
+
 export type TerminalImageRenderResult =
   | {
       kind: 'kitty';
+      key: string;
       sequence: string;
       placeholder: KittyImagePlaceholder;
     }
@@ -181,7 +207,7 @@ export function renderTerminalImage({
   }
 
   const result: TerminalImageRenderResult = useKitty
-    ? renderKitty(png, shape)
+    ? { ...renderKitty(png, shape), key: cacheKey }
     : renderWithChafa(display.filePath, shape, env, chafaPath);
   if (result.kind !== 'unavailable') {
     rememberRenderResult(cacheKey, result);
@@ -345,7 +371,7 @@ function createImageId(
 function renderKitty(
   png: Buffer,
   shape: { widthCells: number; rows: number },
-): Extract<TerminalImageRenderResult, { kind: 'kitty' }> {
+): Omit<Extract<TerminalImageRenderResult, { kind: 'kitty' }>, 'key'> {
   const imageId = createImageId(png, shape);
   return {
     kind: 'kitty',

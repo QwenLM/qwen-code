@@ -11,8 +11,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
+  markKittyImageWritten,
   renderTerminalImage,
   supportsKittyImageProtocol,
+  TRANSMITTED_KEY_LIMIT,
+  wasKittyImageWritten,
 } from './terminal-image-renderer.js';
 
 const PNG_1X1 = Buffer.from(
@@ -81,6 +84,53 @@ describe('terminalImageRenderer', () => {
     expect(result.sequence).toContain('c=1,r=1');
     expect(result.placeholder.lines).toHaveLength(1);
     expect(result.placeholder.lines[0]).toContain('\u{10EEEE}');
+  });
+
+  it('exposes a stable render key on Kitty results so remounts can skip re-transmission', async () => {
+    await fs.writeFile(imagePath, pngWithSize(1600, 800));
+    const options = {
+      display: {
+        type: 'terminal_image' as const,
+        filePath: imagePath,
+        mimeType: 'image/png' as const,
+      },
+      contentWidth: 200,
+      availableTerminalHeight: 100,
+      env: { TERM: 'xterm-kitty' },
+      stdoutIsTTY: true,
+    };
+
+    const first = renderTerminalImage(options);
+    const second = renderTerminalImage(options);
+    expect(first.kind).toBe('kitty');
+    expect(second.kind).toBe('kitty');
+    if (first.kind !== 'kitty' || second.kind !== 'kitty') return;
+    expect(first.key).toBeTruthy();
+    expect(second.key).toBe(first.key);
+
+    // A different placement shape is a different image on the terminal grid and
+    // therefore gets its own transmission key.
+    const resized = renderTerminalImage({ ...options, contentWidth: 30 });
+    expect(resized.kind).toBe('kitty');
+    if (resized.kind === 'kitty') {
+      expect(resized.key).not.toBe(first.key);
+    }
+  });
+
+  it('tracks transmitted Kitty images for the session and bounds the set', () => {
+    const unique = `transmit-${Date.now()}-`;
+    expect(wasKittyImageWritten(`${unique}0`)).toBe(false);
+    markKittyImageWritten(`${unique}0`);
+    expect(wasKittyImageWritten(`${unique}0`)).toBe(true);
+
+    // Exceeding the limit evicts the oldest key, so the set stays bounded.
+    for (let i = 1; i <= TRANSMITTED_KEY_LIMIT; i++) {
+      markKittyImageWritten(`${unique}${i}`);
+    }
+    expect(wasKittyImageWritten(`${unique}0`)).toBe(false);
+    expect(wasKittyImageWritten(`${unique}${TRANSMITTED_KEY_LIMIT}`)).toBe(
+      true,
+    );
   });
 
   it.each(IMAGE_SIZE_CASES)(

@@ -11,7 +11,9 @@ import type { Config, TerminalImageDisplay } from '@qwen-code/qwen-code-core';
 import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useTerminalOutput } from '../contexts/TerminalOutputContext.js';
 import {
+  markKittyImageWritten,
   renderTerminalImage,
+  wasKittyImageWritten,
   type TerminalImageRenderResult,
 } from '../utils/terminal-image-renderer.js';
 import { theme } from '../semantic-colors.js';
@@ -34,7 +36,6 @@ export const TerminalImage: React.FC<TerminalImageProps> = ({
   availableTerminalHeight,
 }) => {
   const writeRaw = useTerminalOutput();
-  const writtenSequence = React.useRef<string | null>(null);
   const filePath = path.resolve(data.filePath);
   const safePath = config.getWorkspaceContext().isPathWithinWorkspace(filePath);
   const result = React.useMemo<TerminalImageRenderResult | null>(
@@ -53,15 +54,16 @@ export const TerminalImage: React.FC<TerminalImageProps> = ({
     [availableTerminalHeight, contentWidth, data.mimeType, filePath, safePath],
   );
 
-  const kittySequence = result?.kind === 'kitty' ? result.sequence : null;
+  // The Kitty payload is written once per terminal session per render key; the
+  // terminal keeps the image and redraws it from the placeholder cells, so a
+  // remount (live row -> Static row, or a resize) must not re-transmit it.
   React.useEffect(() => {
-    writtenSequence.current = null;
-  }, [filePath]);
-  React.useEffect(() => {
-    if (!kittySequence || writtenSequence.current === kittySequence) return;
-    writtenSequence.current = kittySequence;
-    process.nextTick(() => writeRaw(kittySequence));
-  }, [kittySequence, writeRaw]);
+    if (!result || result.kind !== 'kitty') return;
+    if (wasKittyImageWritten(result.key)) return;
+    markKittyImageWritten(result.key);
+    const sequence = result.sequence;
+    process.nextTick(() => writeRaw(sequence));
+  }, [result, writeRaw]);
 
   if (!safePath) {
     return (

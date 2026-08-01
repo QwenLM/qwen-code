@@ -15,8 +15,14 @@ import {
 } from '../utils/terminal-image-renderer.js';
 import { TerminalImage } from './TerminalImage.js';
 
+const { writtenKeys } = vi.hoisted(() => ({ writtenKeys: new Set<string>() }));
+
 vi.mock('../utils/terminal-image-renderer.js', () => ({
   renderTerminalImage: vi.fn(),
+  wasKittyImageWritten: vi.fn((key: string) => writtenKeys.has(key)),
+  markKittyImageWritten: vi.fn((key: string) => {
+    writtenKeys.add(key);
+  }),
 }));
 
 const mockedRenderTerminalImage = vi.mocked(renderTerminalImage);
@@ -33,6 +39,17 @@ const IMAGE = {
   type: 'terminal_image' as const,
   filePath: '/workspace/chart.png',
   mimeType: 'image/png' as const,
+};
+
+const KITTY_RESULT: TerminalImageRenderResult = {
+  kind: 'kitty',
+  key: 'kitty-payload',
+  sequence: '\x1b_Gpayload\x1b\\',
+  placeholder: {
+    color: '#00002a',
+    imageId: 42,
+    lines: ['placeholder'],
+  },
 };
 
 function renderImage(
@@ -58,23 +75,13 @@ function renderImage(
 
 describe('TerminalImage', () => {
   beforeEach(() => {
+    writtenKeys.clear();
     vi.clearAllMocks();
   });
 
   it('writes trusted Kitty data and renders its placeholder', async () => {
     const writeRaw = vi.fn();
-    const { lastFrame } = renderImage(
-      {
-        kind: 'kitty',
-        sequence: '\x1b_Gpayload\x1b\\',
-        placeholder: {
-          color: '#00002a',
-          imageId: 42,
-          lines: ['placeholder'],
-        },
-      },
-      writeRaw,
-    );
+    const { lastFrame } = renderImage(KITTY_RESULT, writeRaw);
 
     await vi.waitFor(() => {
       expect(writeRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
@@ -117,15 +124,7 @@ describe('TerminalImage', () => {
   });
 
   it('does not re-emit the Kitty sequence when the emit effect re-runs', async () => {
-    mockedRenderTerminalImage.mockReturnValue({
-      kind: 'kitty',
-      sequence: '\x1b_Gpayload\x1b\\',
-      placeholder: {
-        color: '#00002a',
-        imageId: 42,
-        lines: ['placeholder'],
-      },
-    });
+    mockedRenderTerminalImage.mockReturnValue(KITTY_RESULT);
 
     const renderWith = (writer: (...args: unknown[]) => void) => (
       <TerminalOutputProvider value={writer}>
@@ -152,5 +151,36 @@ describe('TerminalImage', () => {
 
     expect(secondWriteRaw).not.toHaveBeenCalled();
     expect(firstWriteRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-transmit the Kitty payload when the image remounts', async () => {
+    mockedRenderTerminalImage.mockReturnValue(KITTY_RESULT);
+
+    const renderWith = (writer: (...args: unknown[]) => void) => (
+      <TerminalOutputProvider value={writer}>
+        <TerminalImage
+          data={IMAGE}
+          config={configWithWorkspaceResult(true)}
+          contentWidth={80}
+          availableTerminalHeight={20}
+        />
+      </TerminalOutputProvider>
+    );
+
+    const firstWriteRaw = vi.fn();
+    const first = render(renderWith(firstWriteRaw));
+    await vi.waitFor(() => {
+      expect(firstWriteRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
+    });
+    first.unmount();
+
+    // A fresh mount (live row -> Static row, or a resize) previously
+    // re-transmitted the whole payload even though the terminal still holds it.
+    const secondWriteRaw = vi.fn();
+    const second = render(renderWith(secondWriteRaw));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(secondWriteRaw).not.toHaveBeenCalled();
+    second.unmount();
   });
 });
