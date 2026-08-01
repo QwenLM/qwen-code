@@ -9,6 +9,7 @@
 
 import type { FC } from 'react';
 import {
+  CollapsibleOutput,
   ToolCallContainer,
   CopyButton,
   safeTitle,
@@ -211,8 +212,12 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
   // Success with output
   if (textOutputs.length > 0) {
     const output = textOutputs.join('\n');
-    const truncatedOutput =
-      output.length > 500 ? output.substring(0, 500) + '...' : output;
+    const isCollapsible = output.length > 500;
+    const outputContent = (
+      <div className={`${classPrefix}-toolcall-output-subtle`}>
+        <pre className={`${classPrefix}-toolcall-pre`}>{output}</pre>
+      </div>
+    );
 
     return (
       <Container
@@ -250,12 +255,22 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
               style={{ cursor: 'pointer' }}
             >
               <div className={`${classPrefix}-toolcall-label`}>OUT</div>
-              <div className={`${classPrefix}-toolcall-row-content`}>
-                <div className={`${classPrefix}-toolcall-output-subtle`}>
-                  <pre className={`${classPrefix}-toolcall-pre`}>
-                    {truncatedOutput}
-                  </pre>
-                </div>
+              <div
+                className={`${classPrefix}-toolcall-row-content ${
+                  isCollapsible ? `${classPrefix}-toolcall-full` : ''
+                }`}
+              >
+                {isCollapsible ? (
+                  <CollapsibleOutput
+                    isCollapsible
+                    collapsedHeight={60}
+                    fadeStart={40}
+                  >
+                    {outputContent}
+                  </CollapsibleOutput>
+                ) : (
+                  outputContent
+                )}
               </div>
             </div>
           </div>
