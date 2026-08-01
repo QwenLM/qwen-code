@@ -458,3 +458,22 @@ describe('findings (command boundary)', () => {
     ).toThrow(/is not valid JSON/);
   });
 });
+
+describe('validateFindings — the canonical artifact round-trips', () => {
+  it('keeps outcome and outcomeNote when an artifact is fed back through --input', () => {
+    // `validateFindings` accepts `outcome`; dropping the note while keeping the
+    // outcome would strip exactly the field a `skipped` finding owes the reader.
+    const [f] = validateFindings([
+      { ...base, outcome: 'skipped', outcomeNote: 'outside the reviewed diff' },
+    ]);
+    expect(f.outcome).toBe('skipped');
+    expect(f.outcomeNote).toBe('outside the reviewed diff');
+  });
+
+  it('ignores a note that arrives with no outcome', () => {
+    // A note is a reason for an outcome; without one it has nothing to explain.
+    const [f] = validateFindings([{ ...base, outcomeNote: 'stray' }]);
+    expect(f.outcome).toBeUndefined();
+    expect(f.outcomeNote).toBeUndefined();
+  });
+});

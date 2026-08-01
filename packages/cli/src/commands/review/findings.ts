@@ -266,6 +266,13 @@ export function validateFindings(raw: unknown): Finding[] {
       );
     }
 
+    // `outcomeNote` is accepted on input so the canonical artifact round-trips:
+    // `validateFindings` already accepts `outcome`, and an artifact fed back
+    // through `--input` that kept its outcomes but silently dropped their
+    // reasons would strip exactly the field a `skipped` finding owes the reader.
+    const outcomeNote =
+      asString(o, 'outcomeNote') ?? asString(o, 'outcome_note');
+
     const shortSummary =
       asString(o, 'shortSummary') ?? asString(o, 'short_summary');
 
@@ -290,6 +297,7 @@ export function validateFindings(raw: unknown): Finding[] {
         : {}),
       locations: parseLocations(o, i),
       ...(outcome ? { outcome } : {}),
+      ...(outcome && outcomeNote ? { outcomeNote } : {}),
     } satisfies Finding;
   });
 
