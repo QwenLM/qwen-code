@@ -25,11 +25,11 @@ import { resolve as resolvePath } from 'node:path';
  * case-insensitive filesystems all collapse onto the same entry, which
  * is what we want — the cache is reasoning about *files*, not strings.
  *
- * Platform note: on Windows, `Stats.ino` is documented as not guaranteed
- * unique (Node returns it from `_BY_HANDLE_FILE_INFORMATION.nFileIndex`,
- * which can collide across volumes and ReFS). Callers that target
- * Windows should consider falling back to a path-based key; the POSIX
- * platforms qwen-code primarily runs on (macOS / Linux) are unaffected.
+ * Platform note: when `Stats.ino` is `0` (seen on FAT/exFAT and some
+ * SMB-style filesystems), inode identity is unverifiable. The cache
+ * deliberately does not store those reads/writes, so later mutation
+ * checks fail closed instead of treating unrelated files as the same
+ * `dev:0` entry.
  *
  * Lifecycle: one instance is created per `Config` via the field
  * initializer, so any code that constructs its own Config — notably
@@ -142,6 +142,10 @@ export class FileReadCache {
     return `${stats.dev}:${stats.ino}`;
   }
 
+  static hasVerifiableIdentity(stats: Stats): boolean {
+    return stats.ino !== 0;
+  }
+
   /**
    * Record a successful Read of `absPath`.
    *
@@ -186,6 +190,15 @@ export class FileReadCache {
     stats: Stats,
     opts: { full: boolean; cacheable: boolean },
   ): FileReadEntry {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      const entry = FileReadCache.createEntry(absPath, stats);
+      entry.lastReadAt = Date.now();
+      entry.readResidentInHistory = opts.full;
+      entry.lastReadWasFull = opts.full;
+      entry.lastReadCacheable = opts.cacheable;
+      return entry;
+    }
+
     const key = FileReadCache.inodeKey(stats);
     const existing = this.byInode.get(key);
     const sameFingerprint =
@@ -244,6 +257,17 @@ export class FileReadCache {
     stats: Stats,
     opts: { cacheable?: boolean } = {},
   ): FileReadEntry {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      const entry = FileReadCache.createEntry(absPath, stats);
+      const now = Date.now();
+      entry.lastWriteAt = now;
+      entry.lastReadAt = now;
+      entry.lastReadWasFull = true;
+      entry.lastReadCacheable = opts.cacheable ?? true;
+      entry.readResidentInHistory = true;
+      return entry;
+    }
+
     const entry = this.upsert(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
@@ -273,6 +297,10 @@ export class FileReadCache {
    * `0 occurrences` failure mode, which prompts the model to re-read.
    */
   check(stats: Stats): FileReadCheckResult {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return { state: 'unknown' };
+    }
+
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (!entry) return { state: 'unknown' };
     if (entry.mtimeMs !== stats.mtimeMs || entry.sizeBytes !== stats.size) {
@@ -301,6 +329,10 @@ export class FileReadCache {
    * fall back to {@link clear}.
    */
   markReadEvictedFromHistory(stats: Stats): boolean {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return false;
+    }
+
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (entry) {
       entry.readResidentInHistory = false;
@@ -311,6 +343,10 @@ export class FileReadCache {
 
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
+    if (!FileReadCache.hasVerifiableIdentity(stats)) {
+      return;
+    }
+
     this.byInode.delete(FileReadCache.inodeKey(stats));
   }
 
@@ -397,8 +433,14 @@ export class FileReadCache {
         this.byInode.delete(oldestKey);
       }
     }
-    const entry: FileReadEntry = {
-      inodeKey: key,
+    const entry = FileReadCache.createEntry(absPath, stats);
+    this.byInode.set(key, entry);
+    return entry;
+  }
+
+  private static createEntry(absPath: string, stats: Stats): FileReadEntry {
+    return {
+      inodeKey: FileReadCache.inodeKey(stats),
       realPath: absPath,
       mtimeMs: stats.mtimeMs,
       sizeBytes: stats.size,
@@ -406,7 +448,5 @@ export class FileReadCache {
       lastReadCacheable: false,
       readResidentInHistory: false,
     };
-    this.byInode.set(key, entry);
-    return entry;
   }
 }
