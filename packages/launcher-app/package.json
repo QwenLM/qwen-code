@@ -1,0 +1,24 @@
+{
+  "name": "@qwen-code/launcher-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows control panel for the qwen-rc remote-control launcher",
+  "main": "dist/main/main.cjs",
+  "scripts": {
+    "build": "node esbuild.js",
+    "start": "npm run build && electron .",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.3"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.23.0",
+    "@types/qrcode": "^1.5.5"
+  }
+}
