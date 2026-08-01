@@ -424,6 +424,22 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('passes deferUntilIdle as strictly false (not undefined) on plain Enter submit', async () => {
+    props.buffer.setText('hello');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(props.onSubmit).toHaveBeenCalled();
+      const secondArg = vi.mocked(props.onSubmit).mock.calls[0]![1];
+      expect(secondArg.deferUntilIdle).toBe(false);
+    });
+    unmount();
+  });
+
   it('captures explicit provenance before clearing the input buffer', async () => {
     props.buffer.setText('restored prompt');
     vi.mocked(props.buffer.setText).mockClear();

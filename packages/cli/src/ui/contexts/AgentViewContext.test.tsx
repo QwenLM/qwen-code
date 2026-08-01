@@ -107,6 +107,37 @@ describe('agentViewActiveShellPtySet tracking', () => {
     expect(latest.state!.agentViewHasActiveShellPty).toBe(false);
   });
 
+  it('setAgentViewHasActiveShellPty is a no-op when value already matches', () => {
+    const config = makeConfig();
+    let renderCount = 0;
+    function CountingConsumer() {
+      latest.state = useAgentViewState();
+      latest.actions = useAgentViewActions();
+      renderCount++;
+      return null;
+    }
+
+    render(
+      <AgentViewProvider config={config}>
+        <CountingConsumer />
+      </AgentViewProvider>,
+    );
+
+    act(() => latest.actions!.setAgentViewHasActiveShellPty('agent-1', true));
+    const rendersAfterFirstAdd = renderCount;
+    expect(rendersAfterFirstAdd).toBeGreaterThan(1);
+
+    act(() => latest.actions!.setAgentViewHasActiveShellPty('agent-1', true));
+    expect(renderCount).toBe(rendersAfterFirstAdd);
+
+    act(() => latest.actions!.setAgentViewHasActiveShellPty('agent-1', false));
+    const rendersAfterRemove = renderCount;
+    expect(rendersAfterRemove).toBeGreaterThan(rendersAfterFirstAdd);
+
+    act(() => latest.actions!.setAgentViewHasActiveShellPty('agent-1', false));
+    expect(renderCount).toBe(rendersAfterRemove);
+  });
+
   it('unregisterAll clears all PTY entries', () => {
     const config = makeConfig();
     render(

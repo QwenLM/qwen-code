@@ -94,6 +94,22 @@ describe('resolveToggleTarget', () => {
     ).toEqual({ modelId: 'shared-model', authType: AuthType.USE_GEMINI });
   });
 
+  it('returns currentAuthType via the early-return (not the loop) when only the current provider owns the model', () => {
+    const config = makeConfig({
+      [AuthType.QWEN_OAUTH]: ['qwen3-coder', 'qwen3-max'],
+      [AuthType.USE_OPENAI]: ['gpt-4'],
+    });
+    const result = resolveToggleTarget(
+      config,
+      'qwen3-max',
+      AuthType.QWEN_OAUTH,
+    );
+    expect(result).toEqual({
+      modelId: 'qwen3-max',
+      authType: AuthType.QWEN_OAUTH,
+    });
+  });
+
   it('falls back to the current auth type when no provider owns the id', () => {
     const config = makeConfig({
       [AuthType.QWEN_OAUTH]: ['qwen3-coder'],
