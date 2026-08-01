@@ -594,7 +594,7 @@ tr:hover .frozenCell.selectedCell {
 
 @container table-toolbar (max-width: 500px) {
   .compactToolbarLabel,
-  .selectionStats .selectionMetric {
+  .selectionMetric:not(:first-child) {
     display: none;
   }
 
@@ -604,10 +604,6 @@ tr:hover .frozenCell.selectedCell {
     justify-content: center;
     gap: 0;
     padding-inline: 0;
-  }
-
-  .densityTrigger {
-    font-size: 0;
   }
 }
 

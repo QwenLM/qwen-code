@@ -58,6 +58,7 @@ import {
   GripVerticalIcon,
   MinusIcon,
   PlusIcon,
+  Rows3Icon,
   XIcon,
 } from 'lucide-react';
 import {
@@ -1343,6 +1344,7 @@ function CustomColumnsPopover({
           variant="ghost"
           size="sm"
           className={`${styles.toolbarControl} ${styles.compactToolbarControl}`}
+          aria-label={t('markdownTable.customColumns')}
           type="button"
         >
           <BoltIcon />
@@ -2625,10 +2627,13 @@ export function EnhancedTable({
               className={styles.densityTrigger}
               aria-label={t('markdownTable.densityLabel')}
             >
+              <Rows3Icon className="size-4" />
               <SelectValue>
-                {t('markdownTable.densityCurrent', {
-                  density: t(`markdownTable.density.${density}`),
-                })}
+                <span className={styles.compactToolbarLabel}>
+                  {t('markdownTable.densityCurrent', {
+                    density: t(`markdownTable.density.${density}`),
+                  })}
+                </span>
               </SelectValue>
             </SelectTrigger>
             <SelectContent className={styles.densityMenu}>
