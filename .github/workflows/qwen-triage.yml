@@ -3426,11 +3426,16 @@ jobs:
             local node_status=0
             node -e '
               const fs = require("node:fs");
-              const text = fs.readFileSync(process.argv[1], "utf8").replace(/\u0000/g, "");
+              const text = fs.readFileSync(process.argv[1], "utf8").replace(/[\u0000\u0001]/g, "");
               function escProse(s) {
+                // Allowlisted tags are stashed behind a \u0001 sentinel (stripped
+                // from input) BEFORE the < pass and restored from it, so a literal
+                // &lt;details> the author typed stays escaped text instead of being
+                // promoted back to a live tag by the un-escape step.
                 return s
+                  .replace(/<(\/?)(details|summary)>/g, "\u0001$1$2>")
                   .replace(/</g, "&lt;")
-                  .replace(/&lt;(\/?)(details|summary)>/g, "<$1$2>")
+                  .replace(/\u0001(\/?)(details|summary)>/g, "<$1$2>")
                   .replace(/&lt;!--/g, "&lt;!\\-\\-")
                   .replace(/@/g, "@&#8203;");
               }
@@ -3454,6 +3459,13 @@ jobs:
                 };
                 while (i < line.length) {
                   if (line[i] !== "`") { buf += line[i]; i += 1; continue; }
+                  // A backslash-escaped backtick does not OPEN a code span (the
+                  // CommonMark escape rule consumes it first) but still CLOSES one
+                  // — an asymmetry a line-scoped scanner cannot model. Fail closed
+                  // like an unmatched run so the whole line is prose-escaped.
+                  let bs = 0, b = i - 1;
+                  while (b >= 0 && line[b] === "\\") { bs += 1; b -= 1; }
+                  if (bs % 2 === 1) { unmatched = true; buf += line[i]; i += 1; continue; }
                   let j = i;
                   while (j < line.length && line[j] === "`") j += 1;
                   const run = j - i;

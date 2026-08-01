@@ -1915,6 +1915,50 @@ describe('qwen-triage verify hardening', () => {
       expect(psOut).toContain('@&#8203;everyone');
       expect(psOut).not.toContain('@everyone');
 
+      // Backslash-escaped opening backtick (review Critical): CommonMark's
+      // escape rule consumes \` before the backticks rule runs, so it does
+      // NOT open a code span — but the raw-text backtick scanner still lets it
+      // CLOSE one. Before the fix proseLine paired the escaped backtick with a
+      // later one and shipped the gap as inert code, so GitHub rendered prose:
+      // a live <a href>, an un-defused @everyone, and a </details> that
+      // balance() never saw (it went through escCode), closing the wrapper
+      // early. The scanner now fails closed on an odd backslash run. Asserted
+      // on the RAW output (parser-independent): no live <a href>/<img>, the
+      // mention is ZWSP-defused, and the injected closer is dropped so the
+      // wrapper stays 1 open / 1 close.
+      const escBt = join(dir, 'esc-bt.md');
+      writeFileSync(
+        escBt,
+        'see \\` opts </details> @everyone <a href="https://evil.example/phish">Merge instructions</a> ` end\n',
+      );
+      const escBtOut = emit(escBt, 45000);
+      expect(escBtOut).not.toContain('<a href');
+      expect(escBtOut).not.toContain('<img');
+      expect(escBtOut).toContain('@&#8203;everyone');
+      expect(escBtOut).not.toContain('@everyone');
+      expect(escBtOut.split('<details>').length - 1).toBe(1);
+      expect(escBtOut.split('</details>').length - 1).toBe(1);
+
+      // Pre-escaped entities (review Medium): escProse restores the allowlist
+      // by round-tripping through &lt;, so before the fix it could not tell a
+      // &lt; it just produced from one the author typed — a literal
+      // &lt;details> in the report was promoted to a LIVE fold and a literal
+      // &lt;/details> was silently deleted by the surplus-closer drop. The
+      // sentinel now protects only the source's OWN raw tags, so author-typed
+      // entities stay escaped text: no forged fold, nothing deleted, wrapper
+      // stays 1 open / 1 close.
+      const ent = join(dir, 'entity.md');
+      writeFileSync(
+        ent,
+        'pre-escaped: &lt;/details> and &lt;details> and &lt;img src=x>\n',
+      );
+      const entOut = emit(ent, 45000);
+      expect(entOut).toContain('&lt;/details>');
+      expect(entOut).toContain('&lt;details>');
+      expect(entOut).toContain('&lt;img src=x>');
+      expect(entOut.split('<details>').length - 1).toBe(1);
+      expect(entOut.split('</details>').length - 1).toBe(1);
+
       // A NUL byte in the report is stripped (parity with emit_block's
       // tr -d '\000'); it must not reach the comment body.
       const nul = join(dir, 'nul.md');
