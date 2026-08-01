@@ -414,11 +414,14 @@ describe('test-efficacy probe isolation (#6832)', () => {
     );
     // The baseline drops the collocated test: `price.test.ts` collects nothing
     // (the probe-tree import-error shape); every other file passes.
-    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    // Override the fake PACKAGE entry — post-#8050 the probe resolves the
+    // runner through vitest/package.json's bin, so a node_modules/.bin file
+    // is dead weight it never reads. price.test.ts collects nothing; every
+    // other file passes.
     writeFileSync(
-      bin,
+      join(repo, 'node_modules', 'vitest', 'vitest.mjs'),
       `#!/usr/bin/env node
-const path = require('path');
+import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
@@ -429,7 +432,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    chmodSync(bin, 0o755);
 
     await runHandler({
       report: join(repo, 'report.json'),
