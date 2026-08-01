@@ -1806,6 +1806,18 @@ export function buildLedger(
       title: (carried ? line.slice(carried[0].length) : line).trim(),
     };
   };
+  /**
+   * A title the next round can act on. The field's job is "enough to re-locate
+   * the claim", and a comment that is nothing but its severity marker leaves it
+   * empty — which does not merely degrade the entry, it jams the review: the
+   * next round is told every ledger entry is owed a ruling, has no claim to
+   * rule on, answers `cannot tell`, and that is `cannot-tell-existing-critical`
+   * — a cap. Nothing changes between rounds, so the cap never lifts. Dropping
+   * the entry instead would hide a Critical that really was posted, so keep it
+   * and hand over the one handle there is.
+   */
+  const locatable = (title: string, where: string): string =>
+    title || `(comment carried no text — see the posted finding at ${where})`;
 
   for (const c of drafted) {
     // ONE severity predicate for the whole package. `severityOf` trims leading
@@ -1821,12 +1833,16 @@ export function buildLedger(
     const { id: carried, title } = titleOf(
       body.slice(marker.length).replace(/^:?\s*/, ''),
     );
+    const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
       id: idFor(carried),
       sev: sev === 'critical' ? 'C' : 'S',
-      file: typeof c.path === 'string' ? c.path : '(unknown)',
+      file,
       ...(typeof c.line === 'number' ? { line: c.line } : {}),
-      title,
+      title: locatable(
+        title,
+        `${file}${typeof c.line === 'number' ? `:${c.line}` : ''}`,
+      ),
     });
   }
   for (const b of bodyCriticals) {
@@ -1835,7 +1851,7 @@ export function buildLedger(
       id: idFor(carried),
       sev: 'C',
       file: '(body)',
-      title,
+      title: locatable(title, 'the review body'),
     });
   }
   return { v: 1, round, findings };
