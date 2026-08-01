@@ -29,15 +29,30 @@ import {
 } from './extract-step.js';
 
 /**
- * The lines the shell would actually EXECUTE. The guarantee the header owes is
- * not "the env appears somewhere" but "nothing except the `run:` body ever
- * reaches command position" — assert the effect, not the `#` that implements it.
+ * The guarantee stated exactly: the emitted file is HEADER + the body
+ * VERBATIM, and every header line is inert — a comment, or one of the shell
+ * directives the caller names here.
+ *
+ * Deliberately not "filter the script for lines that look executable": such a
+ * filter has to drop `set -e` to work, which makes it blind to a header that
+ * leaked exactly that line, and it cannot tell the header's directive from one
+ * the `run:` body legitimately contains. Splitting the file at the body's own
+ * length needs to know nothing about what the header emits.
  */
-const executableLines = (script: string): string[] =>
-  script
+const expectVerbatimBody = (
+  scriptPath: string,
+  body: string,
+  allowedDirectives: string[],
+): void => {
+  const emitted = readFileSync(scriptPath, 'utf8');
+  const withNewline = body.endsWith('\n') ? body : `${body}\n`;
+  expect(emitted.endsWith(withNewline)).toBe(true);
+  const header = emitted.slice(0, emitted.length - withNewline.length);
+  const live = header
     .split('\n')
-    .filter((l) => l.trim() !== '' && !l.trimStart().startsWith('#'))
-    .filter((l) => l !== 'set -e');
+    .filter((l) => l.trim() !== '' && !l.startsWith('#'));
+  expect(live).toEqual(allowedDirectives);
+};
 
 const hasBash = ((): boolean => {
   try {
@@ -279,15 +294,173 @@ describe('runExtractStep', () => {
       step: 'Run',
       out: join(dir, 'step.sh'),
     });
-    const script = readFileSync(meta.scriptPath, 'utf8');
     // A block scalar's continuation lines are the failure: commented only on
     // the first line, `  "maxSessionTurns": 60` and `}` run as commands, and
     // the header's own `set -e` kills the step before its body.
-    expect(executableLines(script)).toEqual(['echo hi']);
+    expectVerbatimBody(meta.scriptPath, 'echo hi', ['set -e']);
+    const script = readFileSync(meta.scriptPath, 'utf8');
     expect(script).toContain('# env [step] SETTINGS_JSON={');
     // Continuation lines keep the block scalar's own indentation after the `#`.
     expect(script).toContain('#     "maxSessionTurns": 60');
     expect(script).toContain('#   }');
+  });
+
+  it('keeps a body that itself contains `set -e` — the header is split off by length, not by filtering', () => {
+    const wf = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        run: |-
+          set -e
+          echo hi
+`;
+    const meta = runExtractStep({
+      workflow: write(wf),
+      job: 'j',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    // The body's own `set -e` is body, not header: 434 real steps in this
+    // repo's workflows include such a line, and an oracle that filtered it out
+    // would be blind to a header that leaked exactly that.
+    expectVerbatimBody(meta.scriptPath, 'set -e\necho hi', ['set -e']);
+  });
+
+  it('carries pipefail when the shell is DECLARED bash, and not when it is defaulted', () => {
+    const declared = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Run
+        run: a | b
+`;
+    // \`shell: bash\` makes the runner use \`bash --noprofile --norc -eo pipefail\`;
+    // the default is a bare \`bash -e\`. A pipeline whose middle stage fails
+    // aborts under the first and not the second.
+    expectVerbatimBody(
+      runExtractStep({
+        workflow: write(declared),
+        job: 'j',
+        step: 'Run',
+        out: join(dir, 'a.sh'),
+      }).scriptPath,
+      'a | b',
+      ['set -eo pipefail'],
+    );
+    const defaulted = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        run: a | b
+`;
+    expectVerbatimBody(
+      runExtractStep({
+        workflow: write(defaulted),
+        job: 'j',
+        step: 'Run',
+        out: join(dir, 'b.sh'),
+      }).scriptPath,
+      'a | b',
+      ['set -e'],
+    );
+  });
+
+  it('shebangs only the command word of a shell TEMPLATE, and records the whole of it', () => {
+    const wf = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        shell: perl {0}
+        run: print 1;
+`;
+    const meta = runExtractStep({
+      workflow: write(wf),
+      job: 'j',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    expect(meta.shell).toBe('perl {0}');
+    const script = readFileSync(meta.scriptPath, 'utf8');
+    expect(script).toContain('#!/usr/bin/env perl\n');
+    expect(script).toContain('# shell (runner invokes it this way): perl {0}');
+    // Not bash, so no `set -e` is invented for it.
+    expectVerbatimBody(meta.scriptPath, 'print 1;', []);
+  });
+
+  it('orders the env NEAREST FIRST — the step own vars are not buried', () => {
+    const meta = runExtractStep({
+      workflow: write(WF_LEVELS),
+      job: 'build',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    // Measured on qwen-autofix.yml:route:0, merge order put 20 inherited
+    // entries ahead of the step's own 26 in a 49-line header.
+    expect(Object.keys(meta.env)).toEqual([
+      'LOCAL', // step
+      'NODE_ENV', // job
+      'GLOBAL_FLAG', // workflow
+    ]);
+  });
+
+  it('renders a valueless env key as the empty string, not "null"', () => {
+    const wf = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        env:
+          EMPTY:
+          NUM: 7
+        run: echo hi
+`;
+    const meta = runExtractStep({
+      workflow: write(wf),
+      job: 'j',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    expect(meta.env).toEqual({ EMPTY: '', NUM: '7' });
+  });
+
+  it('separates a missing file from a malformed one', () => {
+    expect(() =>
+      runExtractStep({
+        workflow: join(dir, 'nope.yml'),
+        job: 'j',
+        step: '0',
+        out: join(dir, 's'),
+      }),
+    ).toThrow(/cannot read .*ENOENT/);
+    expect(() =>
+      runExtractStep({
+        workflow: write('jobs: [\n'),
+        job: 'j',
+        step: '0',
+        out: join(dir, 's'),
+      }),
+    ).toThrow(/cannot parse/);
   });
 
   it.skipIf(!hasBash)(
@@ -312,6 +485,26 @@ describe('expressionsOf / invokedCommandsOf', () => {
       '${{ x }}',
       '${{ y }}',
     ]);
+  });
+
+  it('captures an expression that CONTAINS a brace, and the site after it', () => {
+    // The live shape: `format('refs/pull/{0}/head', …)` appears in this repo's
+    // workflows. Stopping at the first `}` does not mis-list such a site, it
+    // drops it — and a stub list that silently omits an entry reads as
+    // "nothing more to supply".
+    expect(
+      expressionsOf(
+        "ref: ${{ github.ref || format('refs/pull/{0}/head', github.event.number) }} then ${{ github.repository }}",
+      ),
+    ).toEqual([
+      "${{ github.ref || format('refs/pull/{0}/head', github.event.number) }}",
+      '${{ github.repository }}',
+    ]);
+  });
+
+  it('reports nothing for an unterminated site rather than swallowing the rest', () => {
+    expect(expressionsOf('${{ github.ref')).toEqual([]);
+    expect(expressionsOf('${{ a }} ${{ unterminated')).toEqual(['${{ a }}']);
   });
 
   it('reads pipeline segments and skips keywords, builtins, and VAR= prefixes', () => {

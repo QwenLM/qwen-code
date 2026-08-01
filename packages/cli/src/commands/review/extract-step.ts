@@ -89,11 +89,25 @@ export interface ExtractedStep {
   scriptPath: string;
 }
 
-/** Every distinct `${{ … }}` site, in order of first appearance. */
+/**
+ * Every distinct `${{ … }}` site, in order of first appearance. Scans forward
+ * to the closing `}}` rather than matching `[^}]*`: a GitHub expression may
+ * legally contain a brace — `format('refs/pull/{0}/head', …)`,
+ * `fromJSON('{"a":1}')` — and a pattern that stops at the first `}` does not
+ * mis-list such a site, it DROPS it. Silence is the one failure this list
+ * cannot afford: the caller reads it as "these are all the values to supply",
+ * so a missing entry is a value that never gets stubbed.
+ */
 export function expressionsOf(...texts: string[]): string[] {
   const seen = new Set<string>();
   for (const t of texts) {
-    for (const m of t.matchAll(/\$\{\{[^}]*\}\}/g)) seen.add(m[0].trim());
+    let i = t.indexOf('${{');
+    while (i !== -1) {
+      const end = t.indexOf('}}', i + 3);
+      if (end === -1) break; // unterminated — no site to report
+      seen.add(t.slice(i, end + 2).trim());
+      i = t.indexOf('${{', end + 2);
+    }
   }
   return [...seen];
 }
@@ -189,6 +203,18 @@ function runDefaultsOf(container: unknown): RunDefaults {
 }
 
 /**
+ * An env value as the runner would hand it over. GitHub requires a scalar
+ * here; a map or sequence is a malformed workflow, and `[object Object]` would
+ * hide that behind a plausible-looking string. A bare `FOO:` is YAML null,
+ * which the runner passes as the empty string.
+ */
+function envValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+/**
  * Merge one level's `env:` over what the outer levels set. Called
  * workflow → job → step, so the nearest level wins, exactly as the runner
  * resolves it.
@@ -202,9 +228,31 @@ function mergeEnv(
   const raw = (container as { env?: unknown } | undefined)?.env;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    env[k] = String(v);
+    env[k] = envValue(v);
     sources[k] = scope;
   }
+}
+
+/**
+ * Nearest level first — the step's own `env:`, then the job's, then the
+ * workflow's. The merged map has no natural order, and merge order puts the
+ * inherited entries first: on a workflow with a large top-level `env:` block
+ * that buries the step's own vars, which are the ones a verifier reaches for.
+ * `sort` is stable, so within a level the workflow's own order survives.
+ */
+const SCOPE_ORDER: Record<EnvScope, number> = { step: 0, job: 1, workflow: 2 };
+
+function nearestFirst(
+  env: Record<string, string>,
+  sources: Record<string, EnvScope>,
+): Record<string, string> {
+  const ordered: Record<string, string> = {};
+  for (const k of Object.keys(env).sort(
+    (a, b) => SCOPE_ORDER[sources[a]] - SCOPE_ORDER[sources[b]],
+  )) {
+    ordered[k] = env[k];
+  }
+  return ordered;
 }
 
 export interface ExtractStepArgs {
@@ -216,9 +264,19 @@ export interface ExtractStepArgs {
 
 export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   const wfPath = resolve(args.workflow);
+  // Read and parse are separate failures with separate fixes: a missing path
+  // reported as "cannot parse" sends the caller hunting for a YAML error.
+  let text: string;
+  try {
+    text = readFileSync(wfPath, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `extract-step: cannot read ${args.workflow}: ${(err as Error).message}`,
+    );
+  }
   let doc: WorkflowDoc;
   try {
-    doc = parse(readFileSync(wfPath, 'utf8')) as typeof doc;
+    doc = parse(text) as WorkflowDoc;
   } catch (err) {
     throw new Error(
       `extract-step: cannot parse ${args.workflow}: ${(err as Error).message}`,
@@ -259,18 +317,34 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   // wrong directory, and nothing says so.
   const workflowDefaults = runDefaultsOf(doc);
   const jobDefaults = runDefaultsOf(job);
-  const env: Record<string, string> = {};
+  const merged: Record<string, string> = {};
   const envSources: Record<string, EnvScope> = {};
-  mergeEnv(doc, 'workflow', env, envSources);
-  mergeEnv(job, 'job', env, envSources);
-  mergeEnv(step, 'step', env, envSources);
+  mergeEnv(doc, 'workflow', merged, envSources);
+  mergeEnv(job, 'job', merged, envSources);
+  mergeEnv(step, 'step', merged, envSources);
+  const env = nearestFirst(merged, envSources);
 
-  // GitHub's default for run steps on Linux runners is `bash -e`; a `shell:`
-  // at any level overrides. Recorded either way, because the caller must
-  // invoke the script with the same shell the runner would.
-  const shell =
-    nearestString(step.shell, jobDefaults.shell, workflowDefaults.shell) ??
-    'bash';
+  // GitHub's default for run steps on non-Windows runners is `bash -e {0}`; a
+  // `shell:` at any level overrides it. Declaring `shell: bash` is NOT the
+  // same as taking the default — the runner then uses
+  // `bash --noprofile --norc -eo pipefail {0}`, so a pipeline whose middle
+  // command fails aborts there and would not under a bare `set -e`. Carry the
+  // distinction or the extraction measures a different script than the runner.
+  const declaredShell = nearestString(
+    step.shell,
+    jobDefaults.shell,
+    workflowDefaults.shell,
+  );
+  const shell = declaredShell ?? 'bash';
+  // A `shell:` value is a command TEMPLATE (`perl {0}`), so only its first
+  // word can go in a shebang; the full template is recorded beside it.
+  const shellCommand = shell.trim().split(/\s+/)[0] || 'bash';
+  const setLine =
+    declaredShell === 'bash'
+      ? 'set -eo pipefail'
+      : shellCommand === 'bash' || shellCommand === 'sh'
+        ? 'set -e'
+        : undefined;
   const workingDirectory = nearestString(
     step['working-directory'],
     jobDefaults['working-directory'],
@@ -287,12 +361,15 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   // unbound variable should. Each entry carries the level it came from, so a
   // reader of the script alone can tell an inherited value from the step's own.
   const header = [
-    `#!/usr/bin/env ${shell === 'bash' ? 'bash' : shell}`,
+    `#!/usr/bin/env ${shellCommand}`,
     ...commentLines(
       '# extracted verbatim from ',
       `${args.workflow} — job \`${args.job}\`, step \`${stepLabel}\``,
     ),
-    ...(shell === 'bash' ? ['set -e'] : []),
+    ...(shell === shellCommand
+      ? []
+      : commentLines('# shell (runner invokes it this way): ', shell)),
+    ...(setLine ? [setLine] : []),
     ...Object.entries(env).flatMap(([k, v]) =>
       commentLines(`# env [${envSources[k]}] ${k}=`, v),
     ),
@@ -331,7 +408,8 @@ export const extractStepCommand: CommandModule = {
       .option('step', {
         type: 'string',
         demandOption: true,
-        describe: 'Step name, id, or 0-based index within the job',
+        describe:
+          'Step name, id, or 0-based index within the job (an all-digit value is always read as an index)',
       })
       .option('out', {
         type: 'string',
