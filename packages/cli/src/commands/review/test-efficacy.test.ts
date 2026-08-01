@@ -1679,10 +1679,14 @@ describe('selectMutants — replacement operators', () => {
   });
 
   it('emits one candidate per line — a safety-verb line is not also mutated by replacement', () => {
-    // `map.delete(k) ?? fallback` matches both; the deletion experiment wins.
-    const { selected } = selectMutants([fileOf('cache.delete(key);\n', [1])]);
+    // The input must trigger BOTH paths or the `continue` under test is not
+    // load-bearing: this line carries a safety verb AND a `?? fallback`, so
+    // without the guard it would yield a replacement candidate too.
+    const { selected } = selectMutants([
+      fileOf('cache.delete(key) ?? fallback.reset();\n', [1]),
+    ]);
     expect(selected).toHaveLength(1);
-    expect(selected[0].operator).toBeUndefined();
+    expect(selected[0].operator).toBeUndefined(); // deletion won
   });
 });
 

@@ -583,6 +583,9 @@ export interface MutantSourceFile {
  * `derailed` — the caller must disclose that zero for the same reason.
  */
 /**
+ * (Below: the replacement operators. `selectMutants`' own contract doc sits
+ * directly above `selectMutants` — this block documents its helper.)
+ *
  * Replacement mutants for one added line. High-precision by construction: each
  * pattern is anchored to a shape whose survival maps to one crisp sentence,
  * because a survivor becomes a public Suggestion and a fuzzy operator would
@@ -643,7 +646,7 @@ export function replacementMutantsOf(
   // mean nothing pins when the guard must not fire. The condition must close on
   // this line (balanced parens), or `true` would splice mid-expression.
   const ifm = /^((?:}\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
-  if (ifm && /[!=]==|[<>]=?\s/.test(ifm[2])) {
+  if (ifm) {
     let depth = 1;
     let condEnd = -1;
     for (let i = 0; i < ifm[2].length; i++) {
@@ -653,7 +656,11 @@ export function replacementMutantsOf(
         break;
       }
     }
-    if (condEnd > 0) {
+    // The comparison must be in the CONDITION, not anywhere after `if (`:
+    // testing the whole remainder admitted `if (ready) emit(a !== b);` — the
+    // comparison-less shape whose survivors are pure noise, which this gate
+    // exists to exclude.
+    if (condEnd > 0 && /[!=]==|[<>]=?\s/.test(ifm[2].slice(0, condEnd))) {
       return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
     }
   }
@@ -1597,7 +1604,11 @@ export function runOneMutant(
       verdict === 'killed'
         ? `the suite went red with this statement ${what} — a test catches it`
         : verdict === 'survived'
-          ? `every affected test still PASSED with this statement ${what} — no test fails when it changes`
+          ? `every affected test still PASSED with this statement ${what} — no test fails ${
+              mutant.mutated === undefined
+                ? 'when it is removed'
+                : 'when it changes'
+            }`
           : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
     return { ...mutant, verdict, detail };
   } finally {

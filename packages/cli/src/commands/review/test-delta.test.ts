@@ -58,6 +58,13 @@ describe('failingFilesOf', () => {
     expect(failingFilesOf(out)).toEqual(['src/commands/x.test.ts']);
   });
 
+  it('reads a Windows path shape', () => {
+    // A missed parse is an unattributed failure, not a loud error.
+    expect(failingFilesOf(' FAIL  C:\\repo\\src\\x.test.ts > case')).toEqual([
+      'C:\\repo\\src\\x.test.ts',
+    ]);
+  });
+
   it('names no file from output with no failure lines', () => {
     expect(failingFilesOf('Tests  12 passed (12)')).toEqual([]);
   });
@@ -75,7 +82,7 @@ describe('runTestDelta', () => {
 
   const runWith = (
     test: CommandResult[],
-    baseOutput: string | ((command: string) => CommandResult),
+    baseOutput: string | ((command: string, cwd?: string) => CommandResult),
   ): TestDeltaReport =>
     runTestDelta({
       report: writeReport(test),
@@ -83,7 +90,10 @@ describe('runTestDelta', () => {
       timeout: 60,
       exec:
         typeof baseOutput === 'function'
-          ? (command) => baseOutput(command)
+          ? // Pass cwd through: swallowing it made the baseline-dir assertion
+            // impossible to write, which is why the test that promised it
+            // never made it.
+            (command, cwd) => baseOutput(command, cwd)
           : (command) => cmd({ command, output: baseOutput }),
     });
 
@@ -112,6 +122,7 @@ describe('runTestDelta', () => {
 
   it('reruns ONLY the failed commands, in the baseline dir', () => {
     const calls: string[] = [];
+    const cwds: string[] = [];
     runWith(
       [
         cmd({ command: 'npm test --workspace="a"', exitCode: 0 }),
@@ -125,13 +136,18 @@ describe('runTestDelta', () => {
           exitCode: null,
         }),
       ],
-      (command) => {
+      (command, cwd) => {
         calls.push(command);
+        cwds.push(cwd);
         return cmd({ command, output: '' });
       },
     );
     // Green suites have nothing to attribute; a timeout is infrastructure.
     expect(calls).toEqual(['npm test --workspace="b"']);
+    // …and the rerun happens in the BASE tree, which the name promises and
+    // nothing asserted: running it in the PR worktree would compare a tree
+    // with itself and report every failure pre-existing.
+    expect(cwds).toEqual([baseline]);
   });
 
   it('an empty netNew with everything shared is the pre-existing verdict', () => {

@@ -484,6 +484,66 @@ process.stdout.write(JSON.stringify({
     ).toBe(false);
   });
 
+  it('runs a REPLACEMENT mutant end-to-end and reports the survivor', async () => {
+    // The three new operators take the `lines[line-1] = mutated` branch of
+    // runOneMutant, and nothing exercised write-file -> run-probe -> classify
+    // for it: the unit tests stop at candidate selection, and the other
+    // integration fixture was deliberately made operator-free.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export function pick(a?: string) {\n  return a;\n}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export function pick(a?: string) {\n' +
+        '  return a ?? fallback.value;\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { pick } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof pick).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    const coalesce = out.mutants.probed.find(
+      (m: { operator?: string }) => m.operator === 'coalesce',
+    );
+    expect(coalesce).toBeDefined();
+    expect(coalesce.mutated).toBe('  return a;');
+    expect(coalesce.verdict).toBe('survived');
+    // The wording must match the operator: a replacement CHANGES the line.
+    expect(coalesce.detail).toContain('when it changes');
+    expect(
+      out.findings.some((f: { message: string }) =>
+        f.message.includes('?? fallback'),
+      ),
+    ).toBe(true);
+    // The mutation happened only in the disposable tree.
+    expect(treeState(wt)).toEqual(before);
+  });
+
   it('runs a deletion mutant end-to-end and reports the survivor', async () => {
     // The dogfood shape at full scale: the PR adds a reset function whose one
     // safety statement (`state.clear()`) nothing gates. The fake vitest is
