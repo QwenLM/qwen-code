@@ -160,7 +160,7 @@ jobs:
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
       # on restrictive permissions.
@@ -168,7 +168,7 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ]; then
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
             rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
           fi
@@ -466,7 +466,7 @@ jobs:
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -758,7 +758,7 @@ jobs:
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

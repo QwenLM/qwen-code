@@ -382,12 +382,12 @@ describe('qwen-triage: workspace ownership restore', () => {
     );
     assert.match(
       verifyOwnershipStep.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
-      'verify makes .qwen read-only before the agent runs, so cleanup must restore its owner write bits',
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'verify hardens the workspace before the agent runs, so cleanup must restore owner write bits across the whole workspace, not just .qwen',
     );
 
     const chmodIndex = verifyOwnershipStep.run.indexOf(
-      'chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"',
+      'chmod -R u+rwX "$GITHUB_WORKSPACE"',
     );
     const chownIndex = verifyOwnershipStep.run.indexOf(
       'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
@@ -428,7 +428,7 @@ describe('qwen-triage: workspace ownership restore', () => {
   it('verify: a chmod failure is visible, not silent', () => {
     assert.match(
       verifyOwnershipStep.run,
-      /::warning::could not restore \.qwen write permissions/,
+      /::warning::could not restore workspace write permissions/,
       'chmod failure must emit a ::warning::, not be swallowed by || true',
     );
   });
@@ -507,6 +507,11 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
       ciCleanStep.run,
       /sudo -n rm -rf/,
       'cleanup must fall back to sudo for root-owned dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\[ ! -L "\$GITHUB_WORKSPACE\/\.qwen" \]/,
+      'cleanup must not follow a symlinked .qwen: chmod -R dereferences a symlinked argument and would widen an outside tree',
     );
     assert.doesNotMatch(
       ciCleanStep.run,
