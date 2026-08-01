@@ -6,11 +6,17 @@
 
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
-const SUPPORTED_CHANNEL_TYPES = new Set(['dingtalk', 'wecom', 'feishu']);
+const SUPPORTED_CHANNEL_TYPES = new Set([
+  'dingtalk',
+  'wecom',
+  'feishu',
+  'github',
+  'gitlab',
+]);
 
 export function isSupportedChannelType(
   type: unknown,
-): type is 'dingtalk' | 'wecom' | 'feishu' {
+): type is 'dingtalk' | 'wecom' | 'feishu' | 'github' | 'gitlab' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 

@@ -9,6 +9,23 @@ export const plugin: ChannelPlugin = {
   requiredConfigFields: ['token'],
   envResolvableConfigFields: ['baseUrl'],
   defaultSessionScope: 'chat_thread',
+  management: {
+    fields: [
+      {
+        key: 'token',
+        label: 'Personal Access Token',
+        kind: 'secret',
+        required: true,
+        envResolvable: true,
+      },
+      {
+        key: 'baseUrl',
+        label: 'Base URL',
+        kind: 'string',
+        envResolvable: true,
+      },
+    ],
+  },
   createChannel: (name, config, bridge, options) =>
     new GitlabChannel(name, config, bridge, options),
 };
