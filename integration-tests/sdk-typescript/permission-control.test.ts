@@ -1043,11 +1043,28 @@ describe('Permission Control (E2E)', () => {
         async () => {
           const fileName = 'test-plan-edit.txt';
           await helper.createFile(fileName, 'old content');
-          const fakeServer = await startFakeToolServer('edit', {
-            file_path: helper.getPath(fileName),
-            old_string: 'old',
-            new_string: 'new',
-          });
+          const filePath = helper.getPath(fileName);
+          // Read the file first so prior-read enforcement passes and the
+          // plan-mode policy is the gate that actually blocks the edit.
+          const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [fakeToolCall('read_file', { file_path: filePath })],
+              };
+            }
+            if (requestIndex === 1) {
+              return {
+                toolCalls: [
+                  fakeToolCall('edit', {
+                    file_path: filePath,
+                    old_string: 'old',
+                    new_string: 'new',
+                  }),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          }, FAKE_SERVER_OPTIONS);
 
           const q = query({
             prompt: `Edit ${fileName}.`,
@@ -1056,7 +1073,7 @@ describe('Permission Control (E2E)', () => {
               ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'plan',
               cwd: testDir,
-              coreTools: ['edit'],
+              coreTools: ['read_file', 'edit'],
               canUseTool: async (_toolName, input) => ({
                 behavior: 'allow',
                 updatedInput: input,
@@ -1117,6 +1134,12 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
+            const errorResults = findAllToolResultBlocks(messages).filter(
+              (r) => r.isError,
+            );
+            expect(errorResults[0].content.toLowerCase()).toContain(
+              'plan mode',
+            );
             expect(helper.fileExists('plan-shell-blocked.txt')).toBe(false);
           } finally {
             await q.close();
