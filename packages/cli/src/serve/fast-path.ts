@@ -8,8 +8,7 @@ import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   isValidMemoryBudgetMb,
-  MAX_MEMORY_BUDGET_MB,
-  MIN_MEMORY_BUDGET_MB,
+  memoryBudgetRangeError,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
@@ -236,10 +235,7 @@ function getServeFastPathValidationError(
 
   const memoryBudgetMb = parsed.options.memoryBudgetMb;
   if (memoryBudgetMb !== undefined && !isValidMemoryBudgetMb(memoryBudgetMb)) {
-    return (
-      'qwen serve: --memory-budget-mb must be an integer in ' +
-      `[${MIN_MEMORY_BUDGET_MB}, ${MAX_MEMORY_BUDGET_MB}].`
-    );
+    return memoryBudgetRangeError();
   }
 
   return null;

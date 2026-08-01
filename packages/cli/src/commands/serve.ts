@@ -21,8 +21,7 @@ import {
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   isValidMemoryBudgetMb,
-  MAX_MEMORY_BUDGET_MB,
-  MIN_MEMORY_BUDGET_MB,
+  memoryBudgetRangeError,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
@@ -498,10 +497,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       memoryBudgetMb !== undefined &&
       !isValidMemoryBudgetMb(memoryBudgetMb)
     ) {
-      writeStderrLine(
-        'qwen serve: --memory-budget-mb must be an integer in ' +
-          `[${MIN_MEMORY_BUDGET_MB}, ${MAX_MEMORY_BUDGET_MB}].`,
-      );
+      writeStderrLine(memoryBudgetRangeError());
       process.exit(1);
     }
     const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];

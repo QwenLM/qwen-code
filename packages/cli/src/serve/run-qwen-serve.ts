@@ -131,6 +131,7 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
@@ -1556,9 +1557,7 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
-        // The memory budget is resolved during workspace input validation,
-        // well after this pre-runtime placeholder is served.
-        memory: null,
+        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),

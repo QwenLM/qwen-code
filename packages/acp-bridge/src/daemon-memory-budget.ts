@@ -7,10 +7,14 @@
 import os from 'node:os';
 
 // Mirrored from the inline literals in spawnChannel.ts:getAcpMemoryArgs()
-// (only DEFAULT_MEMORY_BUDGET_FRACTION and MAX_CHILD_HEAP_MB have counterparts
+// (only LEGACY_CHILD_HEAP_FRACTION and MAX_CHILD_HEAP_MB have counterparts
 // there; the remaining constants are new to this module). If those change,
 // update these to match. The import direction is blocked by the fast-path
 // bundle closure check; reversing it is tracked as follow-up.
+
+/** Mirrors the hardcoded 0.5 in spawnChannel.ts:getAcpMemoryArgs(). */
+export const LEGACY_CHILD_HEAP_FRACTION = 0.5;
+/** This module's own derived-budget fraction; free to move independently. */
 export const DEFAULT_MEMORY_BUDGET_FRACTION = 0.5;
 export const MIN_MEMORY_BUDGET_MB = 1_024;
 export const MAX_MEMORY_BUDGET_MB = 1_048_576;
@@ -127,7 +131,7 @@ export function detectAvailableMemoryMb(): {
 export function legacyChildCeilingMb(availableMemoryMb?: number): number {
   const memoryMb = availableMemoryMb ?? detectAvailableMemoryMb().memoryMb;
   return Math.min(
-    Math.floor(memoryMb * DEFAULT_MEMORY_BUDGET_FRACTION),
+    Math.floor(memoryMb * LEGACY_CHILD_HEAP_FRACTION),
     MAX_CHILD_HEAP_MB,
   );
 }
@@ -153,6 +157,13 @@ export function normalizeMemoryBudgetMb(value: number): number {
     );
   }
   return value;
+}
+
+export function memoryBudgetRangeError(): string {
+  return (
+    'qwen serve: --memory-budget-mb must be an integer in ' +
+    `[${MIN_MEMORY_BUDGET_MB}, ${MAX_MEMORY_BUDGET_MB}].`
+  );
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   MAX_CHILD_HEAP_MB,
   MIN_CHILD_HEAP_MB,
   recommendedChildShareMb,
+  type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
@@ -182,7 +183,7 @@ interface DaemonStatusLimits {
   memory: DaemonStatusMemoryLimits | null;
 }
 
-interface DaemonStatusMemoryLimits {
+export interface DaemonStatusMemoryLimits {
   /**
    * False, and required. Every figure in this section is resolved input or a
    * model of a policy that does not exist yet; nothing here is applied to a
@@ -215,6 +216,28 @@ interface DaemonStatusMemoryLimits {
      * the figure a child actually receives (see the spawn-path divergences).
      */
     legacyChildCeilingMb: number;
+  };
+}
+
+export function toDaemonStatusMemoryLimits(
+  budget: DaemonMemoryBudget | undefined,
+): DaemonStatusMemoryLimits | null {
+  if (!budget) return null;
+  return {
+    enforced: false,
+    configuredBudgetMb: budget.configuredBudgetMb,
+    effectiveBudgetMb: budget.effectiveBudgetMb,
+    budgetSource: budget.budgetSource,
+    availableMemoryMb: budget.availableMemoryMb,
+    availableMemorySource: budget.availableMemorySource,
+    insufficientMemory: budget.insufficientMemory,
+    modeled: {
+      rootReserveMb: budget.rootReserveMb,
+      childPoolMb: budget.childPoolMb,
+      minChildHeapMb: MIN_CHILD_HEAP_MB,
+      maxChildHeapMb: MAX_CHILD_HEAP_MB,
+      legacyChildCeilingMb: budget.legacyChildCeilingMb,
+    },
   };
 }
 
@@ -612,24 +635,7 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
-      memory: memoryBudget
-        ? {
-            enforced: false,
-            configuredBudgetMb: memoryBudget.configuredBudgetMb,
-            effectiveBudgetMb: memoryBudget.effectiveBudgetMb,
-            budgetSource: memoryBudget.budgetSource,
-            availableMemoryMb: memoryBudget.availableMemoryMb,
-            availableMemorySource: memoryBudget.availableMemorySource,
-            insufficientMemory: memoryBudget.insufficientMemory,
-            modeled: {
-              rootReserveMb: memoryBudget.rootReserveMb,
-              childPoolMb: memoryBudget.childPoolMb,
-              minChildHeapMb: MIN_CHILD_HEAP_MB,
-              maxChildHeapMb: MAX_CHILD_HEAP_MB,
-              legacyChildCeilingMb: memoryBudget.legacyChildCeilingMb,
-            },
-          }
-        : null,
+      memory: toDaemonStatusMemoryLimits(memoryBudget),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
       ? {

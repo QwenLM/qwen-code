@@ -6321,7 +6321,7 @@ describe('runQwenServe runtime startup failures', () => {
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
           acpConnectionCap: null,
-          memory: null,
+          memory: expect.objectContaining({ enforced: false }),
         },
         capabilities: {
           protocolVersions: { current: 'v1', supported: ['v1'] },
