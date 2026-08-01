@@ -311,10 +311,12 @@ describe('test-efficacy probe isolation (#6832)', () => {
     // zero mutants, and before the fix there were zero hunk probes too: the
     // one class of diff per-hunk probing exists for got nothing at all.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    // No safety verb, no `??`, no `+ CONST`, and the condition edit carries no
+    // comparison — zero candidates for EVERY operator, which is the premise.
     write(
       'packages/lib/src/f.ts',
       'export function price(n: number) {\n' +
-        '  if (n < 0) return 0;\n' +
+        '  if (valid(n)) return 0;\n' +
         '  return n * 2;\n' +
         '}\n' +
         '\n'.repeat(12) +
@@ -326,7 +328,7 @@ describe('test-efficacy probe isolation (#6832)', () => {
     write(
       'packages/lib/src/f.ts',
       'export function price(n: number) {\n' +
-        '  if (n <= 0) return 0;\n' +
+        '  if (!valid(n)) return 0;\n' +
         '  return n * 3;\n' +
         '}\n' +
         '\n'.repeat(12) +
@@ -452,6 +454,66 @@ process.stdout.write(JSON.stringify({
         (f) => f.kind === 'hunk-survived',
       ),
     ).toBe(false);
+  });
+
+  it('runs a REPLACEMENT mutant end-to-end and reports the survivor', async () => {
+    // The three new operators take the `lines[line-1] = mutated` branch of
+    // runOneMutant, and nothing exercised write-file -> run-probe -> classify
+    // for it: the unit tests stop at candidate selection, and the other
+    // integration fixture was deliberately made operator-free.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export function pick(a?: string) {\n  return a;\n}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export function pick(a?: string) {\n' +
+        '  return a ?? fallback.value;\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { pick } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof pick).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    const coalesce = out.mutants.probed.find(
+      (m: { operator?: string }) => m.operator === 'coalesce',
+    );
+    expect(coalesce).toBeDefined();
+    expect(coalesce.mutated).toBe('  return a;');
+    expect(coalesce.verdict).toBe('survived');
+    // The wording must match the operator: a replacement CHANGES the line.
+    expect(coalesce.detail).toContain('when it changes');
+    expect(
+      out.findings.some((f: { message: string }) =>
+        f.message.includes('?? fallback'),
+      ),
+    ).toBe(true);
+    // The mutation happened only in the disposable tree.
+    expect(treeState(wt)).toEqual(before);
   });
 
   it('runs a deletion mutant end-to-end and reports the survivor', async () => {
@@ -927,8 +989,10 @@ process.stdout.write(JSON.stringify({
     expect(out.mutants.skippedForCap).toBe(1);
     expect(out.mutants.skippedForBaseline).toBe(0);
     expect(out.mutants.probed.length + out.mutants.skippedForCap).toBe(9);
+    // Names BOTH caps: this count carries sub-cap drops too, and a message
+    // naming only the total sends the reader after candidates that never were.
     expect(stdoutChunks.join('')).toContain(
-      '1 mutant(s) skipped: more candidates than the cap of 8',
+      '1 mutant(s) skipped: more candidates than the selection caps (8 total, 3 of them replacements)',
     );
   });
 
