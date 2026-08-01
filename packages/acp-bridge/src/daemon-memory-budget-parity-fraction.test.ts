@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// getAcpMemoryArgs() memoizes its result into module state, so the saturated
-// and unsaturated parity cases live in separate files: each test file gets a
-// fresh module registry, which keeps the cases independent of execution order
+// Unsaturated counterpart to daemon-memory-budget-parity.test.ts. The two
+// cases are split across files because getAcpMemoryArgs() memoizes into module
+// state; a fresh registry per file keeps them independent of execution order
 // without a slow vi.resetModules() re-import inside a test.
 import { describe, expect, it, vi } from 'vitest';
 import {
+  LEGACY_CHILD_HEAP_FRACTION,
   legacyChildCeilingMb,
   MAX_CHILD_HEAP_MB,
 } from './daemon-memory-budget.js';
@@ -18,8 +19,8 @@ import { getAcpMemoryArgs } from './spawnChannel.js';
 const MB = 1024 * 1024;
 
 const { mockedTotalMem, mockedHeapSizeLimit } = vi.hoisted(() => ({
-  mockedTotalMem: { value: 65_536 * 1024 * 1024 },
-  mockedHeapSizeLimit: { value: 4_096 * 1024 * 1024 },
+  mockedTotalMem: { value: 8_192 * 1024 * 1024 },
+  mockedHeapSizeLimit: { value: 2_048 * 1024 * 1024 },
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -42,17 +43,24 @@ vi.mock('node:v8', async (importOriginal) => {
 });
 
 describe('spawn-path constant parity', () => {
-  it('getAcpMemoryArgs uses the same cap as legacyChildCeilingMb (saturated)', () => {
-    mockedTotalMem.value = 65_536 * MB;
-    mockedHeapSizeLimit.value = 4_096 * MB;
+  it('getAcpMemoryArgs uses the same fraction as legacyChildCeilingMb (unsaturated)', () => {
+    const availableMb = 8_192;
+    mockedTotalMem.value = availableMb * MB;
+    mockedHeapSizeLimit.value = 2_048 * MB;
     vi.spyOn(
       process as { constrainedMemory: () => number },
       'constrainedMemory',
     ).mockReturnValue(0);
 
     const args = getAcpMemoryArgs();
-    const expected = legacyChildCeilingMb(65_536);
-    expect(expected).toBe(MAX_CHILD_HEAP_MB);
+    const expected = legacyChildCeilingMb(availableMb);
+    expect(expected).toBe(
+      Math.min(
+        Math.floor(availableMb * LEGACY_CHILD_HEAP_FRACTION),
+        MAX_CHILD_HEAP_MB,
+      ),
+    );
+    expect(expected).toBeLessThan(MAX_CHILD_HEAP_MB);
     expect(args).toContain(`--max-old-space-size=${expected}`);
   });
 });
