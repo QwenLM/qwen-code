@@ -4433,14 +4433,21 @@ export class QwenAgent extends BaseAgent {
     const toolUseId =
       asString(record.uuid) || `qwen-transcript-tool-${nextId()}`;
     const input = toRecord(uiEvent.function_args);
-    const isError = uiEvent.success === false || uiEvent.status === 'error';
+    const status = asString(uiEvent.status);
+    const isInterrupted = isQwenUserInterruptStatus(status);
+    const isError =
+      uiEvent.success === false ||
+      isQwenToolFailureStatus(status) ||
+      isInterrupted;
     const error = asString(uiEvent.error);
     const contentLength = asNumber(uiEvent.content_length);
-    const toolResult = isError
-      ? error || 'Tool failed'
-      : contentLength != null
-        ? `Completed (${contentLength} bytes)`
-        : 'Completed';
+    const toolResult = isInterrupted
+      ? 'Interrupted'
+      : isError
+        ? error || 'Tool failed'
+        : contentLength != null
+          ? `Completed (${contentLength} bytes)`
+          : 'Completed';
 
     return {
       id: nextId(),

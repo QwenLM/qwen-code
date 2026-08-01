@@ -7,7 +7,7 @@
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import { ChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { ChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,

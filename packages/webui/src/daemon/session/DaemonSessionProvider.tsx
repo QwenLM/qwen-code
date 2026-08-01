@@ -38,6 +38,7 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
+import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -255,7 +256,10 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const todoId =
+    typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
+  const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
@@ -264,6 +268,7 @@ function projectSubagentToolUpdate(
         ...(subagentType ? { subagent_type: subagentType } : {}),
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
+        ...(todoId ? { todo_id: todoId } : {}),
         ...(rawInput['run_in_background'] === true
           ? { run_in_background: true }
           : {}),
@@ -275,6 +280,7 @@ function projectSubagentToolUpdate(
           ? { type: 'task_execution' }
           : {}),
         ...(subagentName ? { subagentName } : {}),
+        ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(terminateReason ? { terminateReason } : {}),
@@ -2454,6 +2460,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ...eventOptionsRef.current,
         suppressOwnUserEcho: false,
       };
+      const nextBeforeRecordId = page.events
+        .map(getPersistedReplayRecordId)
+        .find((recordId): recordId is string => recordId !== undefined);
       const uiEvents: DaemonUiEvent[] = [];
       for (const replayEvent of page.events) {
         try {
@@ -2509,8 +2518,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
       history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor = page.nextCursor;
-      history.beforeRecordId = undefined;
+      history.cursor =
+        nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+      history.beforeRecordId = nextBeforeRecordId;
       history.hasMore = page.hasMore && hasCapacity;
       history.loading = false;
       setTranscriptHistoryState({
@@ -2932,12 +2942,16 @@ export function useDaemonActiveTodoList() {
 }
 
 export function useDaemonStreamingState() {
-  const blocks = useDaemonTranscriptBlocks();
+  const store = useDaemonTranscriptStore();
   const promptStatus = useDaemonPromptStatus();
-
-  return useMemo(
-    () => selectDaemonStreamingState(blocks, promptStatus),
-    [blocks, promptStatus],
+  const getStreamingState = useCallback(
+    () => selectDaemonStreamingState(store.getSnapshot().blocks, promptStatus),
+    [promptStatus, store],
+  );
+  return useSyncExternalStore(
+    store.subscribe,
+    getStreamingState,
+    getStreamingState,
   );
 }
 
@@ -3227,16 +3241,4 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
-}
-
-function extractHttpStatus(error: unknown): number | undefined {
-  if (error instanceof DaemonHttpError) return error.status;
-  if (isRecord(error) && typeof error['status'] === 'number') {
-    return error['status'];
-  }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -46,6 +46,11 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+  type SessionWriterProcessKind,
+} from './session-writer-lease.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -337,6 +342,25 @@ export class SessionService {
    * scheduled-tasks file without re-plumbing the workspace path. */
   getProjectRoot(): string {
     return this.projectRoot;
+  }
+
+  async acquireSessionWriterLease(
+    sessionId: string,
+    options: {
+      processKind: SessionWriterProcessKind;
+      qwenVersion?: string | null;
+      reclaimPolicy: 'local' | 'never';
+    },
+  ): Promise<SessionWriterLease> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      throw new SessionWriterUnavailableError();
+    }
+    return SessionWriterLease.acquire({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      transcriptPath: this.getSessionFilePath(sessionId, 'active'),
+      ...options,
+    });
   }
 
   private warn(message: string): void {
@@ -1666,6 +1690,9 @@ export class SessionService {
   async forkSession(
     sourceSessionId: string,
     newSessionId: string,
+    options: {
+      source?: { sourceType: string; sourceId?: string };
+    } = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
       throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
@@ -1709,7 +1736,8 @@ export class SessionService {
         !(
           record.type === 'system' &&
           (record.subtype === 'parent_session' ||
-            record.subtype === 'session_source')
+            record.subtype === 'session_source' ||
+            (options.source && record.subtype === 'custom_title'))
         ),
     );
     if (sourceRecords.length === 0) {
@@ -1719,32 +1747,53 @@ export class SessionService {
     // Rebuild the parentUuid chain in active-history order so the fork is a
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
-    let prevUuid: string | null = null;
+    const sourceRecord: ChatRecord | undefined = options.source
+      ? {
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: newSessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'session_source',
+          cwd: this.projectRoot,
+          version: records[0].version,
+          systemPayload: {
+            sourceType: options.source.sourceType,
+            ...(options.source.sourceId !== undefined
+              ? { sourceId: options.source.sourceId }
+              : {}),
+          },
+        }
+      : undefined;
+    let prevUuid: string | null = sourceRecord?.uuid ?? null;
     const remappedArtifactIds = new Map<string, string>();
-    const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const isArtifactRecord = isSessionArtifactRecord(record);
-      const systemPayload = remapSystemPayloadForFork(
-        record,
-        sourceSessionId,
-        newSessionId,
-        remappedArtifactIds,
-      );
-      const next: ChatRecord = {
-        ...record,
-        sessionId: newSessionId,
-        cwd: this.projectRoot,
-        systemPayload,
-        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
-        forkedFrom: {
-          sessionId: sourceSessionId,
-          messageUuid: record.uuid,
-        },
-      };
-      if (!isArtifactRecord) {
-        prevUuid = record.uuid;
-      }
-      return next;
-    });
+    const forked: ChatRecord[] = [
+      ...(sourceRecord ? [sourceRecord] : []),
+      ...sourceRecords.map((record) => {
+        const isArtifactRecord = isSessionArtifactRecord(record);
+        const systemPayload = remapSystemPayloadForFork(
+          record,
+          sourceSessionId,
+          newSessionId,
+          remappedArtifactIds,
+        );
+        const next: ChatRecord = {
+          ...record,
+          sessionId: newSessionId,
+          cwd: this.projectRoot,
+          systemPayload,
+          parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
+          forkedFrom: {
+            sessionId: sourceSessionId,
+            messageUuid: record.uuid,
+          },
+        };
+        if (!isArtifactRecord) {
+          prevUuid = record.uuid;
+        }
+        return next;
+      }),
+    ];
 
     // File-history snapshots are side-channel system records used by /rewind.
     // They may not sit on the active message leaf copied above, and copied

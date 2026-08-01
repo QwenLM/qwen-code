@@ -177,7 +177,7 @@ export interface BridgeOptions {
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not
-   * counted. `0` / `Infinity` disable the cap. Defaults to 20 — see
+   * counted. `0` / `Infinity` disable the cap. Defaults to 32 — see
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;

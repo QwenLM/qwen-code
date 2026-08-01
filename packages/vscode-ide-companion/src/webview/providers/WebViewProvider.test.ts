@@ -29,6 +29,7 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
+  toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
   mockShowInformationMessage,
@@ -102,6 +103,11 @@ const {
   },
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
+  },
+  toolCallCallbackRef: {
+    current: undefined as
+      | ((update: Record<string, unknown>) => void)
+      | undefined,
   },
   permissionRequestCallbackRef: {
     current: undefined as ((request: unknown) => Promise<string>) | undefined,
@@ -229,7 +235,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
-    onToolCall = vi.fn();
+    onToolCall = vi.fn(
+      (callback: (update: Record<string, unknown>) => void) => {
+        toolCallCallbackRef.current = callback;
+      },
+    );
     onPlan = vi.fn();
     onPermissionRequest = vi.fn(
       (callback: (request: unknown) => Promise<string>) => {
@@ -451,6 +461,7 @@ beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
+  toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
@@ -901,6 +912,75 @@ describe('WebViewProvider.attachToView', () => {
         status: 'failed',
       }),
     });
+  });
+
+  it('settles a matching pending permission when the tool call becomes terminal', async () => {
+    const { postMessage } = await setupAttachedProvider();
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    const permissionPromise = agentManager?.permissionRequestCallback?.({
+      options: [
+        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
+      ],
+      toolCall: {
+        toolCallId: 'tool-call-aborted',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'pending',
+      },
+    });
+
+    toolCallCallbackRef.current?.({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'tool-call-aborted',
+      status: 'failed',
+    });
+
+    await expect(permissionPromise).resolves.toBe('cancel');
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionResolved',
+      data: { optionId: 'cancel' },
+    });
+  });
+
+  it('rejects one workflow approval without cancelling the parent prompt', async () => {
+    const { postMessage } = await setupAttachedProvider();
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    const messageHandler = mockMessageHandlerInstances.at(-1);
+    const permissionPromise = agentManager?.permissionRequestCallback?.({
+      options: [
+        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
+      ],
+      toolCall: {
+        toolCallId: 'workflow-approval-1',
+        title: 'Run command',
+        kind: 'execute',
+        status: 'pending',
+        _meta: { workflowApproval: true },
+      },
+    });
+
+    messageHandler?.permissionHandler?.({
+      type: 'permissionResponse',
+      data: { optionId: 'cancel' },
+    });
+
+    await expect(permissionPromise).resolves.toBe('cancel');
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith({
+        type: 'toolCall',
+        data: expect.objectContaining({
+          type: 'tool_call_update',
+          toolCallId: 'workflow-approval-1',
+          status: 'failed',
+        }),
+      });
+    });
+    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'streamEnd' }),
+    );
   });
 
   it('replays available skills to the webview after webviewReady', async () => {

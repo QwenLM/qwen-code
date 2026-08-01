@@ -69,15 +69,16 @@ export interface LLMRequestMetadata {
   durationMs?: number;
   error?: string;
   /**
-   * Time from the successful attempt's request dispatch to the first stream
-   * chunk containing user-visible content (text / functionCall / inlineData /
-   * executableCode / thought). Undefined for non-streaming requests, requests
-   * aborted before the first user-visible chunk, and any path that does not
-   * pass through LoggingContentGenerator's stream wrapper.
+   * Internal time from the streaming wrapper's existing wall-clock start to
+   * the first chunk containing user-visible content (text / functionCall /
+   * inlineData / executableCode / thought). Undefined for non-streaming
+   * requests, requests aborted before the first user-visible chunk, and any
+   * path that does not pass through LoggingContentGenerator's stream wrapper.
    *
-   * Semantics: diverges from claude-code's ttftMs (which fires on
-   * Anthropic's message_start metadata event). Matches the "time to first
-   * actual token" intent of the industry-standard TTFT name.
+   * This is intentionally distinct from
+   * `gen_ai.response.time_to_first_chunk`, which uses a monotonic request
+   * issuance timer and records the first normalized chunk regardless of
+   * content.
    * See docs/design/telemetry-llm-request-timing-design.md (D1).
    */
   ttftMs?: number;
@@ -192,6 +193,13 @@ const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
  * Review wenshao @ #4410.
  */
 const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
+// The interaction span ends before a ToolResult continuation starts. Retain
+// only its identity attributes so later spans can inherit the user without
+// re-parenting to an ended span or keeping the Span object alive.
+const interactionIdentityByPromptId = new Map<
+  string,
+  Pick<SpanContext, 'startTime' | 'attributes'>
+>();
 
 export function isInNativeSubagentSpan(): boolean {
   const ctx = subagentContext.getStore();
@@ -219,6 +227,17 @@ function resolveSessionId(
   return typeof fromParent === 'string' && fromParent
     ? fromParent
     : getCurrentSessionId();
+}
+
+function resolveGenAiUserId(
+  parentCtx: Pick<SpanContext, 'attributes'> | undefined,
+  promptId?: string,
+): string | undefined {
+  const logicalParent =
+    parentCtx ??
+    (promptId ? interactionIdentityByPromptId.get(promptId) : undefined);
+  const value = logicalParent?.attributes['gen_ai.user.id'];
+  return typeof value === 'string' && value ? value : undefined;
 }
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
@@ -271,6 +290,12 @@ function ttlFor(ctx: SpanContext): number {
 }
 
 function sweepStaleSpans(now: number): void {
+  for (const [promptId, ctx] of interactionIdentityByPromptId) {
+    if (now - ctx.startTime >= SPAN_TTL_MS_DEFAULT) {
+      interactionIdentityByPromptId.delete(promptId);
+    }
+  }
+
   for (const [spanId, weakRef] of activeSpans) {
     const ctx = weakRef.deref();
     if (ctx === undefined) {
@@ -412,8 +437,10 @@ export function startInteractionSpan(
   ensureCleanupInterval();
   interactionSequence++;
 
+  const userId = config.getTelemetryUserId();
   const attributes: Attributes = {
     'session.id': config.getSessionId(),
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'qwen-code.prompt_id': options.promptId,
     'qwen-code.message_type': options.messageType,
     'qwen-code.model': options.model,
@@ -439,6 +466,14 @@ export function startInteractionSpan(
   };
   activeSpans.set(spanId, new WeakRef(spanContextObj));
   strongSpans.set(spanId, spanContextObj);
+  if (userId) {
+    interactionIdentityByPromptId.set(options.promptId, {
+      startTime: spanContextObj.startTime,
+      attributes: { 'gen_ai.user.id': userId },
+    });
+  } else {
+    interactionIdentityByPromptId.delete(options.promptId);
+  }
   lastInteractionCtx = spanContextObj;
   interactionContext.enterWith(spanContextObj);
 }
@@ -492,8 +527,10 @@ export async function withInteractionSpan<T>(
   ensureCleanupInterval();
   interactionSequence++;
 
+  const userId = config.getTelemetryUserId();
   const attributes: Attributes = {
     'session.id': config.getSessionId(),
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'qwen-code.prompt_id': options.promptId,
     'qwen-code.message_type': options.messageType,
     'qwen-code.model': options.model,
@@ -519,6 +556,14 @@ export async function withInteractionSpan<T>(
   };
   activeSpans.set(spanId, new WeakRef(spanContextObj));
   strongSpans.set(spanId, spanContextObj);
+  if (userId) {
+    interactionIdentityByPromptId.set(options.promptId, {
+      startTime: spanContextObj.startTime,
+      attributes: { 'gen_ai.user.id': userId },
+    });
+  } else {
+    interactionIdentityByPromptId.delete(options.promptId);
+  }
 
   const activeContext = trace.setSpan(parentContext, span);
   return await otelContext.with(activeContext, async () =>
@@ -589,9 +634,11 @@ export function startLLMRequestSpan(
   const ctx = resolveParentContext(parentCtx);
 
   const sessionId = resolveSessionId(parentCtx);
+  const userId = resolveGenAiUserId(parentCtx, promptId);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'qwen-code.prompt_id': promptId,
     'llm_request.context': subagentContext.getStore()
       ? 'subagent'
@@ -827,6 +874,7 @@ export function startToolSpan(
   toolName: string,
   attrs?: Record<string, string | number | boolean>,
   description?: string,
+  promptId?: string,
 ): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
@@ -840,9 +888,11 @@ export function startToolSpan(
   const ctx = resolveParentContext(parentCtx);
 
   const sessionId = resolveSessionId(parentCtx);
+  const userId = resolveGenAiUserId(parentCtx, promptId);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...attrs,
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'gen_ai.operation.name': 'execute_tool',
     'gen_ai.tool.name': toolName,
     'gen_ai.tool.type': 'function',
@@ -1426,11 +1476,17 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
 
   ensureCleanupInterval();
 
+  const parentCtx =
+    subagentContext.getStore() ??
+    toolContext.getStore() ??
+    interactionContext.getStore();
+  const userId = resolveGenAiUserId(parentCtx);
   const attributes: Attributes = {
     // Spec-aligned (OTel GenAI Agent Spans, Development status).
     'gen_ai.operation.name': 'invoke_agent',
     'gen_ai.agent.name': opts.subagentName,
     'gen_ai.conversation.id': opts.sessionId,
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
 
     // Vendor identity and lifecycle. The per-invocation ID stays private;
     // gen_ai.agent.id is reserved for a stable agent definition identity.
@@ -1661,6 +1717,7 @@ export function getActiveInteractionSpan(): Span | undefined {
 export function clearSessionTracingForTesting(): void {
   activeSpans.clear();
   strongSpans.clear();
+  interactionIdentityByPromptId.clear();
   interactionContext.enterWith(undefined);
   toolContext.enterWith(undefined);
   // subagentContext is checked BEFORE interactionContext in startXSpan, so

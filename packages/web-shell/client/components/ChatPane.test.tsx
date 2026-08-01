@@ -31,16 +31,24 @@ let latestOnSubmit:
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
+let latestMonitorDetailsOnOpen:
+  | ((tool: {
+      callId: string;
+      toolName: string;
+      status: 'completed';
+    }) => Promise<boolean>)
+  | undefined;
 let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
-const submitPermission = vi.fn(async () => {});
+const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const getTasks = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -48,10 +56,10 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   loadArtifacts,
+  getTasks,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
-const insertQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
@@ -96,7 +104,6 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
     queuedTexts: queuedTextsMock,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -106,11 +113,29 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
 let messagesState: any[];
 vi.mock('../hooks/useMessages', () => ({
   useMessages: () => messagesState,
+  useMessagesFromBlocks: () => messagesState,
+}));
+
+vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => [],
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
   extractPendingPermission: () => pendingPermission,
 }));
+
+vi.mock('../monitorDetailsContext', async () => {
+  const React = await import('react');
+  return {
+    MonitorDetailsProvider: (props: {
+      onOpen: typeof latestMonitorDetailsOnOpen;
+      children: React.ReactNode;
+    }) => {
+      latestMonitorDetailsOnOpen = props.onOpen;
+      return React.createElement(React.Fragment, null, props.children);
+    },
+  };
+});
 
 vi.mock('./MessageList', () => ({
   MessageList: (props: any) => (
@@ -194,7 +219,12 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div
+      data-testid="pane-queue"
+      data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+    >
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -202,6 +232,9 @@ vi.mock('./messages/ToolApproval', () => ({
     <button
       data-testid="tool-approval"
       data-keyboard-active={String(props.keyboardActive)}
+      data-plan-todos={JSON.stringify(
+        props.planTodos?.map((todo: any) => todo.id) ?? [],
+      )}
       onClick={() => props.onConfirm(props.request.id, 'proceed')}
     >
       approve
@@ -241,12 +274,14 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   latestFollowupAccept = undefined;
+  latestMonitorDetailsOnOpen = undefined;
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  getTasks.mockReset();
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -260,7 +295,6 @@ beforeEach(() => {
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
-  insertQueuedPrompt.mockClear();
   editQueuedPrompt.mockClear();
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
@@ -312,6 +346,80 @@ function testid(id: string): HTMLElement | null {
 }
 
 describe('ChatPane', () => {
+  it('opens a pane monitor in the shared right panel', async () => {
+    connectionState.capabilities = {
+      features: ['session_monitor_tool_correlation'],
+    };
+    const monitor = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch pane logs',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'tail -f pane.log',
+      eventCount: 1,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 11,
+      tasks: [monitor],
+    });
+    const onOpenMonitor = vi.fn();
+
+    render({ onOpenMonitor });
+
+    let opened = false;
+    await act(async () => {
+      opened =
+        (await latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? false;
+    });
+
+    expect(opened).toBe(true);
+    expect(getTasks).toHaveBeenCalledOnce();
+    expect(onOpenMonitor).toHaveBeenCalledWith(
+      monitor,
+      'sess-1',
+      daemonActions,
+    );
+  });
+
+  it('does not open a monitor returned for another pane session', async () => {
+    connectionState.capabilities = {
+      features: ['session_monitor_tool_correlation'],
+    };
+    getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'other-session',
+      now: 11,
+      tasks: [],
+    });
+    const onOpenMonitor = vi.fn();
+
+    render({ onOpenMonitor });
+
+    let opened = true;
+    await act(async () => {
+      opened =
+        (await latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? false;
+    });
+
+    expect(opened).toBe(false);
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+  });
+
   it('renders the custom composer footer directly after the pane editor', () => {
     const footerProps: WebShellComposerToolbarRenderInfo[] = [];
     const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
@@ -390,6 +498,12 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('omits its frame header when embedded in another panel', () => {
+    render({ title: 'Side task', embedded: true });
+    expect(container!.querySelector('header')).toBeNull();
+    expect(testid('pane-messages')).not.toBeNull();
   });
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
@@ -862,6 +976,41 @@ describe('ChatPane', () => {
     );
   });
 
+  it('passes this pane workflow to its exit-plan approval', () => {
+    messagesState = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    messagesState.push({
+      id: 'revision',
+      role: 'user',
+      content: 'Revise the wording',
+    });
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      rawInput: {},
+    };
+
+    render();
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
+      '["prepare","ship"]',
+    );
+  });
+
   it('reflects streaming state on the composer', () => {
     streamingStateValue = 'responding';
     render();
@@ -906,7 +1055,7 @@ describe('ChatPane', () => {
   it('invokes onClose from the header close button', () => {
     const onClose = vi.fn();
     render({ onClose });
-    const closeBtn = container!.querySelector('header button');
+    const closeBtn = container!.querySelector('[data-testid="pane-close"]');
     act(() =>
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
@@ -943,6 +1092,27 @@ describe('ChatPane', () => {
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
   });
 
+  it('renders host header actions scoped to the pane session', () => {
+    const renderHeaderActions = vi.fn(
+      (info: { sessionId: string; workspaceCwd?: string }) => (
+        <button type="button" data-testid="host-pane-action">
+          {info.sessionId}:{info.workspaceCwd ?? ''}
+        </button>
+      ),
+    );
+    render({
+      title: 'Refactor core',
+      workspaceCwd: '/work/api',
+      renderHeaderActions,
+    });
+    expect(renderHeaderActions).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      workspaceCwd: '/work/api',
+    });
+    expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
+    expect(testid('pane-header-actions')).not.toBeNull();
+  });
+
   it('cancels the active turn via the composer cancel action', () => {
     render();
     act(() =>
@@ -976,6 +1146,20 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
     expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
     expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables mid-turn queue mutations only when advertised', () => {
+    connectionState.capabilities = {
+      features: ['session_mid_turn_message_mutation'],
+    };
+    render();
+
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('true');
+  });
+
+  it('disables mid-turn queue mutations when not advertised', () => {
+    render();
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
   it('passes follow-up suggestions to the pane editor', () => {

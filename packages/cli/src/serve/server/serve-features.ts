@@ -14,7 +14,7 @@ import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 
 export const SERVE_LANGUAGE_CODES = [

@@ -96,6 +96,7 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
+      lastReason: undefined,
     });
   }
 
@@ -124,7 +125,13 @@ export function reduceGoalControl(
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
-  return transitionGoal(current, transition.now, { status: 'active' });
+  // An explicit resume re-authorizes autonomous continuation, so it grants a
+  // fresh turn budget; keeping the exhausted count would report `active` and
+  // immediately re-transition to `usage_limited` without running a turn.
+  return transitionGoal(current, transition.now, {
+    status: 'active',
+    turnCount: 0,
+  });
 }
 
 export function reduceGoalTurnFinished(

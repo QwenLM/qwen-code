@@ -7,13 +7,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
-  isExistingFile,
+  resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
@@ -41,6 +42,7 @@ import type {
   AgentSideConnection,
   PermissionOption,
   PromptRequest,
+  RequestPermissionResponse,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -228,31 +230,55 @@ describe('computeInitialTurnFromHistory', () => {
   });
 });
 
-describe('isExistingFile', () => {
-  it('returns false when the path does not exist', () => {
-    expect(isExistingFile('/tmp/missing.png', () => false)).toBe(false);
+describe('resolveExistingFile', () => {
+  it('returns undefined when the path does not exist', () => {
+    expect(
+      resolveExistingFile('/tmp/missing.png', () => {
+        throw new Error('ENOENT');
+      }),
+    ).toBeUndefined();
   });
 
-  it('returns false when the path is not a file', () => {
+  it('returns undefined when the path is not a file or directory', () => {
     expect(
-      isExistingFile(
+      resolveExistingFile(
         '/tmp/dir',
-        () => true,
-        () => ({ isFile: () => false }),
+        (resolved) => resolved,
+        () => ({ isFile: () => false, isDirectory: () => false }),
       ),
-    ).toBe(false);
+    ).toBeUndefined();
   });
 
-  it('returns false when stat fails after exists succeeds', () => {
+  it('returns undefined when stat fails after resolution succeeds', () => {
     expect(
-      isExistingFile(
+      resolveExistingFile(
         '/tmp/image.png',
-        () => true,
+        (resolved) => resolved,
         () => {
           throw new Error('EACCES');
         },
       ),
-    ).toBe(false);
+    ).toBeUndefined();
+  });
+
+  it('returns the canonical path for an existing file', () => {
+    expect(
+      resolveExistingFile(
+        '/tmp/alias.png',
+        () => '/tmp/image.png',
+        () => ({ isFile: () => true }),
+      ),
+    ).toBe('/tmp/image.png');
+  });
+
+  it('returns the canonical path for an existing directory', () => {
+    expect(
+      resolveExistingFile(
+        '/tmp/alias',
+        () => '/tmp/dir',
+        () => ({ isFile: () => false, isDirectory: () => true }),
+      ),
+    ).toBe('/tmp/dir');
   });
 });
 
@@ -349,6 +375,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
@@ -387,6 +414,10 @@ describe('Session', () => {
     registerTool: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
+  };
+  let mockWorkflowRunRegistry: {
+    setApprovalRequestCallback: ReturnType<typeof vi.fn>;
+    resolvePendingApproval: ReturnType<typeof vi.fn>;
   };
 
   function mockConfirmingTool(
@@ -545,6 +576,10 @@ describe('Session', () => {
       setNotificationCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
     };
+    mockWorkflowRunRegistry = {
+      setApprovalRequestCallback: vi.fn(),
+      resolvePendingApproval: vi.fn().mockResolvedValue(true),
+    };
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
@@ -594,6 +629,12 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       setLiveAppendSystemPrompt: vi.fn(),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      setActiveTodoReminder: vi.fn(),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
@@ -607,6 +648,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getFileFilteringOptions: vi.fn().mockReturnValue({
@@ -637,6 +679,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
@@ -693,6 +736,525 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('bridges workflow approvals through ACP permission requests', async () => {
+    mockToolRegistry.getTool.mockReturnValue({
+      displayName: 'Shell',
+      kind: core.Kind.Execute,
+      build: vi.fn().mockReturnValue({
+        getDescription: vi.fn().mockReturnValue('echo safe'),
+        toolLocations: vi
+          .fn()
+          .mockReturnValue([{ path: '/repo/script.sh', line: 3 }]),
+      }),
+    });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback | undefined;
+    expect(callback).toBeTypeOf('function');
+
+    await callback?.(
+      { runId: 'wf_1' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_1',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'run_shell_command',
+        description: 'Run a safe command',
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          command: 'echo safe',
+          rootCommand: 'echo',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    expect(mockClient.requestPermission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'test-session-id',
+        options: [
+          expect.objectContaining({
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          }),
+          expect.objectContaining({
+            optionId: core.ToolConfirmationOutcome.Cancel,
+          }),
+        ],
+        toolCall: expect.objectContaining({
+          toolCallId: 'workflow:test-session-id:wf_1:wfap_1',
+          title: 'Shell: echo safe',
+          kind: 'execute',
+          locations: [{ path: '/repo/script.sh', line: 3 }],
+          rawInput: { command: 'echo safe' },
+          _meta: expect.objectContaining({
+            toolName: 'run_shell_command',
+            workflowApproval: true,
+          }),
+        }),
+      }),
+    );
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_1',
+      'wfap_1',
+      core.ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'workflow:test-session-id:wf_1:wfap_1',
+        status: 'completed',
+      }),
+    });
+  });
+
+  it('serializes concurrent workflow approvals for single-flight ACP clients', async () => {
+    let resolveFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    let resolveSecond:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
+      approvalId,
+      subagentId: `agent-${approvalId}`,
+      callId: `call-${approvalId}`,
+      name: 'run_shell_command',
+      description: 'Run command',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command',
+        command: 'echo safe',
+        rootCommand: 'echo',
+        hideAlwaysAllow: true,
+      },
+      at: 1,
+    });
+
+    const first = callback(
+      { runId: 'wf_concurrent' } as core.WorkflowTask,
+      makeApproval('wfap_first'),
+      { command: 'echo first' },
+      new AbortController().signal,
+    );
+    const second = callback(
+      { runId: 'wf_concurrent' } as core.WorkflowTask,
+      makeApproval('wfap_second'),
+      { command: 'echo second' },
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    resolveFirst?.({
+      outcome: {
+        outcome: 'selected',
+        optionId: core.ToolConfirmationOutcome.ProceedOnce,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    });
+    resolveSecond?.({
+      outcome: {
+        outcome: 'selected',
+        optionId: core.ToolConfirmationOutcome.ProceedOnce,
+      },
+    });
+    await Promise.all([first, second]);
+
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_concurrent',
+      'wfap_first',
+      core.ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_concurrent',
+      'wfap_second',
+      core.ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('serializes permissions across sessions sharing one ACP connection', async () => {
+    let resolveFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+    const secondWorkflowRunRegistry = {
+      ...mockWorkflowRunRegistry,
+      setApprovalRequestCallback: vi.fn(),
+      resolvePendingApproval: vi.fn().mockResolvedValue(true),
+    };
+    const secondConfig = {
+      ...mockConfig,
+      getWorkflowRunRegistry: vi
+        .fn()
+        .mockReturnValue(secondWorkflowRunRegistry),
+    } as unknown as Config;
+    const secondSession = new Session(
+      'second-session-id',
+      secondConfig,
+      mockClient,
+      mockSettings,
+    );
+    const firstCallback = mockWorkflowRunRegistry.setApprovalRequestCallback
+      .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const secondCallback = secondWorkflowRunRegistry.setApprovalRequestCallback
+      .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const makeApproval = (): core.WorkflowApproval => ({
+      approvalId: 'wfap_1',
+      subagentId: 'agent-1',
+      callId: 'call-1',
+      name: 'run_shell_command',
+      description: 'Run command',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command',
+        command: 'echo safe',
+        rootCommand: 'echo',
+        hideAlwaysAllow: true,
+      },
+      at: 1,
+    });
+
+    const first = firstCallback(
+      { runId: 'wf_first' } as core.WorkflowTask,
+      makeApproval(),
+      { command: 'echo first' },
+      new AbortController().signal,
+    );
+    const second = secondCallback(
+      { runId: 'wf_second' } as core.WorkflowTask,
+      makeApproval(),
+      { command: 'echo second' },
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    resolveFirst?.({
+      outcome: {
+        outcome: 'selected',
+        optionId: core.ToolConfirmationOutcome.ProceedOnce,
+      },
+    });
+    await Promise.all([first, second]);
+
+    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    expect(
+      vi
+        .mocked(mockClient.requestPermission)
+        .mock.calls.map(([request]) => request.toolCall.toolCallId),
+    ).toEqual([
+      'workflow:test-session-id:wf_first:wfap_1',
+      'workflow:second-session-id:wf_second:wfap_1',
+    ]);
+    secondSession.dispose();
+  });
+
+  it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
+    let settleFirstTransport:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleFirstTransport = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const firstAbort = new AbortController();
+    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
+      approvalId,
+      subagentId: `agent-${approvalId}`,
+      callId: `call-${approvalId}`,
+      name: 'run_shell_command',
+      description: 'Run command',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command',
+        command: 'echo safe',
+        rootCommand: 'echo',
+        hideAlwaysAllow: true,
+      },
+      at: 1,
+    });
+
+    const first = callback(
+      { runId: 'wf_abort_queue' } as core.WorkflowTask,
+      makeApproval('wfap_aborted'),
+      { command: 'echo first' },
+      firstAbort.signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    const second = callback(
+      { runId: 'wf_abort_queue' } as core.WorkflowTask,
+      makeApproval('wfap_after_abort'),
+      { command: 'echo second' },
+      new AbortController().signal,
+    );
+
+    firstAbort.abort();
+    await first;
+    // The queue advances on abort — the second request is sent without
+    // waiting for the orphaned first RPC to settle.
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    });
+    await second;
+    // Settle the orphaned RPC so no dangling promises remain.
+    settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('fails a workflow approval closed when the ACP request times out', async () => {
+    vi.mocked(mockClient.requestPermission).mockRejectedValue(
+      new Error('Permission request timed out'),
+    );
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+    await callback(
+      { runId: 'wf_timeout' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_timeout',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'run_shell_command',
+        description: 'Run command',
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          command: 'echo safe',
+          rootCommand: 'echo',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_timeout',
+      'wfap_timeout',
+      core.ToolConfirmationOutcome.Cancel,
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'workflow:test-session-id:wf_timeout:wfap_timeout',
+        status: 'failed',
+      }),
+    });
+  });
+
+  it('shows the restricted edit diff as reviewable ACP text', async () => {
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+    await callback(
+      { runId: 'wf_edit' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_edit',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'replace',
+        description: 'Edit file',
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Edit file',
+          fileName: 'example.ts',
+          filePath: '/repo/example.ts',
+          fileDiff: '-unsafe\n+safe',
+          originalContent: null,
+          newContent: '',
+          hideAlwaysAllow: true,
+          hideModify: true,
+          skipIdeDiff: true,
+        },
+        at: 1,
+      },
+      { path: '/repo/example.ts' },
+      new AbortController().signal,
+    );
+
+    const request = vi.mocked(mockClient.requestPermission).mock.calls[0]?.[0];
+    expect(request?.toolCall.content).toContainEqual({
+      type: 'content',
+      content: { type: 'text', text: '-unsafe\n+safe' },
+    });
+    expect(request?.toolCall.content).not.toContainEqual(
+      expect.objectContaining({ type: 'diff' }),
+    );
+  });
+
+  it('rejects a persistent ACP workflow approval outcome that was not offered', async () => {
+    vi.mocked(mockClient.requestPermission).mockResolvedValue({
+      outcome: {
+        outcome: 'selected',
+        optionId: core.ToolConfirmationOutcome.ProceedAlwaysProject,
+      },
+    });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+    await callback(
+      { runId: 'wf_persistent' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_persistent',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'run_shell_command',
+        description: 'Run command',
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          command: 'echo safe',
+          rootCommand: 'echo',
+          hideAlwaysAllow: false,
+        },
+        at: 1,
+      },
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_persistent',
+      'wfap_persistent',
+      core.ToolConfirmationOutcome.Cancel,
+    );
+  });
+
+  it('aborts an in-flight workflow approval and unregisters on dispose', async () => {
+    vi.mocked(mockClient.requestPermission).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const approval = callback(
+      { runId: 'wf_dispose' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_dispose',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'write_file',
+        description: 'Write file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Write file',
+          prompt: 'Allow?',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+
+    session.dispose();
+    await approval;
+
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_dispose',
+      'wfap_dispose',
+      core.ToolConfirmationOutcome.Cancel,
+    );
+    expect(
+      mockWorkflowRunRegistry.setApprovalRequestCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('aborts an in-flight ACP request when core clears the approval', async () => {
+    vi.mocked(mockClient.requestPermission).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const approvalAbort = new AbortController();
+    const approval = callback(
+      { runId: 'wf_cleared' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_cleared',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'read_file',
+        description: 'Read file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { path: '/tmp/test' },
+      approvalAbort.signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+
+    approvalAbort.abort();
+    await approval;
+
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_cleared',
+      'wfap_cleared',
+      core.ToolConfirmationOutcome.Cancel,
+    );
   });
 
   it('forwards recording degradation and unsubscribes on dispose', async () => {
@@ -882,6 +1444,152 @@ describe('Session', () => {
     });
     expect(nonInteractiveCliCommands.handleSlashCommand).not.toHaveBeenCalled();
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('clears active todo context when an ordinary prompt starts', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start different work' }],
+    });
+
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+      'test-session-id########1',
+      undefined,
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start different work' }],
+      retry: true,
+    } as PromptRequest);
+
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+      'test-session-id########2',
+      'test-session-id########1',
+    );
+  });
+
+  it('includes active Todo context on the first retry request', async () => {
+    const reminder =
+      '<system-reminder>unfinished todo: run tests</system-reminder>';
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+      retry: true,
+    } as PromptRequest);
+
+    const retryCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as {
+      message: Part[];
+    };
+    expect(textParts(retryCall.message)).toContain(reminder);
+  });
+
+  it('continues active Todo context for related automatic turns', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+    vi.mocked(mockConfig.startAutomaticActiveTodoWorkChain).mockClear();
+    const reminder =
+      '<system-reminder>unfinished todo: wait for agent</system-reminder>';
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+    const internals = session as unknown as {
+      relatedAgentIds: Set<string>;
+    };
+    internals.relatedAgentIds.add('related-agent');
+    const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: {
+        agentId: string;
+        status: string;
+        todoWorkChainId?: string;
+      },
+    ) => void;
+
+    callback('Background task completed.', '<task-notification/>', {
+      agentId: 'related-agent',
+      status: 'completed',
+      todoWorkChainId: 'test-session-id########1',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        expect.stringContaining('########notification'),
+        'test-session-id########1',
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        expect.stringContaining('########notification'),
+      ),
+    );
+    const notificationCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as { message: Part[] };
+    expect(textParts(notificationCall.message)).toContain(reminder);
+  });
+
+  it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+    vi.mocked(mockConfig.startAutomaticActiveTodoWorkChain).mockClear();
+    const internals = session as unknown as {
+      relatedAgentIds: Set<string>;
+    };
+    internals.relatedAgentIds.add('guard-related-agent');
+    const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: { agentId: string; status: string },
+    ) => void;
+
+    callback('Background task completed.', '<task-notification/>', {
+      agentId: 'guard-related-agent',
+      status: 'completed',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        expect.stringContaining('########notification'),
+        undefined,
+      ),
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+      retry: true,
+    } as PromptRequest);
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
+      'test-session-id########1',
+    );
   });
 
   it('holds the close gate until active turns settle', async () => {
@@ -2759,6 +3467,30 @@ describe('Session', () => {
       );
       expect(suppressNextSlashReload).toHaveBeenCalledTimes(1);
       expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes refreshed skill content without reloading settings or notifying twice', async () => {
+      const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+        suppressNextSlashReload: vi.fn(),
+        notifyConfigChanged,
+      });
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+          }),
+        }),
+      );
+      expect(notifyConfigChanged).not.toHaveBeenCalled();
     });
 
     it('notifies SkillManager when the command update fails', async () => {
@@ -4761,6 +5493,16 @@ describe('Session', () => {
     });
 
     it('preserves unsupported image @ files for the vision bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),
+      );
+      const imagePath = path.join(tempDir, 'image.png');
+      await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
         id: 'qwen3.7-plus',
@@ -4792,31 +5534,35 @@ describe('Session', () => {
             { type: 'text', text: 'look at this' },
             {
               type: 'resource_link',
-              uri: 'file:///tmp/image.png',
+              uri: `file://${imagePath}`,
               mimeType: 'image/png',
               name: 'image.png',
             },
           ],
         });
 
-        expect(readManyFilesSpy).toHaveBeenCalledWith(
-          mockConfig,
+        const readOptions = readManyFilesSpy.mock.calls[0]?.[1];
+        expect(readOptions).toEqual(
           expect.objectContaining({
+            paths: [imagePath],
             preserveUnsupportedImageForBridge: true,
+            validatedPathIdentities: expect.any(Map),
           }),
         );
+        expect(readOptions?.validatedPathIdentities?.has(imagePath)).toBe(true);
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[file image]');
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
       }
     });
 
     it('resolves image @ paths from ACP text through the vision bridge', async () => {
-      const tempDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-image-'),
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-image-')),
       );
       const imagePath = path.join(tempDir, 'image.png');
       await fs.writeFile(imagePath, 'image');
@@ -4864,6 +5610,8 @@ describe('Session', () => {
           paths: [imagePath],
           signal: expect.any(AbortSignal),
           preserveUnsupportedImageForBridge: true,
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[imagePath, imagePath]]),
         });
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
@@ -4876,8 +5624,8 @@ describe('Session', () => {
     });
 
     it('ignores non-image and relative ACP text @ paths', async () => {
-      const tempDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-paths-'),
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-paths-')),
       );
       const outsideDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-outside-'),
@@ -4933,6 +5681,160 @@ describe('Session', () => {
       }
     });
 
+    const expectSymlinkTargetNotRead = async (
+      targetName: string,
+      ignored?: 'alias' | 'target',
+    ) => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-symlink-')),
+      );
+      const targetPath = path.join(tempDir, targetName);
+      const imageAlias = path.join(tempDir, 'alias.png');
+      await fs.writeFile(targetPath, 'target data');
+      await fs.symlink(targetPath, imageAlias);
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      if (ignored) {
+        const ignoredPath = ignored === 'alias' ? imageAlias : targetPath;
+        mockConfig.getFileService = vi.fn().mockReturnValue({
+          shouldIgnoreFile: vi.fn(
+            (pathSpec: string) => pathSpec === ignoredPath,
+          ),
+        });
+      }
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'unexpected',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `inspect @${imageAlias}` }],
+        });
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it.skipIf(process.platform === 'win32')(
+      'does not treat an image-named symlink to a text file as an image',
+      () => expectSymlinkTargetNotRead('notes.txt'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an image symlink whose target is ignored',
+      () => expectSymlinkTargetNotRead('ignored.png', 'target'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an ignored image symlink whose target is allowed',
+      () => expectSymlinkTargetNotRead('allowed.png', 'alias'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an image symlink whose target is outside the workspace',
+      async () => {
+        const tempDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-workspace-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-outside-')),
+        );
+        const imageAlias = path.join(tempDir, 'alias.png');
+        await fs.writeFile(path.join(outsideDir, 'outside.png'), 'image');
+        await fs.symlink(path.join(outsideDir, 'outside.png'), imageAlias);
+        mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+        });
+        const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: `inspect @${imageAlias}` }],
+          });
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(tempDir, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'revalidates an ACP text image after resolving extension context',
+      async () => {
+        const tempDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-revalidate-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-outside-')),
+        );
+        const imagePath = path.join(tempDir, 'image.png');
+        const outsidePath = path.join(outsideDir, 'outside.png');
+        await fs.writeFile(imagePath, 'safe image');
+        await fs.writeFile(outsidePath, 'outside image');
+        mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+        });
+        const extension = makeExtension({ path: tempDir });
+        let swapped = false;
+        Object.defineProperty(extension, 'contextFiles', {
+          configurable: true,
+          get: () => {
+            if (!swapped) {
+              swapped = true;
+              fsSync.unlinkSync(imagePath);
+              fsSync.symlinkSync(outsidePath, imagePath);
+            }
+            return [];
+          },
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              {
+                type: 'text',
+                text: `inspect @${imagePath} with @ext:browser`,
+              },
+            ],
+          });
+          expect(swapped).toBe(true);
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(tempDir, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('keeps the user prompt as the final part after referenced file content', async () => {
       // Regression: JetBrains ACP attaches the active editor as a file
       // reference. Appending its content AFTER the prompt buried the actual
@@ -4949,8 +5851,13 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+      const targetDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-editor-')),
+      );
 
       try {
+        await fs.writeFile(path.join(targetDir, 'editor.ts'), 'editor', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [
@@ -4981,6 +5888,7 @@ describe('Session', () => {
         expect(promptIndex).toBeGreaterThan(fileIndex);
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(targetDir, { recursive: true, force: true });
       }
     });
 
@@ -6499,9 +7407,26 @@ describe('Session', () => {
       });
 
       it('injects drained mid-turn user messages with tool responses', async () => {
-        const executeSpy = vi.fn().mockResolvedValue({
-          llmContent: 'file contents',
-          returnDisplay: 'file contents',
+        const todoReminder =
+          '<system-reminder>unfinished todo: check tests</system-reminder>';
+        const activeTodoReminders = new Map<string, string>();
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+          (promptId) => activeTodoReminders.get(promptId),
+        );
+        vi.mocked(mockConfig.setActiveTodoReminder).mockImplementation(
+          (promptId, reminder) => {
+            if (reminder) activeTodoReminders.set(promptId, reminder);
+          },
+        );
+        const executeSpy = vi.fn().mockImplementation(async () => {
+          const promptId = core.promptIdContext.getStore();
+          if (promptId) {
+            mockConfig.setActiveTodoReminder(promptId, todoReminder);
+          }
+          return {
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          };
         });
         const tool = {
           name: 'read_file',
@@ -6553,9 +7478,19 @@ describe('Session', () => {
         const midTurnPart = {
           text: '\n[User message received during tool execution]:   please also check tests  ',
         };
-        expect(secondCall?.[1].message).toEqual(
-          expect.arrayContaining([midTurnPart]),
+        const nextMessage = secondCall?.[1].message as Part[];
+        const functionResponseIndex = nextMessage.findIndex(
+          (part) => part.functionResponse !== undefined,
         );
+        const reminderIndex = nextMessage.findIndex(
+          (part) => part.text === todoReminder,
+        );
+        const midTurnIndex = nextMessage.findIndex(
+          (part) => part.text === midTurnPart.text,
+        );
+        expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
+        expect(reminderIndex).toBeGreaterThan(functionResponseIndex);
+        expect(midTurnIndex).toBeGreaterThan(reminderIndex);
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith([midTurnPart], '  please also check tests  ');
@@ -10915,6 +11850,7 @@ describe('Session', () => {
 
         expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -11746,6 +12682,7 @@ describe('Session', () => {
 
       try {
         await fs.writeFile(filePath, '# Test\n', 'utf8');
+        const canonicalFilePath = await fs.realpath(filePath);
 
         mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
         mockChat.sendMessageStream = vi
@@ -11767,12 +12704,56 @@ describe('Session', () => {
         await session.prompt(promptRequest);
 
         expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
-          paths: [fileName],
+          paths: [canonicalFilePath],
           signal: expect.any(AbortSignal),
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[canonicalFilePath, fileName]]),
         });
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops resource links that fail workspace revalidation', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.png');
+      const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+
+      try {
+        await fs.writeFile(outsidePath, 'secret', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            pathSpec.startsWith(`${tempDir}${path.sep}`),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: 'secret.png',
+              uri: `file://${outsidePath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+        expect(firstSentMessage()).toEqual([{ text: 'Check this file' }]);
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 
@@ -14135,6 +15116,46 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
         });
+
+        it('wraps additionalContext in the reserved tag before sending', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sent = firstSentMessage();
+          expect(textParts(sent)[0]).toBe('hello');
+          expect(
+            core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
+          ).toBe(true);
+          expect(textParts(sent).at(-1)).toContain('extra hook context');
+        });
       });
 
       describe('Stop hook', () => {
@@ -14594,6 +15615,186 @@ describe('Session', () => {
           });
 
           expect(executeSpy).not.toHaveBeenCalled();
+        });
+
+        it('runs the host guard with final params and denies before execution', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const guard = vi.fn().mockResolvedValue({
+            allowed: false,
+            reason: 'host policy denied',
+          });
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/normalized/final.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard',
+                      name: 'read_file',
+                      args: { path: './original.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(guard).toHaveBeenCalledWith({
+            callId: 'call-guard',
+            toolName: 'read_file',
+            args: { path: '/normalized/final.txt' },
+            signal: expect.any(AbortSignal),
+          });
+          expect(executeSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({
+              callId: 'call-guard',
+              status: 'error',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+            }),
+          );
+        });
+
+        it('executes once when the host guard allows the final invocation', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const guard = vi.fn().mockResolvedValue({ allowed: true });
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/normalized/final.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard-allowed',
+                      name: 'read_file',
+                      args: { path: './original.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(guard).toHaveBeenCalledWith({
+            callId: 'call-guard-allowed',
+            toolName: 'read_file',
+            args: { path: '/normalized/final.txt' },
+            signal: expect.any(AbortSignal),
+          });
+          expect(executeSpy).toHaveBeenCalledOnce();
+        });
+
+        it('cancels without execution when aborted while awaiting the host guard', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          let resolveGuard!: (decision: { allowed: true }) => void;
+          const guard = vi.fn(
+            () =>
+              new Promise<{ allowed: true }>((resolve) => {
+                resolveGuard = resolve;
+              }),
+          );
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard-aborted',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          await vi.waitFor(() => expect(guard).toHaveBeenCalledOnce());
+          const cancel = session.cancelPendingPrompt();
+          resolveGuard({ allowed: true });
+
+          await cancel;
+          await prompt;
+          expect(executeSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({
+              callId: 'call-guard-aborted',
+              status: 'cancelled',
+            }),
+          );
         });
       });
 
@@ -15758,6 +16959,50 @@ describe('Session', () => {
       };
     }
 
+    it('publishes a persisted Todo plan when cancellation races completion', async () => {
+      const controller = new AbortController();
+      const execute = vi.fn().mockImplementation(async () => {
+        controller.abort();
+        return {
+          llmContent: 'updated',
+          returnDisplay: {
+            type: 'todo_list',
+            planId: 'plan-1',
+            todos: [{ id: '1', content: 'Ship', status: 'pending' }],
+          },
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.TODO_WRITE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        controller.signal,
+        'prompt-cancelled-todo',
+        [
+          {
+            id: 'todo-call',
+            name: core.ToolNames.TODO_WRITE,
+            args: { todos: [{ id: '1', content: 'Ship', status: 'pending' }] },
+          },
+        ],
+      );
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'plan',
+            entries: [
+              expect.objectContaining({
+                content: 'Ship',
+                _meta: { qwenTodo: { id: '1' } },
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+
     it('lets normalized tool images select a full-turn model', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: [
@@ -16042,6 +17287,7 @@ describe('Session', () => {
           'gen_ai.tool.call.id': 'provider-call',
         }),
         'read_file',
+        'prompt-tool-span',
       );
       expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
         mockConfig,
@@ -16075,6 +17321,7 @@ describe('Session', () => {
           'gen_ai.tool.call.id': 'internal-call',
         }),
         'read_file',
+        'prompt-tool-span-fallback',
       );
     });
 
@@ -18750,6 +19997,26 @@ describe('Session', () => {
             ([params]) =>
               params.update.sessionUpdate === 'agent_message_chunk' &&
               params.update._meta?.['source'] === 'todo_stop_guard',
+          ),
+      ).toBe(false);
+    });
+
+    it('does not publish rejected Todo arguments as a live plan', async () => {
+      const execute = installPendingTodoTool();
+      execute.mockResolvedValue({
+        llmContent: 'Failed to modify todos',
+        returnDisplay:
+          'Error writing todos: Todo dependency graph contains a cycle',
+      });
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) => params.update.sessionUpdate === 'plan',
           ),
       ).toBe(false);
     });

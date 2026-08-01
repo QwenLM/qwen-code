@@ -109,6 +109,8 @@ interface MessageListProps {
   includeSubagentToolUsageInMetrics?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  failedPromptMessageId?: string;
+  onRetryFailedPrompt?: () => void;
   onBranchSession?: () => void;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
@@ -121,6 +123,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -2220,6 +2223,8 @@ export const MessageList = memo(
       includeSubagentToolUsageInMetrics = true,
       showRetryHint = false,
       onRetryClick,
+      failedPromptMessageId,
+      onRetryFailedPrompt,
       onBranchSession,
       onCanScrollToBottomChange,
       turnFileChanges,
@@ -2229,6 +2234,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onError,
       generateContent,
     },
     ref,
@@ -3650,6 +3656,7 @@ export const MessageList = memo(
                 onOpenScheduledTask={
                   onOpenScheduledTask ?? noopTurnOutputAction
                 }
+                onError={onError}
               />
             );
           }
@@ -3694,6 +3701,11 @@ export const MessageList = memo(
               isLatest={isLatest}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
+              sendFailed={
+                displayItem.message.role === 'user' &&
+                displayItem.message.id === failedPromptMessageId
+              }
+              onRetrySend={onRetryFailedPrompt}
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
@@ -3744,12 +3756,15 @@ export const MessageList = memo(
         workspaceCwd,
         showRetryHint,
         onRetryClick,
+        failedPromptMessageId,
+        onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onError,
       ],
     );
 

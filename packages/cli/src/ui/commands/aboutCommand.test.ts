@@ -75,6 +75,8 @@ describe('aboutCommand', () => {
     expect(aboutCommand.name).toBe('status');
     expect(aboutCommand.altNames).toEqual(['about']);
     expect(aboutCommand.description).toBe('show version info');
+    expect(aboutCommand.canRunDuringStreaming).toBe(true);
+    expect(aboutCommand.subCommands?.[0]?.canRunDuringStreaming).toBe(true);
   });
 
   it('should call addItem with all version info', async () => {

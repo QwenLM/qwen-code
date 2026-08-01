@@ -24,6 +24,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getCliVersion } from '../../utils/version.js';
 import {
   coverageFromTranscripts,
   verificationGaps,
@@ -34,10 +35,12 @@ import { gh, setGhHost } from './lib/gh.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
+  requiredAgents,
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
+import type { TestPlanReport } from './test-plan.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -47,6 +50,18 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * The floor above which a zero-finding Approve is disclosed as low-signal,
+ * in the plan's `srcDiffLines` — diff lines belonging to `source` files, the
+ * same field the review topology is chosen from (tests, docs and generated
+ * files excluded by construction). A trivial edit stays under it even
+ * scattered one changed line per hunk (~8 diff lines each with context and
+ * hunk header, plus 4 file-header lines), and the smallest diff the topology
+ * gate calls big is 500 — so the floor sits well past the typo-fix class and
+ * well before "big".
+ */
+export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
  * Reads a PR's description body, given its `owner/repo` and number. The one
@@ -160,6 +175,18 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * Set on an APPROVE composed from zero findings over a non-trivial source
+   * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
+   * Disclosure only — the event never moves on it: the coverage gate proves
+   * the agents READ the diff, not that the review had discriminating power,
+   * and a dogfooded weak-model run drafted nothing from its whole roster on a
+   * diff where stronger same-condition runs found a verified blocker, then
+   * printed a bare confident Approve. The verdict line names the shape.
+   * `agents` is the plan's required roster — all on record at APPROVE, or
+   * coverage would have capped — and `srcDiffLines` the plan's own count.
+   */
+  lowSignal: { agents: number; srcDiffLines: number } | null;
 }
 
 function withMarker(line: string): string {
@@ -208,7 +235,10 @@ function toBool(value: unknown, field: string): boolean {
   return value;
 }
 
-export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
+export function composeReview(
+  input: ComposeReviewInput,
+  cliVersion = 'unknown',
+): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -296,11 +326,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
   // in the body on every verdict, but never fed into the cap.
   const gateDisclosed: string[] = [];
+  // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
+  // see `testPlanGate` for why this one neither blocks nor caps.
+  const testPlanNotes: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
+    testPlanNotes.push(...testPlanGate(input.planPath).notes);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -641,7 +675,33 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgradedFrom = 'Request changes';
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review_`;
+  // A zero-finding Approve over a non-trivial source diff is disclosed, not
+  // capped. Every gate above proves the agents READ the diff; none proves the
+  // review could tell good code from bad, and a dogfooded weak-model run
+  // drafted nothing from all of its agents on a diff where stronger runs found
+  // a verified blocker — then composed a bare confident Approve. The verdict
+  // stands (nothing was found, and a cap would punish every genuinely clean
+  // diff), but the verdict line must say which kind of Approve this is.
+  // "Non-trivial" is measured in the plan's own risk metric (`srcDiffLines`,
+  // the field the topology is chosen from), so a docs-only or typo-class diff
+  // keeps its bare Approve — there, finding nothing is the expected outcome.
+  let lowSignal: ComposeReviewResult['lowSignal'] = null;
+  if (event === 'APPROVE' && input.planPath) {
+    try {
+      const plan = JSON.parse(
+        readFileSync(input.planPath, 'utf8'),
+      ) as RosterPlan;
+      const src = Number(plan.srcDiffLines ?? 0);
+      if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
+        lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
+      }
+    } catch {
+      // Unreachable on a real APPROVE — the coverage gate already read this
+      // plan — and a disclosure must never take the review down.
+    }
+  }
+
+  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -881,6 +941,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ]
     : [];
 
+  // The Test Plan's own claims, ruled against the reviewed tree. Rendered on
+  // every verdict — including Approve, which is where most of them land — and
+  // worded so the author can see it is about the description, not the code.
+  const testPlanBlock: Bi[] = testPlanNotes.length
+    ? [
+        {
+          en: `Test Plan (not a blocker): ${testPlanNotes.join('; ')}.`,
+          zh: `Test Plan（非阻断）：${testPlanNotes.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -891,6 +963,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...cannotTellBlock,
       ...notReviewedParts,
       ...deferredBlock,
+      ...testPlanBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -901,6 +974,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -911,14 +985,16 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...deferredBlock,
+          ...testPlanBlock,
         ],
-        deferredBlock.length ? '\n\n' : ' ',
+        deferredBlock.length || testPlanBlock.length ? '\n\n' : ' ',
       ),
       baseEvent,
       cappedBy,
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -1024,6 +1100,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   //     shell actionlint would lint but we do not yet trust.
   clauses.push(...deferredBlock);
 
+  // 6c. Test Plan rulings (non-capping) — a claim in the PR description that
+  //     the reviewed tree does not bear out.
+  clauses.push(...testPlanBlock);
+
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
   //    cap. Either way the body copy is the ONLY copy of an unanchorable
@@ -1040,6 +1120,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgraded,
     downgradedFrom,
     remediation,
+    lowSignal,
   };
 }
 
@@ -1291,6 +1372,79 @@ function scriptLintReportName(pr: unknown): string {
 }
 
 /**
+ * Read the test-plan report and turn its rulings into body notes.
+ *
+ * Unlike `scriptLintGate`, this one **never caps and never blocks**, and every
+ * early return is therefore a plain "nothing to say" rather than a fail-closed
+ * disclosure. That asymmetry is deliberate on both halves:
+ *
+ *   - A Test Plan defect is not a code defect. The author claimed a path that
+ *     is not there, or a count from a different suite; the diff is unaffected.
+ *     Blocking a merge on it would spend the review's one irreversible action
+ *     on a documentation nit, and the skill's design philosophy is that a
+ *     comment not worth the reader's time costs more than it returns.
+ *   - Capping on a MISSING report would cap essentially every PR, because most
+ *     PRs produce no notes at all and a run has no way to prove the difference
+ *     between "checked, nothing to say" and "never checked" that is worth the
+ *     un-Approvability. This is the `deferred`-checker precedent above: a
+ *     limitation the author cannot fix must not become a permanent cap.
+ *
+ * A stale report is dropped in silence for the same reason a stale one is
+ * refused elsewhere — a note about a previous commit's Test Plan is worse than
+ * no note, and here there is no cap to fall back to.
+ */
+export function testPlanGate(planPath: string): { notes: string[] } {
+  const notes: string[] = [];
+  let plan: { prNumber?: unknown; diffPathAbsolute?: unknown };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return { notes };
+  }
+  // A local review has no PR body, so there is no Test Plan to have checked.
+  const pr = plan.prNumber;
+  const isPr =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  if (!isPr) return { notes };
+
+  let report: TestPlanReport;
+  try {
+    report = JSON.parse(
+      readFileSync(
+        join(dirname(planPath), `qwen-review-pr-${pr}-test-plan.json`),
+        'utf8',
+      ),
+    ) as TestPlanReport;
+  } catch {
+    return { notes };
+  }
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (!planDiffHash || report.diffHash !== planDiffHash) return { notes };
+
+  for (const claim of report.claims ?? []) {
+    if (claim.verdict === 'contradicted') {
+      notes.push(
+        `${mdField(claim.text)} — ${mdField(claim.observed ?? 'not reproduced')}`,
+      );
+    } else if (claim.verdict === 'differs') {
+      notes.push(
+        `${mdField(claim.text)} — this review observed ${mdField(claim.observed ?? 'a different result')}`,
+      );
+    }
+  }
+  // The same cap discipline the mutant/hunk probes apply: unbounded notes
+  // joined into one line drown the verdict they ride on.
+  const MAX_NOTES = 5;
+  if (notes.length > MAX_NOTES) {
+    const extra = notes.length - MAX_NOTES;
+    notes.length = MAX_NOTES;
+    notes.push(`and ${extra} more`);
+  }
+  return { notes };
+}
+
+/**
  * Whether the posted body carries the collapsed Chinese version: the plan
  * (fetch-pr's report) recorded Han characters in the PR description. The
  * signal is the CLI's own — never the caller's, who could otherwise toggle
@@ -1433,7 +1587,7 @@ export const composeReviewCommand: CommandModule = {
           'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
           'the bilingual body-language recovery has to fetch the PR description',
       }),
-  handler: (argv) => {
+  handler: async (argv) => {
     const { input, comments, out, host } =
       argv as unknown as ComposeReviewCliArgs;
     // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
@@ -1486,10 +1640,13 @@ export const composeReviewCommand: CommandModule = {
       );
     }
     const drafted = readDraftedComments(comments);
-    const result = composeReview({
-      ...parsed,
-      ...countInlineFindings(drafted),
-    });
+    const result = composeReview(
+      {
+        ...parsed,
+        ...countInlineFindings(drafted),
+      },
+      await getCliVersion(),
+    );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
@@ -1581,6 +1738,18 @@ export function verdictLine(r: ComposeReviewResult): string {
     // lose and no blocker to hide, but the event did change and the user should see
     // it did.
     line += ' — downgraded by a presubmit check';
+  }
+  // Not a cap and not a downgrade — the Approve stands. But a bare confident
+  // Approve from a run that drafted nothing on a real diff reads as evidence
+  // of quality when it is only absence of signal, so the line says which
+  // Approve this is. Both numbers are the run's own: the roster the plan
+  // required (all on record, or coverage would have capped) and the plan's
+  // source-line count.
+  if (r.event === 'APPROVE' && r.lowSignal) {
+    line +=
+      ` — low signal: none of the ${r.lowSignal.agents} review agents ` +
+      `reported a finding on a non-trivial diff ` +
+      `(${r.lowSignal.srcDiffLines} source diff lines)`;
   }
   return line;
 }

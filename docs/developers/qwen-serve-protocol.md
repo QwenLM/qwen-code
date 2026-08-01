@@ -164,7 +164,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_info', 'session_prompt', 'session_cancel', 'session_events',
+ 'session_list', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
+ 'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
@@ -192,7 +193,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'multi_workspace_session_shell', 'persistent_workspace_registration',
  'workspace_display_name',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
- 'extension_management_v2', 'workspace_persisted_transcript',
+ 'workspace_qualified_memory', 'extension_management_v2',
+ 'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
@@ -232,6 +234,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
 `workspace_qualified_voice` advertises Voice routes selected by a trusted workspace runtime: `GET` and `POST /workspaces/:workspace/voice`, `POST /workspaces/:workspace/voice/transcribe`, and `WS /workspaces/:workspace/voice/stream`. It is advertised only when multi-workspace runtimes and the shared ACP/Voice WebSocket listener are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. For REST, an unknown selector returns `400 { code: "workspace_mismatch" }` and an untrusted selector returns `403 { code: "untrusted_workspace" }`; WebSocket upgrade rejection exposes the corresponding HTTP 400/403 status without a structured JSON envelope. Neither transport falls back to primary. Legacy `/workspace/voice`, `/workspace/voice/transcribe`, and `/voice/stream` remain primary-only. Clients use `workspace_qualified_voice` for all qualified Voice modalities and let the selected runtime report configuration-specific errors. The legacy `workspace_voice`, `workspace_voice_transcription`, and `voice_transcribe` tags describe only the primary-bound routes and must not hide a qualified secondary configuration.
+
+`workspace_qualified_memory` advertises the workspace-qualified managed-memory routes: `POST /workspaces/:workspace/memory/{remember,forget,dream}` enqueue tasks and `GET /workspaces/:workspace/memory/{remember,forget,dream}/:taskId` reads them back. It is advertised only when ACP HTTP and multi-workspace runtimes are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. Each registered workspace gets its own task lane; the primary's qualified lane is the same instance as the singular `/workspace/memory` surface, so a task enqueued on one is readable on the other. Resolution is strictly per selected runtime with no primary fallback: an unknown selector returns `400 { code: "workspace_mismatch" }`, an untrusted selector returns `403 { code: "untrusted_workspace" }`, and an inactive or draining runtime returns `503 { code: "workspace_runtime_unavailable" }`. Reads never allocate a lane, so polling a workspace that has no tasks returns `404 { code: "<kind>_task_not_found" }`. Task ids are scoped to their lane and do not survive a workspace reconfiguration or runtime replacement; a stale id returns `404`, not a data-loss condition. When ACP HTTP is disabled the tag is not advertised and a non-primary qualified request returns a non-retryable `501 { code: "workspace_memory_unavailable" }`, while the primary qualified route keeps working through the locally-owned lane.
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
@@ -448,6 +452,7 @@ operator diagnostic snapshot documented below.
 | `workspace_runtime_removal`         | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_qualified_acp`           | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `workspace_qualified_voice`         | multi-workspace runtimes and the shared ACP/Voice WebSocket listener are active, so every workspace-qualified Voice modality is reachable for a secondary runtime.                                                                                                                                                                                                                                                                                                                                              |
+| `workspace_qualified_memory`        | ACP HTTP and multi-workspace runtimes are active, so workspace-qualified managed-memory routes can select a per-workspace task lane for remember, forget, and dream operations.                                                                                                                                                                                                                                                                                                                                 |
 | `client_mcp_over_ws`                | the daemon accepts client-hosted MCP servers over the ACP WebSocket. This is an explicit opt-in, not required for the CDP tunnel path.                                                                                                                                                                                                                                                                                                                                                                          |
 | `cdp_tunnel_over_ws`                | the daemon exposes the reverse `/cdp` WebSocket tunnel, either by explicit opt-in or because a Chrome extension origin is allowed. This only means the tunnel exists; it does not mean Chrome DevTools MCP tools are registered.                                                                                                                                                                                                                                                                                |
 | `browser_automation_mcp`            | ACP HTTP is enabled, `cdp_tunnel_over_ws` is active, no bearer token blocks `/cdp`, and `QWEN_CDP_MCP_COMMAND` names an external stdio MCP adapter. The main CLI package does not bundle a browser automation adapter; without this tag, Chrome extension side-panel chat may still work, but console/network/screenshot/click tools are not registered by default.                                                                                                                                             |
@@ -535,7 +540,7 @@ Response shape:
     "sessionShellCommandEnabled": false
   },
   "limits": {
-    "maxSessions": 20,
+    "maxSessions": 32,
     "maxTotalSessions": null,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
@@ -792,9 +797,15 @@ Pairing management is available only for instances configured with the
 
 - `GET .../channels/:name/pairing-requests`
 - `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
+- `GET .../channels/:name/pairing-approvals`
+- `DELETE .../channels/:name/pairing-approvals` with
+  `{ "senderId": "..." }`
 
-Both pairing routes require a bearer token and use `Cache-Control: no-store`.
-Approval is scoped to the selected Channel instance and workspace.
+All pairing routes require a bearer token and use `Cache-Control: no-store`.
+Requests, approvals, and revocations are scoped to the selected Channel
+instance and workspace. The approvals snapshot contains sender IDs because the
+allowlist does not persist sender display names. Revoking an unknown sender
+returns `404 channel_pairing_approval_not_found`.
 
 ### Channel delivery and Notify
 
@@ -906,8 +917,8 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
   ],
   "limits": {
     "maxPendingPromptsPerSession": 5,
-    "maxSessionsPerWorkspace": 20,
-    "maxTotalSessions": 40
+    "maxSessionsPerWorkspace": 32,
+    "maxTotalSessions": 64
   },
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/primary-workspace",
@@ -1072,6 +1083,7 @@ Capability tags:
 - `workspace_persisted_transcript` → `GET /workspaces/:workspace/session/:id/transcript`
 - `workspace_session_export` → `GET /workspaces/:workspace/session/:id/export`
 - `workspace_archived_session_export` → `GET /workspaces/:workspace/session/:id/archive/export`
+- `workspace_qualified_memory` → `POST /workspaces/:workspace/memory/{remember,forget,dream}` and `GET /workspaces/:workspace/memory/{remember,forget,dream}/:taskId`
 
 `workspace_acp_status` reports the primary workspace ACP channel's
 point-in-time liveness as `{ channelLive: boolean }`. The handler does not
@@ -1287,6 +1299,15 @@ canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
+
+Repeated reads are served from the last committed workspace snapshot,
+periodically revalidated against the child's in-memory cache. A read never
+scans skill directories or reparses `SKILL.md` files. The child does verify
+that its extension sources are unchanged — one `readdir` of the extensions
+directory plus a `stat` per entry, the enablement file, and the store's
+activation state — and refreshes only when they moved, so an extension
+installed or toggled outside the daemon is still picked up on the next read.
+Safe and bare mode skip the check, matching their exclusion of extensions.
 
 ### `GET /workspace/providers`
 
@@ -1573,10 +1594,56 @@ Filesystem errors use this JSON shape:
 
 #### `GET /file`
 
-Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
-`limit`. The daemon rejects binary files and files above the text read cap.
-The response includes `hash`, a SHA-256 digest over the raw on-disk bytes for
-the whole file, even when `line`, `limit`, or `maxBytes` returned a slice.
+Reads a text file. Query params: `path` (required), `maxBytes`, `line`, `limit`,
+and `cursor`. The daemon rejects binary files. Files above the 256 KiB
+full-snapshot
+cap require at least one explicit window argument (`line`, `limit`, or
+`maxBytes`); a request with none of them remains `file_too_large`. Such a
+window is streamed, and its returned UTF-8 content stays capped at 256 KiB.
+`maxBytes` always applies to the UTF-8 response bytes after decoding, including
+when the source uses another supported encoding within the full-snapshot cap.
+
+Line offsets are resolved by scanning from the start of the file, so a window
+is also refused with `file_too_large` when reaching it would read more than
+8 MiB (`MAX_TEXT_SCAN_BYTES`). Use `GET /file/bytes` to reach a deeper offset
+directly. Large text in an encoding the route cannot decode returns
+`binary_file`, not `file_too_large` — retrying with a smaller window cannot
+help, and `readBytes` is the same remedy that already applies to binary.
+
+For files within the full-snapshot cap, the response includes `hash`, a SHA-256
+digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
+or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
+complete `sizeBytes`, set `truncated: true`, and return
+`originalLineCount: null` when the stream stops before EOF.
+
+##### Paging with `cursor`
+
+Requires the `workspace_file_read_cursor` capability. A response that has more
+to give returns `hasMore: true` and, when a file byte offset is derivable, a
+`nextCursor` token. Passing it back as `cursor` resumes in O(1), where a deep
+`line` offset costs a scan from byte 0 and is refused past 8 MiB.
+
+```
+GET /file?path=big.log&limit=500          → { content, nextCursor, hasMore: true }
+GET /file?path=big.log&limit=500&cursor=… → next page
+```
+
+`cursor` and `line` are mutually exclusive (`parse_error`) — both name a
+starting point. A malformed or over-long cursor is `parse_error`; a cursor
+whose file has been replaced or truncated is `hash_mismatch` (409). Appending
+does **not** invalidate an outstanding cursor, which is the case the feature
+exists for.
+
+`content` omits the terminating newline of its last line, as every other read
+does, so a client reassembling pages joins them with `\n`. `hasMore` is not a
+restatement of `nextCursor`: a small non-UTF-8 file read with a `limit` has
+more content but no derivable byte offset, so it reports `hasMore: true` with
+`nextCursor: null`. The cursor is also null when the byte cap cuts the current
+line, because resuming from that offset would return a partial line. For many
+short lines, lower `limit` until the page ends before the byte cap and returns
+a cursor. For a single oversized line, request the following line explicitly
+(for example, `line=2` when starting at line 1), then continue with cursors;
+use `GET /file/bytes` when the complete oversized line is required.
 
 ```json
 {
@@ -2239,9 +2306,15 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, and `DELETE /session/:id/artifacts/:artifactId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, and `DELETE /session/:id/artifacts/:artifactId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
+
+### Mid-turn messages
+
+`POST /session/:id/mid-turn-message` accepts `{ "message": "..." }` while a turn is active. A successful admission returns `{ "accepted": true, "messageId": "<uuid>" }`; an idle session or full mid-turn queue returns `{ "accepted": false }`, and the client should retain the message for ordinary next-turn submission. When the message is drained into the running turn, `mid_turn_message_injected` includes aligned `messages` and `messageIds` arrays plus the originating client id.
+
+When `session_mid_turn_message_mutation` is advertised, the originating client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It returns `{ "removed": true }` only while that message is still waiting in the daemon queue. `{ "removed": false }` means it was not found, belonged to another client, or had already been drained.
 
 ### `POST /session/:id/prompt`
 

@@ -330,6 +330,17 @@ export function escapePath(filePath: string): string {
 }
 
 /**
+ * Removes backslash escaping from the shared SHELL_SPECIAL_CHARS set, on any
+ * platform. Unlike unescapePath this does not skip win32, for callers that
+ * receive escaped tokens (e.g. session mentions) which must be normalized
+ * regardless of OS. Kept as the single source of truth for the escape set so
+ * platform-specific unescapers cannot drift from it.
+ */
+export function unescapeShellSpecials(value: string): string {
+  return value.replace(UNESCAPE_REGEX, '$1');
+}
+
+/**
  * Unescapes special characters in a file path.
  * Removes backslash escaping from shell metacharacters.
  *
@@ -341,8 +352,7 @@ export function unescapePath(filePath: string): string {
   if (os.platform() === 'win32') {
     return filePath;
   }
-  const unescaped = filePath.replace(UNESCAPE_REGEX, '$1');
-  return unescaped;
+  return unescapeShellSpecials(filePath);
 }
 
 /**

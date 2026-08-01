@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
+  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
@@ -269,6 +270,15 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
+      });
+    });
+
     it('should have voice dictation settings under general', () => {
       const voice =
         getSettingsSchema().general.properties.voice.properties ?? {};
@@ -341,6 +351,22 @@ describe('SettingsSchema', () => {
         getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
       ).toBe(true);
       expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
     });
 
     it('should have consistent default values for boolean settings', () => {
@@ -432,9 +458,9 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui.properties.useTerminalBuffer;
       expect(useTerminalBuffer).toBeDefined();
       expect(useTerminalBuffer.type).toBe('boolean');
-      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.default).toBe(true);
       expect(useTerminalBuffer.showInDialog).toBe(true);
-      expect(useTerminalBuffer.requiresRestart).toBe(false);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {
