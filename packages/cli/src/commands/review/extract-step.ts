@@ -47,6 +47,22 @@ interface WorkflowStep {
   env?: unknown;
 }
 
+interface RunDefaults {
+  shell?: unknown;
+  'working-directory'?: unknown;
+}
+
+interface WorkflowJob {
+  steps?: WorkflowStep[];
+}
+
+interface WorkflowDoc {
+  jobs?: Record<string, WorkflowJob>;
+}
+
+/** Which `env:`/`defaults:` level a resolved value came from. */
+export type EnvScope = 'workflow' | 'job' | 'step';
+
 export interface ExtractedStep {
   workflow: string;
   job: string;
@@ -55,8 +71,16 @@ export interface ExtractedStep {
   index: number;
   shell: string;
   workingDirectory?: string;
-  /** The step-level `env:` keys, values verbatim (they may hold `${{ … }}`). */
+  /**
+   * The EFFECTIVE `env:` the runner would hand the step — workflow, job and
+   * step levels merged, nearest wins — values verbatim (they may hold
+   * `${{ … }}`). Step-level only would be a lie: a step whose behaviour turns
+   * on a job-level `NODE_ENV` is exactly the by-hand transcription error this
+   * command exists to remove.
+   */
   env: Record<string, string>;
+  /** Which level each effective `env:` key came from. */
+  envSources: Record<string, EnvScope>;
   /** Every distinct `${{ … }}` expression in the script and env — the stub list. */
   expressions: string[];
   /** Top-level commands the script invokes — a starting point for stubbing. */
@@ -137,6 +161,52 @@ export function invokedCommandsOf(script: string): string[] {
   return [...seen].sort();
 }
 
+/**
+ * `text` rendered as comment lines — EVERY line, not just the first. A YAML
+ * block scalar (`SETTINGS_JSON: |`) reaches here as a multi-line string, and a
+ * continuation line that escaped the `#` would sit in command position: under
+ * the `set -e` this header emits, the extracted step then dies in its own
+ * preamble, before its `run:` body ever runs.
+ */
+export function commentLines(firstPrefix: string, text: string): string[] {
+  const [first = '', ...rest] = text.split('\n');
+  return [`${firstPrefix}${first}`, ...rest.map((line) => `#   ${line}`)];
+}
+
+/** The nearest level that set a scalar — step, then job, then workflow. */
+function nearestString(...values: unknown[]): string | undefined {
+  return values.find((v): v is string => typeof v === 'string');
+}
+
+/** `defaults.run` of a workflow or job, tolerating any shape the YAML holds. */
+function runDefaultsOf(container: unknown): RunDefaults {
+  const defaults = (container as { defaults?: unknown } | undefined)?.defaults;
+  const run =
+    defaults && typeof defaults === 'object'
+      ? (defaults as { run?: unknown }).run
+      : undefined;
+  return run && typeof run === 'object' ? (run as RunDefaults) : {};
+}
+
+/**
+ * Merge one level's `env:` over what the outer levels set. Called
+ * workflow → job → step, so the nearest level wins, exactly as the runner
+ * resolves it.
+ */
+function mergeEnv(
+  container: unknown,
+  scope: EnvScope,
+  env: Record<string, string>,
+  sources: Record<string, EnvScope>,
+): void {
+  const raw = (container as { env?: unknown } | undefined)?.env;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    env[k] = String(v);
+    sources[k] = scope;
+  }
+}
+
 export interface ExtractStepArgs {
   workflow: string;
   job: string;
@@ -146,7 +216,7 @@ export interface ExtractStepArgs {
 
 export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   const wfPath = resolve(args.workflow);
-  let doc: { jobs?: Record<string, { steps?: WorkflowStep[] }> };
+  let doc: WorkflowDoc;
   try {
     doc = parse(readFileSync(wfPath, 'utf8')) as typeof doc;
   } catch (err) {
@@ -181,29 +251,51 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
     );
   }
 
-  // GitHub's default for run steps on Linux runners is `bash -e`; an explicit
-  // `shell:` overrides. Recorded either way, because the caller must invoke
-  // the script with the same shell the runner would.
-  const shell = typeof step.shell === 'string' ? step.shell : 'bash';
+  // `env:`, `shell:` and `working-directory:` are all THREE-level settings on
+  // GitHub — workflow, job, step, nearest wins — and only the step level is
+  // visible in the step's own text. Reading step-level alone reproduces by
+  // machine the transcription error this command exists to remove: the script
+  // runs with an empty `$NODE_ENV` a job-level `env:` would have set, in the
+  // wrong directory, and nothing says so.
+  const workflowDefaults = runDefaultsOf(doc);
+  const jobDefaults = runDefaultsOf(job);
   const env: Record<string, string> = {};
-  if (step.env && typeof step.env === 'object') {
-    for (const [k, v] of Object.entries(step.env as Record<string, unknown>)) {
-      env[k] = String(v);
-    }
-  }
+  const envSources: Record<string, EnvScope> = {};
+  mergeEnv(doc, 'workflow', env, envSources);
+  mergeEnv(job, 'job', env, envSources);
+  mergeEnv(step, 'step', env, envSources);
+
+  // GitHub's default for run steps on Linux runners is `bash -e`; a `shell:`
+  // at any level overrides. Recorded either way, because the caller must
+  // invoke the script with the same shell the runner would.
+  const shell =
+    nearestString(step.shell, jobDefaults.shell, workflowDefaults.shell) ??
+    'bash';
+  const workingDirectory = nearestString(
+    step['working-directory'],
+    jobDefaults['working-directory'],
+    workflowDefaults['working-directory'],
+  );
 
   const script = step.run;
+  const stepLabel = String(step.name ?? step.id ?? index);
   const outPath = resolve(args.out);
   mkdirSync(dirname(outPath), { recursive: true });
   // Verbatim body under a header that names its provenance. The env block is
   // emitted as COMMENTS, not exports: its values may hold `${{ … }}` the
   // caller must stub, and a half-substituted export would run where a loud
-  // unbound variable should.
+  // unbound variable should. Each entry carries the level it came from, so a
+  // reader of the script alone can tell an inherited value from the step's own.
   const header = [
     `#!/usr/bin/env ${shell === 'bash' ? 'bash' : shell}`,
-    `# extracted verbatim from ${args.workflow} — job \`${args.job}\`, step \`${String(step.name ?? step.id ?? index)}\``,
+    ...commentLines(
+      '# extracted verbatim from ',
+      `${args.workflow} — job \`${args.job}\`, step \`${stepLabel}\``,
+    ),
     ...(shell === 'bash' ? ['set -e'] : []),
-    ...Object.entries(env).map(([k, v]) => `# env ${k}=${v}`),
+    ...Object.entries(env).flatMap(([k, v]) =>
+      commentLines(`# env [${envSources[k]}] ${k}=`, v),
+    ),
     '',
   ].join('\n');
   writeFileSync(outPath, header + script + (script.endsWith('\n') ? '' : '\n'));
@@ -212,13 +304,12 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   return {
     workflow: args.workflow,
     job: args.job,
-    step: String(step.name ?? step.id ?? index),
+    step: stepLabel,
     index,
     shell,
-    ...(typeof step['working-directory'] === 'string'
-      ? { workingDirectory: step['working-directory'] }
-      : {}),
+    ...(workingDirectory === undefined ? {} : { workingDirectory }),
     env,
+    envSources,
     expressions: expressionsOf(script, ...Object.values(env)),
     invokes: invokedCommandsOf(script),
     scriptPath: outPath,
@@ -250,8 +341,13 @@ export const extractStepCommand: CommandModule = {
   handler: (argv) => {
     const meta = runExtractStep(argv as unknown as ExtractStepArgs);
     writeStdoutLine(JSON.stringify(meta, null, 2));
+    const inherited = Object.values(meta.envSources).filter(
+      (scope) => scope !== 'step',
+    ).length;
     writeStderrLine(
-      `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
+      `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, ` +
+        `${Object.keys(meta.env).length} env var(s), ${inherited} inherited from job/workflow, ` +
+        `invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
     );
   },
 };
