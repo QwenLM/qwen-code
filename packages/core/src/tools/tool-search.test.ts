@@ -1086,6 +1086,49 @@ describe('ToolSearchTool', () => {
     expect(registry.hasPresentedProxySchema('cron_list')).toBe(false);
   });
 
+  it('declares schemas directly when an atomic search result exceeds the batch budget', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_deferred',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(tool.maxOutputChars).toBe(Number.POSITIVE_INFINITY);
+    expect(setTools).toHaveBeenCalledOnce();
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain('declared directly instead');
+  });
+
+  it('rolls back an oversized direct declaration when setTools fails', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_deferred',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockRejectedValue(new Error('provider rejected tools')),
+    } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe('provider rejected tools');
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
+  });
+
   it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {
     // ensureTool throwing mid-iteration would otherwise propagate out of
     // the for loop with previous tools already revealed but never

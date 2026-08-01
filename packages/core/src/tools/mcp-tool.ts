@@ -159,6 +159,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
     private readonly allowInvocationContext: boolean = false,
+    private readonly schemaSnapshot: string = '',
     private readonly retryCount: number = 0,
   ) {
     super(params);
@@ -269,6 +270,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
       const newTool = await this.attemptReconnect();
       if (newTool) {
+        if (JSON.stringify(newTool.schema) !== this.schemaSnapshot) {
+          throw new Error(
+            `MCP tool "${this.registeredToolName}" changed its schema during reconnect. Fetch its current schema before retrying the call.`,
+          );
+        }
         const newInvocation = new DiscoveredMCPToolInvocation(
           newTool['mcpTool'],
           this.serverName,
@@ -284,6 +290,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.mcpToolIdleTimeoutMs,
           this.annotations,
           newTool['allowInvocationContext'] === true,
+          this.schemaSnapshot,
           this.retryCount + 1,
         );
         return newInvocation.execute(signal, updateOutput);
@@ -723,6 +730,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.allowInvocationContext,
+      JSON.stringify(this.schema),
     );
   }
 }

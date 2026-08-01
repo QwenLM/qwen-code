@@ -323,6 +323,33 @@ export interface RunNonInteractiveOptions {
   continueInterrupted?: boolean;
 }
 
+function getHeadlessExecutionRequest(
+  request: ToolCallRequestInfo,
+): ToolCallRequestInfo {
+  if (request.name !== ToolNames.DEFERRED_TOOL_CALL) {
+    const canonicalName = canonicalToolName(request.name);
+    return canonicalName === request.name
+      ? request
+      : { ...request, name: canonicalName };
+  }
+  const targetName = request.args['name'];
+  const targetArgs = request.args['arguments'];
+  if (
+    typeof targetName !== 'string' ||
+    !targetArgs ||
+    typeof targetArgs !== 'object' ||
+    Array.isArray(targetArgs)
+  ) {
+    return request;
+  }
+  return {
+    ...request,
+    name: canonicalToolName(targetName),
+    args: targetArgs as Record<string, unknown>,
+    providerName: ToolNames.DEFERRED_TOOL_CALL,
+  };
+}
+
 /**
  * Partition headless tool-call requests into consecutive batches by
  * concurrency safety, mirroring the interactive scheduler
@@ -345,13 +372,14 @@ function partitionHeadlessToolCalls(
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
   const registry = config.getToolRegistry();
-  return partitionByConcurrencySafety(requests, (request) =>
-    isToolCallConcurrencySafe(
-      request.name,
-      registry.getTool(canonicalToolName(request.name))?.kind,
-      request.args,
-    ),
-  );
+  return partitionByConcurrencySafety(requests, (request) => {
+    const executionRequest = getHeadlessExecutionRequest(request);
+    return isToolCallConcurrencySafe(
+      executionRequest.name,
+      registry.getTool(executionRequest.name)?.kind,
+      executionRequest.args,
+    );
+  });
 }
 
 /**
@@ -1222,6 +1250,10 @@ export async function runNonInteractive(
           ToolCallResponseInfo,
           'success' | 'error' | 'cancelled'
         >();
+        const executionRequestByResponse = new Map<
+          ToolCallResponseInfo,
+          ToolCallRequestInfo
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -1400,14 +1432,15 @@ export async function runNonInteractive(
           // has its own complex handler (subagent messages). All other
           // tools with canUpdateOutput=true (e.g., MCP tools) get a
           // generic handler that emits progress via the adapter.
-          const isAgentTool = requestInfo.name === 'agent';
+          const executionRequest = getHeadlessExecutionRequest(requestInfo);
+          const isAgentTool = executionRequest.name === 'agent';
           const { handler: outputUpdateHandler } = isAgentTool
             ? createAgentToolProgressHandler(
                 config,
                 requestInfo.callId,
                 adapter,
               )
-            : createToolProgressHandler(requestInfo, adapter);
+            : createToolProgressHandler(executionRequest, adapter);
 
           const response = await executeToolCall(
             config,
@@ -1423,6 +1456,7 @@ export async function runNonInteractive(
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
                   statusByResponse.set(call.response, call.status);
+                  executionRequestByResponse.set(call.response, call.request);
                 }
               },
               deferDeferredToolPresentationCommit: true,
@@ -1447,6 +1481,9 @@ export async function runNonInteractive(
           requestInfo: ToolCallRequestInfo,
           toolResponse: ToolCallResponseInfo,
         ): boolean => {
+          const executionRequest =
+            executionRequestByResponse.get(toolResponse) ??
+            getHeadlessExecutionRequest(requestInfo);
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -1454,7 +1491,7 @@ export async function runNonInteractive(
             // the LLM can decide what to do next. In text mode, we
             // still log the error.
             handleToolError(
-              requestInfo.name,
+              executionRequest.name,
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
@@ -1464,13 +1501,13 @@ export async function runNonInteractive(
             );
           }
 
-          adapter.emitToolResult(requestInfo, toolResponse);
+          adapter.emitToolResult(executionRequest, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           config
             .getGeminiClient()
             .recordCompletedToolCall(
-              requestInfo.name,
-              requestInfo.args as Record<string, unknown>,
+              executionRequest.name,
+              executionRequest.args as Record<string, unknown>,
             );
 
           // Capture model override from skill tool results.
@@ -1695,13 +1732,23 @@ export async function runNonInteractive(
 
         const orderedResponses = batchRequests.flatMap((request) => {
           const response = responseByRequest.get(request);
-          return response ? [{ request, response }] : [];
+          return response
+            ? [
+                {
+                  request,
+                  executionRequest:
+                    executionRequestByResponse.get(response) ??
+                    getHeadlessExecutionRequest(request),
+                  response,
+                },
+              ]
+            : [];
         });
         const finalized = await finalizeToolResponses(
           config,
-          orderedResponses.map(({ request, response }) => ({
+          orderedResponses.map(({ request, executionRequest, response }) => ({
             callId: request.callId,
-            toolName: request.name,
+            toolName: executionRequest.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
           })),

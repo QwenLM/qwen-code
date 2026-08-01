@@ -231,6 +231,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
+  ToolNames.TOOL_SEARCH,
 ]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
@@ -2221,6 +2222,9 @@ export class CoreToolScheduler {
         if (!normalizedRequest.ok) {
           const errorRequest: ToolCallRequestInfo = {
             ...reqInfo,
+            ...(normalizedRequest.targetName
+              ? { name: normalizedRequest.targetName }
+              : {}),
             providerName: normalizedRequest.providerName,
           };
           const count = recordBatchRetryableToolError(

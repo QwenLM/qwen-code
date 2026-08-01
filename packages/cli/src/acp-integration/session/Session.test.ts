@@ -17028,6 +17028,49 @@ describe('Session', () => {
       };
     }
 
+    it('keeps staged schema presentations when the delivery message is copied', () => {
+      const presentation = {
+        name: core.ToolNames.CRON_CREATE,
+        schemaFingerprint: 'schema',
+      };
+      const message: Content = {
+        role: 'user',
+        parts: [{ text: '<functions>cron_create</functions>' }],
+      };
+      const internals = session as unknown as {
+        trackDeferredToolPresentationsForMessage(
+          message: Content,
+          toolRun: {
+            parts: Part[];
+            stopAfterPermissionCancel: boolean;
+            deferredToolPresentations: core.DeferredToolPresentation[];
+          },
+        ): void;
+        commitDeferredToolPresentationsForDeliveredMessage(
+          message: Content,
+        ): void;
+      };
+
+      internals.trackDeferredToolPresentationsForMessage(message, {
+        parts: message.parts ?? [],
+        stopAfterPermissionCancel: false,
+        deferredToolPresentations: [presentation],
+      });
+      const copiedMessage: Content = {
+        ...message,
+        parts: [...(message.parts ?? []), { text: 'continuation' }],
+      };
+      internals.commitDeferredToolPresentationsForDeliveredMessage(
+        copiedMessage,
+      );
+
+      expect(mockToolRegistry.markProxySchemaPresented).toHaveBeenCalledWith(
+        presentation,
+      );
+      internals.commitDeferredToolPresentationsForDeliveredMessage(message);
+      expect(mockToolRegistry.markProxySchemaPresented).toHaveBeenCalledOnce();
+    });
+
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => ({

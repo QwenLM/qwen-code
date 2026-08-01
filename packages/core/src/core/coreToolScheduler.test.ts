@@ -3824,6 +3824,57 @@ describe('CoreToolScheduler', () => {
     expect(output).toBe(content);
   });
 
+  it('keeps an atomic tool_search schema block inline', async () => {
+    const content = `<functions>${'a'.repeat(40_000)}</functions>`;
+    const presentation = {
+      name: ToolNames.CRON_CREATE,
+      schemaFingerprint: 'schema',
+    };
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: content,
+            returnDisplay: 'Loaded 1 tool',
+            deferredToolPresentations: [presentation],
+          }),
+          maxOutputChars: Number.POSITIVE_INFINITY,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+        toolOutputBatchBudget: 100_000,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search-atomic',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search-atomic',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).toBe(content);
+    await vi.waitFor(() => {
+      expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+    });
+  });
+
   it('schedules a memory pressure check after tool execution', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',
@@ -15767,6 +15818,43 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('isolates malformed proxy envelopes by attempted target', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+      createSchedulerWithTool(tool);
+
+    for (const [index, name] of [
+      StrictStringTool.Name,
+      StrictStringTool.Name,
+      'anotherDeferredTool',
+    ].entries()) {
+      await scheduler.schedule(
+        [
+          makeRequest(`proxy-${index}`, ToolNames.DEFERRED_TOOL_CALL, {
+            name,
+            arguments: 'not an object',
+          }),
+        ],
+        new AbortController().signal,
+      );
+    }
+
+    expect(getLastErrorMessage(onToolCallsUpdate)).not.toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
+    const [completed] = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as [
+      ToolCall,
+    ];
+    expect(completed.request.name).toBe('anotherDeferredTool');
+    expect(completed.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    }
   });
 
   it('should keep retry counts stable when truncation guidance is toggled', async () => {

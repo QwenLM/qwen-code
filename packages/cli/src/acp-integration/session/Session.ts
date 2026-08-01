@@ -287,6 +287,13 @@ import {
 } from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const DEFERRED_TOOL_PRESENTATIONS = Symbol('deferredToolPresentations');
+type ContentWithDeferredToolPresentations = Content & {
+  [DEFERRED_TOOL_PRESENTATIONS]?: {
+    presentations: readonly DeferredToolPresentation[];
+    committed: boolean;
+  };
+};
 const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
@@ -1293,10 +1300,6 @@ export class Session implements SessionContext {
   // background loops, so keep this with the session instead of a single
   // runToolCalls invocation.
   private readonly duplicateProviderToolCallResponseIds = new Set<string>();
-  private readonly pendingDeferredToolPresentationsByMessage = new WeakMap<
-    Content,
-    readonly DeferredToolPresentation[]
-  >();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -7298,7 +7301,9 @@ export class Session implements SessionContext {
     if (!message || !presentations || presentations.length === 0) {
       return;
     }
-    this.pendingDeferredToolPresentationsByMessage.set(message, presentations);
+    (message as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ] = { presentations, committed: false };
   }
 
   /**
@@ -7314,13 +7319,14 @@ export class Session implements SessionContext {
     if (!message) {
       return;
     }
-    const presentations =
-      this.pendingDeferredToolPresentationsByMessage.get(message);
-    if (!presentations) {
+    const stagedMessage = message as ContentWithDeferredToolPresentations;
+    const state = stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
+    if (!state || state.committed) {
       return;
     }
-    this.pendingDeferredToolPresentationsByMessage.delete(message);
-    this.commitDeferredToolPresentations(presentations);
+    state.committed = true;
+    delete stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
+    this.commitDeferredToolPresentations(state.presentations);
   }
 
   /**

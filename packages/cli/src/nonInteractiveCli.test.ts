@@ -50,6 +50,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
@@ -1837,6 +1838,55 @@ describe('runNonInteractive', () => {
       expect(started).toBe(total);
       expect(startOrder).toEqual(['tool-1', 'tool-2', 'tool-3']);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
+    });
+
+    it('classifies deferred calls by the real target tool', async () => {
+      setupMetricsMock();
+      vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) =>
+        name === 'deferred_read'
+          ? ({ kind: Kind.Read } as unknown as ReturnType<
+              typeof mockToolRegistry.getTool
+            >)
+          : undefined,
+      );
+
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          started += 1;
+          if (started === 2) openGate();
+          await gate;
+          return { responseParts: [{ text: request.callId }] };
+        },
+      );
+      const calls: ServerGeminiStreamEvent[] = ['proxy-1', 'proxy-2'].map(
+        (callId) => ({
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId,
+            name: ToolNames.DEFERRED_TOOL_CALL,
+            args: { name: 'deferred_read', arguments: { path: callId } },
+            isClientInitiated: false,
+            prompt_id: 'p-proxy-parallel',
+          },
+        }),
+      );
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(calls))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'read twice',
+        'p-proxy-parallel',
+      );
+
+      expect(started).toBe(2);
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -5258,6 +5308,112 @@ describe('runNonInteractive', () => {
         }),
       );
     }
+  });
+
+  it('records deferred calls with the normalized target identity', async () => {
+    setupMetricsMock();
+    const emitToolResult = vi.fn();
+    const adapter = {
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: vi.fn(),
+      emitResult: vi.fn(),
+      emitUserMessage: vi.fn(),
+      emitToolResult,
+      emitSystemMessage: vi.fn(),
+      emitMessage: vi.fn(),
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+    const providerRequest: ToolCallRequestInfo = {
+      callId: 'proxy-call',
+      name: ToolNames.DEFERRED_TOOL_CALL,
+      args: {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-headless-identity',
+    };
+    const toolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: providerRequest,
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (
+        _config: unknown,
+        request: ToolCallRequestInfo,
+        _signal: AbortSignal,
+        options: {
+          onAllToolCallsComplete?: (
+            calls: Array<{
+              request: ToolCallRequestInfo;
+              response: ToolCallResponseInfo;
+              status: 'success';
+            }>,
+          ) => Promise<void>;
+        },
+      ) => {
+        const response: ToolCallResponseInfo = {
+          callId: request.callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'created' },
+              },
+            },
+          ],
+        };
+        await options.onAllToolCallsComplete?.([
+          {
+            request: {
+              ...request,
+              name: ToolNames.CRON_CREATE,
+              args: { schedule: '0 9 * * *' },
+              providerName: ToolNames.DEFERRED_TOOL_CALL,
+            },
+            response,
+            status: 'success',
+          },
+        ]);
+        return response;
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCall]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Create a cron job',
+      'prompt-headless-identity',
+      { adapter },
+    );
+
+    expect(emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: ToolNames.CRON_CREATE,
+        args: { schedule: '0 9 * * *' },
+        providerName: ToolNames.DEFERRED_TOOL_CALL,
+      }),
+      expect.anything(),
+    );
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      ToolNames.CRON_CREATE,
+      { schedule: '0 9 * * *' },
+    );
   });
 
   it('should execute only the first duplicate tool call id in stream-json format', async () => {

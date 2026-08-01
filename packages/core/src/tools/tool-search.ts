@@ -371,6 +371,14 @@ class ToolSearchInvocation extends BaseToolInvocation<
       llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
     }
 
+    const oversizedFallback = await this.revealOversizedSchemasDirectly(
+      llmContent,
+      deferredToolPresentations,
+    );
+    if (oversizedFallback) {
+      return oversizedFallback;
+    }
+
     const displayParts: string[] = [];
     if (loadedSchemas.length > 0) {
       displayParts.push(`Loaded ${loadedSchemas.length} tool(s)`);
@@ -393,6 +401,55 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     return result;
   }
+
+  private async revealOversizedSchemasDirectly(
+    llmContent: string,
+    presentations: readonly DeferredToolPresentation[],
+  ): Promise<ToolResult | undefined> {
+    const budget = this.config.getToolOutputBatchBudget();
+    if (
+      presentations.length === 0 ||
+      !Number.isFinite(budget) ||
+      budget <= 0 ||
+      llmContent.length <= budget
+    ) {
+      return undefined;
+    }
+
+    const registry = this.config.getToolRegistry();
+    const names = [...new Set(presentations.map(({ name }) => name))];
+    const newlyRevealed = names.filter(
+      (name) => !registry.isDeferredToolRevealed(name),
+    );
+    for (const name of newlyRevealed) {
+      registry.revealDeferredTool(name);
+    }
+
+    try {
+      if (newlyRevealed.length > 0) {
+        const client = this.config.getGeminiClient();
+        if (!client) {
+          throw new Error('GeminiClient not initialised');
+        }
+        await client.setTools();
+      }
+    } catch (error) {
+      for (const name of newlyRevealed) {
+        registry.unrevealDeferredTool(name);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        llmContent: `Error: deferred schemas exceeded the inline output budget and could not be declared directly (${message}).`,
+        returnDisplay: `Direct declaration failed: ${message}`,
+        error: { message },
+      };
+    }
+
+    return {
+      llmContent: `The requested deferred schemas exceeded the inline output budget, so these tools were declared directly instead: ${names.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`,
+      returnDisplay: `Declared ${names.length} oversized tool(s) directly`,
+    };
+  }
 }
 
 export class ToolSearchTool extends BaseDeclarativeTool<
@@ -400,6 +457,10 @@ export class ToolSearchTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name = ToolNames.TOOL_SEARCH;
+
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
 
   constructor(private readonly config: Config) {
     super(
