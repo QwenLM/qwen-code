@@ -291,6 +291,41 @@ jobs:
     ).toThrow(/0: Post comment/);
   });
 
+  it('refuses an AMBIGUOUS step name instead of silently taking the first', () => {
+    // A job may legally hold two steps with the same name. Taking the first is
+    // the failure this command's own header names — "picks the same-named step
+    // from the wrong job" — and it is worst in the use this command exists
+    // for: A/B extraction runs it once per tree, so a PR that adds or reorders
+    // a duplicate leaves the two sides comparing different steps and reporting
+    // on one.
+    const dup = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post comment
+        run: echo one
+      - name: Post comment
+        run: echo two
+`;
+    const wf = write(dup);
+    expect(() =>
+      runExtractStep({
+        workflow: wf,
+        job: 'j',
+        step: 'Post comment',
+        out: join(dir, 's'),
+      }),
+    ).toThrow(/ambiguous.*indices 0, 1.*pass the index/s);
+    // The index is never ambiguous, and still selects.
+    expect(
+      runExtractStep({ workflow: wf, job: 'j', step: '1', out: join(dir, 's') })
+        .index,
+    ).toBe(1);
+  });
+
   it('resolves env and defaults across ALL THREE levels, nearest wins', () => {
     const meta = runExtractStep({
       workflow: write(WF_LEVELS),

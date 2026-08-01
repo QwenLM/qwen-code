@@ -532,9 +532,21 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   const steps = Array.isArray(job.steps) ? job.steps : [];
   // Match by name, id, or 0-based index — exact, never substring: two steps
   // named "Post comment" and "Post comment (retry)" must not alias.
-  const index = /^\d+$/.test(args.step)
-    ? Number(args.step)
-    : steps.findIndex((s) => s?.name === args.step || s?.id === args.step);
+  const byName = steps.flatMap((s, i) =>
+    s?.name === args.step || s?.id === args.step ? [i] : [],
+  );
+  // A job may legally hold two steps with the SAME name, and taking the first
+  // is the failure this command's own header names: "picks the same-named step
+  // from the wrong job". A/B extraction runs this twice, once per tree, and a
+  // PR that adds or reorders a duplicate then has the two sides comparing
+  // different steps while reporting on one. Ambiguity is refused out loud —
+  // the index is always available and is never ambiguous.
+  if (byName.length > 1) {
+    throw new Error(
+      `extract-step: step \`${args.step}\` is ambiguous in job \`${args.job}\` — ${byName.length} steps share that name (indices ${byName.join(', ')}); pass the index instead`,
+    );
+  }
+  const index = /^\d+$/.test(args.step) ? Number(args.step) : (byName[0] ?? -1);
   const step = steps[index];
   if (!step) {
     const named = steps
@@ -680,15 +692,25 @@ export const extractStepCommand: CommandModule = {
         describe: 'Where to write the executable script',
       }),
   handler: (argv) => {
-    const meta = runExtractStep(argv as unknown as ExtractStepArgs);
-    writeStdoutLine(JSON.stringify(meta, null, 2));
-    const inherited = Object.values(meta.envSources).filter(
-      (scope) => scope !== 'step',
-    ).length;
-    writeStderrLine(
-      `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, ` +
-        `${Object.keys(meta.env).length} env var(s), ${inherited} inherited from job/workflow, ` +
-        `invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
-    );
+    // Caught, like `base-tree` and `test-plan` next door. Every throw above is
+    // a message written FOR the caller — read vs parse, no job vs no step vs
+    // no `run:` — and letting it propagate re-frames all of them as "an
+    // unexpected critical error" under a stack trace, which is the hunt those
+    // messages exist to prevent.
+    try {
+      const meta = runExtractStep(argv as unknown as ExtractStepArgs);
+      writeStdoutLine(JSON.stringify(meta, null, 2));
+      const inherited = Object.values(meta.envSources).filter(
+        (scope) => scope !== 'step',
+      ).length;
+      writeStderrLine(
+        `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, ` +
+          `${Object.keys(meta.env).length} env var(s), ${inherited} inherited from job/workflow, ` +
+          `invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
+      );
+    } catch (err) {
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
+    }
   },
 };
