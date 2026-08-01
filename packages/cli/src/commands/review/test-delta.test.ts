@@ -312,6 +312,47 @@ describe('runTestDelta', () => {
     expect(r.note).not.toContain('timed out');
   });
 
+  it('prefers the failing set the run measured over re-parsing trimmed output', () => {
+    // The base rerun parses its own raw text; `output` is only the bounded copy
+    // that lands in the report. Re-parsing it would lose whatever the trim's
+    // omitted middle swallowed, and a SHORT base set fabricates netNew.
+    const r = runWith(
+      [cmd({ output: 'FAIL src/a.test.ts\nFAIL src/b.test.ts' })],
+      () => ({
+        ...cmd({}),
+        output: 'FAIL src/a.test.ts\n\n... [90000 characters omitted] ...\n',
+        failingFiles: ['src/a.test.ts', 'src/b.test.ts'],
+      }),
+    );
+    expect(r.netNew).toEqual([]);
+    expect(r.shared).toEqual(['src/a.test.ts', 'src/b.test.ts']);
+  });
+
+  it('discloses a PR-side output that was already trimmed', () => {
+    // build-test trimmed it before this command ran, so the PR failing set may
+    // be short. That understates `shared`; it cannot invent a netNew. Say so.
+    const r = runWith(
+      [
+        cmd({
+          output:
+            'FAIL src/a.test.ts\n\n... [120000 characters omitted] ...\nFAIL src/z.test.ts',
+        }),
+      ],
+      'FAIL src/a.test.ts',
+    );
+    expect(r.note).toContain('may be partial');
+    expect(r.entries[0].prTruncated).toBe(true);
+  });
+
+  it('says nothing about trimming when the PR output was complete', () => {
+    const r = runWith(
+      [cmd({ output: 'FAIL src/a.test.ts' })],
+      'FAIL src/a.test.ts',
+    );
+    expect(r.note).not.toContain('may be partial');
+    expect(r.entries[0].prTruncated).toBe(false);
+  });
+
   it('says when a rerun died on a BUDGET-shortened deadline, not its own', () => {
     // Otherwise "timed out — infrastructure" sends the reader hunting a hang
     // that is really an exhausted budget, and a rerun with room to spare would

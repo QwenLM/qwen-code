@@ -54,6 +54,9 @@ import {
 // eslint-disable-next-line no-control-regex -- ESC is the character under test
 const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
+/** `trimOutput`'s own marker — the one signal that a stored output is partial. */
+const TRIM_MARKER_RE = /\.\.\. \[\d+ characters omitted/;
+
 /**
  * Test files a runner named as failing, out of one command's output.
  *
@@ -115,6 +118,11 @@ export interface DeltaEntry {
    * path-based judgment stays in force. Disclosed, never silently dropped.
    */
   unparsed: boolean;
+  /**
+   * True when the PR-side output this read was already trimmed by `build-test`.
+   * The failing-file list may be short, which can only understate `shared`.
+   */
+  prTruncated: boolean;
 }
 
 export interface TestDeltaReport {
@@ -146,11 +154,28 @@ export interface TestDeltaArgs {
   prWorktree?: string;
   timeout: number;
   /** Test seam — production spawns the real command. */
-  exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
+  exec?: (command: string, cwd: string, timeoutMs: number) => BaseRunResult;
   /** Injectable clock, for tests only — the budget math cannot be driven to
    *  its cutoff in real time. Matches `test-efficacy`'s seam; without it a
    *  test has to reassign the global `Date.now`. */
   now?: () => number;
+}
+
+/**
+ * A base-side rerun, plus what it measured BEFORE its output was bounded.
+ *
+ * `output` is trimmed for the report, and `trimOutput` rescues only module
+ * errors and runner summaries out of the omitted middle — not the per-file
+ * `FAIL` lines this command parses. A base suite with a failure section over
+ * the tail budget would therefore lose failing files into the gap, and a
+ * SHORTER base set is the dangerous direction: `netNew` is the PR side minus
+ * the base side, so every file trimming hid becomes a fabricated Critical
+ * attributed to this PR by "measurement". Parse the raw text, report the
+ * bounded one.
+ */
+export interface BaseRunResult extends CommandResult {
+  /** Parsed from the untrimmed output. Absent from a seam that predates this. */
+  failingFiles?: string[];
 }
 
 // Mirrors build-test's run() on the three properties its comments call out as
@@ -160,7 +185,7 @@ export interface TestDeltaArgs {
 // form misses a maxBuffer kill, which would flow into the base-green Critical
 // path), and trimmed output (a failing monorepo suite is hundreds of KB that
 // would otherwise land verbatim in the report Agent 7 reads).
-function run(command: string, cwd: string, timeoutMs: number): CommandResult {
+function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
   const started = Date.now();
   const r = spawnSync(command, {
     shell: true,
@@ -178,16 +203,18 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // an exit code, so the substring form reported timedOut:false with empty
   // output and fed straight into the base-green path.
   const timedOut = spawnTimedOut(r);
+  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   return {
     command,
     exitCode: timedOut ? null : (r.status ?? null),
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
+    failingFiles: timedOut ? [] : failingFilesOf(raw, cwd),
     // Bounded like build-test's: this lands in `entries[].base.output`, which
     // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
     // untrimmed megabyte pushes exactly what the command produces past any
     // reader's truncation.
-    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    output: trimOutput(raw),
   };
 }
 
@@ -275,14 +302,22 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     const clamped = remaining < perCommandMs;
     const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
     if (base.timedOut && clamped) budgetClamped.push(t.command);
+    // Prefer what the run itself measured off the untrimmed text; fall back to
+    // re-parsing the bounded output only for a seam that supplies neither.
     const baseFailingFiles = base.timedOut
       ? []
-      : failingFilesOf(base.output, baseline);
+      : (base.failingFiles ?? failingFilesOf(base.output, baseline));
     // The PR side is what netNew/shared are derived from, so a PR side that
     // parsed NOTHING attributes nothing — regardless of what the base rerun
     // managed to parse. Requiring both sides to be empty silently dropped a
     // failed command whose FAIL lines the trim had scattered.
     const unparsed = prFailingFiles.length === 0;
+    // The PR side is read out of build-test's STORED output, which that command
+    // trimmed on the same rules. The base side is parsed raw (see BaseRunResult)
+    // so it can never be the short one, but nothing here can un-trim the report:
+    // a PR-side set missing files makes `shared` — not `netNew` — too small, so
+    // the loss is silence, and silence still gets said out loud.
+    const prTruncated = TRIM_MARKER_RE.test(t.output ?? '');
     // A base run that never finished attributes NOTHING: with its failing set
     // unknowable, promoting the PR side's failures to net-new would
     // manufacture the strongest evidence this command produces out of an
@@ -309,6 +344,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         : prFailingFiles.filter((f) => baseFailingFiles.includes(f)),
       base,
       unparsed,
+      prTruncated,
     });
   }
 
@@ -316,6 +352,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const shared = [...new Set(entries.flatMap((e) => e.shared))].sort();
   const unparsed = entries.filter((e) => e.unparsed).length;
   const timedOut = entries.filter((e) => e.base.timedOut).length;
+  const truncated = entries.filter((e) => e.prTruncated).length;
 
   const parts: string[] = [];
   if (netNew.length) {
@@ -331,6 +368,11 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (unparsed) {
     parts.push(
       `${unparsed} command(s) failed but named no parseable failing file — no delta for those; judge them by the diff as before`,
+    );
+  }
+  if (truncated) {
+    parts.push(
+      `${truncated} command(s) had their PR-side output trimmed before this ran, so their failing-file list may be partial — a file missing there is one this delta could not call pre-existing, never one it invented`,
     );
   }
   const unusable = entries.filter(
