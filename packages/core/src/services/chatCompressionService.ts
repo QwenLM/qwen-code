@@ -516,6 +516,12 @@ export class ChatCompressionService {
         );
     }
 
+    // Hoist the system prompt so the guard can include it in the estimate.
+    const systemInstruction = buildCompressionSystemPrompt(
+      opts.customInstructions,
+      hookExtraInstructions,
+    );
+
     // Guard: if the compaction model's context window is too small for the
     // slimmed payload, fall back to the main model for this compression only.
     // Coalesce to the main model so an undefined getCompactionModel() (e.g.
@@ -534,13 +540,15 @@ export class ChatCompressionService {
           : config.getAllConfiguredModels();
         const entry = models.find((m) => m.id === resolved.modelId);
         const window = entry?.contextWindowSize;
-        // Include the output reserve: most providers count it against the
-        // same context window as the input.
+        // Include the system prompt and the output reserve: providers check
+        // prompt + max_tokens <= window, so all three terms count.
         const slimmedTokenEstimate =
           estimateContentTokens(
             slim.slimmedHistory,
             slimmingConfig.imageTokenEstimate,
-          ) + COMPACT_MAX_OUTPUT_TOKENS;
+          ) +
+          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+          COMPACT_MAX_OUTPUT_TOKENS;
         if (window && window > 0 && slimmedTokenEstimate > window) {
           compactionWarning =
             `Compaction model "${resolved.modelId}" context window ` +
@@ -572,10 +580,7 @@ export class ChatCompressionService {
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: buildCompressionSystemPrompt(
-        opts.customInstructions,
-        hookExtraInstructions,
-      ),
+      systemInstruction,
       contents: [
         ...slim.slimmedHistory,
         {
