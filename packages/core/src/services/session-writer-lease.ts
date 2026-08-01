@@ -402,7 +402,12 @@ function sameFileIdentity(
   left: TranscriptFingerprint,
   right: TranscriptFingerprint,
 ): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  return (
+    left.ino !== 0 &&
+    right.ino !== 0 &&
+    left.dev === right.dev &&
+    left.ino === right.ino
+  );
 }
 
 function sameFileSecurityMetadata(

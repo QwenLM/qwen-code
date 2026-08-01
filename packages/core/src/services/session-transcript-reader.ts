@@ -579,7 +579,7 @@ function sameFileIdentity(
   a: SessionTranscriptFileIdentity,
   b: SessionTranscriptFileIdentity,
 ): boolean {
-  return a.dev === b.dev && a.ino === b.ino;
+  return a.ino !== 0 && b.ino !== 0 && a.dev === b.dev && a.ino === b.ino;
 }
 
 function makeCacheKey(

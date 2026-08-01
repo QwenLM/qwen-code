@@ -732,6 +732,29 @@ describe('SessionTranscriptReader', () => {
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
   });
 
+  it('rejects a cursor when the frozen file identity has inode zero', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: {
+            ...first.nextCursorState!.fileIdentity,
+            ino: 0,
+          },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
   it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {
     await writeRecords([
       record('u1', null, 'root'),
