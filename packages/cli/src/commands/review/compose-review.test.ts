@@ -18,8 +18,11 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import { parseLedger } from './lib/ledger.js';
+import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  buildLedger,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -3120,5 +3123,202 @@ describe('testPlanGate — Test Plan rulings, disclosed but never capping', () =
     const notes = testPlanGate(p).notes;
     expect(notes).toHaveLength(6);
     expect(notes[5]).toBe('and 3 more');
+  });
+});
+
+describe('buildLedger', () => {
+  it('gives a text-less finding a locating title instead of an empty one', () => {
+    // A comment that is nothing but its severity marker used to yield an empty
+    // title, and an empty title jams the review rather than merely degrading
+    // the entry: the next round is told every ledger entry is owed a ruling,
+    // has no claim to rule on, answers `cannot tell`, and that is
+    // `cannot-tell-existing-critical` — a cap that nothing between rounds can
+    // lift. Keep the entry (the Critical really was posted) and hand over the
+    // one handle there is.
+    const l = buildLedger(
+      2,
+      [{ path: 'packages/cli/src/a.ts', line: 42, body: '**[Critical]**' }],
+      ['   '],
+    );
+    expect(l.findings[0].title).toContain('packages/cli/src/a.ts:42');
+    expect(l.findings[0].title).not.toBe('');
+    expect(l.findings[1].title).toContain('the review body');
+    // A finding that DID carry text is untouched.
+    expect(
+      buildLedger(
+        2,
+        [{ path: 'a.ts', line: 1, body: '**[Critical]** real claim' }],
+        [],
+      ).findings[0].title,
+    ).toBe('real claim');
+  });
+
+  it('numbers findings round-scoped, inline first then body Criticals', () => {
+    const l = buildLedger(
+      3,
+      [
+        {
+          path: 'src/a.ts',
+          line: 12,
+          body: '**[Critical]**: double free\ndetail',
+        },
+        { path: 'src/b.ts', line: 4, body: '**[Suggestion]** untested guard' },
+        { path: 'src/c.ts', body: 'no marker — not a finding' },
+      ],
+      ['`src/d.ts` unanchorable blocker'],
+    );
+    expect(l.round).toBe(3);
+    expect(l.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+      {
+        id: 'R3-2',
+        sev: 'S',
+        file: 'src/b.ts',
+        line: 4,
+        title: 'untested guard',
+      },
+      {
+        id: 'R3-3',
+        sev: 'C',
+        file: '(body)',
+        title: '`src/d.ts` unanchorable blocker',
+      },
+    ]);
+  });
+
+  it('classifies through `severityOf`, whitespace and all', () => {
+    // The ledger restated the severity predicate as a bare `startsWith`, while
+    // `countInlineFindings` — the count the VERDICT is computed from — trims
+    // first. A Critical whose body opened with a newline was therefore counted,
+    // posted, blocked the merge, and was silently missing from the ledger,
+    // shifting the id of every finding after it.
+    const drafted = [
+      { path: 'src/a.ts', line: 1, body: '\n  **[Critical]** leading space' },
+      { path: 'src/b.ts', line: 2, body: '**[Suggestion]** plain' },
+    ];
+    expect(countInlineFindings(drafted)).toEqual({
+      criticalsInline: 1,
+      suggestionsInline: 1,
+    });
+    expect(buildLedger(1, drafted, []).findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 1,
+        title: 'leading space',
+      },
+      { id: 'R1-2', sev: 'S', file: 'src/b.ts', line: 2, title: 'plain' },
+    ]);
+  });
+
+  it('keeps a carried-forward id instead of renumbering it by position', () => {
+    // Step 6 re-reports a still-standing finding under its ORIGINAL id, so the
+    // report says `R1-2 still stands` — and a ledger that renumbered it `R3-1`
+    // handed the next round a work list keyed by ids the report never used,
+    // which is the whole thing `R1-2 names the same claim every round` promised.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'a.ts', line: 4, body: '**[Critical]** R1-2: still leaking' },
+        { path: 'b.ts', body: '**[Suggestion]** brand new this round' },
+        { path: 'c.ts', body: '**[Critical]** R2-1 — moved but the same' },
+      ],
+      ['R1-5) the unanchorable one, still open'],
+    );
+    expect(l.findings.map((f) => `${f.id}|${f.title}`)).toEqual([
+      'R1-2|still leaking',
+      'R3-1|brand new this round',
+      'R2-1|— moved but the same',
+      'R1-5|the unanchorable one, still open',
+    ]);
+  });
+
+  it('never issues one id twice, however the comments are worded', () => {
+    // A duplicated carried id (a copy-paste, or a title that merely opens like
+    // one) must not collapse two claims onto one ledger entry.
+    const l = buildLedger(
+      2,
+      [
+        { path: 'a.ts', body: '**[Critical]** R1-1: one' },
+        { path: 'b.ts', body: '**[Critical]** R1-1: two, same id' },
+      ],
+      [],
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-1', 'R2-1']);
+  });
+});
+
+describe('the ledger marker reaches the POSTED body', () => {
+  // The feature was inert end to end: the marker was appended in the CLI
+  // handler, after composeReview() returned, so it reached only the composed
+  // JSON on disk — and `submit` posts what the PURE function returns. Every
+  // assertion here goes through composeReview, the path GitHub receives.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ledger-e2e-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+
+  it('appends the marker to the body composeReview returns', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+      ],
+    });
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'S',
+        file: 'src/a.ts',
+        line: 3,
+        title: 'untested guard',
+      },
+    ]);
+  });
+
+  it('counts the round from the side file pr-context recovered, +1', () => {
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 4, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.round).toBe(5);
+  });
+
+  it('carries NO marker on a local review — there is no PR to hold it', () => {
+    const r = composeReview({
+      planPath: plan({ prNumber: undefined }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(r.body).not.toContain('qwen-review-ledger');
   });
 });
