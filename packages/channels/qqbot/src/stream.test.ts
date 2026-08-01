@@ -1159,6 +1159,16 @@ describe('error recovery paths', () => {
 
   it('onSessionDied cleans up stream state for dead session', () => {
     const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    // Anchor the session to its triggering message (onPromptStart), then
+    // stream a chunk so onSessionDied must clean up both the stream state
+    // and the reply anchor (releaseSessionReplyAnchor).
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-1');
+    expect(sessionAnchors.has('sess-1')).toBe(true);
     onResponseChunk(ch, 'test-chat', 'alive', 'sess-1');
 
     vi.spyOn(global, 'clearTimeout');
@@ -1169,8 +1179,9 @@ describe('error recovery paths', () => {
 
     expect(clearTimeout).toHaveBeenCalledWith(timer);
     expect(streamState(ch).has('sess-1')).toBe(false);
+    // releaseSessionReplyAnchor drops the dead session's reply anchor too.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
 
-    const chp = ch as unknown as Record<string, unknown>;
     expect((chp['flushingSessions'] as Set<string>).has('sess-1')).toBe(false);
     expect((chp['pendingStreamDelete'] as Set<string>).has('sess-1')).toBe(
       false,

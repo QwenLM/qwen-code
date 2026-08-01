@@ -1789,7 +1789,13 @@ export class QQChannel extends ChannelBase {
       const all = this.router.getAll();
       let purged = 0;
       for (const entry of all) {
-        if (entry.key.endsWith(':__single__')) {
+        // Exact-match only this channel's own key: in daemon mode the router
+        // is shared across channels, so a suffix match on ':__single__' would
+        // also hit sibling channels' live single-scope routing state and
+        // silently reset their sessions. Orphan keys from the single-scope
+        // era are `<thisChannel>:__single__`, so the exact match still cleans
+        // up this channel's orphans without touching sibling routes.
+        if (entry.key === `${this.name}:__single__`) {
           if (this.router.removeSessionId(entry.sessionId)) purged++;
         }
       }
@@ -1800,8 +1806,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] purgeSingleScopeOrphans failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
-`,
+        `[QQ:${this.name}] purgeSingleScopeOrphans failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );
     }
   }
@@ -1824,13 +1829,7 @@ export class QQChannel extends ChannelBase {
     this.sessionReplyMsgId.delete(sessionId);
     if (anchor === undefined) return;
     // Another session is still streaming under this msgId — keep its seq.
-    if (
-      [...this.sessionReplyMsgId.values()].some(
-        (a) => a.msgId === anchor.msgId,
-      )
-    ) {
-      return;
-    }
+    if (this.isMsgIdAnchoredBySession(anchor.msgId)) return;
     // The chat-level entry still points at this msgId — seq is still in use.
     for (const [, entry] of this.replyMsgId) {
       if (entry.msgId === anchor.msgId) return;
@@ -1840,6 +1839,13 @@ export class QQChannel extends ChannelBase {
       // orphaned seq for a msgId that can never be used again.
       this.saveQQState();
     }
+  }
+
+  /** Whether any live session is still anchored to this msgId. */
+  private isMsgIdAnchoredBySession(msgId: string): boolean {
+    return [...this.sessionReplyMsgId.values()].some(
+      (a) => a.msgId === msgId,
+    );
   }
 
   /**
@@ -1854,10 +1860,7 @@ export class QQChannel extends ChannelBase {
       // overwrite by a newer message doesn't reset the sequence — the seq
       // bookkeeping is keyed by msgId, so only delete it when no live session
       // is still anchored to it.
-      const streamStillAnchored = [...this.sessionReplyMsgId.values()].some(
-        (a) => a.msgId === oldEntry.msgId,
-      );
-      if (!streamStillAnchored) {
+      if (!this.isMsgIdAnchoredBySession(oldEntry.msgId)) {
         this.msgSeqMap.delete(oldEntry.msgId);
       }
     }
