@@ -8072,8 +8072,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         return { accepted: false };
       }
-      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
-      return { accepted: true };
+      const messageId = randomUUID();
+      entry.midTurnMessageQueue.push({
+        messageId,
+        text: trimmed,
+        originatorClientId,
+      });
+      return { accepted: true, messageId };
+    },
+
+    removeMidTurnMessage(sessionId, messageId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const index = entry.midTurnMessageQueue.findIndex(
+        (message) =>
+          message.messageId === messageId &&
+          message.originatorClientId === originatorClientId,
+      );
+      if (index === -1) {
+        // A miss is the interesting race (already drained mid-turn, or the
+        // caller's clientId doesn't match the queued originator) — log it
+        // like the enqueue / pending-removal siblings so it shows in daemon logs.
+        writeStderrLine(
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or originator mismatch)`,
+        );
+        return { removed: false };
+      }
+      entry.midTurnMessageQueue.splice(index, 1);
+      return { removed: true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

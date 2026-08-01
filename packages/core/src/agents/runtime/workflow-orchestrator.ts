@@ -372,6 +372,7 @@ export function createProductionDispatch(
    * just without budget recording.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
@@ -386,15 +387,21 @@ export function createProductionDispatch(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
     return runStallResilient(
-      (attemptSignal, emitter) =>
-        runSingleDispatch(
-          config,
-          prompt,
-          opts,
-          attemptSignal,
-          emitter,
-          onTokens,
-        ),
+      async (attemptSignal, emitter) => {
+        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        try {
+          return await runSingleDispatch(
+            config,
+            prompt,
+            opts,
+            attemptSignal,
+            emitter,
+            onTokens,
+          );
+        } finally {
+          cleanupApprovalBridge?.();
+        }
+      },
       {
         stallMs,
         signal,

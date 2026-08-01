@@ -43,11 +43,93 @@ const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
-const verifyJob = doc.jobs.verify;
-const tmuxJob = doc.jobs['tmux-testing'];
-const verifyCleanupStep = verifyJob.steps.find(
-  (s) => s.name === 'Clean up runner workspace',
+const triageOwnershipStep = steps.find(
+  (s) => s.name === 'Restore workspace ownership',
 );
+const verifyJob = doc.jobs.verify;
+const verifyOwnershipStep = verifyJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const tmuxJob = doc.jobs['tmux-testing'];
+const tmuxOwnershipStep = tmuxJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+
+const ciWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'ci.yml',
+);
+const ciDoc = parse(readFileSync(ciWorkflowPath, 'utf8'));
+const ciTestJob = ciDoc.jobs.test;
+const ciOwnershipStep = ciTestJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciCleanStep = ciTestJob.steps.find(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+);
+
+const prReviewWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'qwen-code-pr-review.yml',
+);
+const prReviewDoc = parse(readFileSync(prReviewWorkflowPath, 'utf8'));
+const prReviewJob = prReviewDoc.jobs['review-pr'];
+const prReviewOwnershipStep = prReviewJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
+const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciIntegrationJob = ciDoc.jobs.integration_cli;
+const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+
+// A probe that only checks .qwen/.git reports "healthy" on workspace-wide
+// poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
+// chown that main did unconditionally — checkout then fails with EACCES.
+// Recovery must stay unconditional and run before checkout; these tests
+// guard against re-adding the probe gating, the inert rename-aside
+// fallback, or moving the restore below the checkout step.
+const assertUnconditional = (jobSteps, step, label) => {
+  assert.ok(step, `${label} must have a "Restore workspace ownership" step`);
+  assert.match(
+    step.run,
+    /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must restore ownership of the whole workspace`,
+  );
+  assert.match(
+    step.run,
+    /sudo -n chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must keep the sudo fallback that recovers root-owned files on a non-root runner`,
+  );
+  assert.match(
+    step.run,
+    /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+    `${label} must restore write permission of the whole workspace`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /recovery_needed|\.probe\./,
+    `${label} must not gate recovery behind a .qwen/.git probe — poisoning is workspace-wide`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /\.stale\./,
+    `${label} must not rename dirs aside — the rename-aside fallback never unblocks checkout`,
+  );
+  const restoreIdx = jobSteps.indexOf(step);
+  const checkoutIdx = jobSteps.findIndex((s) => /^Checkout/.test(s.name));
+  assert.ok(
+    restoreIdx !== -1 && checkoutIdx !== -1 && restoreIdx < checkoutIdx,
+    `${label} ownership restore must run before checkout`,
+  );
+};
 
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
@@ -290,24 +372,161 @@ describe('qwen-triage: git exec-vector cleanup', () => {
   });
 });
 
-describe('qwen-triage: verify workspace cleanup', () => {
-  it('restores write permission before returning the workspace to the runner', () => {
-    assert.ok(verifyCleanupStep, 'verify cleanup step must exist');
+describe('qwen-triage: workspace ownership restore', () => {
+  it('verify: restores write permission before returning the workspace to the runner', () => {
+    assert.ok(verifyOwnershipStep, 'verify ownership-restore step must exist');
+    assert.equal(
+      verifyOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — without always(), a failed/cancelled verify leaves root-owned files that break the next checkout',
+    );
     assert.match(
-      verifyCleanupStep.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
-      'verify makes .qwen read-only before the agent runs, so cleanup must restore its owner write bits',
+      verifyOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'verify hardens the workspace before the agent runs, so cleanup must restore owner write bits across the whole workspace, not just .qwen',
     );
 
-    const chmodIndex = verifyCleanupStep.run.indexOf(
-      'chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"',
+    const chmodIndex = verifyOwnershipStep.run.indexOf(
+      'chmod -R u+rwX "$GITHUB_WORKSPACE"',
     );
-    const chownIndex = verifyCleanupStep.run.indexOf(
+    const chownIndex = verifyOwnershipStep.run.indexOf(
       'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
     );
     assert.ok(
       chmodIndex < chownIndex,
       'the root-owned read-only tree must be made writable before ownership is returned',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'verify runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
+  });
+
+  it('tmux-testing: returns ownership to the runner unconditionally', () => {
+    assert.ok(
+      tmuxOwnershipStep,
+      'tmux-testing ownership-restore step must exist',
+    );
+    assert.equal(
+      tmuxOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — the prepare step chowns to node:node; without always(), a failed/cancelled run leaves node-owned files that break the next checkout',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must return workspace ownership to the runner',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'tmux-testing runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
+  });
+
+  it('verify: a chmod failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore workspace write permissions/,
+      'chmod failure must emit a ::warning::, not be swallowed by || true',
+    );
+  });
+
+  it('verify: a chown failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('tmux-testing: restores write permission as well as ownership', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must chmod the workspace so a read-only tree does not survive the restore',
+    );
+  });
+
+  it('tmux-testing: a chown failure is visible, not silent', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('triage: restores ownership before checkout on the ECS pool', () => {
+    assertUnconditional(steps, triageOwnershipStep, 'qwen-triage triage');
+  });
+});
+
+describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', () => {
+  it('test job restores ownership unconditionally', () => {
+    assertUnconditional(ciTestJob.steps, ciOwnershipStep, 'ci.yml test');
+  });
+
+  it('web_shell_e2e_smoke restores ownership unconditionally', () => {
+    assertUnconditional(
+      ciWebShellJob.steps,
+      ciWebShellOwnershipStep,
+      'ci.yml web_shell_e2e_smoke',
+    );
+  });
+
+  it('integration_cli restores ownership unconditionally', () => {
+    assertUnconditional(
+      ciIntegrationJob.steps,
+      ciIntegrationOwnershipStep,
+      'ci.yml integration_cli',
+    );
+  });
+
+  it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
+    assert.ok(
+      ciCleanStep,
+      'ci.yml test job must keep its "Clean stale .qwen before checkout" step',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\$GITHUB_WORKSPACE\/\.qwen/,
+      'cleanup must remove .qwen by absolute path',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /sudo -n rm -rf/,
+      'cleanup must fall back to sudo for root-owned dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\[ ! -L "\$GITHUB_WORKSPACE\/\.qwen" \]/,
+      'cleanup must not follow a symlinked .qwen: chmod -R dereferences a symlinked argument and would widen an outside tree',
+    );
+    assert.doesNotMatch(
+      ciCleanStep.run,
+      /\.stale\./,
+      'cleanup must not reference .stale.* dirs once rename-aside is gone',
+    );
+  });
+});
+
+describe('qwen-code-pr-review.yml: ownership recovery is unconditional', () => {
+  it('restores ownership without probe gating or rename-aside', () => {
+    assertUnconditional(
+      prReviewJob.steps,
+      prReviewOwnershipStep,
+      'qwen-code-pr-review.yml review-pr',
     );
   });
 });

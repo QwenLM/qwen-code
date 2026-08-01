@@ -12,6 +12,7 @@ import { iconvEncode } from './iconvHelper.js';
 import {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
+  detectLineEndingFromContent,
   readTextCursorWindowFromHandle,
   readTextRange,
   readTextRangeFromHandle,
@@ -300,34 +301,37 @@ describe('readTextRange', () => {
     }
   });
 
-  it('reads the pinned inode after the path is replaced underneath it', async () => {
-    const targetPath = await writeFile(
-      'original.log',
-      'safe-one\nsafe-two\nsafe-three\n',
-    );
-    const replacementPath = await writeFile(
-      'replacement.log',
-      'secret-one\nsecret-two\n',
-    );
-    const fileHandle = await fs.open(targetPath, 'r');
-    try {
-      const stats = await fileHandle.stat();
-      await fs.rename(replacementPath, targetPath);
+  it.skipIf(process.platform === 'win32')(
+    'reads the pinned inode after the path is replaced underneath it',
+    async () => {
+      const targetPath = await writeFile(
+        'original.log',
+        'safe-one\nsafe-two\nsafe-three\n',
+      );
+      const replacementPath = await writeFile(
+        'replacement.log',
+        'secret-one\nsecret-two\n',
+      );
+      const fileHandle = await fs.open(targetPath, 'r');
+      try {
+        const stats = await fileHandle.stat();
+        await fs.rename(replacementPath, targetPath);
 
-      const result = await readTextRangeFromHandle(fileHandle, {
-        offset: 0,
-        limit: 2,
-        fileSize: stats.size,
-        maxOutputBytes: 1_024,
-        maxScanBytes: Number.MAX_SAFE_INTEGER,
-      });
+        const result = await readTextRangeFromHandle(fileHandle, {
+          offset: 0,
+          limit: 2,
+          fileSize: stats.size,
+          maxOutputBytes: 1_024,
+          maxScanBytes: Number.MAX_SAFE_INTEGER,
+        });
 
-      expect(result.content).toBe('safe-one\nsafe-two');
-      expect(result.content).not.toContain('secret');
-    } finally {
-      await fileHandle.close();
-    }
-  });
+        expect(result.content).toBe('safe-one\nsafe-two');
+        expect(result.content).not.toContain('secret');
+      } finally {
+        await fileHandle.close();
+      }
+    },
+  );
 
   it('refuses a line offset that cannot be reached within maxScanBytes', async () => {
     const filePath = await writeFile('budget.log', largeUtf8Lines(5_000));
@@ -993,5 +997,15 @@ describe('readTextCursorWindowFromHandle', () => {
       expect(spans[spans.length - 1][1]).toBe(size);
       expect(pages.join('\n')).toBe(body);
     });
+  });
+});
+
+describe('detectLineEndingFromContent', () => {
+  it('reports crlf for small CRLF content', () => {
+    expect(detectLineEndingFromContent('line1\r\nline2\r\n')).toBe('crlf');
+  });
+
+  it('reports lf when no CRLF is present', () => {
+    expect(detectLineEndingFromContent('line1\nline2\n')).toBe('lf');
   });
 });

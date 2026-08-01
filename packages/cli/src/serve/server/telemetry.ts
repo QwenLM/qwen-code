@@ -270,6 +270,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/mid-turn-message',
   },
   {
+    method: 'DELETE',
+    path: '/session/:id/mid-turn-messages/:messageId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/mid-turn-messages/:messageId',
+  },
+  {
     method: 'GET',
     path: '/session/:id/pending-prompts',
     attribution: 'handler_resolved',
