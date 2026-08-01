@@ -1739,6 +1739,16 @@ describe('replacementMutantsOf', () => {
     });
   });
 
+  it('does not read an arrow function as a comparison', () => {
+    // `=>` ends in `>` followed by a space, so the old class matched it and
+    // every predicate guard became a guard-true candidate — exactly the
+    // `if (ready)` noise the gate exists to exclude.
+    expect(same('if (items.some((x) => x.ok)) return;')).toBeNull();
+    expect(same('if (fn(() => run())) go();')).toBeNull();
+    // A real comparison still qualifies.
+    expect(same('if (a !== b) go();')?.operator).toBe('guard-true');
+  });
+
   it('skips an if with no comparison, and one whose condition spans lines', () => {
     expect(same('if (ready) go();')).toBeNull();
     expect(same('if (a !== b &&')).toBeNull();
