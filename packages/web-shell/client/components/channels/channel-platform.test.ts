@@ -31,6 +31,7 @@ describe('Channel platform availability', () => {
         descriptor('weixin'),
         descriptor('dingtalk', false),
         descriptor('github', false),
+        descriptor('gitlab', false),
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
