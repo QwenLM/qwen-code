@@ -11,11 +11,11 @@ import {
   isChannelDeliveryError,
   type ChannelDeliveryAccepted,
   type ChannelDeliveryRequest,
-} from '../channel-delivery-ipc.js';
+} from '../../runtime/channel-delivery-ipc.js';
 import {
   normalizeChannelDelivery,
   parseChannelDelivery,
-} from '../channel-delivery.js';
+} from '../../runtime/channel-delivery.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,

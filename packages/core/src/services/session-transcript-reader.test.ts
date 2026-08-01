@@ -732,6 +732,54 @@ describe('SessionTranscriptReader', () => {
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
   });
 
+  it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // Windows derives Stats.ino from a 64-bit file index that exceeds 2^53, so
+    // a safe-integer gate would reject every cursor there. The large inode must
+    // survive shape validation and reach the identity match (which then fails
+    // against the real file), rather than being rejected as a non-safe integer.
+    const bigIno = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(bigIno)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: { dev: 1, ino: bigIno },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('still rejects a non-safe-integer byte offset in a cursor', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // snapshotSize/position are arithmetic operands and stay safe-integer even
+    // though dev/ino were relaxed for Windows.
+    const unsafeOffset = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(unsafeOffset)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          snapshotSize: unsafeOffset,
+        }),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
   it('rejects cursors whose position is past the active chain', async () => {
     await writeRecords([
       record('u1', null, 'root'),

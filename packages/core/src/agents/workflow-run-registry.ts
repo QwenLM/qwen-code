@@ -27,6 +27,16 @@
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
+import {
+  AgentEventType,
+  type AgentApprovalRequestEvent,
+  type AgentEventEmitter,
+  type AgentToolResultEvent,
+} from './runtime/agent-events.js';
+import {
+  ToolConfirmationOutcome,
+  type ToolConfirmationPayload,
+} from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
@@ -40,6 +50,19 @@ const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
 export const MAX_RETAINED_TERMINAL_WORKFLOWS = 10;
 
 export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export const MAX_PENDING_WORKFLOW_APPROVALS = 32;
+export const MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS = 64 * 1024;
+
+export interface WorkflowApproval {
+  approvalId: string;
+  subagentId: string;
+  callId: string;
+  name: string;
+  description: string;
+  confirmationDetails: AgentApprovalRequestEvent['confirmationDetails'];
+  at: number;
+}
 
 /**
  * Workflow kind of `TaskState`. Tracks one orchestrator run — the
@@ -114,6 +137,8 @@ export interface WorkflowTask extends TaskBase {
    * provenance (e.g. for the snapshot).
    */
   scriptPath?: string;
+  /** Process-local approval requests; omitted from persisted snapshots. */
+  pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
   result?: unknown;
   /** Error message on `failed` (terminal). */
@@ -141,6 +166,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'perPhaseTokens'
   | 'script'
   | 'description'
+  | 'pendingApprovals'
 > & {
   // Allow the caller to omit `description` — we synthesize it from
   // `meta?.name ?? runId` for symmetry with shell registry's `command`
@@ -178,6 +204,18 @@ export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
  * `useBackgroundTaskView` owns), so the two never clobber each other.
  */
 export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
+export type WorkflowApprovalChangeCallback = (entry: WorkflowTask) => void;
+export type WorkflowApprovalRequestCallback = (
+  entry: WorkflowTask,
+  approval: WorkflowApproval,
+  args: Record<string, unknown>,
+  signal: AbortSignal,
+) => void | Promise<void>;
+
+interface WorkflowApprovalRuntime {
+  respond: AgentApprovalRequestEvent['respond'];
+  requestController?: AbortController;
+}
 
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
@@ -186,6 +224,13 @@ export class WorkflowRunRegistry {
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
   private notificationCallback: WorkflowRunNotificationCallback | undefined;
+  private approvalChangeCallback: WorkflowApprovalChangeCallback | undefined;
+  private approvalRequestCallback: WorkflowApprovalRequestCallback | undefined;
+  private readonly approvalRuntimes = new Map<
+    string,
+    WorkflowApprovalRuntime
+  >();
+  private nextApprovalId = 1;
   /**
    * P5 T7: one-time usage-warning latch. The first `Workflow` tool
    * invocation per session checks `shouldShowUsageWarning()`; if true,
@@ -226,6 +271,18 @@ export class WorkflowRunRegistry {
     this.notificationCallback = cb;
   }
 
+  setApprovalChangeCallback(
+    cb: WorkflowApprovalChangeCallback | undefined,
+  ): void {
+    this.approvalChangeCallback = cb;
+  }
+
+  setApprovalRequestCallback(
+    cb: WorkflowApprovalRequestCallback | undefined,
+  ): void {
+    this.approvalRequestCallback = cb;
+  }
+
   /** Fire the terminal-completion notification (best-effort). */
   private emitNotification(entry: WorkflowTask): void {
     if (!this.notificationCallback) return;
@@ -262,6 +319,7 @@ export class WorkflowRunRegistry {
       entry.tokenBudgetTotal = null;
     }
     entry.perPhaseTokens = new Map();
+    entry.pendingApprovals = [];
     // P7b: default the script source so the snapshot writer + save dialog
     // always have a (possibly empty) string to work with.
     if (entry.script === undefined) entry.script = '';
@@ -294,6 +352,206 @@ export class WorkflowRunRegistry {
 
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
     if (this.handles.get(runId) === handle) this.handles.delete(runId);
+  }
+
+  bridgeApprovalEvents(runId: string, emitter: AgentEventEmitter): () => void {
+    const ownedApprovalIds = new Set<string>();
+    const seenSources = new Set<string>();
+    const onWaiting = (event: AgentApprovalRequestEvent) => {
+      const sourceKey = JSON.stringify([event.subagentId, event.callId]);
+      // Re-emission of an already-settled call: respond is idempotent via
+      // the runtime's responded set, so silently dropping it is safe.
+      if (seenSources.has(sourceKey)) return;
+      seenSources.add(sourceKey);
+      const parked = this.parkPendingApproval(runId, event);
+      if (parked === 'duplicate') return;
+      if (parked === 'rejected') {
+        this.rejectResponder(event.respond);
+        return;
+      }
+      ownedApprovalIds.add(parked);
+    };
+    const onResult = (event: AgentToolResultEvent) => {
+      this.clearPendingApproval(runId, event.subagentId, event.callId);
+    };
+    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    return () => {
+      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+      this.rejectPendingApprovals(runId, (approval) =>
+        ownedApprovalIds.has(approval.approvalId),
+      );
+    };
+  }
+
+  async resolvePendingApproval(
+    runId: string,
+    approvalId: string,
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ): Promise<boolean> {
+    const entry = this.entries.get(runId);
+    if (!entry) return false;
+    const approval = entry.pendingApprovals.find(
+      (candidate) => candidate.approvalId === approvalId,
+    );
+    if (!approval) return false;
+    const runtime = this.approvalRuntimes.get(approvalId);
+    entry.pendingApprovals = entry.pendingApprovals.filter(
+      (candidate) => candidate !== approval,
+    );
+    this.approvalRuntimes.delete(approvalId);
+    runtime?.requestController?.abort();
+    this.emitApprovalChange(entry);
+    if (!runtime) return false;
+    const normalized = normalizeWorkflowApprovalOutcome(outcome);
+    try {
+      await runtime.respond(
+        normalized,
+        normalized === outcome ? payload : undefined,
+      );
+    } catch (error) {
+      debugLogger.error(
+        `Failed to resolve workflow approval ${runId}/${approvalId}:`,
+        error,
+      );
+      this.fail(
+        runId,
+        `Failed to resolve workflow approval: ${approvalId}`,
+        Date.now(),
+      );
+      try {
+        (this.handles.get(runId) ?? entry.abortController).abort();
+      } catch (abortError) {
+        debugLogger.error(
+          'Failed to abort workflow after approval error:',
+          abortError,
+        );
+      }
+      return false;
+    }
+    return true;
+  }
+
+  clearPendingApproval(
+    runId: string,
+    subagentId: string,
+    callId: string,
+  ): boolean {
+    const entry = this.entries.get(runId);
+    const approval = entry?.pendingApprovals.find(
+      (candidate) =>
+        candidate.subagentId === subagentId && candidate.callId === callId,
+    );
+    if (!entry || !approval) return false;
+    entry.pendingApprovals = entry.pendingApprovals.filter(
+      (candidate) => candidate !== approval,
+    );
+    const runtime = this.approvalRuntimes.get(approval.approvalId);
+    this.approvalRuntimes.delete(approval.approvalId);
+    runtime?.requestController?.abort();
+    this.emitApprovalChange(entry);
+    return true;
+  }
+
+  private parkPendingApproval(
+    runId: string,
+    event: AgentApprovalRequestEvent,
+  ): string | 'duplicate' | 'rejected' {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      entry.status !== 'running' ||
+      (!this.approvalChangeCallback && !this.approvalRequestCallback)
+    ) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not running, or no host channel`,
+      );
+      return 'rejected';
+    }
+    if (
+      entry.pendingApprovals.some(
+        (approval) =>
+          approval.subagentId === event.subagentId &&
+          approval.callId === event.callId,
+      )
+    ) {
+      return 'duplicate';
+    }
+    if (entry.pendingApprovals.length >= MAX_PENDING_WORKFLOW_APPROVALS) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: pending limit (${MAX_PENDING_WORKFLOW_APPROVALS}) reached`,
+      );
+      return 'rejected';
+    }
+    const confirmationDetails = restrictWorkflowConfirmationDetails(
+      event.confirmationDetails,
+    );
+    if (
+      !confirmationDetails ||
+      event.name.length +
+        event.description.length +
+        JSON.stringify(confirmationDetails).length >
+        MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS
+    ) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: unsupported type (${event.confirmationDetails.type}) or payload exceeds ${MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS} chars`,
+      );
+      return 'rejected';
+    }
+    const approvalId = `wfap_${this.nextApprovalId++}`;
+    const approval: WorkflowApproval = {
+      approvalId,
+      subagentId: event.subagentId,
+      callId: event.callId,
+      name: event.name,
+      description: event.description,
+      confirmationDetails,
+      at: event.timestamp,
+    };
+    const approvalRequestCallback = this.approvalRequestCallback;
+    const requestController = approvalRequestCallback
+      ? new AbortController()
+      : undefined;
+    this.approvalRuntimes.set(approvalId, {
+      respond: event.respond,
+      requestController,
+    });
+    entry.pendingApprovals = [...entry.pendingApprovals, approval];
+    this.emitApprovalChange(entry);
+    if (
+      approvalRequestCallback &&
+      requestController &&
+      !requestController.signal.aborted
+    ) {
+      try {
+        const request = approvalRequestCallback(
+          entry,
+          approval,
+          event.args,
+          requestController.signal,
+        );
+        void Promise.resolve(request).catch((error) => {
+          debugLogger.error('Workflow approval channel failed:', error);
+          return this.resolvePendingApproval(
+            runId,
+            approvalId,
+            ToolConfirmationOutcome.Cancel,
+          );
+        });
+      } catch (error) {
+        debugLogger.error('Workflow approval channel failed:', error);
+        entry.pendingApprovals = entry.pendingApprovals.filter(
+          (candidate) => candidate.approvalId !== approvalId,
+        );
+        this.approvalRuntimes.delete(approvalId);
+        requestController.abort();
+        this.emitApprovalChange(entry);
+        return 'rejected';
+      }
+    }
+    return approvalId;
   }
 
   /**
@@ -390,6 +648,7 @@ export class WorkflowRunRegistry {
   complete(runId: string, result: unknown, endTime: number): void {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
+    this.rejectPendingApprovals(runId);
     entry.status = 'completed';
     entry.endTime = endTime;
     entry.result = result;
@@ -402,6 +661,7 @@ export class WorkflowRunRegistry {
   fail(runId: string, message: string, endTime: number): void {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
+    this.rejectPendingApprovals(runId);
     entry.status = 'failed';
     entry.endTime = endTime;
     entry.error = message;
@@ -419,6 +679,7 @@ export class WorkflowRunRegistry {
   cancel(runId: string, endTime: number): void {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
+    this.rejectPendingApprovals(runId);
     entry.status = 'cancelled';
     entry.endTime = endTime;
     entry.notified = true;
@@ -472,6 +733,14 @@ export class WorkflowRunRegistry {
     const sample = this.entries.values().next().value as
       | WorkflowTask
       | undefined;
+    for (const entry of this.entries.values()) {
+      this.rejectPendingApprovals(entry.runId);
+    }
+    for (const runtime of this.approvalRuntimes.values()) {
+      runtime.requestController?.abort();
+      this.rejectResponder(runtime.respond);
+    }
+    this.approvalRuntimes.clear();
     this.entries.clear();
     this.handles.clear();
     if (sample) this.emitStatusChange(sample);
@@ -493,6 +762,7 @@ export class WorkflowRunRegistry {
     let lastCancelled: WorkflowTask | undefined;
     for (const entry of Array.from(this.entries.values())) {
       if (entry.status !== 'running') continue;
+      this.rejectPendingApprovals(entry.runId);
       entry.status = 'cancelled';
       entry.endTime = endTime;
       entry.notified = true;
@@ -534,6 +804,110 @@ export class WorkflowRunRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('Failed to emit workflow status change:', error);
+    }
+  }
+
+  private rejectPendingApprovals(
+    runId: string,
+    predicate: (approval: WorkflowApproval) => boolean = () => true,
+  ): void {
+    const entry = this.entries.get(runId);
+    if (!entry) return;
+    const rejected = entry.pendingApprovals.filter(predicate);
+    if (rejected.length === 0) return;
+    const rejectedIds = new Set(
+      rejected.map((approval) => approval.approvalId),
+    );
+    entry.pendingApprovals = entry.pendingApprovals.filter(
+      (approval) => !rejectedIds.has(approval.approvalId),
+    );
+    const runtimes: WorkflowApprovalRuntime[] = [];
+    for (const approvalId of rejectedIds) {
+      const runtime = this.approvalRuntimes.get(approvalId);
+      this.approvalRuntimes.delete(approvalId);
+      if (!runtime) continue;
+      runtime.requestController?.abort();
+      runtimes.push(runtime);
+    }
+    this.emitApprovalChange(entry);
+    for (const runtime of runtimes) this.rejectResponder(runtime.respond);
+  }
+
+  private rejectResponder(respond: AgentApprovalRequestEvent['respond']): void {
+    void respond(ToolConfirmationOutcome.Cancel).catch((error) => {
+      debugLogger.error('Failed to reject workflow approval:', error);
+    });
+  }
+
+  private emitApprovalChange(entry: WorkflowTask): void {
+    if (!this.approvalChangeCallback) return;
+    try {
+      this.approvalChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit workflow approval change:', error);
+    }
+  }
+}
+
+function normalizeWorkflowApprovalOutcome(
+  outcome: ToolConfirmationOutcome,
+): ToolConfirmationOutcome {
+  return outcome === ToolConfirmationOutcome.ProceedOnce ||
+    outcome === ToolConfirmationOutcome.Cancel
+    ? outcome
+    : ToolConfirmationOutcome.Cancel;
+}
+
+function restrictWorkflowConfirmationDetails(
+  details: AgentApprovalRequestEvent['confirmationDetails'],
+): AgentApprovalRequestEvent['confirmationDetails'] | undefined {
+  switch (details.type) {
+    case 'edit':
+      return {
+        type: 'edit',
+        title: details.title,
+        fileName: details.fileName,
+        filePath: details.filePath,
+        fileDiff: details.fileDiff,
+        originalContent: null,
+        newContent: '',
+        hideAlwaysAllow: true,
+        hideModify: true,
+        skipIdeDiff: true,
+        warnings: details.warnings ? [...details.warnings] : undefined,
+      };
+    case 'exec':
+      return {
+        type: 'exec',
+        title: details.title,
+        command: details.command,
+        rootCommand: details.rootCommand,
+        hideAlwaysAllow: true,
+        warnings: details.warnings ? [...details.warnings] : undefined,
+      };
+    case 'mcp':
+      return {
+        type: 'mcp',
+        title: details.title,
+        serverName: details.serverName,
+        toolName: details.toolName,
+        toolDisplayName: details.toolDisplayName,
+        hideAlwaysAllow: true,
+      };
+    case 'info':
+      return {
+        type: 'info',
+        title: details.title,
+        prompt: details.prompt,
+        urls: details.urls ? [...details.urls] : undefined,
+        hideAlwaysAllow: true,
+      };
+    case 'plan':
+    case 'ask_user_question':
+      return undefined;
+    default: {
+      const _exhaustive: never = details;
+      return _exhaustive;
     }
   }
 }

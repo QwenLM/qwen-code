@@ -57,6 +57,16 @@ function readStatus(statusPath: string): Record<string, unknown> {
   >;
 }
 
+function isProcessRunning(pid: number | undefined): boolean {
+  if (pid === undefined) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('background shell status sidecar (integration, real spawn)', () => {
   let shellTool: ShellTool;
   let registry: BackgroundShellRegistry;
@@ -104,10 +114,18 @@ describe('background shell status sidecar (integration, real spawn)', () => {
     shellTool = new ShellTool(mockConfig);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     registry.abortAll();
+    await waitFor(() =>
+      registry.getAll().every((task) => !isProcessRunning(task.pid)),
+    );
     for (const dir of tmpDirs) {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
     }
     tmpDirs = [];
   });
