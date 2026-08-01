@@ -8,7 +8,7 @@
     "directory": "packages/mobile-mcp"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.0.0"
   },
   "license": "Apache-2.0",
   "scripts": {
@@ -24,7 +24,8 @@
     "lib"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.26.0",
+    "@hono/node-server": "2.0.12",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "ajv": "^8.18.0",
     "commander": "14.0.0",
     "express": "5.1.0",

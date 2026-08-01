@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ZodRawShapeCompat } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
 import fs from 'node:fs';
@@ -90,6 +91,11 @@ export const createMcpServer = (): McpServer => {
 
   type ZodSchemaShape = Record<string, z.ZodType>;
 
+  // Workspaces can resolve the SDK and this package through different Zod copies.
+  // The SDK supports both at runtime; this preserves the local schema inference.
+  const sdkInputSchema = <Schema extends ZodSchemaShape>(schema: Schema) =>
+    schema as unknown as Schema & ZodRawShapeCompat;
+
   interface ToolAnnotations {
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
@@ -111,7 +117,7 @@ export const createMcpServer = (): McpServer => {
       {
         title,
         description: finalDescription,
-        inputSchema: paramsSchema,
+        inputSchema: sdkInputSchema(paramsSchema),
         annotations,
       },
       (async (args: any, _extra: any) => {
@@ -945,13 +951,13 @@ export const createMcpServer = (): McpServer => {
       title: 'Take Screenshot',
       description:
         "Take a screenshot of the mobile device. Use this to understand what's on screen. Do not cache this result.",
-      inputSchema: {
+      inputSchema: sdkInputSchema({
         device: z
           .string()
           .describe(
             'The device identifier to use. Use mobile_list_available_devices to find which devices are available to you.',
           ),
-      },
+      }),
       annotations: {
         readOnlyHint: true,
       },

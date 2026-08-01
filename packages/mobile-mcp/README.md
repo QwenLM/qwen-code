@@ -4,6 +4,10 @@ Fork of [mobile-next/mobile-mcp](https://github.com/mobile-next/mobile-mcp) for 
 
 This package is an MCP server that enables LLM agents to interact with mobile devices (iOS and Android) through screenshots, accessibility elements, and coordinate-based touch actions. It supports simulators, emulators, and real devices.
 
+## Requirements
+
+- Node.js 22 or later
+
 ## Upstream
 
 Based on [mobile-next/mobile-mcp](https://github.com/mobile-next/mobile-mcp) v0.0.61 (`c5d7d27`). We track upstream via `git subtree` and will continue to sync updates. See [.vendored-patches.md](.vendored-patches.md) for local modifications and [scripts/sync-from-upstream.sh](scripts/sync-from-upstream.sh) for the sync mechanism.
