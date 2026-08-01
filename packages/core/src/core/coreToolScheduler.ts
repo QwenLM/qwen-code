@@ -531,6 +531,7 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.LS,
   ToolNames.LSP,
   ToolNames.NOTEBOOK_EDIT,
+  ToolNames.DISPLAY_IMAGE,
 ]);
 
 /**
@@ -728,6 +729,7 @@ export function extractToolFilePaths(
     case ToolNames.ZOOM_IMAGE:
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
+    case ToolNames.DISPLAY_IMAGE:
       push(obj['file_path']);
       return out;
 

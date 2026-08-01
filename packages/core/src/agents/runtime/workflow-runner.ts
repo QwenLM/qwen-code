@@ -8,7 +8,10 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
 import { logWorkflowRun } from '../../telemetry/loggers.js';
 import { WorkflowRunEvent } from '../../telemetry/types.js';
-import { createChildAbortController } from '../../utils/abortController.js';
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
 import {
   type WorkflowRunRegistry,
   type WorkflowTask,
@@ -35,6 +38,7 @@ export interface WorkflowRunnerOptions {
   resumeFromRunId?: string;
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
+  runInBackground?: boolean;
 }
 
 export type WorkflowRunSettlement =
@@ -64,6 +68,7 @@ export class WorkflowRunner {
     options: WorkflowRunnerOptions,
   ): Promise<WorkflowRunHandle> {
     const config = options.config;
+    const runInBackground = options.runInBackground === true;
     const budget = WorkflowBudgetImpl.fromEnv();
     const loaded =
       options.scriptPath && options.script === undefined
@@ -83,7 +88,13 @@ export class WorkflowRunner {
     const resumeReplay: JournalReplay | undefined = options.resumeFromRunId
       ? await journal?.load()
       : undefined;
-    const controller = createChildAbortController(options.signal);
+    if (runInBackground && options.signal.aborted) {
+      throw new Error('Background workflow start was cancelled.');
+    }
+    const callerWasAbortedBeforeStart = options.signal.aborted;
+    const controller = runInBackground
+      ? createAbortController()
+      : createChildAbortController(options.signal);
     const registry = config.getWorkflowRunRegistry?.();
     const dispatch =
       options.dispatch ??
@@ -96,17 +107,24 @@ export class WorkflowRunner {
           : undefined,
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
-    const entry = registry?.register({
-      runId,
-      meta: null,
-      status: 'running',
-      startTime: Date.now(),
-      outputFile: '',
-      abortController: controller,
-      tokenBudgetTotal: budget.total,
-      script,
-      scriptPath,
-    });
+    let entry: WorkflowTask | undefined;
+    try {
+      entry = registry?.register({
+        runId,
+        meta: null,
+        status: 'running',
+        startTime: Date.now(),
+        outputFile: '',
+        abortController: controller,
+        tokenBudgetTotal: budget.total,
+        script,
+        scriptPath,
+        isBackgrounded: runInBackground,
+      });
+    } catch (error) {
+      controller.abort();
+      throw error;
+    }
     const emitUpdate = (): void => {
       if (!entry || !options.onUpdate) return;
       try {
@@ -172,7 +190,11 @@ export class WorkflowRunner {
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
-          if (options.signal.aborted) {
+          if (
+            callerWasAbortedBeforeStart ||
+            (!runInBackground && options.signal.aborted) ||
+            entry?.status === 'cancelled'
+          ) {
             registry?.cancel(runId, Date.now());
           } else {
             registry?.fail(runId, message, Date.now());

@@ -69,6 +69,7 @@ export const ToolNames = {
   RECORD_ARTIFACT: 'record_artifact',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  DISPLAY_IMAGE: 'display_image',
 } as const;
 
 /**
@@ -123,6 +124,7 @@ export const ToolDisplayNames = {
   RECORD_ARTIFACT: 'RecordArtifact',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 
 // Migration from old tool names to new tool names
