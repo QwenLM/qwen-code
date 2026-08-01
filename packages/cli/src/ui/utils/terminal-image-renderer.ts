@@ -229,6 +229,7 @@ function renderWithChafa(
       chafaPath,
       [
         '--animate=off',
+        '--colors=256',
         '--format=symbols',
         '--symbols=block',
         `--size=${shape.widthCells}x${shape.rows}`,
