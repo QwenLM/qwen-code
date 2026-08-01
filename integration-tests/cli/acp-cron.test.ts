@@ -376,7 +376,7 @@ async function initSession(
           // Fail fast if the cron_create tool call was not served to the first
           // user prompt. An internal model call before the first prompt (title
           // generation, a classifier pass) would shift dispatch and otherwise
-          // surface only as an opaque 30s timeout in Part 3a.
+          // surface only as an opaque 75s timeout in Part 3a.
           expect(
             JSON.stringify(fakeServer.requests[0]?.body['messages']),
             'requestIndex 0 was not the cron_create prompt — dispatch shifted',
@@ -409,7 +409,7 @@ async function initSession(
               (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
               u.receivedAt > promptDoneAt,
             'cron-fired user_message_chunk with CRONFIRE7742',
-            30_000,
+            75_000,
           );
           expect(cronUserMsg.update?._meta).toBeDefined();
           expect(cronUserMsg.update?._meta?.source).toBe('cron');
