@@ -62,6 +62,13 @@ function fakeModelOptions(baseUrl: string) {
   };
 }
 
+function startFakeTextServer() {
+  return startFakeOpenAIServer(
+    () => ({ content: 'Done.' }),
+    FAKE_SERVER_OPTIONS,
+  );
+}
+
 /**
  * Factory function that creates a streaming input with a control point.
  * After the first message is yielded, the generator waits for a resume signal,
@@ -349,7 +356,8 @@ describe('Permission Control (E2E)', () => {
   });
 
   describe('setPermissionMode API', () => {
-    it('should change permission mode from default to yolo', async () => {
+    it('should continue after changing permission mode from default to yolo', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 1 + 1?',
@@ -361,6 +369,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
           debug: true,
@@ -428,10 +437,12 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
-    it('should change permission mode from yolo to plan', async () => {
+    it('should continue after changing permission mode from yolo to plan', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 3 + 3?',
@@ -443,6 +454,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'yolo',
         },
@@ -509,10 +521,12 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
-    it('should change permission mode to auto-edit', async () => {
+    it('should continue after changing permission mode to auto-edit', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 5 + 5?',
@@ -524,6 +538,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
         },
@@ -590,6 +605,7 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
