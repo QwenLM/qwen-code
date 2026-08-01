@@ -6611,6 +6611,27 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('discards an automatic recap after clearing the screen', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'l',
+        }),
+      );
+      recap.resolve({ sessionId: 'session-1', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.reset).toHaveBeenCalled();
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
   it('focuses the composer after starting a new session', async () => {
     const { container } = renderApp();
     await flush();

@@ -5797,6 +5797,14 @@ export function App({
             connectionRef.current.sessionId !== sessionId ||
             result.sessionId !== sessionId
           ) {
+            console.warn('[auto-recap] discarding stale recap', {
+              captured: { sessionId, version },
+              current: {
+                sessionId: connectionRef.current.sessionId,
+                version: autoRecapVersionRef.current,
+              },
+              result: result.sessionId,
+            });
             return;
           }
           if (result.recap) {
