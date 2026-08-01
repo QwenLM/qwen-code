@@ -964,6 +964,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
    * `settings.skills.disabledLevels`.
@@ -1369,6 +1370,10 @@ export interface ConfigParameters {
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
 }
+
+export type TerminalImageRenderSupport =
+  | { available: true }
+  | { available: false; reason: string };
 
 export interface ImageGenerationConfig {
   model: string;
@@ -1798,6 +1803,9 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly terminalImageRenderSupportProvider:
+    | (() => Promise<TerminalImageRenderSupport>)
+    | null;
   private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
@@ -2113,6 +2121,8 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.terminalImageRenderSupportProvider =
+      params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
@@ -7141,6 +7151,15 @@ export class Config {
     return this.interactive;
   }
 
+  async getTerminalImageRenderSupport(): Promise<TerminalImageRenderSupport> {
+    return this.terminalImageRenderSupportProvider
+      ? this.terminalImageRenderSupportProvider()
+      : {
+          available: false,
+          reason: 'No terminal image renderer is configured.',
+        };
+  }
+
   getUseRipgrep(): boolean {
     return this.useRipgrep;
   }
@@ -8052,6 +8071,17 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    if (
+      resolveInteractionMode(this) === 'interactive' &&
+      !this.sdkMode &&
+      !this.getScreenReader() &&
+      !options?.forSubAgent
+    ) {
+      await registerLazy(ToolNames.DISPLAY_IMAGE, async () => {
+        const { DisplayImageTool } = await import('../tools/display-image.js');
+        return new DisplayImageTool(this);
+      });
+    }
     // WebSearch is opt-in: it registers only when explicitly enabled AND the
     // configured search model resolves to a usable DashScope entry. A failed
     // gate surfaces a one-time startup notice instead of a silently missing
