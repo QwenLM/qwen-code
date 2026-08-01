@@ -302,6 +302,18 @@ describe('summaryCommand custom export path', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symlink cycle',
+    async () => {
+      await fs.symlink('link-b', path.join(projectRoot, 'link-a'));
+      await fs.symlink('link-a', path.join(projectRoot, 'link-b'));
+      const result = await run('link-a');
+      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(result.content).toContain('within the project root');
+      expect(runSideQuery).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not create the target directory when generation fails', async () => {
     vi.mocked(runSideQuery).mockRejectedValueOnce(new Error('rate limit'));
     const result = await run('reports/2026/summary.md');
@@ -341,6 +353,19 @@ describe('summaryCommand custom export path', () => {
     expect(await fs.readFile(target, 'utf8')).toContain(
       '`## Summary Metadata`',
     );
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overwrite a file with a Summary Metadata heading but no Update time', async () => {
+    const target = path.join(projectRoot, 'DESIGN.md');
+    await fs.writeFile(
+      target,
+      'Some content\n\n---\n\n## Summary Metadata\n\nThis is a design doc.\n',
+      'utf8',
+    );
+    const result = await run('DESIGN.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('already exists');
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
@@ -396,5 +421,99 @@ describe('summaryCommand custom export path', () => {
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(result.content).toContain('ends with a separator');
     expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'allows the default target when .qwen is a symlink',
+    async () => {
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'summary-shared-'),
+      );
+      try {
+        await fs.symlink(outside, path.join(projectRoot, '.qwen'));
+        const result = await run('');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'info',
+        });
+        expect(await fileExists(path.join(outside, 'PROJECT_SUMMARY.md'))).toBe(
+          true,
+        );
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('rejects a non-summary file created during generation', async () => {
+    vi.mocked(runSideQuery).mockImplementationOnce(async () => {
+      await fs.writeFile(
+        path.join(projectRoot, 'race.md'),
+        'precious content',
+        'utf8',
+      );
+      return { text: 'SUMMARY BODY' };
+    });
+    const result = await run('race.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('already exists');
+    expect(await fs.readFile(path.join(projectRoot, 'race.md'), 'utf8')).toBe(
+      'precious content',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'applies 0o700 to .qwen/ when spelled explicitly',
+    async () => {
+      const result = await run('.qwen/');
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      const stat = await fs.stat(path.join(projectRoot, '.qwen'));
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves existing file permissions on regeneration',
+    async () => {
+      const target = path.join(projectRoot, 'summary.md');
+      await fs.writeFile(
+        target,
+        'old body\n\n---\n\n## Summary Metadata\n**Update time**: old\n',
+        'utf8',
+      );
+      await fs.chmod(target, 0o644);
+      await run('summary.md');
+      const stat = await fs.stat(target);
+      expect(stat.mode & 0o777).toBe(0o644);
+    },
+  );
+
+  it('returns empty content in interactive mode errors to avoid double rendering', async () => {
+    const chat = {
+      getHistoryShallow: () => [
+        { role: 'user', parts: [{ text: 'a' }] },
+        { role: 'model', parts: [{ text: 'b' }] },
+        { role: 'user', parts: [{ text: 'c' }] },
+      ],
+      getGenerationConfig: () => ({ systemInstruction: 'sys' }),
+    };
+    const config = {
+      getProjectRoot: () => projectRoot,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getModel: () => 'test-model',
+    };
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        config: config as any,
+      },
+    });
+    const result = (await summaryCommand.action?.(
+      context,
+      '../outside/leak.md',
+    )) as MessageResult;
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toBe('');
   });
 });
