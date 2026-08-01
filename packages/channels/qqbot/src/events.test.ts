@@ -695,6 +695,51 @@ describe('handleGroup', () => {
     stderrSpy.mockRestore();
   });
 
+  it('warnedSenderOpenIds 超过 500 条后重置，此前告警过的键重新告警', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // 501 条不同非法 senderOpenId（非 32-hex，能通过非空检查），同一 chatId。
+    // handleGroup/prepareGroupMessage 是同步的、stderr 告警即时发出，
+    // 因此循环内无需逐条 advance timers，最后统一推进一次即可。
+    for (let i = 0; i < 501; i++) {
+      pvt['handleGroup'](
+        makeGroupEvent({
+          id: `msg-warn-reset-${i}`,
+          author: {
+            member_openid: `ZZZ${String(i).padStart(3, '0')}`,
+            username: 'Bob',
+          },
+        }),
+      );
+    }
+    await vi.advanceTimersByTimeAsync(600);
+
+    // 第 501 条触发 size>500 清空，重置后第 1 条用过的非法 openid 重新告警
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-warn-reset-final',
+        author: {
+          member_openid: 'ZZZ000',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(502);
+    const warnCalls = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((c) => c.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(502);
+
+    stderrSpy.mockRestore();
+  });
+
   it('allowMention=false 时同昵称不同发送者用前 8 位消歧', async () => {
     const ch = makeChannel({ allowMention: false });
     const pvt = ch as unknown as QQChannelRaw;
@@ -728,6 +773,40 @@ describe('handleGroup', () => {
     // 两条消息昵称相同，但前缀分别带各自前 8 位片段用于消歧
     expect(texts[0]).toContain('[Bob(ABCDEF01)]');
     expect(texts[1]).toContain('[Bob(FEDCBA98)]');
+  });
+
+  it('allowMention=false 时非法 senderOpenId 仍显示 8 位片段且不告警', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-invalid-fragment',
+        content: '查一下天气',
+        author: {
+          member_openid: 'ZZZ12345',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    // 任意非空值都得到 8 位片段（sanitizeSenderName 原样返回该值），
+    // 且 allowMention=false 门控抑制了格式告警
+    expect(env['text']).toBe('[atMention=true] [Bob(ZZZ12345)]: 查一下天气');
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((c) => c.includes('Unexpected senderOpenId format')),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
   });
 });
 

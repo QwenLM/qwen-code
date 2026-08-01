@@ -2381,7 +2381,7 @@ export class QQChannel extends ChannelBase {
     const senderTag = showSenderOpenId
       ? `(${senderOpenId})`
       : this.qqConfig.allowMention === false && senderOpenId
-        ? `(${senderOpenId.slice(0, 8)})`
+        ? `(${sanitizeSenderName(senderOpenId).slice(0, 8)})`
         : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
