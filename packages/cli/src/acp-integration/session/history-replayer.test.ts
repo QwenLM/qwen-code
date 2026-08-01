@@ -926,9 +926,15 @@ describe('HistoryReplayer', () => {
     it('should emit plan update for TodoWriteTool results', async () => {
       const todoDisplay: TodoResultDisplay = {
         type: 'todo_list',
+        planId: 'plan-1',
         todos: [
           { id: '1', content: 'Task 1', status: 'pending' },
-          { id: '2', content: 'Task 2', status: 'completed' },
+          {
+            id: '2',
+            content: 'Task 2',
+            status: 'completed',
+            blockedBy: ['1'],
+          },
         ],
       };
       const record = createToolResultRecord('todo_write', todoDisplay);
@@ -950,8 +956,18 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'plan',
         entries: [
-          { content: 'Task 1', priority: 'medium', status: 'pending' },
-          { content: 'Task 2', priority: 'medium', status: 'completed' },
+          {
+            content: 'Task 1',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: '1' } },
+          },
+          {
+            content: 'Task 2',
+            priority: 'medium',
+            status: 'completed',
+            _meta: { qwenTodo: { id: '2', blockedBy: ['1'] } },
+          },
         ],
         _meta: {
           ...replayMeta(record, {
@@ -966,6 +982,7 @@ describe('HistoryReplayer', () => {
             sourceRecordIds: [record.uuid],
             planToolCallId: 'call-123',
           },
+          qwenTodoPlan: { id: 'plan-1' },
         },
       });
     });

@@ -22,7 +22,10 @@ import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
-import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   CommandKind,
@@ -182,6 +185,13 @@ function handleCommandResult(
         reason:
           'Action confirmation is not supported in non-interactive mode. Commands requiring confirmation cannot be executed.',
         originalType: 'confirm_action',
+      };
+
+    case 'goal_control':
+      return {
+        type: 'unsupported',
+        reason: 'Goal control is not supported in non-interactive mode yet.',
+        originalType: 'goal_control',
       };
 
     default: {
@@ -406,6 +416,7 @@ export const handleSlashCommand = async (
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
+    const successfulSkillCommands: SlashCommand[] = [];
 
     for (const skill of stackedResult.skills) {
       if (!skill.action) continue;
@@ -428,10 +439,14 @@ export const handleSlashCommand = async (
         }
       }
 
+      const succeeded = skillResult?.type === 'submit_prompt';
       recordSkillInvocation(config, {
         skillName: getSkillCommandName(skill),
-        success: skillResult?.type === 'submit_prompt',
+        success: succeeded,
       });
+      if (succeeded) {
+        successfulSkillCommands.push(skill);
+      }
     }
 
     if (stackedResult.remainingText) {
@@ -449,6 +464,9 @@ export const handleSlashCommand = async (
     );
     if (hookResult.blockedResult) {
       return hookResult.blockedResult;
+    }
+    for (const skill of successfulSkillCommands) {
+      void recordAutoSkillCommandUsage(config, skill);
     }
 
     return {
@@ -593,6 +611,7 @@ export const handleSlashCommand = async (
       return hookResult.blockedResult;
     }
     recordSkillCommandInvocation(true);
+    void recordAutoSkillCommandUsage(config, commandToExecute);
     return handleCommandResult(
       { ...result, content: hookResult.content },
       outputHistoryItems,

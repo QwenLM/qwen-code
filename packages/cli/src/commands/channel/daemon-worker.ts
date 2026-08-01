@@ -52,7 +52,7 @@ import {
   MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
-} from '../../serve/channel-delivery-ipc.js';
+} from '../../runtime/channel-delivery-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
 import {
   isChannelStartupReportAckMessage,
