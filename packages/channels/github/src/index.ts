@@ -57,6 +57,18 @@ export const plugin: ChannelPlugin = {
         kind: 'string-list',
         description: 'GitHub usernames, used by Allowlist and Pairing policies',
       },
+      {
+        key: 'reasonFilter',
+        label: 'Reason Filter',
+        kind: 'string-list',
+        description:
+          'Optional. Comma-separated notification reasons to process. ' +
+          'Valid values: mention, review_requested, assign, author, comment, ' +
+          'ci_activity, manual, state_change, subscribed, team_mention, ' +
+          'security_alert, approval_requested, invitation, ' +
+          'member_feature_requested, security_advisory_credit. ' +
+          'Leave empty to process all.',
+      },
     ],
   },
   createChannel: (name, config, bridge, options) =>

@@ -52,6 +52,12 @@ function initialFieldValue(
   if (field.kind === 'string-list') {
     return Array.isArray(value) ? value.join(', ') : '';
   }
+  if (field.kind === 'record') {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return JSON.stringify(value);
+    }
+    return '';
+  }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
     return field.options?.[0]?.value ?? '';
@@ -103,6 +109,15 @@ function isMissingField(
     return !secret?.value?.trim();
   }
   const value = draft.values[field.key];
+  if (field.kind === 'record') {
+    if (typeof value !== 'string' || !value.trim()) return true;
+    try {
+      const parsed = JSON.parse(value) as Record<string, string>;
+      return Object.values(parsed).every((v) => !v.trim());
+    } catch {
+      return true;
+    }
+  }
   return typeof value === 'string' ? value.trim().length === 0 : false;
 }
 
@@ -165,6 +180,22 @@ function assignField(
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  } else if (field.kind === 'record') {
+    try {
+      const parsed = JSON.parse(value) as Record<string, string>;
+      const filtered = Object.fromEntries(
+        Object.entries(parsed).filter(
+          ([, v]) => typeof v === 'string' && v.trim(),
+        ),
+      );
+      if (Object.keys(filtered).length > 0) {
+        config[field.key] = filtered;
+      } else {
+        delete config[field.key];
+      }
+    } catch {
+      delete config[field.key];
+    }
   } else {
     config[field.key] = value;
   }

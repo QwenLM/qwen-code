@@ -2458,6 +2458,9 @@ const EN: Messages = {
     'Allowed Users (comma-separated)',
   'channels.editor.field.github.allowedUsers.description':
     'GitHub usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.github.reasonFilter': 'Reason Filter',
+  'channels.editor.field.github.reasonFilter.description':
+    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -2474,6 +2477,27 @@ const EN: Messages = {
     'Allowed Users (comma-separated)',
   'channels.editor.field.gitlab.allowedUsers.description':
     'GitLab usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    'Mentioned — @bot in a comment or description',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    'Directly Addressed — comment starts with @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    'Assigned — bot assigned to an issue or MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    'Review Requested — bot requested as MR reviewer',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    'Approval Required — MR needs bot approval',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    "Marked — someone stars bot's comment/issue/MR",
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    'Build Failed — CI/CD pipeline fails on bot branch/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    'Unmergeable — MR becomes unmergeable (conflicts)',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    'Merge Train Removed — MR removed from merge train',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -4948,6 +4972,9 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
   'channels.editor.field.github.allowedUsers.description':
     'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.github.reasonFilter': '通知原因过滤',
+  'channels.editor.field.github.reasonFilter.description':
+    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -4963,6 +4990,27 @@ const ZH: Messages = {
   'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
   'channels.editor.field.gitlab.allowedUsers.description':
     'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.gitlab.action_prompt_template': '动作模板',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    '被提及 — 评论或描述中 @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    '直接对话 — 评论以 @bot 开头',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    '被指派 — bot 被指派到 issue 或 MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    '请求审查 — bot 被请求为 MR 审查者',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    '需要批准 — MR 需要 bot 批准',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    '被标记 — 有人星标 bot 的评论/issue/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    '构建失败 — CI/CD 流水线在 bot 分支/MR 上失败',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    '不可合并 — MR 变为不可合并（冲突）',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    '合并队列移除 — MR 从合并队列中移除',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',

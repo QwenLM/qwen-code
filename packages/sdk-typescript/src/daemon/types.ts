@@ -2930,7 +2930,8 @@ export type DaemonChannelConfigFieldKind =
   | 'boolean'
   | 'number'
   | 'enum'
-  | 'string-list';
+  | 'string-list'
+  | 'record';
 
 export interface DaemonChannelConfigFieldDescriptor {
   key: string;

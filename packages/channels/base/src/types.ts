@@ -385,7 +385,8 @@ export type ChannelConfigFieldKind =
   | 'boolean'
   | 'number'
   | 'enum'
-  | 'string-list';
+  | 'string-list'
+  | 'record';
 
 export interface ChannelConfigFieldDescriptor {
   key: string;

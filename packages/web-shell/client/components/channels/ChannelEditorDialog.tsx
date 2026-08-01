@@ -77,6 +77,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     senderPolicy: 'channels.editor.field.github.senderPolicy',
     allowedUsers: 'channels.editor.field.github.allowedUsers',
+    reasonFilter: 'channels.editor.field.github.reasonFilter',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
@@ -84,6 +85,8 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
     senderPolicy: 'channels.editor.field.gitlab.senderPolicy',
     allowedUsers: 'channels.editor.field.gitlab.allowedUsers',
+    action_prompt_template:
+      'channels.editor.field.gitlab.action_prompt_template',
   },
 };
 
@@ -427,6 +430,56 @@ export function ChannelEditorDialog({
               ))}
             </SelectContent>
           </Select>
+        </FieldShell>
+      );
+    }
+    if (field.kind === 'record') {
+      let record: Record<string, string> = {};
+      if (typeof value === 'string' && value) {
+        try {
+          record = JSON.parse(value) as Record<string, string>;
+        } catch {
+          /* malformed — render empty */
+        }
+      }
+      const updateRecord = (key: string, val: string) => {
+        const next = { ...record, [key]: val };
+        update(JSON.stringify(next));
+      };
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <div className={styles.recordFields}>
+            {field.options?.map((option) => {
+              const optKey = `${FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ?? ''}.option.${option.value}`;
+              const translated = t(optKey);
+              const displayLabel =
+                translated !== optKey ? translated : option.label;
+              return (
+                <div key={option.value} className={styles.recordRow}>
+                  <Label
+                    htmlFor={`${id}-${option.value}`}
+                    className={styles.recordLabel}
+                  >
+                    {displayLabel}
+                  </Label>
+                  <Input
+                    id={`${id}-${option.value}`}
+                    value={record[option.value] ?? ''}
+                    onChange={(event) =>
+                      updateRecord(option.value, event.target.value)
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
         </FieldShell>
       );
     }
