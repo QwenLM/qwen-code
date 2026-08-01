@@ -17,11 +17,12 @@ import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
   ChannelConfig,
+  ChannelTaskLifecycleEvent,
   Envelope,
 } from '@qwen-code/channel-base';
 import {
-  getGlobalQwenDir,
   getWorkspaceScopeDirName,
+  getGlobalQwenDir,
   PollingChannelBase,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
@@ -199,7 +200,55 @@ interface PendingFinalDelivery {
   triggerKind?: string;
 }
 
+type InboundTaskState = 'accepted' | 'running' | 'reply_pending' | 'failed';
+
+interface InboundTaskDedupe {
+  dispatchedBodies?: string[];
+  dispatchedComments?: string[];
+  dispatchedEvents?: string[];
+}
+
+interface InboundTaskRecord {
+  version: 1;
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  state: InboundTaskState;
+  issueNumber: number;
+  source: {
+    chatId: string;
+    threadId?: string;
+    messageId?: string;
+  };
+  envelope?: Envelope;
+  dedupe: InboundTaskDedupe;
+  sessionId?: string;
+  runId?: string;
+  error?: string;
+}
+
+function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
+  const record = value as InboundTaskRecord;
+  return (
+    record !== null &&
+    typeof record === 'object' &&
+    record.version === 1 &&
+    typeof record.id === 'string' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string' &&
+    ['accepted', 'running', 'reply_pending', 'failed'].includes(record.state) &&
+    Number.isSafeInteger(record.issueNumber) &&
+    record.source !== null &&
+    typeof record.source === 'object' &&
+    typeof record.source.chatId === 'string' &&
+    record.dedupe !== null &&
+    typeof record.dedupe === 'object'
+  );
+}
+
 class FinalPublicationError extends Error {}
+
+class PendingDeliveryPersistenceError extends Error {}
 
 const NO_REPLY_SENTINEL = '<no-reply/>';
 const NO_REPLY_SENTINEL_PATTERN = /^<no-reply\s*\/>$/i;
@@ -268,6 +317,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private pendingFinalDeliveryRequestsActive = 0;
   private pendingFinalDeliveryRetryStopRequested = false;
   private reasonFilter: Set<string> | null = null;
+  private inboundRecoveryPending = true;
+  private recoverableInboundTasks = 0;
+  private activeInboundTaskIdsByMessage = new Map<string, string>();
+  private pendingCursorUpdatedAt: string | undefined;
 
   constructor(
     name: string,
@@ -284,7 +337,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       .join('\n\n');
     super(name, config, bridge, options);
   }
-
   protected createInitialCursor(): GithubCursor {
     return { lastProcessedAt: new Date().toISOString() };
   }
@@ -358,6 +410,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     this.gate.replaceAllowedUsers(allowed);
     this.migrateLegacyPublicationState();
+    this.inboundRecoveryPending = true;
+    this.recoverableInboundTasks = this.readInboundTasks().filter((record) =>
+      this.isRecoverableInboundState(record.state),
+    ).length;
     this.pendingFinalDeliveryRetryStopRequested = false;
     this.startPollLoop();
     if (this.pendingFinalDeliveryRetry) {
@@ -486,12 +542,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ),
       });
       if (threadId && isDefiniteNoWriteGithubError(err)) {
-        this.enqueuePendingFinalDelivery({
-          ...auditBase,
-          chatId,
-          threadId,
-          fullText,
-        });
+        try {
+          this.enqueuePendingFinalDelivery({
+            ...auditBase,
+            chatId,
+            threadId,
+            fullText,
+          });
+        } catch (persistError) {
+          throw new PendingDeliveryPersistenceError(
+            `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
+              persistError instanceof Error
+                ? persistError.message
+                : String(persistError),
+              200,
+            )}`,
+            { cause: err },
+          );
+        }
       }
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
@@ -552,19 +620,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       actor: input.actor,
       triggerKind: input.triggerKind,
     };
-    try {
-      const pending = this.readPendingFinalDeliveries().filter(
-        (item) => item.id !== record.id,
-      );
-      this.writePendingFinalDeliveries([...pending, record]);
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        )}\n`,
-      );
-    }
+    const pending = this.readPendingFinalDeliveries(true).filter(
+      (item) => item.id !== record.id,
+    );
+    this.writePendingFinalDeliveries([...pending, record]);
   }
 
   private async retryPendingFinalDeliveries(
@@ -591,9 +650,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             80,
           )}\n`,
         );
-        this.updatePendingFinalDeliveries((current) =>
-          current.filter((item) => item.id !== record.id),
-        );
+        if (
+          this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          this.removeReplyPendingInboundTask(record);
+        }
         continue;
       }
       try {
@@ -624,6 +687,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           continue;
         }
+        this.removeReplyPendingInboundTask(record);
       } catch (err) {
         if (signal?.aborted) return;
         if (isDefiniteNoWriteGithubError(err)) {
@@ -647,6 +711,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           continue;
         }
+        this.removeReplyPendingInboundTask(record);
       }
     }
   }
@@ -686,6 +751,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         )}\n`,
       );
       return false;
+    }
+  }
+
+  private removeReplyPendingInboundTask(delivery: PendingFinalDelivery): void {
+    const tasks = this.readInboundTasks();
+    const matching = tasks.filter(
+      (task) =>
+        task.state === 'reply_pending' &&
+        task.source.chatId === delivery.chatId &&
+        task.source.threadId === delivery.threadId &&
+        task.source.messageId === delivery.sourceMessageId,
+    );
+    for (const task of matching) {
+      this.removeInboundTask(task.id);
     }
   }
 
@@ -874,6 +953,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    if (this.inboundRecoveryPending) {
+      await this.recoverInboundTasks();
+      this.inboundRecoveryPending = false;
+    }
+
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
       new Date(this.cursor.lastProcessedAt).getTime() - 1000,
@@ -901,12 +985,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // PUT /notifications' async mark fails to mark the thread read.
     const windowSince = this.cursor.lastProcessedAt;
 
-    await this.markNotificationsAsRead(maxUpdatedAt);
-
     if (maxUpdatedAt > this.cursor.lastProcessedAt) {
-      this.cursor.lastProcessedAt = maxUpdatedAt;
+      this.pendingCursorUpdatedAt =
+        !this.pendingCursorUpdatedAt ||
+        maxUpdatedAt > this.pendingCursorUpdatedAt
+          ? maxUpdatedAt
+          : this.pendingCursorUpdatedAt;
     }
-
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -972,6 +1057,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
+    if (!this.hasRecoverableInboundTasks() && this.pendingCursorUpdatedAt) {
+      const committedAt = this.pendingCursorUpdatedAt;
+      await this.markNotificationsAsRead(committedAt);
+      if (committedAt > this.cursor.lastProcessedAt) {
+        this.cursor.lastProcessedAt = committedAt;
+      }
+      this.pendingCursorUpdatedAt = undefined;
+    }
   }
 
   private async processCommentLane(
@@ -1008,7 +1101,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metadata: this.buildRouteMetadata(ctx),
       };
 
-      if (!(await this.dispatchEnvelope(envelope, ctx.issueNumber))) {
+      if (
+        !(await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+          dispatchedComments: [key],
+        }))
+      ) {
         dispatched = true;
         continue;
       }
@@ -1057,7 +1154,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${reason}.\n${buildTriggerGuidance(reason)}\n${details}`,
     };
-    await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+      dispatchedEvents: [trigger.key],
+    });
     this.recordDispatched('dispatchedEvents', trigger.key);
   }
 
@@ -1102,7 +1201,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       metadata: this.buildRouteMetadata(ctx),
     };
 
-    await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+      dispatchedComments: allComments.map(
+        (comment) => comment.node_id || String(comment.id),
+      ),
+    });
   }
 
   private async findDirectTrigger(
@@ -1252,7 +1355,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metadata: this.buildRouteMetadata(ctx),
       };
 
-      await this.dispatchEnvelope(envelope, issueNumber);
+      await this.dispatchEnvelope(envelope, issueNumber, {
+        dispatchedBodies: [bodyKey],
+      });
       this.recordDispatchedBody(bodyKey);
     } catch (err) {
       process.stderr.write(
@@ -1281,18 +1386,275 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async dispatchEnvelope(
     envelope: Envelope,
     issueNumber: number,
+    dedupe: InboundTaskDedupe = {},
   ): Promise<boolean> {
+    const task = this.claimInboundTask(envelope, issueNumber, dedupe);
+    return this.runInboundTask(task);
+  }
+
+  private claimInboundTask(
+    envelope: Envelope,
+    issueNumber: number,
+    dedupe: InboundTaskDedupe,
+  ): InboundTaskRecord {
+    const existing = this.readInboundTasks().find(
+      (record) =>
+        record.envelope &&
+        this.isRecoverableInboundState(record.state) &&
+        record.source.chatId === envelope.chatId &&
+        record.source.threadId === envelope.threadId &&
+        record.source.messageId === envelope.messageId,
+    );
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    const task: InboundTaskRecord = {
+      version: 1,
+      id: randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      state: 'accepted',
+      issueNumber,
+      source: {
+        chatId: envelope.chatId,
+        threadId: envelope.threadId,
+        messageId: envelope.messageId,
+      },
+      envelope,
+      dedupe,
+    };
+    this.updateInboundTasks((records) => [...records, task]);
+    this.applyTaskDedupe(task);
+    return task;
+  }
+
+  private async runInboundTask(task: InboundTaskRecord): Promise<boolean> {
+    const envelope = task.envelope;
+    if (!envelope) return true;
+    this.activeInboundTaskIdsByMessage.set(
+      this.inboundMessageKey(envelope.chatId, envelope.messageId),
+      task.id,
+    );
+    this.transitionInboundTask(task.id, 'running');
     try {
       await this.handleInbound(envelope);
+      if (this.hasPendingFinalDeliveryForTask(task)) {
+        this.transitionInboundTask(task.id, 'reply_pending', {
+          envelope: undefined,
+        });
+      } else {
+        this.removeInboundTask(task.id);
+      }
       return true;
     } catch (err) {
+      const error = sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        200,
+      );
       process.stderr.write(
         `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${err}\n`,
       );
-      if (!(err instanceof FinalPublicationError)) {
-        await this.postErrorComment(envelope.chatId, issueNumber);
+      if (err instanceof FinalPublicationError) {
+        if (this.hasPendingFinalDeliveryForTask(task)) {
+          this.transitionInboundTask(task.id, 'reply_pending', {
+            envelope: undefined,
+            error,
+          });
+        } else {
+          this.removeInboundTask(task.id);
+        }
+      } else {
+        this.transitionInboundTask(task.id, 'failed', { error });
+        await this.postErrorComment(envelope.chatId, task.issueNumber);
       }
       return false;
+    } finally {
+      this.activeInboundTaskIdsByMessage.delete(
+        this.inboundMessageKey(envelope.chatId, envelope.messageId),
+      );
+    }
+  }
+
+  private async recoverInboundTasks(): Promise<void> {
+    for (const task of this.readInboundTasks()) {
+      if (!task.envelope || !this.isRecoverableInboundState(task.state))
+        continue;
+      this.applyTaskDedupe(task);
+      if (this.hasPendingFinalDeliveryForTask(task, true)) {
+        this.transitionInboundTask(task.id, 'reply_pending', {
+          envelope: undefined,
+        });
+        continue;
+      }
+      if (this.hasPublicationAuditForTask(task, true)) {
+        this.removeInboundTask(task.id);
+        continue;
+      }
+      await this.runInboundTask(task);
+    }
+  }
+
+  private isRecoverableInboundState(state: InboundTaskState): boolean {
+    return state === 'accepted' || state === 'running' || state === 'failed';
+  }
+
+  private hasRecoverableInboundTasks(): boolean {
+    return this.recoverableInboundTasks > 0;
+  }
+
+  private hasPendingFinalDeliveryForTask(
+    task: InboundTaskRecord,
+    strict = false,
+  ): boolean {
+    return this.readPendingFinalDeliveries(strict).some(
+      (record) =>
+        record.chatId === task.source.chatId &&
+        record.threadId === task.source.threadId &&
+        record.sourceMessageId === task.source.messageId,
+    );
+  }
+
+  private hasPublicationAuditForTask(
+    task: InboundTaskRecord,
+    strict = false,
+  ): boolean {
+    try {
+      return readFileSync(this.channelFilePath('github-audit.jsonl'), 'utf-8')
+        .split('\n')
+        .some((line) => {
+          if (!line) return false;
+          try {
+            const record = JSON.parse(line) as PublicationAuditRecord;
+            return (
+              record.repository === task.source.chatId &&
+              record.threadId === task.source.threadId &&
+              record.sourceMessageId === task.source.messageId &&
+              (record.outcome === 'posted' || record.outcome === 'suppressed')
+            );
+          } catch {
+            return false;
+          }
+        });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if (strict) throw err;
+      return false;
+    }
+  }
+
+  private applyTaskDedupe(task: InboundTaskRecord): void {
+    for (const [field, keys] of Object.entries(task.dedupe) as Array<
+      [keyof InboundTaskDedupe, string[] | undefined]
+    >) {
+      for (const key of keys ?? []) {
+        this.recordDispatched(field, key);
+      }
+    }
+  }
+
+  private transitionInboundTask(
+    taskId: string,
+    state: InboundTaskState,
+    updates: Partial<
+      Pick<InboundTaskRecord, 'envelope' | 'error' | 'sessionId' | 'runId'>
+    > = {},
+  ): void {
+    this.updateInboundTasks((records) =>
+      records.map((record) =>
+        record.id === taskId
+          ? {
+              ...record,
+              ...updates,
+              state,
+              updatedAt: new Date().toISOString(),
+            }
+          : record,
+      ),
+    );
+  }
+
+  private removeInboundTask(taskId: string): void {
+    this.updateInboundTasks((records) =>
+      records.filter((record) => record.id !== taskId),
+    );
+  }
+
+  private updateInboundTasks(
+    update: (records: InboundTaskRecord[]) => InboundTaskRecord[],
+  ): void {
+    const records = update(this.readInboundTasks(true));
+    this.writeInboundTasks(records);
+    this.recoverableInboundTasks = records.filter((record) =>
+      this.isRecoverableInboundState(record.state),
+    ).length;
+  }
+
+  private inboundTasksPath(): string {
+    return this.channelFilePath('github-inbound-tasks.json');
+  }
+
+  private readInboundTasks(strict = false): InboundTaskRecord[] {
+    try {
+      const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
+      return Array.isArray(parsed) ? parsed.filter(isInboundTaskRecord) : [];
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to read GitHub inbound tasks: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+        if (strict) throw err;
+      }
+      return [];
+    }
+  }
+
+  private writeInboundTasks(records: InboundTaskRecord[]): void {
+    const path = this.inboundTasksPath();
+    if (records.length === 0) {
+      try {
+        unlinkSync(path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      return;
+    }
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, `${JSON.stringify(records)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
+  }
+
+  private inboundMessageKey(chatId: string, messageId?: string): string {
+    return `${chatId}|${messageId ?? ''}`;
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    const taskId = this.activeInboundTaskIdsByMessage.get(
+      this.inboundMessageKey(event.chatId, event.messageId),
+    );
+    if (!taskId) return;
+    if (event.type === 'started') {
+      this.transitionInboundTask(taskId, 'running', {
+        sessionId: event.sessionId,
+        runId: event.runId,
+      });
+      return;
+    }
+    if (event.type === 'failed') {
+      this.transitionInboundTask(
+        taskId,
+        event.phase === 'delivery' ? 'reply_pending' : 'failed',
+        { error: event.error },
+      );
     }
   }
 

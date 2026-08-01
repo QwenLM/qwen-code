@@ -19,8 +19,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getWorkspaceScopeDirName } from '../../base/src/paths.js';
 import {
-  getWorkspaceScopeDirName,
   type ChannelAgentBridge,
   type ChannelConfig,
   type Envelope,
@@ -171,6 +171,66 @@ function makeIssueEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function inboundTaskPath(
+  cwd = '/tmp/test',
+  channelName = 'test-github',
+): string {
+  const nameHash = createHash('sha256')
+    .update(channelName)
+    .digest('hex')
+    .slice(0, 16);
+  return join(
+    process.env.QWEN_HOME!,
+    'channels',
+    getWorkspaceScopeDirName(cwd),
+    `${channelName}-${nameHash}-github-inbound-tasks.json`,
+  );
+}
+
+function makeInboundTaskRecord(overrides: Record<string, unknown> = {}) {
+  const envelope = {
+    channelName: 'test-github',
+    senderId: 'alice',
+    senderName: 'alice',
+    chatId: 'owner/repo',
+    threadId: 'issue:42',
+    messageId: '1001',
+    text: 'please fix this',
+    isGroup: true,
+    isMentioned: true,
+    isReplyToBot: false,
+    metadata: 'Trigger: mention.',
+  };
+  return {
+    version: 1,
+    id: 'inbound-task-1',
+    createdAt: '2026-07-02T10:00:00.000Z',
+    updatedAt: '2026-07-02T10:00:00.000Z',
+    state: 'accepted',
+    issueNumber: 42,
+    source: {
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+      messageId: envelope.messageId,
+    },
+    envelope,
+    dedupe: { dispatchedComments: ['C_1001'] },
+    ...overrides,
+  };
+}
+
+function writeInboundTasks(records: unknown[]): void {
+  const path = inboundTaskPath();
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(records)}\n`, 'utf-8');
+}
+
+function readInboundTasks(): Array<Record<string, unknown>> {
+  return JSON.parse(readFileSync(inboundTaskPath(), 'utf-8')) as Array<
+    Record<string, unknown>
+  >;
+}
+
 /** Subclass that captures envelopes instead of running the full ChannelBase pipeline. */
 class TestableGithubChannel extends GithubChannel {
   inboundEnvelopes: Envelope[] = [];
@@ -179,6 +239,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
     return this.sourceMessageId;
@@ -193,6 +254,7 @@ class TestableGithubChannel extends GithubChannel {
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
+    await this.handleInboundHook?.(envelope);
     if (this.handleInboundError) throw this.handleInboundError;
     if (this.usePreflight && !(await this.preflightInbound(envelope))) return;
     this.inboundEnvelopes.push(envelope);
@@ -271,6 +333,7 @@ describe('GithubChannel', () => {
     await channel.connect();
     channel.disconnect();
     channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+    vi.clearAllMocks();
   }
 
   async function pollOnce() {
@@ -509,7 +572,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.chatId).toBe('owner/repo');
     });
 
-    it('marks notifications as read before processing (best-effort)', async () => {
+    it('marks notifications as read after accepted work completes', async () => {
       const notification = makeNotification({
         updated_at: '2026-07-02T10:00:00.000Z',
       });
@@ -526,10 +589,12 @@ describe('GithubChannel', () => {
         read: true,
       });
       const markOrder =
-        mockOctokit.rest.activity.markNotificationsAsRead.mock
-          .invocationCallOrder[0]!;
-      const commentOrder = mockOctokit.paginate.mock.invocationCallOrder[2]!;
-      expect(markOrder).toBeLessThan(commentOrder);
+        mockOctokit.rest.activity.markNotificationsAsRead.mock.invocationCallOrder.at(
+          -1,
+        )!;
+      const commentOrder =
+        mockOctokit.paginate.mock.invocationCallOrder.at(-1)!;
+      expect(markOrder).toBeGreaterThan(commentOrder);
     });
 
     it('marks all fetched notifications read even on failure', async () => {
@@ -646,10 +711,10 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce([makeComment()]);
       await pollOnce();
 
-      // Call 1: initWithoutLoop's poll; call 2: listNotifications;
-      // call 3: listComments — the comment enumeration window.
+      // initWithoutLoop clears call history; call 1 lists notifications and call 2
+      // enumerates comments using the durable cursor lower bound.
       expect(mockOctokit.paginate).toHaveBeenNthCalledWith(
-        3,
+        2,
         expect.anything(),
         expect.objectContaining({ since: '2026-07-01T00:00:00.000Z' }),
       );
@@ -2096,6 +2161,11 @@ describe('GithubChannel', () => {
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('ambiguous transport failure'),
       );
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -2489,7 +2559,7 @@ describe('GithubChannel', () => {
       );
     });
 
-    it('still marks thread as read after handleInbound failure', async () => {
+    it('keeps a failed inbound task recoverable and leaves the notification unread', async () => {
       channel.handleInboundError = new Error('agent down');
       await initWithoutLoop();
       mockOctokit.paginate
@@ -2500,7 +2570,295 @@ describe('GithubChannel', () => {
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
+      ).not.toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001']);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          issueNumber: 42,
+          envelope: expect.objectContaining({ messageId: '1001' }),
+          dedupe: { dispatchedComments: ['C_1001'] },
+          error: 'agent down',
+        }),
+      ]);
+    });
+
+    it('recovers an accepted task before polling and removes it after success', async () => {
+      writeInboundTasks([makeInboundTaskRecord()]);
+      channel.handleInboundHook = async () => {
+        expect(readInboundTasks()).toEqual([
+          expect.objectContaining({ state: 'running' }),
+        ]);
+      };
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      await vi.waitFor(() => {
+        expect(channel.inboundEnvelopes.map((item) => item.messageId)).toEqual([
+          '1001',
+        ]);
+      });
+      channel.disconnect();
+
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('commits the recovered notification window after restart', async () => {
+      writeInboundTasks([makeInboundTaskRecord()]);
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          last_read_at: '2026-07-02T09:00:00.000Z',
+          updated_at: '2026-07-02T10:00:00.000Z',
+        }),
+      ]);
+
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      await privateChannel.pollOnce();
+
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+    });
+
+    it('restores persisted dedupe before polling after recovery', async () => {
+      writeInboundTasks([makeInboundTaskRecord()]);
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            last_read_at: '2026-07-02T09:00:00.000Z',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      await privateChannel.pollOnce();
+
+      expect(channel.inboundEnvelopes.map((item) => item.messageId)).toEqual([
+        '1001',
+      ]);
+    });
+
+    it('keeps the inbound envelope recoverable when pending delivery persistence fails', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      mkdirSync(pendingPath, { recursive: true });
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        abortableSleep: (ms: number) => Promise<void>;
+        runInboundTask: (task: Record<string, unknown>) => Promise<boolean>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      channel.sourceMessageId = '1001';
+      channel.sourceSenderId = 'alice';
+      channel.sourceMetadata = 'Trigger: mention.';
+
+      vi.spyOn(
+        channel as unknown as {
+          postErrorComment: (
+            chatId: string,
+            issueNumber: number,
+          ) => Promise<void>;
+        },
+        'postErrorComment',
+      ).mockResolvedValue(undefined);
+      privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      channel.handleInboundHook = async (envelope) => {
+        await (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse(
+          envelope.chatId,
+          envelope.threadId!,
+          'completed response',
+          'session-1',
+        );
+      };
+
+      await privateChannel.runInboundTask(
+        makeInboundTaskRecord({ state: 'running' }),
+      );
+
+      const [persistedTask] = readInboundTasks();
+      expect(persistedTask).toMatchObject({
+        state: 'failed',
+        envelope: { messageId: '1001' },
+      });
+      expect(String(persistedTask?.error)).toContain(
+        'failed to persist pending GitHub delivery',
+      );
+    });
+
+    it('does not rerun recovered work when delivery evidence is unreadable', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      mkdirSync(pendingPath, { recursive: true });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await expect(privateChannel.pollOnce()).rejects.toThrow(
+        /illegal operation on a directory|EISDIR/,
+      );
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'running' }),
+      ]);
+    });
+
+    it('does not rerun recovered work when publication audit is unreadable', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(auditPath, { recursive: true });
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await expect(privateChannel.pollOnce()).rejects.toThrow(
+        /illegal operation on a directory|EISDIR/,
+      );
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'running' }),
+      ]);
+    });
+
+    it('removes a reply-pending task when a posted pending delivery is reconciled', async () => {
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'reply_pending',
+          envelope: undefined,
+        }),
+      ]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      const pending = {
+        id: 'pending-1',
+        createdAt: '2026-07-02T10:01:00.000Z',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        fullText: 'completed response',
+        sessionId: 'session-1',
+        sourceMessageId: '1001',
+      };
+      writeFileSync(pendingPath, `${JSON.stringify([pending])}\n`, 'utf-8');
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({ outcome: 'posted', pendingId: pending.id })}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+
+      await privateChannel.retryPendingFinalDeliveries();
+
+      expect(existsSync(pendingPath)).toBe(false);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('does not rerun a task whose final reply is already pending delivery', async () => {
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'running',
+          sessionId: 'session-1',
+          runId: 'run-1',
+        }),
+      ]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      writeFileSync(
+        pendingPath,
+        `${JSON.stringify([
+          {
+            id: 'pending-1',
+            createdAt: '2026-07-02T10:01:00.000Z',
+            chatId: 'owner/repo',
+            threadId: 'issue:42',
+            fullText: 'completed response',
+            sessionId: 'session-1',
+            sourceMessageId: '1001',
+            actor: 'alice',
+            triggerKind: 'mention',
+          },
+        ])}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        retryPendingFinalDeliveries: () => Promise<void>;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await privateChannel.pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'reply_pending' }),
+      ]);
+
+      await privateChannel.retryPendingFinalDeliveries();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'completed response' }),
+      );
+
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('posts only one error comment when dispatch fails on a new thread', async () => {
@@ -2557,7 +2915,17 @@ describe('GithubChannel', () => {
         '1001',
         '1003',
       ]);
-      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1003']);
+      expect(channel.cursor.dispatchedComments).toEqual([
+        'C_1001',
+        'C_1002',
+        'C_1003',
+      ]);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          envelope: expect.objectContaining({ messageId: '1002' }),
+        }),
+      ]);
     });
   });
 
