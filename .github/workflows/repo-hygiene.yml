@@ -429,6 +429,7 @@ jobs:
                   "write_file(**/eslint.config.*)",
                   "write_file(**/eslint.legacy-filenames.*)",
                   "write_file(**/vitest.config.*)",
+                  "write_file(**/vite.config.*)",
                   "write_file(**/node_modules/**)"
                 ]
               },
@@ -500,6 +501,7 @@ jobs:
             exit 0
           fi
           git config core.hooksPath /dev/null
+          git config core.fsmonitor false
           git checkout "${BRANCH}"
 
           # Move committed findings to reportOnly so they surface in the

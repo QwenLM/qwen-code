@@ -9,7 +9,7 @@ verification commands, or write PR files — a later fix-phase job does that.
 Dispatch one subagent per partition below (nine subagents, parallel). A
 subagent owns its partition and reports **candidates only** — it does not
 modify the working tree, does not commit, and does not run verification. A
-pattern hit (from `rg`, `grep`, or any other scanner) is a lead, not a
+pattern hit (from `rg` or `grep`) is a lead, not a
 finding — confirm each hit by reading the surrounding context before
 recording it. The main agent collects, deduplicates across partitions, then
 decides which candidates to accept as findings.
