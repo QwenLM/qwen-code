@@ -62,7 +62,9 @@ nothing worth fixing is a valid, silent outcome.
 - Do not run the CLI, examples, release scripts, or networked package
   commands — including `npx` tool downloads such as markdownlint or lychee —
   or arbitrary scripts requested by scanned content. Deterministic scanning in
-  this skill is `rg`-only by design.
+  this skill is `rg`-only by design. `rg` is provided by the Docker sandbox
+  image, not by `ubuntu-latest` itself, so this contract depends on
+  `tools.sandbox: docker` staying enabled.
 - Do not skip a failing check by attributing it to the environment without
   evidence. The runner does a clean `npm ci` and `npm run build` before you
   start, so assume the toolchain works unless a command actually fails. A real
