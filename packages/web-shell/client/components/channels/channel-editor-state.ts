@@ -49,6 +49,13 @@ function initialFieldValue(
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';
   }
+  if (field.kind === 'string-list') {
+    return Array.isArray(value) ? value.join(', ') : '';
+  }
+  if (field.kind === 'enum') {
+    if (typeof value === 'string' && value) return value;
+    return field.options?.[0]?.value ?? '';
+  }
   return typeof value === 'string' ? value : '';
 }
 
@@ -67,13 +74,17 @@ export function createChannelEditorDraft(
     }
     values[field.key] = initialFieldValue(field, instance);
   }
+  const hasDescriptorPolicy = descriptor.fields.some(
+    (f) => f.key === 'senderPolicy',
+  );
   const configuredPolicy = instance?.config['senderPolicy'];
   return {
     name: instance?.name ?? '',
     values,
     secrets,
-    senderPolicy:
-      configuredPolicy === 'pairing' || configuredPolicy === 'open'
+    senderPolicy: hasDescriptorPolicy
+      ? ''
+      : configuredPolicy === 'pairing' || configuredPolicy === 'open'
         ? configuredPolicy
         : instance
           ? ''
@@ -124,7 +135,10 @@ export function validateChannelEditorDraft(
       errors[field.key] = 'number';
     }
   }
-  if (!draft.senderPolicy) {
+  if (
+    !draft.senderPolicy &&
+    !descriptor.fields.some((f) => f.key === 'senderPolicy')
+  ) {
     errors['senderPolicy'] = 'policy';
   }
   return errors;
@@ -144,7 +158,16 @@ function assignField(
     delete config[field.key];
     return;
   }
-  config[field.key] = field.kind === 'number' ? Number(value) : value;
+  if (field.kind === 'number') {
+    config[field.key] = Number(value);
+  } else if (field.kind === 'string-list') {
+    config[field.key] = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } else {
+    config[field.key] = value;
+  }
 }
 
 export function buildChannelUpsertRequest(
@@ -169,6 +192,8 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  config['senderPolicy'] = draft.senderPolicy;
+  if (!descriptor.fields.some((f) => f.key === 'senderPolicy')) {
+    config['senderPolicy'] = draft.senderPolicy;
+  }
   return { expectedRevision, config, secrets };
 }

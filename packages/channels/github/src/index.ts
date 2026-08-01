@@ -24,6 +24,33 @@ export const plugin: ChannelPlugin = {
         kind: 'string',
         envResolvable: true,
       },
+      {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        options: [
+          { value: 'open', label: 'Open' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
+        key: 'senderPolicy',
+        label: 'Sender Policy',
+        kind: 'enum',
+        required: true,
+        options: [
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'open', label: 'Open' },
+        ],
+      },
+      {
+        key: 'allowedUsers',
+        label: 'Allowed Users',
+        kind: 'string-list',
+      },
     ],
   },
   createChannel: (name, config, bridge, options) =>

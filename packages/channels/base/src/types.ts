@@ -384,7 +384,8 @@ export type ChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list';
 
 export interface ChannelConfigFieldDescriptor {
   key: string;

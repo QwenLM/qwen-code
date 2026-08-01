@@ -171,3 +171,106 @@ describe('Channel editor state', () => {
     });
   });
 });
+
+const GITHUB: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      options: [
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
+describe('Descriptor-driven senderPolicy', () => {
+  it('defaults enum fields to the first option for new channels', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    expect(draft.values.groupPolicy).toBe('open');
+    expect(draft.values.senderPolicy).toBe('allowlist');
+    expect(draft.senderPolicy).toBe('');
+  });
+
+  it('reads stored enum and string-list values when editing', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        senderPolicy: 'pairing',
+        allowedUsers: ['alice', 'bob'],
+      },
+      secrets: { token: { present: true, source: 'stored' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(draft.values.groupPolicy).toBe('allowlist');
+    expect(draft.values.senderPolicy).toBe('pairing');
+    expect(draft.values.allowedUsers).toBe('alice, bob');
+  });
+
+  it('writes senderPolicy via descriptor fields, not the hardcoded path', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'my-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.allowedUsers = 'alice, bob';
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    expect(request.config).toEqual({
+      type: 'github',
+      groupPolicy: 'open',
+      senderPolicy: 'allowlist',
+      allowedUsers: ['alice', 'bob'],
+    });
+  });
+
+  it('skips senderPolicy validation when descriptor declares it', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'my-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+
+    const errors = validateChannelEditorDraft(GITHUB, draft, []);
+    expect(errors).toEqual({});
+  });
+
+  it('omits empty string-list fields from the upsert config', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'my-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.allowedUsers = '';
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+});

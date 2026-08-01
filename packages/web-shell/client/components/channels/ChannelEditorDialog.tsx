@@ -55,14 +55,7 @@ import {
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
 } from './channel-editor-state';
-
-const PLATFORM_MARKS: Record<string, string> = {
-  dingtalk: 'D',
-  wecom: 'W',
-  feishu: 'F',
-  github: 'GH',
-  gitlab: 'GL',
-};
+import { PLATFORM_MARKS } from './channel-platform';
 
 const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dingtalk: {
@@ -81,10 +74,16 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   github: {
     token: 'channels.editor.field.github.token',
     baseUrl: 'channels.editor.field.github.baseUrl',
+    groupPolicy: 'channels.editor.field.github.groupPolicy',
+    senderPolicy: 'channels.editor.field.github.senderPolicy',
+    allowedUsers: 'channels.editor.field.github.allowedUsers',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
     baseUrl: 'channels.editor.field.gitlab.baseUrl',
+    groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
+    senderPolicy: 'channels.editor.field.gitlab.senderPolicy',
+    allowedUsers: 'channels.editor.field.gitlab.allowedUsers',
   },
 };
 
@@ -524,42 +523,50 @@ export function ChannelEditorDialog({
               <h3 className={styles.sectionHeading}>
                 {t('channels.editor.section.access')}
               </h3>
-              <RadioGroup
-                className={styles.policyGrid}
-                value={draft.senderPolicy}
-                aria-invalid={Boolean(errors['senderPolicy'])}
-                onValueChange={(value) =>
-                  setDraft((current) => ({
-                    ...current,
-                    senderPolicy:
-                      value === 'pairing' || value === 'open' ? value : '',
-                  }))
-                }
-              >
-                {(['pairing', 'open'] as const).map((policy) => (
-                  <Label
-                    key={policy}
-                    className={styles.policyCard}
-                    data-selected={draft.senderPolicy === policy}
+              {descriptor.fields.some(
+                (f) => f.key === 'senderPolicy',
+              ) ? null : (
+                <>
+                  <RadioGroup
+                    className={styles.policyGrid}
+                    value={draft.senderPolicy}
+                    aria-invalid={Boolean(errors['senderPolicy'])}
+                    onValueChange={(value) =>
+                      setDraft((current) => ({
+                        ...current,
+                        senderPolicy:
+                          value === 'pairing' || value === 'open' ? value : '',
+                      }))
+                    }
                   >
-                    <RadioGroupItem value={policy} />
-                    <span className={styles.policyCopy}>
-                      <span className={styles.policyTitle}>
-                        {t(`channels.editor.policy.${policy}.title`)}
-                      </span>
-                      <span className={styles.policyDescription}>
-                        {t(`channels.editor.policy.${policy}.description`)}
-                      </span>
-                    </span>
-                  </Label>
-                ))}
-              </RadioGroup>
-              {errors['senderPolicy'] ? (
-                <p role="alert" className="text-xs text-destructive">
-                  {errors['senderPolicy']}
-                </p>
-              ) : null}
-              {draft.senderPolicy === 'pairing' ? (
+                    {(['pairing', 'open'] as const).map((policy) => (
+                      <Label
+                        key={policy}
+                        className={styles.policyCard}
+                        data-selected={draft.senderPolicy === policy}
+                      >
+                        <RadioGroupItem value={policy} />
+                        <span className={styles.policyCopy}>
+                          <span className={styles.policyTitle}>
+                            {t(`channels.editor.policy.${policy}.title`)}
+                          </span>
+                          <span className={styles.policyDescription}>
+                            {t(`channels.editor.policy.${policy}.description`)}
+                          </span>
+                        </span>
+                      </Label>
+                    ))}
+                  </RadioGroup>
+                  {errors['senderPolicy'] ? (
+                    <p role="alert" className="text-xs text-destructive">
+                      {errors['senderPolicy']}
+                    </p>
+                  ) : null}
+                </>
+              )}
+              {(descriptor.fields.some((f) => f.key === 'senderPolicy')
+                ? String(draft.values['senderPolicy'] ?? '')
+                : draft.senderPolicy) === 'pairing' ? (
                 instance?.config.senderPolicy === 'pairing' ? (
                   <ChannelPairingRequests
                     channelName={instance.name}

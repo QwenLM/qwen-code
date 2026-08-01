@@ -6,6 +6,14 @@
 
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
+export const PLATFORM_MARKS: Record<string, string> = {
+  dingtalk: 'D',
+  wecom: 'W',
+  feishu: 'F',
+  github: 'GH',
+  gitlab: 'GL',
+};
+
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
   'wecom',

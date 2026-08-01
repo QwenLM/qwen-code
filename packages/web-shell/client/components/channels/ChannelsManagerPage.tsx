@@ -57,6 +57,7 @@ import styles from './ChannelsManagerPage.module.css';
 import {
   isChannelPlatformAvailable,
   isSupportedChannelType,
+  PLATFORM_MARKS,
 } from './channel-platform';
 
 interface ChannelsManagerPageProps {
@@ -72,14 +73,6 @@ const STATUS_KEYS: Record<DaemonChannelRuntimeState['state'], string> = {
   connected: 'channels.status.connected',
   partial: 'channels.status.partial',
   error: 'channels.status.error',
-};
-
-const PLATFORM_MARKS: Record<string, string> = {
-  dingtalk: 'D',
-  wecom: 'W',
-  feishu: 'F',
-  github: 'GH',
-  gitlab: 'GL',
 };
 
 function badgeVariant(

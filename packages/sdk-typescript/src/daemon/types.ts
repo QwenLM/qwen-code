@@ -2924,7 +2924,8 @@ export type DaemonChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list';
 
 export interface DaemonChannelConfigFieldDescriptor {
   key: string;

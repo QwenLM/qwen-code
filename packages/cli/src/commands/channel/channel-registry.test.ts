@@ -26,6 +26,36 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    for (const type of ['github', 'gitlab'] as const) {
+      const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'token',
+          kind: 'secret',
+          required: true,
+        }),
+      );
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'groupPolicy',
+          kind: 'enum',
+          required: true,
+        }),
+      );
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'senderPolicy',
+          kind: 'enum',
+          required: true,
+        }),
+      );
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'allowedUsers',
+          kind: 'string-list',
+        }),
+      );
+    }
     expect(JSON.stringify(catalog)).not.toContain('createChannel');
   });
 });
