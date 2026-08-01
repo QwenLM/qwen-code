@@ -34,6 +34,7 @@ import {
   containsXmlToolCalls,
   tryRecoverXmlToolCalls,
 } from './xml-tool-call-fallback.js';
+import { tryRecoverJsonToolCalls } from './json-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import {
   getRateLimitErrorDetails,
@@ -4068,6 +4069,8 @@ export class GeminiChat {
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
     let deferredFinishReason: FinishReason | undefined;
+    const bufferedJsonTextChunks: GenerateContentResponse[] = [];
+    let bufferingJsonText = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -4226,6 +4229,19 @@ export class GeminiChat {
         }
 
         if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
+          const chunkText = chunk.candidates
+            ?.flatMap((candidate) => candidate.content?.parts ?? [])
+            .filter((part) => !part.thought && typeof part.text === 'string')
+            .map((part) => part.text)
+            .join('');
+          const chunkStartsJson =
+            chunkText?.trimStart().startsWith('[') ||
+            chunkText?.trimStart().startsWith('{');
+          if (!hasToolCall && (bufferingJsonText || chunkStartsJson)) {
+            bufferingJsonText = true;
+            bufferedJsonTextChunks.push(chunk);
+            continue;
+          }
           yield chunk;
         }
       }
@@ -4347,6 +4363,41 @@ export class GeminiChat {
       }
     }
 
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      hasFinishReason &&
+      contentText
+    ) {
+      const toolRegistry = this.config.getToolRegistry();
+      const recovery = tryRecoverJsonToolCalls(contentText, (name) =>
+        Boolean(toolRegistry.getTool(name)),
+      );
+      if (recovery.recovered) {
+        hasToolCall = true;
+        for (let i = consolidatedHistoryParts.length - 1; i >= 0; i--) {
+          if (consolidatedHistoryParts[i]!.text !== undefined) {
+            consolidatedHistoryParts.splice(i, 1);
+          }
+        }
+        consolidatedHistoryParts.push(...recovery.functionCallParts);
+        contentText = '';
+        contentParts = consolidatedHistoryParts;
+        const syntheticChunk = {
+          candidates: [
+            {
+              content: { role: 'model', parts: recovery.functionCallParts },
+            },
+          ],
+        } as GenerateContentResponse;
+        syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
+        recoveredChunk = syntheticChunk;
+        debugLogger.warn(
+          `JSON tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) [${recovery.functionCallParts.map((p) => p.functionCall?.name).join(', ')}] from plain text content`,
+        );
+      }
+    }
+
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
@@ -4391,6 +4442,10 @@ export class GeminiChat {
 
     if (recoveredChunk) {
       yield recoveredChunk;
+    } else if (bufferedJsonTextChunks.length > 0) {
+      for (const chunk of bufferedJsonTextChunks) {
+        yield chunk;
+      }
     }
 
     // Record assistant turn with raw Content and metadata. Gate matches

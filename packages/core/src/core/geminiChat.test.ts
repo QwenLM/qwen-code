@@ -1721,6 +1721,79 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('recovers JSON-serialized tool calls emitted as text', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(456);
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'agent' ? ({ name } as unknown) : undefined,
+        ),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const leakedJson = JSON.stringify([
+        {
+          name: 'agent',
+          prompt: 'inspect the failing tests',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: leakedJson }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'dispatch agents' },
+        'prompt-id-json-tool-leak',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      const emittedParts = events.flatMap((event) =>
+        event.type === StreamEventType.CHUNK
+          ? (event.value.candidates?.[0]?.content?.parts ?? [])
+          : [],
+      );
+      expect(emittedParts.some((part) => part.text === leakedJson)).toBe(false);
+      expect(emittedParts).toContainEqual({
+        functionCall: {
+          id: 'json-recovered-0-456',
+          name: 'agent',
+          args: {
+            prompt: 'inspect the failing tests',
+            subagent_type: 'general-purpose',
+            run_in_background: true,
+          },
+        },
+      });
+
+      const modelTurn = chat.getHistory()[1]!;
+      expect(modelTurn.parts).toEqual([
+        {
+          functionCall: {
+            id: 'json-recovered-0-456',
+            name: 'agent',
+            args: {
+              prompt: 'inspect the failing tests',
+              subagent_type: 'general-purpose',
+              run_in_background: true,
+            },
+          },
+        },
+      ]);
+    });
+
     it('should succeed when there is finish reason and only thought content (reasoning models)', async () => {
       // This test verifies that responses containing only thought/reasoning content
       // are accepted as valid.
