@@ -917,10 +917,15 @@ export class SkillManager {
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
       case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
         const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          path.resolve(
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
         );
         for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
           const homeExpanded = expandHomeDir(customDir);
@@ -957,6 +962,11 @@ export class SkillManager {
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
 
