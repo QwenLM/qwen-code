@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
-use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
+    WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
@@ -171,10 +174,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tauri::command]
-fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
+fn bootstrap_state(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+) -> Result<BootstrapState, String> {
+    require_bootstrap_origin(&webview)?;
     let starting = state.starting.load(Ordering::SeqCst) != 0;
     let running = lock(&state.runtime).is_some();
-    BootstrapState {
+    Ok(BootstrapState {
         desktop_version: env!("CARGO_PKG_VERSION").to_string(),
         status: if running {
             "ready"
@@ -188,11 +195,15 @@ fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
             .workspace()
             .map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
-    }
+    })
 }
 
 #[tauri::command]
-async fn choose_workspace(app: AppHandle) -> Result<Option<String>, String> {
+async fn choose_workspace(
+    webview: WebviewWindow,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    require_bootstrap_origin(&webview)?;
     let folder = tauri::async_runtime::spawn_blocking({
         let app = app.clone();
         move || {
@@ -215,7 +226,8 @@ async fn choose_workspace(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn restart_runtime(app: AppHandle) -> Result<(), String> {
+fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
     let workspace = app
         .state::<ApplicationState>()
         .settings
@@ -226,7 +238,11 @@ fn restart_runtime(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_logs(state: State<'_, ApplicationState>) -> Result<(), String> {
+fn open_logs(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
     if let Some(parent) = state.log_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create desktop log directory: {error}"))?;
@@ -240,7 +256,8 @@ fn open_logs(state: State<'_, ApplicationState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
+async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
     let update = app
         .updater()
         .map_err(|error| format!("Failed to initialize updater: {error}"))?
@@ -428,6 +445,17 @@ fn navigate_to_bootstrap(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Failed to show desktop recovery page: {error}"))
 }
 
+fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    if is_bootstrap_url(&url) {
+        Ok(())
+    } else {
+        Err("This command is only available from the desktop shell.".to_string())
+    }
+}
+
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
         || lock(origin)
@@ -470,9 +498,39 @@ fn check_updates_silently(app: AppHandle) {
             Ok(updater) => updater,
             Err(_) => return,
         };
-        if let Ok(Some(update)) = updater.check().await {
-            let _ = app.emit("update-available", update.version);
+        let Ok(Some(update)) = updater.check().await else {
+            return;
+        };
+        let _ = app.emit("update-available", update.version.clone());
+        let version = update.version.clone();
+        let confirmed = tauri::async_runtime::spawn_blocking({
+            let app = app.clone();
+            move || {
+                app.dialog()
+                    .message(format!(
+                        "Qwen Code Desktop {version} is available. Install and restart now?"
+                    ))
+                    .title("Qwen Code update")
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Install and restart".to_string(),
+                        "Later".to_string(),
+                    ))
+                    .blocking_show()
+            }
+        })
+        .await;
+        if confirmed != Ok(true) {
+            return;
         }
+        if update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .is_err()
+        {
+            return;
+        }
+        app.request_restart();
     });
 }
 
@@ -602,6 +660,19 @@ mod tests {
         assert!(is_allowed_navigation(
             &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
             &origin,
+        ));
+    }
+
+    #[test]
+    fn command_origin_gate_accepts_only_bootstrap() {
+        assert!(is_bootstrap_url(
+            &Url::parse(BOOTSTRAP_URL).expect("bootstrap")
+        ));
+        assert!(!is_bootstrap_url(
+            &Url::parse("http://127.0.0.1:49152/").expect("runtime")
+        ));
+        assert!(!is_bootstrap_url(
+            &Url::parse("https://example.com/").expect("external")
         ));
     }
 }
