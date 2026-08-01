@@ -16,9 +16,10 @@ following are true:
 - the active provider is Anthropic or DashScope and cache control is enabled;
 - slimming found no media that would change the provider-facing history.
 
-The request uses the current chat's generation config, including its system
-instruction and tool declarations, and the complete curated history. The
-existing compression instruction is appended as the final user message.
+The request uses the current turn's effective generation config, including
+per-request tool overrides used by subagents, and the complete curated
+history. The existing compression instruction is appended as the final user
+message.
 Nothing consumes or executes function calls from this request. A response
 containing a function call, an empty response, a malformed state snapshot, or
 a request error is discarded and retried once through the existing cold side

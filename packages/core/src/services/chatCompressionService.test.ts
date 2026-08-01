@@ -2265,6 +2265,31 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(coldSpy).not.toHaveBeenCalled();
   });
 
+  it('preserves per-request tool overrides used by subagent turns', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const requestTools = [
+      {
+        functionDeclarations: [
+          { name: 'subagent_tool', description: 'Subagent-only tool' },
+        ],
+      },
+    ];
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      requestGenerationConfig: { tools: requestTools },
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      config?: { tools?: unknown };
+    };
+    expect(request.config?.tools).toBe(requestTools);
+  });
+
   it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
     'uses cache sharing for DashScope through %s',
     async (authType) => {
@@ -2419,6 +2444,28 @@ describe('ChatCompressionService.compress cache sharing', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('Aborted');
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back when cancellation lands with an unusable shared response', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const controller = new AbortController();
+    generateText.mockImplementation(async () => {
+      controller.abort();
+      return { text: 'plain summary', usage: {}, hadToolCall: false };
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await expect(
+      new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
     expect(coldSpy).not.toHaveBeenCalled();
   });
 

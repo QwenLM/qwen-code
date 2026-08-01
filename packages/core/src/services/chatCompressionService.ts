@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
@@ -245,6 +245,8 @@ export interface CompressOptions {
    * (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /** Per-request overrides used by the main turn, including transient tools. */
+  requestGenerationConfig?: GenerateContentConfig;
   /**
    * User-supplied focus directives passed to the compression side-query.
    * Appended to the system prompt as an `Additional Instructions:` block.
@@ -643,7 +645,10 @@ export class ChatCompressionService {
       supportsCompressionCacheSharing(config);
     if (canShareCache) {
       try {
-        const generationConfig = chat.getGenerationConfig();
+        const generationConfig = {
+          ...chat.getGenerationConfig(),
+          ...opts.requestGenerationConfig,
+        };
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
@@ -703,7 +708,10 @@ export class ChatCompressionService {
       }
     }
 
-    summaryResult ??= await runColdCompression();
+    if (!summaryResult) {
+      abortSignal.throwIfAborted();
+      summaryResult = await runColdCompression();
+    }
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>
     // blocks, so a response that is ONLY <analysis>...</analysis> (no
