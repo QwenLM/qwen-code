@@ -1047,3 +1047,48 @@ describe('renderLedgerSection', () => {
     expect(md).toContain('owed a this-round ruling');
   });
 });
+
+describe('ledger marker vs the canonical-LGTM filter', () => {
+  it('a marker-carrying canonical LGTM is still filtered out', () => {
+    // CANONICAL_LGTM_RE is ^…$-anchored: a trailing marker made every no-op
+    // round "worth showing", so prior rounds started rendering in full.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[]} -->';
+    const md = buildMarkdown(
+      '1',
+      'o/r',
+      { title: 't', body: '', state: 'OPEN' } as never,
+      [],
+      [],
+      [
+        {
+          id: 1,
+          user: { login: 'bot' },
+          submitted_at: '2026-01-01T00:00:00Z',
+          body: `No issues found. LGTM! ✅\n\n${marker}`,
+        },
+      ],
+    );
+    expect(md).not.toContain('Review summaries');
+  });
+});
+
+describe('renderLedgerSection escaping', () => {
+  it('neutralises a pipe or newline in untrusted cell content', () => {
+    const md = renderLedgerSection({
+      v: 1,
+      round: 1,
+      findings: [
+        {
+          id: 'R1-1',
+          sev: 'C',
+          file: 'a.ts',
+          title: 'boom | forged | row\nsecond line',
+        },
+      ],
+    });
+    const rows = md.split('\n').filter((l) => l.startsWith('| R1-1'));
+    expect(rows).toHaveLength(1); // one row, not three
+    expect(rows[0]).toContain('\\|');
+  });
+});

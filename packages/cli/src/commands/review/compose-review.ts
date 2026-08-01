@@ -148,6 +148,13 @@ export interface ComposeReviewInput {
     downgradeRequestChanges?: boolean;
     downgradeReasons?: string[];
   };
+  /**
+   * The drafted inline comments this review is posting — the ledger's own
+   * input. A seam like `criticalsInline`, filled by the two CLI boundaries
+   * from the same array they count, never by the model's state JSON (the
+   * handler strips it, as it does `env` and `prBodyFetcher`).
+   */
+  draftedComments?: Array<{ path?: unknown; line?: unknown; body?: unknown }>;
   /** Model id for the footer, e.g. `qwen3.7-max`. */
   modelId: string;
 }
@@ -240,6 +247,66 @@ function toBool(value: unknown, field: string): boolean {
 }
 
 export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
+  const result = composeReviewBody(input);
+  // The ledger marker rides the body THIS function returns, because this — not
+  // the CLI handler — is what `submit` calls and posts. Appending it in the
+  // handler left the feature inert end to end: the marker reached only the
+  // composed JSON on disk, which nothing in the posting path reads, so no
+  // posted review ever carried one and every round recovered `null`.
+  const marker = ledgerMarkerFor(input);
+  return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
+}
+
+/**
+ * The next round's marker, or null when this review has no PR to carry one.
+ * Round number comes from the side file `pr-context` wrote from the PREVIOUS
+ * posted round (+1) — never from the model, never from this input.
+ */
+function ledgerMarkerFor(input: ComposeReviewInput): string | null {
+  try {
+    if (!input.planPath) return null;
+    const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
+      prNumber?: unknown;
+    };
+    const pr = plan?.prNumber;
+    const isPr =
+      (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+      (typeof pr === 'string' && /^\d+$/.test(pr));
+    if (!isPr) return null;
+    let prevRound = 0;
+    try {
+      const prev = JSON.parse(
+        readFileSync(
+          join(
+            dirname(input.planPath),
+            `qwen-review-pr-${pr}-prev-ledger.json`,
+          ),
+          'utf8',
+        ),
+      ) as Ledger;
+      if (Number.isInteger(prev.round) && prev.round > 0)
+        prevRound = prev.round;
+    } catch {
+      // No previous posted round recovered: this is round 1.
+    }
+    return serializeLedger(
+      buildLedger(
+        prevRound + 1,
+        (input.draftedComments ?? []) as Array<{
+          path?: unknown;
+          line?: unknown;
+          body?: unknown;
+        }>,
+        toStringList(input.bodyCriticals, 'bodyCriticals'),
+      ),
+    );
+  } catch {
+    // A carry-forward convenience, never worth failing the verdict over.
+    return null;
+  }
+}
+
+function composeReviewBody(input: ComposeReviewInput): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -1623,6 +1690,9 @@ export const composeReviewCommand: CommandModule = {
     // fail-safe. Stripping it here keeps the register the CLI's own, not the
     // caller's, which is the whole point of the seam.
     delete parsed.prBodyFetcher;
+    // Same reasoning: the ledger's contents are the comments this run drafted,
+    // read from `--comments` below — not something a state JSON may assert.
+    delete parsed.draftedComments;
     // The inline counts are counted, not accepted — `submit` has refused them
     // since the count-beside-the-comments bug, and this boundary refusing them
     // too is what makes the Step 6 line and the posted verdict the same
@@ -1644,52 +1714,8 @@ export const composeReviewCommand: CommandModule = {
     const result = composeReview({
       ...parsed,
       ...countInlineFindings(drafted),
+      draftedComments: drafted,
     });
-    // Embed the next round's machine ledger in the body about to be posted —
-    // the durable copy every future environment can read back via pr-context.
-    // The round number comes from the side file pr-context recovered from the
-    // PREVIOUS posted round (+1), never from the model; a first review is
-    // round 1. PR-mode only: a local review has no PR to carry the marker.
-    try {
-      const planRaw = parsed.planPath
-        ? (JSON.parse(readFileSync(parsed.planPath, 'utf8')) as {
-            prNumber?: unknown;
-          })
-        : null;
-      const pr = planRaw?.prNumber;
-      const isPr =
-        (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-        (typeof pr === 'string' && /^\d+$/.test(pr));
-      if (isPr && parsed.planPath) {
-        let prevRound = 0;
-        try {
-          const prev = JSON.parse(
-            readFileSync(
-              join(
-                dirname(parsed.planPath),
-                `qwen-review-pr-${pr}-prev-ledger.json`,
-              ),
-              'utf8',
-            ),
-          ) as Ledger;
-          if (Number.isInteger(prev.round) && prev.round > 0) {
-            prevRound = prev.round;
-          }
-        } catch {
-          // No previous posted round recovered: this is round 1.
-        }
-        const ledger = buildLedger(
-          prevRound + 1,
-          drafted as Array<{ path?: unknown; line?: unknown; body?: unknown }>,
-          toStringList(parsed.bodyCriticals, 'bodyCriticals'),
-        );
-        result.body = `${result.body}\n\n${serializeLedger(ledger)}`;
-      }
-    } catch {
-      // The ledger is a carry-forward convenience, never worth failing the
-      // verdict over. A round without a marker costs the NEXT round its
-      // memory, nothing else.
-    }
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
@@ -1723,7 +1749,6 @@ export const composeReviewCommand: CommandModule = {
   },
 };
 
-/** The terminal verdict, in the words Step 6 is told to print. */
 /**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
@@ -1767,6 +1792,7 @@ export function buildLedger(
   return { v: 1, round, findings };
 }
 
+/** The terminal verdict, in the words Step 6 is told to print. */
 export function verdictLine(r: ComposeReviewResult): string {
   const label: Record<ReviewEvent, string> = {
     APPROVE: 'Approve',

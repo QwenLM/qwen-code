@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import { parseLedger } from './lib/ledger.js';
 import {
   composeReview,
   buildLedger,
@@ -3146,5 +3147,73 @@ describe('buildLedger', () => {
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
+  });
+});
+
+describe('the ledger marker reaches the POSTED body', () => {
+  // The feature was inert end to end: the marker was appended in the CLI
+  // handler, after composeReview() returned, so it reached only the composed
+  // JSON on disk — and `submit` posts what the PURE function returns. Every
+  // assertion here goes through composeReview, the path GitHub receives.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ledger-e2e-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+
+  it('appends the marker to the body composeReview returns', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+      ],
+    });
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'S',
+        file: 'src/a.ts',
+        line: 3,
+        title: 'untested guard',
+      },
+    ]);
+  });
+
+  it('counts the round from the side file pr-context recovered, +1', () => {
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 4, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.round).toBe(5);
+  });
+
+  it('carries NO marker on a local review — there is no PR to hold it', () => {
+    const r = composeReview({
+      planPath: plan({ prNumber: undefined }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(r.body).not.toContain('qwen-review-ledger');
   });
 });

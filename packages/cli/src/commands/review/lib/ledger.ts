@@ -69,7 +69,9 @@ export function serializeLedger(ledger: Ledger): string {
  */
 export function parseLedger(body: string | undefined): Ledger | null {
   if (!body) return null;
-  const start = body.indexOf(OPEN);
+  // LAST marker, not the first: an edited or quote-carrying body can hold more
+  // than one, and the newest round is the one that describes the current state.
+  const start = body.lastIndexOf(OPEN);
   if (start < 0) return null;
   const end = body.indexOf(CLOSE, start);
   if (end < 0) return null;
@@ -86,9 +88,17 @@ export function parseLedger(body: string | undefined): Ledger | null {
           typeof f.id === 'string' &&
           (f.sev === 'C' || f.sev === 'S') &&
           typeof f.file === 'string' &&
-          typeof f.title === 'string',
+          typeof f.title === 'string' &&
+          (f.line === undefined || Number.isInteger(f.line)),
       )
-      .slice(0, LEDGER_MAX_FINDINGS);
+      .slice(0, LEDGER_MAX_FINDINGS)
+      // Normalise on READ too: the caps are the serializer's contract, and a
+      // hand-edited marker is not bound by it.
+      .map((f) => ({
+        ...f,
+        title: f.title.slice(0, LEDGER_MAX_TITLE),
+        file: f.file.slice(0, 200),
+      }));
     return { v: 1, round: raw.round, findings };
   } catch {
     return null;
