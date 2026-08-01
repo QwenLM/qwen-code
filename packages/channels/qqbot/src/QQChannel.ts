@@ -995,7 +995,7 @@ export class QQChannel extends ChannelBase {
   /**
    * QQ Bot API V2 does not provide a typing indicator endpoint.
    * ChannelBase calls these hooks to signal prompt start/end;
-   * they are intentionally no-ops for this channel.
+   * onPromptStart is intentionally a no-op.
    */
   protected override onPromptStart(
     _chatId: string,
@@ -1003,11 +1003,37 @@ export class QQChannel extends ChannelBase {
     _messageId?: string,
   ): void {}
 
+  /**
+   * ChannelBase invokes this unconditionally in a finally block — including
+   * when the prompt was cancelled, in which case onResponseComplete is
+   * skipped. That makes it the one reliable release point for per-session
+   * streaming state: without it a cancelled turn would leave its reply
+   * anchor in sessionReplyMsgId and the next prompt on the same session
+   * would inherit the stale anchor via onResponseChunk.
+   *
+   * Deferred completions are exempt: when onResponseComplete parked the
+   * session in pendingStreamDelete, a final flush is still in flight and
+   * its promise chain owns the streamState lifecycle (it re-flushes the
+   * residual buffer, then releases the anchor). Clearing state here would
+   * trip the .then() identity guard and silently drop the residual buffer.
+   */
   protected override onPromptEnd(
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    const sessionId = _sessionId;
+    if (this.pendingStreamDelete.has(sessionId)) {
+      return;
+    }
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.streamState.delete(sessionId);
+    this.flushingSessions.delete(sessionId);
+    this.pendingStreamDelete.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
+    this.releaseSessionReplyAnchor(sessionId);
+  }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
 
@@ -1131,7 +1157,7 @@ export class QQChannel extends ChannelBase {
           // onResponseComplete already fired: release the per-session reply
           // anchor now. Any later window's chunks still carry state.msgId
           // (captured in the state object), so this cannot detach them.
-          this.sessionReplyMsgId.delete(sessionId);
+          this.releaseSessionReplyAnchor(sessionId);
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
             // Don't clear buffer or retryCount — idleFlush will pick them up.
@@ -1165,7 +1191,7 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           if (current === state) {
             this.streamState.delete(sessionId);
-            this.sessionReplyMsgId.delete(sessionId);
+            this.releaseSessionReplyAnchor(sessionId);
           }
           if (this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
@@ -1201,7 +1227,7 @@ export class QQChannel extends ChannelBase {
               current.timer.unref?.();
             } else {
               this.streamState.delete(sessionId);
-              this.sessionReplyMsgId.delete(sessionId);
+              this.releaseSessionReplyAnchor(sessionId);
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
               process.stderr.write(
@@ -1226,7 +1252,7 @@ export class QQChannel extends ChannelBase {
                 current.retryCount >= this.maxFlushRetries
               ) {
                 this.streamState.delete(sessionId);
-                this.sessionReplyMsgId.delete(sessionId);
+                this.releaseSessionReplyAnchor(sessionId);
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
                   `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
@@ -1253,7 +1279,7 @@ export class QQChannel extends ChannelBase {
                 }
               } else {
                 this.streamState.delete(sessionId);
-                this.sessionReplyMsgId.delete(sessionId);
+                this.releaseSessionReplyAnchor(sessionId);
                 // #2: Clean up flushedSessions on retry exhaustion
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
@@ -1322,7 +1348,7 @@ export class QQChannel extends ChannelBase {
     const capturedMsgId = this.sessionReplyMsgId.get(sessionId);
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
-    this.sessionReplyMsgId.delete(sessionId);
+    this.releaseSessionReplyAnchor(sessionId);
     if (remaining) {
       if (capturedMsgId) {
         // Final segment keeps this session's reply anchor (per-session msgId),
@@ -1343,7 +1369,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
-    this.sessionReplyMsgId.delete(sessionId);
+    this.releaseSessionReplyAnchor(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -1680,24 +1706,19 @@ export class QQChannel extends ChannelBase {
    * this channel force-forced sessionScope to 'single' (see PR #6457). Under
    * thread/user scope those keys (`<channel>:__single__`) can never be routed
    * to again, so they are dead weight in the router maps and in the persisted
-   * sessions file. Removal is best-effort and defensive: no-op when the router
-   * exposes none of the needed APIs (e.g. in tests).
+   * sessions file.
    */
   private purgeSingleScopeOrphans(): void {
+    // Under an explicit 'single' sessionScope these keys are live routing
+    // state, not orphans — purging them would silently reset every explicit
+    // single-scope user session on each channel (re)start.
+    if (this.config.sessionScope === 'single') return;
     try {
-      const r = this.router as unknown as {
-        getAll?: () => Array<{ key?: unknown; sessionId?: unknown }>;
-        removeSessionId?: (sessionId: string) => boolean;
-      };
-      const all = r.getAll?.() ?? [];
+      const all = this.router.getAll();
       let purged = 0;
       for (const entry of all) {
-        if (
-          typeof entry?.key === 'string' &&
-          entry.key.endsWith(':__single__') &&
-          typeof entry.sessionId === 'string'
-        ) {
-          if (r.removeSessionId?.(entry.sessionId)) purged++;
+        if (entry.key.endsWith(':__single__')) {
+          if (this.router.removeSessionId(entry.sessionId)) purged++;
         }
       }
       if (purged > 0) {
@@ -1714,6 +1735,30 @@ export class QQChannel extends ChannelBase {
   }
 
   // ── ReplyMsgId helpers ────────────────────────────────────────
+
+  /**
+   * Release a session's reply anchor, cascading to msgSeqMap when the
+   * anchored msgId is no longer referenced by any live session or by the
+   * chat's current replyMsgId entry. Idempotent — safe to call on sessions
+   * that never held an anchor. This is the single release path for
+   * sessionReplyMsgId so every release point (flush completion, permanent
+   * delivery failure, retry exhaustion, onResponseComplete, onSessionDied,
+   * onPromptEnd, group removal) also cleans up msg_seq counters whose msgId
+   * can never be used again — otherwise they accumulate forever in memory
+   * and in the persisted QQ state.
+   */
+  private releaseSessionReplyAnchor(sessionId: string): void {
+    const anchor = this.sessionReplyMsgId.get(sessionId);
+    this.sessionReplyMsgId.delete(sessionId);
+    if (anchor === undefined) return;
+    // Another session is still streaming under this msgId — keep its seq.
+    if ([...this.sessionReplyMsgId.values()].includes(anchor)) return;
+    // The chat-level entry still points at this msgId — seq is still in use.
+    for (const [, entry] of this.replyMsgId) {
+      if (entry.msgId === anchor) return;
+    }
+    this.msgSeqMap.delete(anchor);
+  }
 
   /**
    * Capture the current reply msgId for a chat (with TTL check), used to
@@ -2837,7 +2882,7 @@ export class QQChannel extends ChannelBase {
         this.pendingStreamDelete.delete(sid);
         this.flushedSessions.delete(sid);
         this.streamState.delete(sid);
-        this.sessionReplyMsgId.delete(sid);
+        this.releaseSessionReplyAnchor(sid);
         if (this.config.sessionScope !== 'single') {
           this.onSessionDied(sid);
         }

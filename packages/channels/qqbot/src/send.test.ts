@@ -392,8 +392,12 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
-  it('is a safe no-op when the router exposes no cleanup APIs', () => {
-    const ch = makeChannelWithRouter({ restoreSessions: vi.fn() });
+  it('is a safe no-op when the router throws during purge', () => {
+    const ch = makeChannelWithRouter({
+      getAll: () => {
+        throw new Error('router unavailable');
+      },
+    });
     expect(() => callPurge(ch)).not.toThrow();
   });
 

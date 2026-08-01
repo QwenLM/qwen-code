@@ -85,6 +85,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     restoreSessions(): Promise<void> {
       return Promise.resolve();
     }
+    getAll(): Array<{ key: string; sessionId: string; target: unknown }> {
+      return [];
+    }
+    removeSessionId(_sessionId: string): boolean {
+      return false;
+    }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
   sanitizeLogText: (text: string, maxLen: number): string => {
