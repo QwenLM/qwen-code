@@ -198,16 +198,16 @@ describe('ToolApproval', () => {
     // (e.g. 'Always Allow in project' vs 'Always allow in this project'), so
     // asserting the rendered text proves localization overrides server labels.
     const labels = Array.from(
-      container.querySelectorAll('[data-option-label]'),
+      container.querySelectorAll('[data-web-shell-option-label]'),
     ).map((el) => el.textContent);
-    expect(labels).toEqual(
-      expect.arrayContaining([
-        'Always allow for this user',
-        'Always allow in this project',
-        'Always allow for this server',
-        'Always allow for this tool',
-      ]),
-    );
+    expect(labels).toEqual([
+      'Reject',
+      'Always allow for this user',
+      'Always allow in this project',
+      'Always allow for this server',
+      'Always allow for this tool',
+      'Yes, allow once',
+    ]);
 
     act(() => root.unmount());
   });

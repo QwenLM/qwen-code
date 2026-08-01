@@ -92,7 +92,7 @@ function optionButtons(): HTMLButtonElement[] {
 
 function optionLabels(): (string | null | undefined)[] {
   return optionButtons().map(
-    (o) => o.querySelector('[data-option-label]')?.textContent,
+    (o) => o.querySelector('[data-web-shell-option-label]')?.textContent,
   );
 }
 
@@ -333,35 +333,50 @@ describe('ToolApproval accessibility', () => {
     expect(opts[1]!.getAttribute('data-option-id')).toBe('proceed_once');
   });
 
-  it('preserves distinct allow_once options with different ids and labels', () => {
-    const planRequest: PermissionRequest = {
-      id: 'req-plan',
-      content: [],
-      options: [
+  it.each([
+    [
+      'en' as const,
+      ['Reject', 'Yes, restore previous mode', 'Yes, allow once'],
+    ],
+    ['zh-CN' as const, ['拒绝', '是，恢复之前的模式', '是，允许一次']],
+  ])(
+    'renders plan-mode allow_once options as distinct, localized buttons in %s',
+    (language, expectedLabels) => {
+      // plan mode emits two allow_once options (restore_previous +
+      // proceed_once). They must stay distinct AND both localize: before
+      // restore_previous got its own i18n key, zh-CN leaked the English server
+      // labels for both.
+      render(
+        undefined,
         {
-          id: 'restore_previous',
-          label: 'Yes, restore previous mode',
-          kind: 'allow_once',
+          id: 'req-plan',
+          content: [],
+          options: [
+            {
+              id: 'restore_previous',
+              label: 'Yes, restore previous mode (default)',
+              kind: 'allow_once',
+            },
+            {
+              id: 'proceed_once',
+              label: 'Yes, and manually approve edits',
+              kind: 'allow_once',
+            },
+            { id: 'reject', label: 'Reject', kind: 'reject_once' },
+          ],
         },
-        {
-          id: 'proceed_once',
-          label: 'Yes, and manually approve edits',
-          kind: 'allow_once',
-        },
-        { id: 'reject', label: 'Reject', kind: 'reject_once' },
-      ],
-    };
-    render(undefined, planRequest);
-    const opts = optionButtons();
-    expect(opts).toHaveLength(3);
-    const ids = opts.map((o) => o.getAttribute('data-option-id'));
-    expect(ids).toContain('restore_previous');
-    expect(ids).toContain('proceed_once');
-    expect(ids).toContain('reject');
-    const labels = optionLabels();
-    expect(labels).toContain('Yes, restore previous mode');
-    expect(labels).toContain('Yes, and manually approve edits');
-  });
+        language,
+      );
+      const opts = optionButtons();
+      expect(opts).toHaveLength(3);
+      expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+        'reject',
+        'restore_previous',
+        'proceed_once',
+      ]);
+      expect(optionLabels()).toEqual(expectedLabels);
+    },
+  );
 
   it('falls back to i18n when a standard option has an empty label', () => {
     render(undefined, {
@@ -375,5 +390,26 @@ describe('ToolApproval accessibility', () => {
     const labels = optionLabels();
     expect(labels).toContain('Yes, allow once');
     expect(labels).toContain('Reject');
+  });
+
+  it('never renders a blank button when colliding options have empty labels', () => {
+    // Two generic allow_once options share the allowOnce key, so the collision
+    // guard reaches for their server labels, but both are empty. It must
+    // degrade to the localized string (duplicated yet readable) rather than
+    // render an unlabeled button a screen reader cannot announce.
+    render(undefined, {
+      id: 'req-collide-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: '', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual([
+      'Reject',
+      'Yes, allow once',
+      'Yes, allow once',
+    ]);
   });
 });

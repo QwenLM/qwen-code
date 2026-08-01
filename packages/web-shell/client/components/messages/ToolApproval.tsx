@@ -145,6 +145,9 @@ function getOptionI18nKey(
   if (option.id === 'proceed_once_and_switch_to_default') {
     return 'approval.option.allowOnceAndSwitchToDefault';
   }
+  if (option.id === 'restore_previous') {
+    return 'approval.option.restorePrevious';
+  }
   if (option.kind === 'allow_once') return 'approval.option.allowOnce';
   if (option.kind === 'reject_once') return 'approval.option.rejectOnce';
   if (option.kind === 'allow_always') {
@@ -207,10 +210,13 @@ export function ToolApproval({
     () => getSafeDefaultIndex(displayOptions),
     [displayOptions],
   );
-  // Prefer the localized label, but when two visible options share a generic
-  // i18n key (plan mode renders restore_previous + proceed_once, both
-  // allow_once) they would become identical buttons — fall back to the
-  // server's distinct labels for those only, keeping everything else localized.
+  // Prefer the localized label. Known producers give every option a distinct
+  // i18n key (plan mode's restore_previous has its own), so this normally
+  // localizes everything. The key count is a last-resort guard: if a future
+  // producer repeats a generic key, those options fall back to the server's
+  // distinct labels instead of identical buttons. An empty server label still
+  // degrades to the localized text, never a blank button without an accessible
+  // name.
   const labelForOption = useMemo(() => {
     const keyCount = new Map<string, number>();
     for (const option of displayOptions) {
@@ -219,7 +225,8 @@ export function ToolApproval({
     }
     return (option: PermissionRequest['options'][number]) => {
       const key = getOptionI18nKey(option);
-      return key && keyCount.get(key) === 1 ? t(key) : option.label;
+      if (key && keyCount.get(key) === 1) return t(key);
+      return option.label || (key ? t(key) : '');
     };
   }, [displayOptions, t]);
   const [selected, setSelected] = useState(safeDefaultIndex);
@@ -228,17 +235,24 @@ export function ToolApproval({
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const submittedRef = useRef(false);
+  const safeDefaultIndexRef = useRef(safeDefaultIndex);
+  safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
 
+  // Reset only when a NEW request arrives. Reading the safe default through a
+  // ref keeps this keyed strictly to request identity: if the same request's
+  // options (and thus its safe default) change mid-flight, re-running the
+  // effect would clear submittedRef and re-enable a second confirm for a
+  // request the user already answered.
   useEffect(() => {
     submittedRef.current = false;
-    selectedRef.current = safeDefaultIndex;
-    setSelected(safeDefaultIndex);
-  }, [request.id, safeDefaultIndex]);
+    selectedRef.current = safeDefaultIndexRef.current;
+    setSelected(safeDefaultIndexRef.current);
+  }, [request.id]);
 
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
@@ -445,7 +459,7 @@ export function ToolApproval({
               <span className={styles.num} aria-hidden="true">
                 {i + 1}.
               </span>
-              <span className={styles.label} data-option-label>
+              <span className={styles.label} data-web-shell-option-label>
                 {label}
               </span>
             </button>
