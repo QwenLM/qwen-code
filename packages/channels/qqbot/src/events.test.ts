@@ -109,6 +109,10 @@ vi.mock('@qwen-code/channel-base', () => ({
     return cleaned.trim().slice(0, 64) || 'unknown';
   },
   sanitizePromptText: (text: string): string => text,
+  truncateCodePoints: (str: string, max: number): string => {
+    const cp = Array.from(str);
+    return cp.length > max ? cp.slice(0, max).join('') : str;
+  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -429,8 +433,8 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    // allowMention=false → 8-char disambiguation fragment instead of full OPENID
-    expect(env['text']).toBe('[atMention=true] [Bob(ABCDEF01)]: 帮我翻译这段');
+    // allowMention=false → 8-char disambiguation fragment + ellipsis instead of full OPENID
+    expect(env['text']).toBe('[atMention=true] [Bob(ABCDEF01…)]: 帮我翻译这段');
   });
 
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
@@ -545,7 +549,7 @@ describe('handleGroup', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
-  it('senderOpenId 非 32 位 hex 时不显示 openid 并打 stderr 日志', async () => {
+  it('senderOpenId 非 32 位 hex 时显示 8 位片段并打 stderr 日志', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
 
@@ -565,8 +569,10 @@ describe('handleGroup', () => {
 
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    // 校验不通过的 openid 不进入前缀，仍以 [Bob]: 形式展示
-    expect(env['text']).toBe('[atMention=true] [Bob]: <@OPENID_BOT> 你好');
+    // 校验不通过的 openid 显示 8 位片段（截断后加 …），而非完整 openid
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(ZZZ12345…)]: <@OPENID_BOT> 你好',
+    );
 
     const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
     expect(
@@ -580,7 +586,7 @@ describe('handleGroup', () => {
     stderrSpy.mockRestore();
   });
 
-  it('31 位纯 hex senderOpenId 只违反长度约束时不显示 openid 并告警', async () => {
+  it('31 位纯 hex senderOpenId 只违反长度约束时显示 8 位片段并告警', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
 
@@ -603,8 +609,10 @@ describe('handleGroup', () => {
 
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    // 校验不通过的 openid 不进入前缀，仍以 [Bob]: 形式展示
-    expect(env['text']).toBe('[atMention=true] [Bob]: <@OPENID_BOT> 你好');
+    // 校验不通过的 openid 显示 8 位片段（截断后加 …），而非完整 openid
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(ABCDEF01…)]: <@OPENID_BOT> 你好',
+    );
 
     const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
     expect(
@@ -770,9 +778,9 @@ describe('handleGroup', () => {
     const texts = mockHandleInbound.mock.calls.map(
       (c) => (c[0] as Record<string, unknown>)['text'] as string,
     );
-    // 两条消息昵称相同，但前缀分别带各自前 8 位片段用于消歧
-    expect(texts[0]).toContain('[Bob(ABCDEF01)]');
-    expect(texts[1]).toContain('[Bob(FEDCBA98)]');
+    // 两条消息昵称相同，但前缀分别带各自前 8 位片段（+ …）用于消歧
+    expect(texts[0]).toContain('[Bob(ABCDEF01…)]');
+    expect(texts[1]).toContain('[Bob(FEDCBA98…)]');
   });
 
   it('allowMention=false 时非法 senderOpenId 仍显示 8 位片段且不告警', async () => {
@@ -797,9 +805,9 @@ describe('handleGroup', () => {
 
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    // 任意非空值都得到 8 位片段（sanitizeSenderName 原样返回该值），
+    // 任意非空值都得到 8 位片段（截断后加 …，sanitizeSenderName 原样返回该值），
     // 且 allowMention=false 门控抑制了格式告警
-    expect(env['text']).toBe('[atMention=true] [Bob(ZZZ12345)]: 查一下天气');
+    expect(env['text']).toBe('[atMention=true] [Bob(ZZZ12345…)]: 查一下天气');
 
     const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
     expect(
@@ -807,6 +815,38 @@ describe('handleGroup', () => {
     ).toBe(false);
 
     stderrSpy.mockRestore();
+  });
+
+  it('allowMention=false 时 emoji 开头的非法 senderOpenId 截断不产生孤立代理项', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    // 'a😀😀😀😀' 非 32-hex、含多字节字符（U+1F600，UTF-16 下是代理对）。
+    // 统一兜底走 truncateCodePoints 按码点截断：5 个码点 ≤ 8 → 完整保留。
+    // 若按 UTF-16 单元 slice 会劈开代理对留下孤立代理项（渲染为 \uFFFD）。
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'msg-surrogate',
+        content: '测试一下',
+        author: {
+          member_openid: 'a😀😀😀😀',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    const text = env['text'] as string;
+    // 8 位片段完整保留 5 个码点（+ 省略号），无替换符、无孤立代理项
+    expect(text).toBe('[atMention=true] [Bob(a😀😀😀😀…)]: 测试一下');
+    expect(text).not.toContain('\uFFFD');
+    expect(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+        text,
+      ),
+    ).toBe(false);
   });
 });
 

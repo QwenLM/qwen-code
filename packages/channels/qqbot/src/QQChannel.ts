@@ -19,6 +19,7 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -555,8 +556,8 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
-          '消息前缀 [昵称(OPENID)] 中若带有括号内容，其中的 32 位十六进制 OPENID 是该发送者的标识，可用 <@OPENID> 回复时 @他。',
-          '注意：群成员昵称可能本身包含括号或特殊字符，昵称中的括号内容不是 OPENID，请勿使用；只有符合 32 位十六进制格式且位于前缀括号中的才是有效 OPENID。',
+          '消息前缀 [昵称(OPENID)] 中紧邻 ] 之前的括号内是该发送者的 32 位十六进制 OPENID，可用 <@OPENID> 回复时 @他。',
+          '注意：群成员昵称可能本身包含括号或特殊字符，昵称中的括号内容不是 OPENID，请勿使用。',
           '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
@@ -2355,15 +2356,22 @@ export class QQChannel extends ChannelBase {
       !!senderOpenId &&
       QQ_OPENID_RE.test(senderOpenId);
     // Warn once per (chatId, senderOpenId) about malformed OPENIDs, and only
-    // when mention support is enabled (otherwise the sender tag is suppressed
-    // anyway). Bounded: reset the set past 500 entries so unusual
-    // chatId/senderOpenId combos can't accumulate without limit.
+    // when mention support is enabled (with allowMention=false the 8-char
+    // fragment below surfaces the value instead, so a warning is noise).
+    // Bounded: reset the set past 500 entries so unusual chatId/senderOpenId
+    // combos can't accumulate without limit. `showSenderOpenId` is exactly
+    // `allowMention !== false && senderOpenId && QQ_OPENID_RE.test(...)`, so
+    // this condition is equivalent to the old explicit re-test, without the
+    // duplicate regex evaluation.
     if (
+      !showSenderOpenId &&
       this.qqConfig.allowMention !== false &&
-      senderOpenId &&
-      !QQ_OPENID_RE.test(senderOpenId)
+      senderOpenId
     ) {
-      const dedupKey = `${chatId}:${senderOpenId}`;
+      // member_openid is remote-controlled; cap the dedup key so an
+      // unbounded senderOpenId can't balloon the Set (mirrors the k.length
+      // <= 256 cap in restoreQQState).
+      const dedupKey = `${chatId}:${senderOpenId}`.slice(0, 64);
       if (!this.warnedSenderOpenIds.has(dedupKey)) {
         this.warnedSenderOpenIds.add(dedupKey);
         if (this.warnedSenderOpenIds.size > 500) {
@@ -2374,14 +2382,16 @@ export class QQChannel extends ChannelBase {
         );
       }
     }
-    // Plan B for allowMention=false: show a short 8-char disambiguation
-    // fragment instead of the full OPENID. No 32-hex validation here — any
-    // non-empty value gets a fragment, so same-nickname senders stay
-    // distinguishable without exposing a constructible full <@OPENID>.
+    // Unified fallback: whenever the full OPENID can't be shown (mention
+    // support off, or the value failing the 32-hex shape), surface a short
+    // 8-code-point disambiguation fragment + ellipsis so same-nickname senders
+    // stay distinguishable without exposing a constructible full <@OPENID>.
+    // Truncation is code-point aware (truncateCodePoints), so an emoji-laden
+    // malformed id can't be split mid-surrogate-pair into a lone surrogate.
     const senderTag = showSenderOpenId
       ? `(${senderOpenId})`
-      : this.qqConfig.allowMention === false && senderOpenId
-        ? `(${sanitizeSenderName(senderOpenId).slice(0, 8)})`
+      : senderOpenId
+        ? `(${truncateCodePoints(sanitizeSenderName(senderOpenId), 8)}…)`
         : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)

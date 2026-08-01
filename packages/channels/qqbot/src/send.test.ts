@@ -118,6 +118,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizeSenderName: real.sanitizeSenderName,
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
+    truncateCodePoints: real.truncateCodePoints,
   };
 });
 
