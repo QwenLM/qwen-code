@@ -296,7 +296,8 @@ interface DaemonStatusRuntimeMemory {
   /**
    * Which children the daemon's RSS sampling actually covers. Only the primary
    * ACP child is sampled today, so this section must not be read as
-   * process-tree observation.
+   * process-tree observation. Sampling is gated on an active SSE/WS watcher;
+   * when no client is observing, childRssBytes reads 0 even for the primary.
    */
   childRssCoverage: 'primary_only';
   /**

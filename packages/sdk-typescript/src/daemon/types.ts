@@ -628,7 +628,7 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /** Always false: nothing in this section is applied to a process. */
-      enforced: boolean;
+      enforced: false;
       configuredBudgetMb: number;
       effectiveBudgetMb: number;
       budgetSource: 'flag' | 'derived';
@@ -700,6 +700,11 @@ export interface DaemonStatusReport {
        * process-tree count.
        */
       activeAcpChildren: number;
+      /**
+       * Which children the daemon's RSS sampling covers. Only the primary ACP
+       * child is sampled, and only while an SSE/WS watcher is active; when no
+       * client is observing, childRssBytes reads 0.
+       */
       childRssCoverage: 'primary_only';
       modeled: {
         /** `null` when no workspace is registered. */
