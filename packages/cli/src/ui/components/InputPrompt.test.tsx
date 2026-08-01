@@ -16,6 +16,7 @@ import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import os from 'node:os';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -5904,6 +5905,33 @@ describe('classifyPastedImagePaths', () => {
       imagePaths: [imagePath],
       allImages: true,
     });
+  });
+
+  it('preserves a raw Windows image path with a space-leading segment', () => {
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue('win32');
+    const imagePath = 'C:\\data\\ archive\\img.png';
+
+    try {
+      expect(classifyPastedImagePaths(imagePath)).toEqual({
+        imagePaths: [imagePath],
+        allImages: true,
+      });
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('unescapes a shell-escaped Unix image path exactly once', () => {
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+    try {
+      expect(classifyPastedImagePaths('@/tmp/foo\\\\ bar.png')).toEqual({
+        imagePaths: ['/tmp/foo\\ bar.png'],
+        allImages: true,
+      });
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('unescapes a normalized Windows image reference before promotion', () => {

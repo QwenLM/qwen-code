@@ -136,9 +136,7 @@ export function classifyPastedImagePaths(pasted: string): {
       token
         .replace(/^@(["'])/, '@') // strip a quote after the `@` prefix
         .replace(/^["']|["']$/g, ''), // strip surrounding quotes
-    )
-      .replace(/^@/, '') // strip the `@` reference prefix
-      .replace(/\\ /g, ' '); // unescape shell-escaped spaces
+    ).replace(/^@/, ''); // strip the `@` reference prefix
     if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
       imagePaths.push(normalized);
     } else {
