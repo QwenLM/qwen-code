@@ -113,12 +113,12 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a young PR, but continuing to implement them after
-  # five change-producing rounds expands the diff and creates fresh review
-  # churn. From round 6 onward, only Critical findings, formally requested
-  # changes, failed checks, and base conflicts may drive code changes;
-  # lower-severity feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '5'
+  # Suggestions may improve a PR, but continuing to implement them after ten
+  # change-producing rounds expands the diff and creates fresh review churn.
+  # From round 11 onward, only Critical findings, formally requested changes,
+  # failed checks, and base conflicts may drive code changes; lower-severity
+  # feedback is recorded and left open.
+  CRITICAL_ONLY_AFTER_ROUND: '10'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
@@ -2471,10 +2471,10 @@ jobs:
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
             # Per AGENTS.md's review policy, Suggestion-level findings are
-            # actionable during the first five change-producing rounds. The
-            # scan still selects later feedback so prepare can record and
-            # watermark its deferral; only the address job filters what may
-            # drive code changes.
+            # actionable during the initial change-producing rounds; takeover
+            # extends that window. The scan still selects later feedback so
+            # prepare can record and watermark its deferral; only the address
+            # job filters what may drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -3048,7 +3048,7 @@ jobs:
             OVER_BUDGET_AUTHORS="$(jq -n \
               --arg key "${LIVE_REARM_KEY}" --arg ab "${AUTOFIX_BOT}" --arg rb "${REVIEW_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" \
-              --argjson r5 "${CRITICAL_ONLY_AFTER_ROUND}" \
+              --argjson critical_after "${CRITICAL_ONLY_AFTER_ROUND}" \
               --argjson k "${CRITICAL_ONLY_HUMAN_BATCHES}" \
               --slurpfile rv "${WORKDIR}/rv.json" --slurpfile rc "${WORKDIR}/rc.json" --slurpfile ic "${WORKDIR}/ic.json" '
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -3058,7 +3058,7 @@ jobs:
                | sort_by(.at)) as $ms
               | ([ range(0; ($ms | length)) as $i
                    | ($ms[$i]
-                      | select((.acted == "true" and .round > $r5) or (.acted == "false" and .round >= $r5))
+                      | select((.acted == "true" and .round > $critical_after) or (.acted == "false" and .round >= $critical_after))
                       | {lo: (if $i == 0 then "" else ($ms[$i - 1].ts) end), hi: .ts}) ]) as $spans
               | ($rv | add) as $reviews
               | ($rc | add) as $comments
@@ -3540,7 +3540,9 @@ jobs:
             "${WORKDIR}/gate-rejection.md" \
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
-            "${WORKDIR}/agent-timeout"
+            "${WORKDIR}/agent-timeout" \
+            "${WORKDIR}/resolved-comments.txt" \
+            "${WORKDIR}/comment-replies.json"
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
@@ -3568,19 +3570,26 @@ jobs:
         env:
           FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
           FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
+          FIRST_VERIFIED_HEAD: '${{ steps.verify.outputs.verified_head }}'
           REPAIR_ATTEMPTED: '${{ steps.repair.outputs.attempted }}'
           REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
           REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
+          REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
+          VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
             OUTCOME="${REPAIR_OUTCOME}"
             COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
+            VERIFIED_HEAD="${REPAIR_VERIFIED_HEAD}"
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${COMMITTED}" ]]; then
             echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${VERIFIED_HEAD}" ]]; then
+            echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
             fixed|noop) ;;
@@ -3628,6 +3637,7 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -3717,6 +3727,20 @@ jobs:
                 PUSH_RACE_MERGED='true'
               fi
             done
+            CAN_RESOLVE_THREADS='false'
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
+                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+                CAN_RESOLVE_THREADS='true'
+              else
+                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+              fi
+            fi
             # Resolve the review threads whose findings the agent actually
             # IMPLEMENTED, so a human re-reviewing sees only what is still open
             # instead of re-reading every thread to work out what was handled.
@@ -3745,8 +3769,15 @@ jobs:
                 echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
               fi
             fi
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              RESOLVED_N=0
+            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+              CONFIRMED_RESOLVED_N=0
+              read_thread_guard() {
+                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
+                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
+                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
+                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
+                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
+              }
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
                 rc_id="${rc_id%$'\r'}"
                 rc_id="${rc_id#rc:}"
@@ -3759,16 +3790,41 @@ jobs:
                   echo "::warning::comment ${rc_id} matched no open review thread"
                   continue
                 fi
+                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
+                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
+                  break
+                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
+                  continue
+                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
+                  break
+                fi
+                RESOLVE_SUCCEEDED='false'
                 if gh api graphql -f threadId="${thread_id}" -f query='
                   mutation($threadId:ID!){
                     resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
                   }' > /dev/null 2>&1; then
-                  RESOLVED_N=$(( RESOLVED_N + 1 ))
-                else
+                  RESOLVE_SUCCEEDED='true'
+                fi
+                POST_GUARD_OK='false'
+                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
+                  POST_GUARD_OK='true'
+                fi
+                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
+                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
+                  fi
+                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
+                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
                   echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                else
+                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
+                  break
                 fi
               done < "${WORKDIR}/resolved-comments.txt"
-              echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
             fi
             # The mirror of the resolve above: a finding the agent did NOT
             # resolve keeps its thread open, and this answers it IN that thread.
