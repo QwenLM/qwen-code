@@ -6,7 +6,7 @@
 
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -97,6 +97,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -918,15 +919,20 @@ function parsePromptChannelDelivery(
 const MAX_NOTIFICATION_QUEUE = 20;
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
-export function isExistingFile(
+export function resolveExistingFile(
   resolved: string,
-  fileExists: (path: string) => boolean = existsSync,
-  statFile: (path: string) => { isFile(): boolean } = statSync,
-): boolean {
+  resolveRealPath: (path: string) => string = realpathSync,
+  statFile: (path: string) => {
+    isFile(): boolean;
+    isDirectory?(): boolean;
+  } = statSync,
+): string | undefined {
   try {
-    return fileExists(resolved) && statFile(resolved).isFile();
+    const canonicalPath = resolveRealPath(resolved);
+    const stats = statFile(canonicalPath);
+    return stats.isFile() || stats.isDirectory?.() ? canonicalPath : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -7148,7 +7154,9 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
       opts?: {
+        errorType?: ToolErrorType;
         recordInvalidToolParams?: boolean;
+        status?: 'error' | 'cancelled';
         stopAfterPermissionCancel?: boolean;
       },
     ) => {
@@ -7165,10 +7173,10 @@ export class Session implements SessionContext {
         responseParts: errorParts,
         metadata: {
           callId,
-          status: 'error',
+          status: opts?.status ?? 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType: opts?.errorType,
         },
       });
       const loopDetected =
@@ -8005,6 +8013,33 @@ export class Session implements SessionContext {
             }
           }
 
+          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+              },
+            );
+            if (activeToolAbortSignal.aborted) {
+              return earlyErrorResponse(
+                new Error('Tool invocation was cancelled'),
+                toolName,
+                { status: 'cancelled' },
+              );
+            }
+            if (!guardDecision.allowed) {
+              return earlyErrorResponse(
+                new Error(guardDecision.reason),
+                toolName,
+                { errorType: ToolErrorType.EXECUTION_DENIED },
+              );
+            }
+          }
+
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&
             typeof args['task_id'] === 'string' &&
@@ -8640,7 +8675,7 @@ export class Session implements SessionContext {
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
-    const textPathSpecsToRead = new Set<string>();
+    const textPathSpecsToRead = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -8651,23 +8686,27 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
+            if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),
               pathSpec,
             );
+            const canonicalPath = resolveExistingFile(resolved);
+            if (!canonicalPath) continue;
             const filteringOptions = this.config.getFileFilteringOptions();
             if (
-              path.isAbsolute(pathSpec) &&
-              getSpecificMimeType(resolved)?.startsWith('image/') &&
-              isExistingFile(resolved) &&
+              getSpecificMimeType(canonicalPath)?.startsWith('image/') &&
               this.config
                 .getWorkspaceContext()
-                .isPathWithinWorkspace(pathSpec) &&
+                .isPathWithinWorkspace(canonicalPath) &&
               !this.config
                 .getFileService()
-                .shouldIgnoreFile(pathSpec, filteringOptions)
+                .shouldIgnoreFile(pathSpec, filteringOptions) &&
+              !this.config
+                .getFileService()
+                .shouldIgnoreFile(canonicalPath, filteringOptions)
             ) {
-              textPathSpecsToRead.add(pathSpec);
+              textPathSpecsToRead.set(canonicalPath, pathSpec);
             }
           }
           return { text: part.text };
@@ -8718,18 +8757,65 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
-    const pathSpecsToRead = [
-      ...new Set([
-        ...textPathSpecsToRead,
-        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
-      ]),
-    ];
     const extensionParts = await this.#resolveExtensionMentionParts(
       extensionMentions,
       abortSignal,
     );
     const mcpServerParts =
       this.#resolveMcpServerMentionParts(mcpServerMentions);
+    const revalidatedTextPaths: string[] = [];
+    const validatedPathIdentities = new Map<
+      string,
+      { dev: number; ino: number }
+    >();
+    const candidatePathsToRead = [
+      ...textPathSpecsToRead.entries(),
+      ...atPathCommandParts.flatMap((part) => {
+        const fileUri = part.fileData!.fileUri!;
+        const resolved = path.resolve(this.config.getTargetDir(), fileUri);
+        const canonicalPath = resolveExistingFile(resolved);
+        return canonicalPath ? [[canonicalPath, fileUri] as const] : [];
+      }),
+    ];
+    const filteringOptions =
+      candidatePathsToRead.length > 0
+        ? this.config.getFileFilteringOptions()
+        : undefined;
+    const displayPaths = new Map<string, string>();
+    const acceptedFileUris = new Set<string>();
+    for (const [textPath, displayPath] of candidatePathsToRead) {
+      try {
+        if (
+          resolveExistingFile(textPath) !== textPath ||
+          !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
+          (textPathSpecsToRead.has(textPath) &&
+            !getSpecificMimeType(textPath)?.startsWith('image/')) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(displayPath, filteringOptions) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(textPath, filteringOptions)
+        ) {
+          continue;
+        }
+        const stats = statSync(textPath);
+        revalidatedTextPaths.push(textPath);
+        displayPaths.set(textPath, displayPath);
+        acceptedFileUris.add(displayPath);
+        validatedPathIdentities.set(textPath, {
+          dev: stats.dev,
+          ino: stats.ino,
+        });
+      } catch {
+        // The path changed between validation steps; skip it fail-closed.
+      }
+    }
+    const pathSpecsToRead = [...new Set(revalidatedTextPaths)];
+    const partsToSend = parts.filter(
+      (part) =>
+        !('fileData' in part) || acceptedFileUris.has(part.fileData!.fileUri!),
+    );
 
     if (
       pathSpecsToRead.length === 0 &&
@@ -8738,7 +8824,7 @@ export class Session implements SessionContext {
       mcpServerParts.length === 0
     ) {
       return this.#applyBridgeConversionsIfNeeded(
-        parts,
+        partsToSend,
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8746,7 +8832,7 @@ export class Session implements SessionContext {
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
-        [...parts, ...extensionParts, ...mcpServerParts],
+        [...partsToSend, ...extensionParts, ...mcpServerParts],
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8754,8 +8840,8 @@ export class Session implements SessionContext {
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
-    for (let i = 0; i < parts.length; i++) {
-      const chunk = parts[i];
+    for (let i = 0; i < partsToSend.length; i++) {
+      const chunk = partsToSend[i];
       if ('text' in chunk) {
         initialQueryText += chunk.text;
       } else if ('fileData' in chunk) {
@@ -8793,6 +8879,10 @@ export class Session implements SessionContext {
         ...(preserveUnsupportedImageForBridge
           ? { preserveUnsupportedImageForBridge }
           : {}),
+        ...(validatedPathIdentities.size > 0
+          ? { validatedPathIdentities }
+          : {}),
+        ...(displayPaths.size > 0 ? { displayPaths } : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)

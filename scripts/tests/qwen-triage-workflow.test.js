@@ -19,6 +19,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const cacheProducerWorkflow = readFileSync(
+  '.github/workflows/npm-cache.yml',
+  'utf8',
+);
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -834,7 +838,13 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (commentBody, author, commenter, issueNumber = '1') => {
+    const gate = (
+      commentBody,
+      author,
+      commenter,
+      issueNumber = '1',
+      isPr = 'true',
+    ) => {
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -851,6 +861,7 @@ describe('qwen-triage verify workflow', () => {
           COMMENT_USER: commenter,
           PR_NUMBER: '1',
           ISSUE_NUMBER: issueNumber,
+          IS_PR: isPr,
           TMUX_PR: '',
         },
         encoding: 'utf8',
@@ -865,6 +876,7 @@ describe('qwen-triage verify workflow', () => {
         run: val('should_run'),
         trust: val('verify_trust'),
         oid: val('verify_head_oid'),
+        lane: val('verify_lane'),
       };
     };
 
@@ -900,16 +912,49 @@ describe('qwen-triage verify workflow', () => {
       expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
       expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
       expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
-      // Neither non-verify path emits trust outputs. Assert the REAL keys:
-      // this line read `.runner` — a name from an earlier design that
-      // `gate()` never returns — so it was `expect(undefined).toBeUndefined()`
-      // and could not fail, however badly the trust level leaked.
-      const triage = gate('@qwen-code /triage', 'mallory', 'bob');
-      expect(triage.trust).toBeUndefined();
-      expect(triage.oid).toBeUndefined();
+
+      // /triage on a PR ALSO starts the verify lane, in parallel — and the
+      // point of routing it through the same classifier is that an external
+      // author still gets the external control set. If this ever emits
+      // `trusted` (or no trust at all) for `mallory`, the head-OID pin, the
+      // risk screen and both workspace wipes silently stop firing while the
+      // lane keeps executing that author's code on the persistent pool.
+      const triagePr = gate('@qwen-code /triage', 'mallory', 'bob');
+      expect(triagePr.run).toBe('true');
+      expect(triagePr.lane).toBe('true');
+      expect(triagePr.trust).toBe('external');
+      expect(triagePr.oid).toBe('deadbeefcafe');
+      expect(gate('@qwen-code /triage', 'alice', 'bob').trust).toBe('trusted');
+
+      // The lane fails closed DIFFERENTLY from an explicit /verify. An
+      // unreadable author permission denies `/verify` outright, because the
+      // commenter asked for exactly that; on `/triage` it must only close
+      // the lane, or a flaky permission API silently costs the reviewer
+      // their triage too. Same for a failed head-OID snapshot (issue 99).
+      const laneFail = gate('@qwen-code /triage', 'charlie', 'bob');
+      expect(laneFail.run).toBe('true');
+      expect(laneFail.lane).toBe('false');
+      expect(laneFail.trust).toBeUndefined();
+      const oidFail = gate('@qwen-code /triage', 'mallory', 'bob', '99');
+      expect(oidFail.run).toBe('true');
+      expect(oidFail.lane).toBe('false');
+      expect(gate('@qwen-code /verify', 'charlie', 'bob').run).toBe('false');
+
+      // On a plain ISSUE there is nothing to build, so the lane stays off
+      // and no author lookup is spent. This assertion used to be written as
+      // "/triage emits no trust outputs" with a fixture that never set
+      // IS_PR — true for the wrong reason, and it would have stayed green
+      // through the change above.
+      const triageIssue = gate('@qwen-code /triage', 'mallory', 'bob', '1', '');
+      expect(triageIssue.run).toBe('true');
+      expect(triageIssue.lane).toBeUndefined();
+      expect(triageIssue.trust).toBeUndefined();
+      expect(triageIssue.oid).toBeUndefined();
+
       const tmux = gate('@qwen-code /tmux', 'alice', 'bob');
       expect(tmux.trust).toBeUndefined();
       expect(tmux.oid).toBeUndefined();
+      expect(tmux.lane).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -944,6 +989,72 @@ describe('qwen-triage verify workflow', () => {
     const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
     expect(rm).toBeGreaterThan(-1);
     expect(mk).toBeGreaterThan(rm);
+  });
+
+  // The lane trigger was unpinned: deleting the gate from the verify job's
+  // `if` left every assertion green while the job became reachable from any
+  // comment on any open PR. Measured as a mutation before this test existed.
+  //
+  // `verify_lane` is also the single source of truth for WHICH comments
+  // start the lane. Re-enumerating the command strings in the job predicate
+  // is what let the trigger and the trust classification drift apart — the
+  // classifier keyed on `/verify` while the predicate would have keyed on
+  // `/verify` or `/triage`, so a `/triage`-started run would have executed
+  // an external author's code with `verify_trust` empty and all four
+  // external-only controls (head-OID pin, risk screen, both wipes) skipped.
+  it('gates the verify lane on authorize alone, not on re-matched commands', () => {
+    // Slice the two predicates APART. Asserting over the whole job text
+    // cannot tell them apart: the first version of this test did exactly
+    // that, and deleting the gate from `if:` still matched the copy inside
+    // `concurrency:` — the mutation survived its own regression test.
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toBeTruthy();
+    expect(concBlock).toBeTruthy();
+    for (const predicate of [ifBlock, concBlock]) {
+      expect(predicate).toContain(
+        "needs.authorize.outputs.verify_lane == 'true'",
+      );
+    }
+    // Concurrency is evaluated after `needs`, so it can and must read the
+    // same output; an unguarded group would let non-runnable triggers share
+    // the per-PR group and cancel a real run.
+    expect(ifBlock).not.toContain("comment.body == '@qwen-code /verify'");
+    expect(concBlock).not.toContain("comment.body == '@qwen-code /verify'");
+
+    // And the authorize job has to actually publish it.
+    expect(job('authorize')).toContain(
+      "verify_lane: '${{ steps.perm.outputs.verify_lane }}'",
+    );
+  });
+
+  // Positive control for the mutations above: a guard this suite is known
+  // to pin, asserted per predicate. Written first as one `toContain` over
+  // the whole job, it survived its own mutation — the copy in
+  // `concurrency:` matched after the `if:` copy was deleted, which is the
+  // same coarse-assertion defect the test above documents. A control that
+  // cannot fail proves nothing about the assertions it vouches for.
+  it('pins the ECS kill switch on both verify predicates (control)', () => {
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(concBlock).toContain(
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+    );
   });
 });
 
@@ -3164,13 +3275,17 @@ describe('qwen-triage verify round-3 hardening', () => {
       'QWEN_VERIFY_CHROMIUM',
     );
 
-    // And the skill must stop calling captures optional, must name the
-    // gate, and must forbid the install the agent cannot complete.
+    // And the skill must stop calling captures optional.
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain('Produce these whenever you ran a harness');
-    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
-    expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
   });
 
   // The browser step's require.resolve + cli.js join is otherwise guarded
@@ -3395,11 +3510,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     );
     // A numbered budget item alongside the A/B, harnesses and gates.
     expect(scope).toMatch(/^4\. \*\*Capture/m);
-    expect(scope).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
     // Time reserved, and the failure that motivated it named — a rule
     // stated without its failure reads as advice and gets skipped.
-    expect(scope).toContain('~5 minutes');
-    expect(scope).toContain('produced **zero**');
+    expect(scope).toContain('four live runs produced zero images');
     // Bounded: the cap exists so "budget it" does not become eight images.
     expect(scope).toMatch(/normally two, at most a handful/);
 
@@ -4350,6 +4467,121 @@ describe('qwen-triage tmux lane parity', () => {
     expect(transcriptCap).toBeGreaterThan(0);
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
+  });
+
+  // The cache step must be restore-only: `actions/cache/restore` has no
+  // post-save hook, so PR lifecycle scripts cannot write to the shared
+  // cache. Swapping to `actions/cache` would re-enable the save path and
+  // let a PR poison subsequent runs.
+  it('pins the npm cache step to restore-only in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain('actions/cache/restore@');
+      expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+      // A separate save step would reopen the same hole the
+      // restore-only variant closes.
+      expect(job(jobName)).not.toContain('actions/cache/save@');
+      expect(job(jobName)).not.toMatch(/uses:\s*'actions\/cache@/);
+    }
+  });
+
+  it('points npm ci at the restored cache directory in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+      );
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cachePath = cacheStep.match(
+        /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
+      )?.[1];
+      expect(cachePath).toBeTruthy();
+      const npmCaches = [
+        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      ].map((m) => m[1]);
+      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
+      for (const c of npmCaches) expect(c).toBe(cachePath);
+    }
+  });
+  it('clears stale npm cache before restore in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      expect(clearStep, `${jobName} must have a clear step`).toContain(
+        'rm -rf',
+      );
+      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
+      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      expect(clearIdx).toBeGreaterThan(-1);
+      expect(restoreIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeLessThan(restoreIdx);
+    }
+  });
+
+  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain("id: 'npm-cache'");
+      const reportStep = stepIn(jobName, 'Report npm cache hit');
+      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
+    }
+  });
+});
+
+describe('qwen-triage npm cache producer', () => {
+  it('saves with the same key and path the triage lanes restore', () => {
+    expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    // Prettier may choose single or double quotes depending on inner
+    // quote characters, so compare the parsed scalar, not the raw YAML.
+    const yamlScalar = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+      return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    };
+    const savePath = yamlScalar(
+      cacheProducerWorkflow.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+    );
+    const saveKey = yamlScalar(
+      cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+    );
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const path = yamlScalar(
+        restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+      );
+      const key = yamlScalar(
+        restoreStep.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+      );
+      expect(path).toBeTruthy();
+      expect(key).toBeTruthy();
+      expect(savePath).toBe(path);
+      expect(saveKey).toBe(key);
+    }
+  });
+
+  it('triggers on push to main', () => {
+    expect(cacheProducerWorkflow).toMatch(/push:/);
+    expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method, so a producer on a different runner or outside
+    // the container computes a different version and every restore misses
+    // even when the key and path strings match.
+    expect(cacheProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    for (const jobName of ['verify', 'tmux-testing']) {
+      expect(job(jobName)).toContain(
+        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+      );
+      expect(job(jobName)).toContain("image: 'node:22-bookworm'");
+    }
   });
 });
 

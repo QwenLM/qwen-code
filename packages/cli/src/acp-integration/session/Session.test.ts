@@ -6,13 +6,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
-  isExistingFile,
+  resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
@@ -220,31 +221,55 @@ describe('computeInitialTurnFromHistory', () => {
   });
 });
 
-describe('isExistingFile', () => {
-  it('returns false when the path does not exist', () => {
-    expect(isExistingFile('/tmp/missing.png', () => false)).toBe(false);
+describe('resolveExistingFile', () => {
+  it('returns undefined when the path does not exist', () => {
+    expect(
+      resolveExistingFile('/tmp/missing.png', () => {
+        throw new Error('ENOENT');
+      }),
+    ).toBeUndefined();
   });
 
-  it('returns false when the path is not a file', () => {
+  it('returns undefined when the path is not a file or directory', () => {
     expect(
-      isExistingFile(
+      resolveExistingFile(
         '/tmp/dir',
-        () => true,
-        () => ({ isFile: () => false }),
+        (resolved) => resolved,
+        () => ({ isFile: () => false, isDirectory: () => false }),
       ),
-    ).toBe(false);
+    ).toBeUndefined();
   });
 
-  it('returns false when stat fails after exists succeeds', () => {
+  it('returns undefined when stat fails after resolution succeeds', () => {
     expect(
-      isExistingFile(
+      resolveExistingFile(
         '/tmp/image.png',
-        () => true,
+        (resolved) => resolved,
         () => {
           throw new Error('EACCES');
         },
       ),
-    ).toBe(false);
+    ).toBeUndefined();
+  });
+
+  it('returns the canonical path for an existing file', () => {
+    expect(
+      resolveExistingFile(
+        '/tmp/alias.png',
+        () => '/tmp/image.png',
+        () => ({ isFile: () => true }),
+      ),
+    ).toBe('/tmp/image.png');
+  });
+
+  it('returns the canonical path for an existing directory', () => {
+    expect(
+      resolveExistingFile(
+        '/tmp/alias',
+        () => '/tmp/dir',
+        () => ({ isFile: () => false, isDirectory: () => true }),
+      ),
+    ).toBe('/tmp/dir');
   });
 });
 
@@ -588,6 +613,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getFileFilteringOptions: vi.fn().mockReturnValue({
@@ -4500,6 +4526,16 @@ describe('Session', () => {
     });
 
     it('preserves unsupported image @ files for the vision bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),
+      );
+      const imagePath = path.join(tempDir, 'image.png');
+      await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
         id: 'qwen3.7-plus',
@@ -4531,31 +4567,35 @@ describe('Session', () => {
             { type: 'text', text: 'look at this' },
             {
               type: 'resource_link',
-              uri: 'file:///tmp/image.png',
+              uri: `file://${imagePath}`,
               mimeType: 'image/png',
               name: 'image.png',
             },
           ],
         });
 
-        expect(readManyFilesSpy).toHaveBeenCalledWith(
-          mockConfig,
+        const readOptions = readManyFilesSpy.mock.calls[0]?.[1];
+        expect(readOptions).toEqual(
           expect.objectContaining({
+            paths: [imagePath],
             preserveUnsupportedImageForBridge: true,
+            validatedPathIdentities: expect.any(Map),
           }),
         );
+        expect(readOptions?.validatedPathIdentities?.has(imagePath)).toBe(true);
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[file image]');
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
       }
     });
 
     it('resolves image @ paths from ACP text through the vision bridge', async () => {
-      const tempDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-image-'),
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-image-')),
       );
       const imagePath = path.join(tempDir, 'image.png');
       await fs.writeFile(imagePath, 'image');
@@ -4603,6 +4643,8 @@ describe('Session', () => {
           paths: [imagePath],
           signal: expect.any(AbortSignal),
           preserveUnsupportedImageForBridge: true,
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[imagePath, imagePath]]),
         });
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
@@ -4615,8 +4657,8 @@ describe('Session', () => {
     });
 
     it('ignores non-image and relative ACP text @ paths', async () => {
-      const tempDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-paths-'),
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-paths-')),
       );
       const outsideDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-outside-'),
@@ -4672,6 +4714,160 @@ describe('Session', () => {
       }
     });
 
+    const expectSymlinkTargetNotRead = async (
+      targetName: string,
+      ignored?: 'alias' | 'target',
+    ) => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-symlink-')),
+      );
+      const targetPath = path.join(tempDir, targetName);
+      const imageAlias = path.join(tempDir, 'alias.png');
+      await fs.writeFile(targetPath, 'target data');
+      await fs.symlink(targetPath, imageAlias);
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      if (ignored) {
+        const ignoredPath = ignored === 'alias' ? imageAlias : targetPath;
+        mockConfig.getFileService = vi.fn().mockReturnValue({
+          shouldIgnoreFile: vi.fn(
+            (pathSpec: string) => pathSpec === ignoredPath,
+          ),
+        });
+      }
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'unexpected',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `inspect @${imageAlias}` }],
+        });
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it.skipIf(process.platform === 'win32')(
+      'does not treat an image-named symlink to a text file as an image',
+      () => expectSymlinkTargetNotRead('notes.txt'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an image symlink whose target is ignored',
+      () => expectSymlinkTargetNotRead('ignored.png', 'target'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an ignored image symlink whose target is allowed',
+      () => expectSymlinkTargetNotRead('allowed.png', 'alias'),
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'does not read an image symlink whose target is outside the workspace',
+      async () => {
+        const tempDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-workspace-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-outside-')),
+        );
+        const imageAlias = path.join(tempDir, 'alias.png');
+        await fs.writeFile(path.join(outsideDir, 'outside.png'), 'image');
+        await fs.symlink(path.join(outsideDir, 'outside.png'), imageAlias);
+        mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+        });
+        const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: `inspect @${imageAlias}` }],
+          });
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(tempDir, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'revalidates an ACP text image after resolving extension context',
+      async () => {
+        const tempDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-revalidate-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-outside-')),
+        );
+        const imagePath = path.join(tempDir, 'image.png');
+        const outsidePath = path.join(outsideDir, 'outside.png');
+        await fs.writeFile(imagePath, 'safe image');
+        await fs.writeFile(outsidePath, 'outside image');
+        mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+        });
+        const extension = makeExtension({ path: tempDir });
+        let swapped = false;
+        Object.defineProperty(extension, 'contextFiles', {
+          configurable: true,
+          get: () => {
+            if (!swapped) {
+              swapped = true;
+              fsSync.unlinkSync(imagePath);
+              fsSync.symlinkSync(outsidePath, imagePath);
+            }
+            return [];
+          },
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              {
+                type: 'text',
+                text: `inspect @${imagePath} with @ext:browser`,
+              },
+            ],
+          });
+          expect(swapped).toBe(true);
+          expect(readManyFilesSpy).not.toHaveBeenCalled();
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(tempDir, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('keeps the user prompt as the final part after referenced file content', async () => {
       // Regression: JetBrains ACP attaches the active editor as a file
       // reference. Appending its content AFTER the prompt buried the actual
@@ -4688,8 +4884,13 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+      const targetDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-editor-')),
+      );
 
       try {
+        await fs.writeFile(path.join(targetDir, 'editor.ts'), 'editor', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [
@@ -4720,6 +4921,7 @@ describe('Session', () => {
         expect(promptIndex).toBeGreaterThan(fileIndex);
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(targetDir, { recursive: true, force: true });
       }
     });
 
@@ -11513,6 +11715,7 @@ describe('Session', () => {
 
       try {
         await fs.writeFile(filePath, '# Test\n', 'utf8');
+        const canonicalFilePath = await fs.realpath(filePath);
 
         mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
         mockChat.sendMessageStream = vi
@@ -11534,12 +11737,56 @@ describe('Session', () => {
         await session.prompt(promptRequest);
 
         expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
-          paths: [fileName],
+          paths: [canonicalFilePath],
           signal: expect.any(AbortSignal),
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[canonicalFilePath, fileName]]),
         });
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops resource links that fail workspace revalidation', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.png');
+      const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+
+      try {
+        await fs.writeFile(outsidePath, 'secret', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            pathSpec.startsWith(`${tempDir}${path.sep}`),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: 'secret.png',
+              uri: `file://${outsidePath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+        expect(firstSentMessage()).toEqual([{ text: 'Check this file' }]);
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 
@@ -14272,6 +14519,186 @@ describe('Session', () => {
           });
 
           expect(executeSpy).not.toHaveBeenCalled();
+        });
+
+        it('runs the host guard with final params and denies before execution', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const guard = vi.fn().mockResolvedValue({
+            allowed: false,
+            reason: 'host policy denied',
+          });
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/normalized/final.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard',
+                      name: 'read_file',
+                      args: { path: './original.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(guard).toHaveBeenCalledWith({
+            callId: 'call-guard',
+            toolName: 'read_file',
+            args: { path: '/normalized/final.txt' },
+            signal: expect.any(AbortSignal),
+          });
+          expect(executeSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({
+              callId: 'call-guard',
+              status: 'error',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+            }),
+          );
+        });
+
+        it('executes once when the host guard allows the final invocation', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const guard = vi.fn().mockResolvedValue({ allowed: true });
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/normalized/final.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard-allowed',
+                      name: 'read_file',
+                      args: { path: './original.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(guard).toHaveBeenCalledWith({
+            callId: 'call-guard-allowed',
+            toolName: 'read_file',
+            args: { path: '/normalized/final.txt' },
+            signal: expect.any(AbortSignal),
+          });
+          expect(executeSpy).toHaveBeenCalledOnce();
+        });
+
+        it('cancels without execution when aborted while awaiting the host guard', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          let resolveGuard!: (decision: { allowed: true }) => void;
+          const guard = vi.fn(
+            () =>
+              new Promise<{ allowed: true }>((resolve) => {
+                resolveGuard = resolve;
+              }),
+          );
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard-aborted',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          await vi.waitFor(() => expect(guard).toHaveBeenCalledOnce());
+          const cancel = session.cancelPendingPrompt();
+          resolveGuard({ allowed: true });
+
+          await cancel;
+          await prompt;
+          expect(executeSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({
+              callId: 'call-guard-aborted',
+              status: 'cancelled',
+            }),
+          );
         });
       });
 

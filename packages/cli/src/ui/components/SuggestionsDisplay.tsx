@@ -187,9 +187,11 @@ export function SuggestionsDisplay({
               </Box>
             );
           })}
+          {/* Mention Ctrl+Tab as an alternative since many terminals
+              intercept Ctrl+←/→ for word-jump (#8069). */}
           <Box marginLeft={2}>
             <Text color={theme.text.secondary}>
-              {t('(Ctrl+←/→ to switch)')}
+              {t('(Ctrl+Tab / Ctrl+Shift+Tab or Ctrl+←/→ to switch)')}
             </Text>
           </Box>
         </Box>

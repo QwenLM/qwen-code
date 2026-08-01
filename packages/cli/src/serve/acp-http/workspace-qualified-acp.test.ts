@@ -867,6 +867,39 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(body.code).toBe('server_disposed');
   });
 
+  it('creates a remember lane on demand but never after dispose()', () => {
+    // A trusted secondary registered after mount has no lane until one is
+    // created on demand.
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'late-id',
+        cwd: '/ws-late',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+    );
+    expect(handle?.getWorkspaceRememberLane('late-id')).toBeUndefined();
+    expect(handle?.ensureWorkspaceRememberLane('late-id')).toBeDefined();
+    expect(handle?.getWorkspaceRememberLane('late-id')).toBeDefined();
+
+    handle?.dispose();
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'late-2',
+        cwd: '/ws-late-2',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+    );
+    // The create-after-dispose path must stay closed (the resolver's 503 is the
+    // right answer); without the guard this would allocate a
+    // dispatcher/registry/lane that nothing will ever tear down.
+    expect(handle?.ensureWorkspaceRememberLane('late-2')).toBeUndefined();
+    expect(handle?.getWorkspaceRememberLane('late-2')).toBeUndefined();
+  });
+
   it('closes a WS upgraded before dispose without allowing initialize', async () => {
     const ws = new WebSocket(
       `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,

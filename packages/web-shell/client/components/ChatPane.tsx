@@ -807,6 +807,7 @@ export function ChatPane({
                   : undefined
               }
               onTurnOutputOpen={handleRightPanelOpen}
+              onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
                   ? actions.generateSessionContent
