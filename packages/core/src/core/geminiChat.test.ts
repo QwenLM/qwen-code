@@ -258,10 +258,10 @@ describe('GeminiChat', async () => {
   }
 
   function streamResponse(
-    response: GenerateContentResponse,
+    ...responses: GenerateContentResponse[]
   ): AsyncGenerator<GenerateContentResponse> {
     return (async function* () {
-      yield response;
+      yield* responses;
     })();
   }
 
@@ -9263,6 +9263,218 @@ describe('GeminiChat', async () => {
       { text: 'Successful final response' },
     ]);
   });
+
+  it('retries a JSON tool protocol leak before emitting or persisting it', async () => {
+    const recordAssistantTurn = vi.fn();
+    const chatWithRecording = new GeminiChat(
+      mockConfig,
+      config,
+      [],
+      {
+        recordAssistantTurn,
+        recordChatCompression: vi.fn(),
+      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      uiTelemetryService,
+    );
+    const leakedJson = JSON.stringify([
+      {
+        prompt: 'Create the node.',
+        name: 'create_node',
+        subagent_type: 'general-purpose',
+        run_in_background: true,
+      },
+      {
+        name: 'read_ref',
+        prompt: 'Read the reference.',
+        subagent_type: 'general-purpose',
+        run_in_background: true,
+      },
+    ]);
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockResolvedValueOnce(
+        streamResponse(
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: '...', thought: true },
+                    { text: leakedJson.slice(0, 40) },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text:
+                        leakedJson.slice(40) + '\n</parameter>\n</function>\n',
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+          {
+            candidates: [{ finishReason: 'STOP' }],
+          } as unknown as GenerateContentResponse,
+        ),
+      )
+      .mockResolvedValueOnce(
+        streamResponse(stopResponse([{ text: 'Successful final response' }])),
+      );
+
+    const stream = await chatWithRecording.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-json-tool-protocol-leak',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
+    expect(chatWithRecording.getLastModelMessageText()).toBe(
+      'Successful final response',
+    );
+    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+      { text: 'Successful final response' },
+    ]);
+  });
+
+  it.each([
+    [JSON.stringify([{ name: 'example', value: 1 }]), 8, 1],
+    ['[1,2,3]', 2, 2],
+  ])(
+    'preserves an ordinary leading JSON array: %s',
+    async (response, splitAt, expectedTextChunks) => {
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        streamResponse(
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: 'thinking', thought: true },
+                    { text: response.slice(0, splitAt) },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+          stopResponse([{ text: response.slice(splitAt) }]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-json-array-literal',
+      );
+      const events: StreamEvent[] = [];
+      const streamedTextChunks: string[] = [];
+      for await (const event of stream) {
+        events.push(event);
+        if (event.type === StreamEventType.CHUNK) {
+          const text =
+            event.value.candidates?.[0]?.content?.parts
+              ?.filter((part) => !part.thought)
+              .map((part) => part.text ?? '')
+              .join('') ?? '';
+          if (text) streamedTextChunks.push(text);
+        }
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(streamedTextChunks).toHaveLength(expectedTextChunks);
+      expect(emittedParts.find((part) => part.thought)?.text).toBe('thinking');
+      expect(streamedTextChunks.join('')).toBe(response);
+      expect(chat.getLastModelMessageText()).toBe(response);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps leading JSON before a later structured tool call (preparation: %s)',
+    async (withPreparation) => {
+      const response = JSON.stringify([{ name: 'example', value: 1 }]);
+      const preparationResponse = {
+        candidates: [{ content: { parts: [] } }],
+      } as unknown as GenerateContentResponse;
+      setToolCallPreparations(preparationResponse, [
+        { callId: 'call-1', toolName: 'read_file' },
+      ]);
+      const responses = [
+        {
+          candidates: [
+            {
+              content: { parts: [{ text: response }] },
+            },
+          ],
+        } as unknown as GenerateContentResponse,
+      ];
+      if (withPreparation) responses.push(preparationResponse);
+      responses.push(
+        stopResponse([
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { file_path: 'a.ts' },
+            },
+          },
+        ]),
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(streamResponse(...responses));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-json-before-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      const emittedPreparations = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => getToolCallPreparations(event.value));
+      expect(emittedPreparations).toEqual(
+        withPreparation ? [{ callId: 'call-1', toolName: 'read_file' }] : [],
+      );
+      for (const parts of [
+        emittedParts,
+        chat.getHistory().at(-1)?.parts ?? [],
+      ]) {
+        expect(parts.findIndex((part) => part.text === response)).toBe(0);
+        expect(parts.findIndex((part) => part.functionCall)).toBe(1);
+      }
+    },
+  );
 
   it('does not reject normal HTML or protocol tag names in prose', async () => {
     const response =

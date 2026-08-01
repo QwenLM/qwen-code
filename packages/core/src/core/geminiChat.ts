@@ -1182,9 +1182,17 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
+const JSON_TOOL_CALL_PREFIXES = [
+  '[{"name":',
+  '[{"prompt":',
+  '[{"subagent_type":',
+  '[{"run_in_background":',
+] as const;
+const TOOL_CALL_CLOSING_TAGS = /<\/parameter>\s*<\/function>\s*$/i;
 
 class LeadingProtocolTagLeakDetector {
-  private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
+  private state: 'detecting' | 'json' | 'json-tool' | 'clean' | 'leaked' =
+    'detecting';
   private buffer = '';
 
   accept(text: string): string {
@@ -1192,8 +1200,12 @@ class LeadingProtocolTagLeakDetector {
     if (this.state === 'leaked') return '';
 
     this.buffer += text;
+    if (this.state === 'json-tool') return '';
     const candidate = this.buffer.trimStart().toLowerCase();
     if (!candidate) return '';
+    if (this.state === 'json') {
+      return this.acceptJsonCandidate(candidate);
+    }
     if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
       return '';
     }
@@ -1208,14 +1220,26 @@ class LeadingProtocolTagLeakDetector {
         return '';
       }
     }
+    if (candidate.startsWith('[')) {
+      this.state = 'json';
+      return this.acceptJsonCandidate(candidate);
+    }
 
-    this.state = 'clean';
-    const output = this.buffer;
-    this.buffer = '';
-    return output;
+    return this.release();
   }
 
   finish(): string {
+    if (this.state === 'json' || this.state === 'json-tool') {
+      if (
+        this.state === 'json-tool' &&
+        TOOL_CALL_CLOSING_TAGS.test(this.buffer)
+      ) {
+        this.state = 'leaked';
+        this.buffer = '';
+        return '';
+      }
+      return this.release();
+    }
     if (this.state !== 'detecting') return '';
     const candidate = this.buffer.trimStart().toLowerCase();
     if (
@@ -1226,8 +1250,34 @@ class LeadingProtocolTagLeakDetector {
       this.buffer = '';
       return '';
     }
-    this.state = 'clean';
+    return this.release();
+  }
+
+  releaseJsonCandidate(): string {
+    return this.state === 'json' || this.state === 'json-tool'
+      ? this.release()
+      : '';
+  }
+
+  private acceptJsonCandidate(candidate: string): string {
+    const normalized = candidate.replace(/\s/g, '');
+    if (
+      JSON_TOOL_CALL_PREFIXES.some((prefix) => prefix.startsWith(normalized))
+    ) {
+      return '';
+    }
+    if (
+      JSON_TOOL_CALL_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+    ) {
+      this.state = 'json-tool';
+      return '';
+    }
+    return this.release();
+  }
+
+  private release(): string {
     const output = this.buffer;
+    this.state = 'clean';
     this.buffer = '';
     return output;
   }
@@ -4062,6 +4112,26 @@ export class GeminiChat {
     let hasToolCall = false;
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    let pendingProtocolParts: Part[] = [];
+    const takePendingProtocolParts = (text: string): Part[] => {
+      const parts = pendingProtocolParts;
+      pendingProtocolParts = [];
+      if (parts.length === 0) return text ? [{ text }] : [];
+      const released: Part[] = [];
+      for (const part of parts) {
+        const previous = released.at(-1);
+        if (
+          previous &&
+          isValidNonThoughtTextPart(previous) &&
+          isValidNonThoughtTextPart(part)
+        ) {
+          previous.text! += part.text!;
+        } else {
+          released.push(isValidNonThoughtTextPart(part) ? { ...part } : part);
+        }
+      }
+      return released;
+    };
     let protocolTextWasSuppressed = false;
     const currentUserTurn = this.history[this.history.length - 1];
     const isToolResultContinuation =
@@ -4091,6 +4161,16 @@ export class GeminiChat {
               ),
             })),
           );
+          const content = chunk.candidates?.[0]?.content;
+          if (content) {
+            const text = protocolTagDetector.releaseJsonCandidate();
+            if (text) {
+              content.parts = [
+                ...takePendingProtocolParts(text),
+                ...(content.parts ?? []),
+              ];
+            }
+          }
         }
 
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
@@ -4101,28 +4181,69 @@ export class GeminiChat {
 
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
-          const content = candidate?.content;
+          let content = candidate?.content;
+          if (candidate?.finishReason && !content?.parts) {
+            const text = protocolTagDetector.finish();
+            if (protocolTagDetector.leaked) {
+              pendingProtocolParts = [];
+            } else {
+              const parts = takePendingProtocolParts(text);
+              if (parts.length > 0) {
+                content = {
+                  ...content,
+                  role: content?.role ?? 'model',
+                  parts,
+                };
+                candidate.content = content;
+              }
+            }
+          }
           if (content?.parts) {
-            content.parts = content.parts.flatMap((part) => {
+            const outputParts: Part[] = [];
+            for (const part of content.parts) {
               if (
                 isToolResultContinuation &&
                 !part.thought &&
                 part.text?.trim() === GEMINI_EMPTY_CONTENT_PLACEHOLDER
               ) {
-                return [];
+                continue;
               }
-              if (typeof part.text !== 'string' || part.thought) return [part];
+              if (typeof part.text !== 'string' || part.thought) {
+                const text = part.thought
+                  ? ''
+                  : protocolTagDetector.releaseJsonCandidate();
+                if (text) {
+                  outputParts.push(...takePendingProtocolParts(text), part);
+                } else if (
+                  pendingProtocolParts.length > 0 ||
+                  protocolTagDetector.leaked
+                ) {
+                  pendingProtocolParts.push(part);
+                } else {
+                  outputParts.push(part);
+                }
+                continue;
+              }
               const text = protocolTagDetector.accept(part.text);
-              if (text) return [{ ...part, text }];
+              if (text) {
+                if (pendingProtocolParts.length > 0) {
+                  outputParts.push(...takePendingProtocolParts(''), part);
+                } else {
+                  outputParts.push({ ...part, text });
+                }
+                continue;
+              }
+              pendingProtocolParts.push(...outputParts.splice(0), part);
               protocolTextWasSuppressed ||= part.text.length > 0;
-              const { text: _text, ...rest } = part;
-              return Object.values(rest).some((value) => value !== undefined)
-                ? [rest]
-                : [];
-            });
+            }
+            content.parts = outputParts;
             if (candidate?.finishReason) {
               const text = protocolTagDetector.finish();
-              if (text) content.parts.push({ text });
+              if (protocolTagDetector.leaked) {
+                pendingProtocolParts = [];
+              } else {
+                content.parts.push(...takePendingProtocolParts(text));
+              }
             }
             content.parts = normalizeModelToolCallIds(
               content.parts,
