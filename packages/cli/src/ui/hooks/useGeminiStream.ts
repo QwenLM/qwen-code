@@ -3323,15 +3323,26 @@ export const useGeminiStream = (
             );
             immediateDuplicateToolResponses.responses.forEach(
               ({ request, response }, index) => {
-                config
-                  .getChatRecordingService?.()
-                  ?.recordToolResult?.(finalized[index].responseParts, {
+                const goalContext = request.goalContext;
+                config.getChatRecordingService?.()?.recordToolResult?.(
+                  finalized[index].responseParts,
+                  {
                     callId: request.callId,
                     status: response.error ? 'error' : 'success',
                     resultDisplay: response.resultDisplay,
                     error: response.error,
                     errorType: response.errorType,
-                  });
+                  },
+                  goalContext
+                    ? request.name === ToolNames.GET_GOAL ||
+                      request.name === ToolNames.UPDATE_GOAL
+                      ? {
+                          goalContext: { ...goalContext },
+                          provenance: 'goal_runtime' as const,
+                        }
+                      : { goalContext: { ...goalContext } }
+                    : undefined,
+                );
               },
             );
             await submitQuery(
@@ -3961,15 +3972,26 @@ export const useGeminiStream = (
         (entry) => entry.responseParts,
       );
       orderedResponses.forEach(({ request, response, status }, index) => {
-        config
-          .getChatRecordingService?.()
-          ?.recordToolResult?.(finalizedResponses[index].responseParts, {
+        const goalContext = request.goalContext;
+        config.getChatRecordingService?.()?.recordToolResult?.(
+          finalizedResponses[index].responseParts,
+          {
             callId: request.callId,
             status,
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
-          });
+          },
+          goalContext
+            ? request.name === ToolNames.GET_GOAL ||
+              request.name === ToolNames.UPDATE_GOAL
+              ? {
+                  goalContext: { ...goalContext },
+                  provenance: 'goal_runtime' as const,
+                }
+              : { goalContext: { ...goalContext } }
+            : undefined,
+        );
       });
 
       if (

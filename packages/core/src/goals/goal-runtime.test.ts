@@ -984,6 +984,54 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal?.status).toBe('active');
   });
 
+  it('does not usage-limit a replacement goal created during budget-exhaustion persistence', async () => {
+    const appendReached = deferred<void>();
+    const appendGate = deferred<void>();
+    let blockNext = false;
+    const journal = fakeGoalJournal({
+      beforeAppend: async () => {
+        if (!blockNext) return;
+        blockNext = false;
+        appendReached.resolve();
+        await appendGate.promise;
+      },
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS - 1; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    const goalId = runtime.getSnapshot().goal!.goalId;
+    const revision = runtime.getSnapshot().goal!.revision;
+    blockNext = true;
+    const lastPermit = host.started[host.started.length - 1];
+    const finishing = runtime.finishTurn(lastPermit);
+    await appendReached.promise;
+
+    const replacing = runtime.dispatch({
+      action: 'replace',
+      objective: 'fresh start',
+      expectedGoalId: goalId,
+      expectedRevision: revision,
+    });
+    appendGate.resolve();
+    await Promise.all([finishing, replacing]);
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal?.objective).toBe('fresh start');
+    expect(
+      journal.appended.map((p) => p.cause).filter((c) => c === 'usage_limited'),
+    ).toHaveLength(0);
+  });
+
   it('returns a bounded catalog without exposing full evidence content', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];

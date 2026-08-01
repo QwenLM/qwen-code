@@ -305,8 +305,15 @@ export function createGoalRuntime(
       return;
     }
     if (snapshot.goal.turnCount >= MAX_GOAL_CONTINUATION_TURNS) {
+      const budgetGoalId = snapshot.goal.goalId;
+      const budgetRevision = snapshot.goal.revision;
       void enqueue(async () => {
-        if (snapshot.goal?.status !== 'active') return;
+        if (
+          snapshot.goal?.status !== 'active' ||
+          snapshot.goal.goalId !== budgetGoalId ||
+          snapshot.goal.revision !== budgetRevision
+        )
+          return;
         const now = Date.now();
         const reason = `Goal exceeded the ${MAX_GOAL_CONTINUATION_TURNS}-turn continuation budget`;
         const limitedSnapshot: GoalSnapshotV2 = {

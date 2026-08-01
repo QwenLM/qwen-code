@@ -2149,6 +2149,137 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('records tool results with goalContext during a Goal turn', async () => {
+    const recordToolResult = vi.fn();
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-record',
+      revision: 1,
+      turnId: 'turn-record',
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => permit),
+      finishTurn: vi.fn().mockResolvedValue(undefined),
+      getSnapshot: vi.fn(() => ({
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'record test',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      })),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ recordToolResult });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'done',
+        };
+        yield {
+          type: ServerGeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 1 },
+          },
+        };
+      })(),
+    );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'shell-goal-1',
+            name: 'shell',
+            args: { command: 'echo hi' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-record',
+            goalContext: permit,
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'shell-goal-1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'shell-goal-1',
+                  name: 'shell',
+                  response: { output: 'hi' },
+                },
+              },
+            ],
+            resultDisplay: 'hi',
+            error: undefined,
+            errorType: undefined,
+          },
+          tool: { displayName: 'Shell' },
+          invocation: {
+            getDescription: () => 'echo hi',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(recordToolResult).toHaveBeenCalledOnce();
+    });
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ callId: 'shell-goal-1', status: 'success' }),
+      {
+        goalContext: {
+          goalId: 'goal-record',
+          revision: 1,
+          turnId: 'turn-record',
+        },
+      },
+    );
+  });
+
   it('waits for a background agent when its launch exhausts capacity', async () => {
     const responseParts: Part[] = [
       {
