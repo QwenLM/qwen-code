@@ -81,7 +81,11 @@ export interface ExtractedStep {
   env: Record<string, string>;
   /** Which level each effective `env:` key came from. */
   envSources: Record<string, EnvScope>;
-  /** Every distinct `${{ … }}` expression in the script and env — the stub list. */
+  /**
+   * Every distinct `${{ … }}` expression in anything this command carries —
+   * the script, the effective env, the working directory, the shell template.
+   * The stub list, and the caller reads it as complete.
+   */
   expressions: string[];
   /** Top-level commands the script invokes — a starting point for stubbing. */
   invokes: string[];
@@ -335,6 +339,14 @@ function nearestString(...values: unknown[]): string | undefined {
   return values.find((v): v is string => typeof v === 'string');
 }
 
+/** The same, plus WHICH level won — the header labels it the way it labels env. */
+function nearestScoped(
+  ...values: Array<[EnvScope, unknown]>
+): { value: string; scope: EnvScope } | undefined {
+  const hit = values.find(([, v]) => typeof v === 'string');
+  return hit ? { value: hit[1] as string, scope: hit[0] } : undefined;
+}
+
 /** `defaults.run` of a workflow or job, tolerating any shape the YAML holds. */
 function runDefaultsOf(container: unknown): RunDefaults {
   const defaults = (container as { defaults?: unknown } | undefined)?.defaults;
@@ -488,11 +500,12 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
       : shellCommand === 'bash' || shellCommand === 'sh'
         ? 'set -e'
         : undefined;
-  const workingDirectory = nearestString(
-    step['working-directory'],
-    jobDefaults['working-directory'],
-    workflowDefaults['working-directory'],
+  const workingDir = nearestScoped(
+    ['step', step['working-directory']],
+    ['job', jobDefaults['working-directory']],
+    ['workflow', workflowDefaults['working-directory']],
   );
+  const workingDirectory = workingDir?.value;
 
   const script = step.run;
   const stepLabel = String(step.name ?? step.id ?? index);
@@ -513,6 +526,18 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
       ? []
       : commentLines('# shell (runner invokes it this way): ', shell)),
     ...(setLine ? [setLine] : []),
+    // A comment, not a `cd`, for the reason the env block is comments: the
+    // value may hold `${{ … }}`, and this command substitutes nothing. But it
+    // has to be HERE and not only in the metadata — this file's own argument
+    // for reading all three levels is that a step run "in the wrong directory,
+    // and nothing says so" is the transcription error it exists to remove, and
+    // a reader of the script alone was told nothing.
+    ...(workingDir
+      ? commentLines(
+          `# working-directory [${workingDir.scope}] (run FROM here): `,
+          workingDir.value,
+        )
+      : []),
     ...Object.entries(env).flatMap(([k, v]) =>
       commentLines(`# env [${envSources[k]}] ${k}=`, v),
     ),
@@ -530,7 +555,16 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
     env,
     envSources,
-    expressions: expressionsOf(script, ...Object.values(env)),
+    // Every setting this command carries, not just the script and its env:
+    // a `working-directory: ${{ github.workspace }}/x` left off the list is a
+    // caller told there is nothing to stub, who then runs in a literal
+    // `${{ … }}` directory. The `shell:` template is on the same footing.
+    expressions: expressionsOf(
+      script,
+      ...Object.values(env),
+      workingDirectory ?? '',
+      shell,
+    ),
     invokes: invokedCommandsOf(script),
     scriptPath: outPath,
   };

@@ -167,6 +167,54 @@ describe('runExtractStep', () => {
     expect(meta.shell).toBe('bash');
   });
 
+  it('says in the SCRIPT where it must run, labelled with the level', () => {
+    // The env block is commented into the header so a reader of the script
+    // alone can see it. The working directory changes what the script does
+    // just as much, and this file's own argument for reading all three levels
+    // is that a step run "in the wrong directory, and nothing says so" is the
+    // transcription error the command exists to remove.
+    const meta = runExtractStep({
+      workflow: write(WF_LEVELS),
+      job: 'inherit-only',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    const script = readFileSync(meta.scriptPath, 'utf8');
+    expect(script).toContain(
+      '# working-directory [workflow] (run FROM here): repo-root',
+    );
+    // A comment, not a `cd` — the value may hold `${{ }}`, and this command
+    // substitutes nothing.
+    expect(script).not.toMatch(/^cd /m);
+  });
+
+  it('lists a ${{ }} hiding in working-directory or shell, not just the script', () => {
+    // The stub list is read as complete: "these are all the values to supply".
+    // A working-directory of `${{ github.workspace }}/x` left off it is a
+    // caller told there is nothing to stub, who then runs in a literal
+    // `${{ … }}` directory.
+    const wf = `
+name: t
+on: [push]
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: \${{ github.workspace }}/packages/cli
+    steps:
+      - name: Run
+        run: npm run build
+`;
+    const meta = runExtractStep({
+      workflow: write(wf),
+      job: 'j',
+      step: 'Run',
+      out: join(dir, 'step.sh'),
+    });
+    expect(meta.expressions).toEqual(['${{ github.workspace }}']);
+  });
+
   it('carries the env VERBATIM as comments — never half-substituted exports', () => {
     const meta = runExtractStep({
       workflow: write(WF),
