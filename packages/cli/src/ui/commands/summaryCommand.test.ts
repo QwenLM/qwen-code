@@ -463,6 +463,29 @@ describe('summaryCommand custom export path', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
+    'rejects a symlink planted at the target during generation',
+    async () => {
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'summary-toctou-'),
+      );
+      try {
+        vi.mocked(runSideQuery).mockImplementationOnce(async () => {
+          await fs.symlink(outside, path.join(projectRoot, 'race-link.md'));
+          return { text: 'SUMMARY BODY' };
+        });
+        const result = await run('race-link.md');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+        expect(result.content).toContain('within the project root');
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'applies 0o700 to .qwen/ when spelled explicitly',
     async () => {
       const result = await run('.qwen/');
@@ -571,5 +594,9 @@ describe('summaryCommand custom export path', () => {
     )) as MessageResult;
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(result.content).toBe('');
+    expect(vi.mocked(context.ui.addItem)).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+      expect.any(Number),
+    );
   });
 });
