@@ -108,9 +108,9 @@ describe('SettingInputPrompt', () => {
     expect(lastFrame()).toContain('Enter your password');
   });
 
-  it('sanitizes and appends pasted sensitive values', () => {
+  it('keeps printable ASCII boundaries and ignores control-only pastes', () => {
     const prefix = 'X';
-    const secret = 'AIza-test-key';
+    const secret = 'AIza~ test-key';
     const { lastFrame } = render(
       <SettingInputPrompt
         settingName="API_KEY"
@@ -128,11 +128,19 @@ describe('SettingInputPrompt', () => {
 
     act(() => {
       mockedUseKeypress.mock.calls.at(-1)?.[0](
-        makeKey({ paste: true, sequence: `${secret}\r\n\x1b` }),
+        makeKey({ paste: true, sequence: `${secret}\x1f\x7f\r\n\x1b` }),
       );
     });
 
     expect(lastFrame()).not.toContain(secret);
+    expect(lastFrame()).toContain('*'.repeat(prefix.length + secret.length));
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](
+        makeKey({ paste: true, sequence: '\x1f\x7f\r\n\x1b' }),
+      );
+    });
+
     expect(lastFrame()).toContain('*'.repeat(prefix.length + secret.length));
 
     act(() => {
