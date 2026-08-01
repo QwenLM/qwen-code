@@ -2066,6 +2066,7 @@ async function triggerAutoRecap(): Promise<{
     typeof deferred<{ sessionId: string; recap: string | null }>
   >;
   container: HTMLElement;
+  rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
 }> {
   const recap = deferred<{ sessionId: string; recap: string | null }>();
   mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
@@ -2078,14 +2079,14 @@ async function triggerAutoRecap(): Promise<{
   let now = 1;
   vi.spyOn(Date, 'now').mockImplementation(() => now);
 
-  const { container } = renderApp();
+  const { container, rerender } = renderApp();
   await flush();
   act(() => document.dispatchEvent(new Event('visibilitychange')));
   now += 3 * 60 * 1000;
   hidden = false;
   act(() => document.dispatchEvent(new Event('visibilitychange')));
   expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
-  return { recap, container };
+  return { recap, container, rerender };
 }
 
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
@@ -6644,6 +6645,20 @@ describe('App session callbacks', () => {
     });
 
     expect(mockStore.reset).toHaveBeenCalled();
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap when the connection session id changes', async () => {
+    const { recap, rerender } = await triggerAutoRecap();
+    await act(async () => {
+      mockConnection.sessionId = 'session-reconnected';
+      rerender();
+      recap.resolve({ sessionId: 'session-1', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ source: 'recap' }),
     ]);
