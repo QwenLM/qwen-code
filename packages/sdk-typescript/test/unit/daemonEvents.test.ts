@@ -999,6 +999,8 @@ describe('daemon event schema', () => {
     expect(misaligned).toBeDefined();
     expect(misaligned?.data.messages).toEqual(['a', 'b']);
     expect(misaligned?.data.messageIds).toBeUndefined();
+    // The malformed enrichment is OMITTED, not left as a present `undefined`.
+    expect(misaligned?.data).not.toHaveProperty('messageIds');
 
     const emptyId = asKnownDaemonEvent({
       id: 8,
@@ -1012,6 +1014,7 @@ describe('daemon event schema', () => {
     }) as DaemonMidTurnMessageInjectedEvent | undefined;
     expect(emptyId).toBeDefined();
     expect(emptyId?.data.messageIds).toBeUndefined();
+    expect(emptyId?.data).not.toHaveProperty('messageIds');
   });
 
   it('reduces session_closed as terminal and clears pending permissions', () => {

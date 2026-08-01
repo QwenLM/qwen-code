@@ -137,6 +137,26 @@ describe('removeInjectedFromQueue', () => {
     expect(next).toEqual([]);
   });
 
+  it('removes the id-matched row, not an earlier same-text row still submitting', () => {
+    // Two same-text sends: the first is still awaiting its admission id, the
+    // second was admitted and queued with an id. The injection frame names the
+    // second's id, so it must be removed — an array-position text match on the
+    // earlier row would silently drop it and leave the queued one to be resent
+    // at idle (double delivery).
+    const submitting = {
+      ...q('x'),
+      midTurnState: 'submitting' as const,
+      midTurnMessageId: undefined,
+    };
+    const queued = q('x');
+    const next = removeInjectedFromQueue(
+      [submitting, queued],
+      [batchWithIds('s', ['x'], [queued.midTurnMessageId!])],
+      's',
+    );
+    expect(next).toEqual([submitting]);
+  });
+
   it('skips batches for a different session', () => {
     const prompts = [q('x')];
     expect(

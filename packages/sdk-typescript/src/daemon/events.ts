@@ -2691,10 +2691,15 @@ function asMidTurnMessageInjectedData(
     messageIds.every(isNonEmptyString)
       ? (messageIds as string[])
       : undefined;
+  // Strip the raw `messageIds` before spreading so a malformed batch OMITS the
+  // key (matching `parseSidechannelMidTurnInjected`) instead of leaving a
+  // present `undefined` that breaks `'messageIds' in data` checks.
+  const { messageIds: _rawMessageIds, ...rest } =
+    value as DaemonMidTurnMessageInjectedData;
   return {
-    ...(value as DaemonMidTurnMessageInjectedData),
+    ...rest,
     messages: value['messages'] as string[],
-    messageIds: alignedMessageIds,
+    ...(alignedMessageIds ? { messageIds: alignedMessageIds } : {}),
   };
 }
 

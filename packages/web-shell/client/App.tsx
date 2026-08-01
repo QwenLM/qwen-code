@@ -4688,6 +4688,10 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -4700,6 +4704,7 @@ export function App({
     connected,
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions,
     store,
@@ -10016,11 +10021,7 @@ export function App({
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
-                          canMutateMidTurn={
-                            connection.capabilities?.features.includes(
-                              'session_mid_turn_message_mutation',
-                            ) === true
-                          }
+                          canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />

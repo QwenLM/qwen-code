@@ -402,6 +402,10 @@ export function ChatPane({
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -414,6 +418,7 @@ export function ChatPane({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions: actions,
     store,
@@ -842,11 +847,7 @@ export function ChatPane({
         <QueuedPromptDisplay
           prompts={queuedPrompts}
           t={t}
-          canMutateMidTurn={
-            connection.capabilities?.features.includes(
-              'session_mid_turn_message_mutation',
-            ) === true
-          }
+          canMutateMidTurn={canMutateMidTurn}
           onDelete={removeQueuedPrompt}
           onEdit={editQueuedPrompt}
         />

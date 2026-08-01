@@ -56,6 +56,7 @@ function deferred<T>() {
 function mount(
   streamingState: 'idle' | 'waiting' | 'responding' | 'thinking',
   sessionActions: DaemonSessionActions,
+  canMutateMidTurn = true,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -74,6 +75,7 @@ function mount(
       connected: false,
       sessionId: 'session-1',
       clientId: 'client-1',
+      canMutateMidTurn,
       streamingState: state,
       sessionActions,
       store,
@@ -529,5 +531,29 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     const consumed = latest.editLastQueuedPrompt();
     expect(consumed).toBe(true);
     expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not send a mid-turn delete when the daemon lacks the mutation capability', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-1',
+    });
+    const { editor } = mount('responding', actions, false);
+
+    act(() => latest.enqueuePrompt('无能力'));
+    await act(async () => {});
+
+    // The keyboard path consumes the keypress but must not hit a route the
+    // daemon doesn't advertise (an older daemon answers the DELETE with a 404).
+    const consumed = latest.editLastQueuedPrompt();
+    await act(async () => {});
+
+    expect(consumed).toBe(true);
+    expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '无能力', midTurnState: 'queued' },
+    ]);
   });
 });

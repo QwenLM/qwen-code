@@ -42,6 +42,13 @@ interface UseQueuedPromptsArgs {
   connected: boolean;
   sessionId?: string;
   clientId?: string;
+  /**
+   * Whether the daemon advertises `session_mid_turn_message_mutation`. Gates the
+   * mid-turn delete/edit mutations — including the keyboard path, which the view
+   * layer's hidden buttons can't reach — so an older daemon that mints message
+   * ids without the route isn't sent a DELETE it answers with a 404.
+   */
+  canMutateMidTurn: boolean;
   streamingState: DaemonStreamingState;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
@@ -128,6 +135,7 @@ export function useQueuedPrompts({
   connected,
   sessionId,
   clientId,
+  canMutateMidTurn,
   streamingState,
   sessionActions,
   store,
@@ -642,6 +650,12 @@ export function useQueuedPrompts({
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();
+  // DECLARATION ORDER IS LOAD-BEARING: this effect must stay declared ABOVE the
+  // idle effect below. When an injection frame and the idle transition land in
+  // the same React batch, effects run in declaration order, so this clears the
+  // injected row's midTurnState first — otherwise the idle effect's
+  // fallbackToPendingPrompt claims that row and resubmits a message the model
+  // already received (double delivery).
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
     const current = queuedPromptsRef.current;
@@ -800,6 +814,7 @@ export function useQueuedPrompts({
       if (
         target.midTurnState !== 'queued' ||
         !target.midTurnMessageId ||
+        !canMutateMidTurn ||
         target.isEditing ||
         target.isRemoving
       ) {
@@ -872,7 +887,7 @@ export function useQueuedPrompts({
         return false;
       }
     },
-    [reportError, sessionActions, setQueuedPromptFlags],
+    [canMutateMidTurn, reportError, sessionActions, setQueuedPromptFlags],
   );
 
   const removeQueuedPrompt = useCallback(
@@ -1026,10 +1041,14 @@ export function useQueuedPrompts({
     if (serverPrompts.length === 0) {
       queuedPromptsRef.current = midTurnPrompts;
       setQueuedPrompts(midTurnPrompts);
-      if (submittingPrompts.length > 0 || clearablePrompts.length > 0) {
+      const cleared =
+        submittingPrompts.length > 0 || clearablePrompts.length > 0;
+      if (cleared) {
         store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
       }
-      return true;
+      // A queue holding only mid-turn rows clears nothing: report "not handled"
+      // rather than a no-op `true`.
+      return cleared;
     }
 
     const clearIds = new Set(
