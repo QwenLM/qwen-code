@@ -277,6 +277,46 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     ]);
   });
 
+  it('delivers each event once to a client that attached through a single path', async () => {
+    const { emu, replies } = setup();
+    // Bring up BOTH attach mechanisms against the same page: the recursive
+    // auto-attach handshake mints PAGE_SESSION_ID...
+    await emu.handleFromClient({
+      id: 20,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    // ...and an explicit attachToTarget mints a second, distinct session.
+    await emu.handleFromClient({
+      id: 21,
+      method: 'Target.attachToTarget',
+      params: { targetId: 'qwen-cdp-page', flatten: true },
+    });
+    const explicit = replies.find(
+      (reply) =>
+        reply.method === 'Target.attachedToTarget' &&
+        (reply.params as { sessionId?: string }).sessionId !==
+          'qwen-cdp-page-session',
+    );
+    const explicitSessionId = (explicit?.params as { sessionId?: string })
+      ?.sessionId;
+    expect(explicitSessionId).toBeTruthy();
+
+    replies.length = 0;
+    emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r-once' });
+
+    // The fan-out reaches both sessions, but a client listens only on the one
+    // session it attached through, so from its point of view each event lands
+    // exactly once — its request/console buffers cannot double-count.
+    expect(
+      replies.filter((reply) => reply.sessionId === 'qwen-cdp-page-session'),
+    ).toHaveLength(1);
+    expect(
+      replies.filter((reply) => reply.sessionId === explicitSessionId),
+    ).toHaveLength(1);
+  });
+
   it('does not emit detachedFromTarget for a never-attached session', async () => {
     const { emu, replies } = setup();
     await emu.handleFromClient({

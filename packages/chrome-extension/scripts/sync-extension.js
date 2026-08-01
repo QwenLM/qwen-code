@@ -33,12 +33,19 @@ function resolveNightlyBuildNumber(packageVersion) {
   if (!packageVersion.includes('-nightly.')) return undefined;
   const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
   if (configured) return Number(configured);
-  return Number(
-    execFileSync('git', ['rev-list', '--count', 'HEAD'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-    }).trim(),
-  );
+  try {
+    return Number(
+      execFileSync('git', ['rev-list', '--count', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
+    );
+  } catch {
+    throw new Error(
+      'Unable to derive the nightly extension build number from git history. ' +
+        'Set QWEN_CHROME_EXTENSION_BUILD_NUMBER to an explicit build number.',
+    );
+  }
 }
 
 const staticSrcDir = path.join(projectRoot, 'public');

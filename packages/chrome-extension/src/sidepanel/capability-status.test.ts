@@ -236,4 +236,30 @@ describe('deriveCapabilityStatus', () => {
         'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
     });
   });
+
+  it('treats a chrome-devtools server with no config args as shadowing', () => {
+    // An HTTP/SSE-transport chrome-devtools server carries no --wsEndpoint arg,
+    // so config?.args?.some(...) is undefined and it must read as shadowing,
+    // not fall through to automation-pending.
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
 });

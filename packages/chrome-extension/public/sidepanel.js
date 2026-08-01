@@ -19,6 +19,7 @@ const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
 const FRAMED_MISS_LIMIT = 2;
+const MCP_POLL_EVERY = 5;
 const SHELL_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 
 /** The command to start a daemon that allows this extension's own origin. */
@@ -89,15 +90,26 @@ async function probeJson(url, token) {
 }
 
 /** Probe `/health` then `/capabilities` and reduce to an onboarding state. */
+let mcpProbeCounter = 0;
+let cachedMcpSnapshot;
 async function probeState(baseUrl, token) {
   const { deriveCapabilityStatus } = QwenCapabilityStatus;
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) return deriveCapabilityStatus(false, []);
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
-  const mcpSnapshot = features.includes('browser_automation_mcp')
-    ? await probeJson(`${baseUrl}/workspace/mcp`, token)
-    : undefined;
+  let mcpSnapshot;
+  if (features.includes('browser_automation_mcp')) {
+    // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
+    // is live, so refresh it on a slower cadence than health/capabilities and
+    // reuse the last snapshot in between. The banner content changes rarely and
+    // need not contend with an in-flight generation on every 2s tick.
+    if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
+      cachedMcpSnapshot = await probeJson(`${baseUrl}/workspace/mcp`, token);
+    }
+    mcpProbeCounter += 1;
+    mcpSnapshot = cachedMcpSnapshot;
+  }
   return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl);
 }
 

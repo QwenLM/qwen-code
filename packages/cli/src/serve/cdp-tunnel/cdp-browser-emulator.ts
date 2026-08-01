@@ -167,6 +167,10 @@ export class CdpBrowserEmulator {
             result: { targetInfo: this.pageTargetInfo() },
           });
         case 'Target.getDevToolsTarget':
+          // Known and deliberately unsupported: the tunnel exposes a single real
+          // tab, not a DevTools frontend target, so there is nothing to return.
+          // Handled explicitly (not via `default:`) so the empty ack is not
+          // logged as an unsupported-method coverage gap.
           return this.cb.reply({ id, result: {} });
         case 'Target.attachToTarget': {
           const targetId = params?.['targetId'];
@@ -276,8 +280,16 @@ export class CdpBrowserEmulator {
   }
 
   /**
-   * Re-emit a CDP event that arrived from the real tab (via the extension),
-   * tagged with the page session id so puppeteer routes it to its Page.
+   * Re-emit a CDP event that arrived from the real tab (via the extension) on
+   * every page session this tunnel has minted: the auto-attach `PAGE_SESSION_ID`
+   * plus each session created by an explicit `Target.attachToTarget`.
+   *
+   * This mirrors Chrome's per-session delivery — each attachment is an
+   * independent subscription that gets its own copy of the page's events. A
+   * client attaches through exactly one of those paths and listens only on the
+   * session it was handed, ignoring events tagged with any other session, so it
+   * still receives each event once. Only a client that deliberately attached
+   * twice would see an event twice, exactly as it would against a real browser.
    */
   emitTabEvent(
     method: string,

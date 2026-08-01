@@ -77,6 +77,7 @@ export async function readZipEntries(zipPath) {
     };
     zip.once('error', fail);
     zip.once('end', () => {
+      if (settled) return;
       settled = true;
       zip.close();
       resolve(entries);
@@ -155,17 +156,20 @@ async function main() {
   );
   const repoRoot = path.resolve(packageRoot, '../..');
   const roots = process.argv.slice(2);
-  let metafilePaths;
+  let requiredMetafilePaths;
+  let optionalMetafilePaths;
   let zipPath;
   if (roots.length === 0) {
     roots.push(
       path.join(packageRoot, 'dist/extension'),
       path.join(repoRoot, 'dist'),
     );
-    metafilePaths = [
-      path.join(repoRoot, 'dist/esbuild.json'),
-      path.join(packageRoot, 'dist/esbuild.json'),
-    ];
+    // The extension background build always writes its own metafile, so that
+    // one is required. The root CLI bundle metafile only exists after
+    // `cross-env DEV=true npm run bundle`, so a package-level run (which never
+    // builds the root bundle) skips it with a warning instead of failing.
+    requiredMetafilePaths = [path.join(packageRoot, 'dist/esbuild.json')];
+    optionalMetafilePaths = [path.join(repoRoot, 'dist/esbuild.json')];
     zipPath = path.join(packageRoot, 'chrome-extension.zip');
   } else {
     console.warn(
@@ -178,10 +182,25 @@ async function main() {
     });
   }
   const findings = await scanArtifactRoots(roots);
-  for (const metafilePath of metafilePaths ?? []) {
+  for (const metafilePath of requiredMetafilePaths ?? []) {
     await access(metafilePath).catch(() => {
-      throw new Error(`Esbuild metafile does not exist: ${metafilePath}`);
+      throw new Error(
+        `Esbuild metafile does not exist: ${metafilePath}. Run "npm run package" in packages/chrome-extension first.`,
+      );
     });
+    findings.push(...(await scanEsbuildMetafile(metafilePath)));
+  }
+  for (const metafilePath of optionalMetafilePaths ?? []) {
+    const present = await access(metafilePath).then(
+      () => true,
+      () => false,
+    );
+    if (!present) {
+      console.warn(
+        `artifact-scan: skipping ${metafilePath} (run "cross-env DEV=true npm run bundle" at the repo root to scan the CLI bundle)`,
+      );
+      continue;
+    }
     findings.push(...(await scanEsbuildMetafile(metafilePath)));
   }
   if (zipPath) findings.push(...(await scanZipArtifact(zipPath)));
