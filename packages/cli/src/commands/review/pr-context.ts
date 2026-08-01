@@ -667,9 +667,13 @@ export function latestOwnLedger(
 
 /** Render the previous round's ledger for the context file. */
 export function renderLedgerSection(ledger: Ledger): string {
+  // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
+  // newline would break the table structure (and could forge rows), so both are
+  // neutralised before interpolation.
+  const cell = (v: string) => v.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
   const rows = ledger.findings.map(
     (f) =>
-      `| ${f.id} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${f.file}${f.line ? `:${f.line}` : ''}\` | ${f.title} |`,
+      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${cell(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
   );
   return [
     '## Previous /review round (machine ledger)',
@@ -769,7 +773,11 @@ export function buildMarkdown(
   }
 
   const meaningfulReviews = reviews
-    .filter((r) => isReviewWorthShowing(r.body))
+    // Strip before FILTERING, not only before rendering: CANONICAL_LGTM_RE is
+    // ^…$-anchored, so a trailing marker made every canonical LGTM "worth
+    // showing" and every prior no-op round started rendering in full — the
+    // exact noise the filter exists to remove.
+    .filter((r) => isReviewWorthShowing(stripLedgerMarker(r.body ?? '')))
     .sort((a, b) => (a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
   if (meaningfulReviews.length > 0) {
     parts.push('## Review summaries (reviewer-level overall comments)');
@@ -934,10 +942,18 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     prevLedger = null;
   }
   if (prevLedger) {
-    writeFileSync(
-      join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
-      JSON.stringify(prevLedger, null, 2),
-    );
+    // mkdir FIRST and guard: this write precedes the one below that creates the
+    // directory, and an unguarded ENOENT would fail the whole command over a
+    // best-effort carry-forward.
+    try {
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(
+        join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+        JSON.stringify(prevLedger, null, 2),
+      );
+    } catch {
+      // No side file: compose-review starts the round count over, nothing else.
+    }
   }
 
   const md = buildMarkdown(
@@ -953,7 +969,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, md, 'utf8');
   const meaningfulReviewCount = reviews.filter((r) =>
-    isReviewWorthShowing(r.body),
+    isReviewWorthShowing(stripLedgerMarker(r.body ?? '')),
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
