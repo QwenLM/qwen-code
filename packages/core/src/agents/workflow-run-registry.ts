@@ -446,7 +446,9 @@ export class WorkflowRunRegistry {
   pause(runId: string): boolean {
     const entry = this.entries.get(runId);
     const handle = this.handles.get(runId);
-    if (!entry || entry.status !== 'running' || !handle) return false;
+    if (!entry?.isBackgrounded || entry.status !== 'running' || !handle) {
+      return false;
+    }
     return handle.pause();
   }
 

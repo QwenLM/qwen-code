@@ -189,7 +189,7 @@ function isStoppableEntry(entry: DialogEntry): boolean {
 }
 
 function workflowPauseHint(entry: DialogEntry | null): string | undefined {
-  if (entry?.kind !== 'workflow') return undefined;
+  if (entry?.kind !== 'workflow' || !entry.isBackgrounded) return undefined;
   switch (entry.status) {
     case 'running':
       return 'p pause (cooperative)';

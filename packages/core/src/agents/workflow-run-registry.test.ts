@@ -770,7 +770,7 @@ describe('WorkflowRunRegistry', () => {
 
   it('does not resume a workflow until pausing has reached paused', () => {
     const r = new WorkflowRunRegistry();
-    const entry = r.register(reg('wf_resume_gate'));
+    const entry = r.register(reg('wf_resume_gate', { isBackgrounded: true }));
     const handle = {
       runId: entry.runId,
       abort: vi.fn(),
@@ -788,6 +788,21 @@ describe('WorkflowRunRegistry', () => {
     r.onDispatchStateChange(entry.runId, 'paused');
     expect(r.resume(entry.runId)).toBe(true);
     expect(handle.resume).toHaveBeenCalledOnce();
+  });
+
+  it('does not pause a foreground workflow', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_foreground'));
+    const handle = {
+      runId: entry.runId,
+      abort: vi.fn(),
+      pause: vi.fn(() => true),
+      resume: vi.fn(() => true),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+
+    expect(r.pause(entry.runId)).toBe(false);
+    expect(handle.pause).not.toHaveBeenCalled();
   });
 
   it('setRecentLogs caps at 100 entries (keeps the tail)', () => {

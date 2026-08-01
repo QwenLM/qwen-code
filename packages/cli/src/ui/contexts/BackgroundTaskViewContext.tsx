@@ -298,7 +298,7 @@ export function BackgroundTaskViewProvider({
   const toggleSelectedWorkflowPause = useCallback(() => {
     if (!config) return;
     const target = entries[selectedIndex];
-    if (!target || target.kind !== 'workflow') return;
+    if (!target || target.kind !== 'workflow' || !target.isBackgrounded) return;
     const registry = config.getWorkflowRunRegistry();
     if (target.status === 'running') {
       registry.pause(target.runId);

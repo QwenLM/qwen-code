@@ -691,6 +691,19 @@ describe('BackgroundTasksDialog', () => {
     expect(h.workflowResume).not.toHaveBeenCalled();
   });
 
+  it('does not offer or trigger pause for a foreground workflow', () => {
+    const h = setup([
+      workflowEntry({ status: 'running', isBackgrounded: false }),
+    ]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.lastFrame()).not.toContain('p pause');
+    h.pressKey({ sequence: 'p' });
+
+    expect(h.workflowPause).not.toHaveBeenCalled();
+    expect(h.workflowResume).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['running', 'pause'],
     ['paused', 'resume'],
@@ -1006,6 +1019,7 @@ describe('BackgroundTasksDialog', () => {
       perPhaseTokens: new Map<string | null, number>(),
       pendingApprovals: [] as WorkflowApproval[],
       script: '',
+      isBackgrounded: true,
     };
     return { ...base, ...overrides } as unknown as DialogEntry;
   }
