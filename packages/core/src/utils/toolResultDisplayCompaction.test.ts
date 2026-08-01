@@ -381,3 +381,82 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTeam.teamName).toContain('truncated from');
   });
 });
+
+describe('compactString limit', () => {
+  // The compaction marker embeds the original length, so it is 60-80
+  // characters on its own. It used to be appended whatever the limit was,
+  // which meant a small caller-supplied limit got back more than it asked
+  // for -- and sometimes more than the string it was given.
+  it.each([
+    ['recording' as const, 70, 60],
+    ['history' as const, 64, 63],
+    ['history' as const, 100, 50],
+    ['recording' as const, 200, 10],
+    ['history' as const, 40, 0],
+  ])(
+    'keeps %s output within bounds for input %d at limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      // Compacting must never hand back more characters than it was given.
+      expect(compact.length).toBeLessThanOrEqual(value.length);
+    },
+  );
+
+  // Guards against over-correcting: when the limit does leave room for the
+  // marker, the marker must still be there. These pass before and after.
+  it.each([
+    ['recording' as const, 5000, 500],
+    ['history' as const, 5000, 200],
+    ['history' as const, 5000, 120],
+  ])(
+    'still explains the truncation for %s at input %d, limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(compact).toContain('truncated');
+    },
+  );
+
+  // The `marker.length >= limit` path slices without a marker, so it has a
+  // boundary of its own to get right. The two surrogate-aware tests above both
+  // run at the default limit and take the head+marker+tail path, so neither
+  // reaches this one.
+  it.each([
+    ['history' as const, 9],
+    ['history' as const, 8],
+    ['recording' as const, 9],
+    ['recording' as const, 8],
+  ])(
+    'does not split a surrogate pair when the marker does not fit, for %s at limit %d',
+    (purpose, limit) => {
+      const value = '😀'.repeat(40);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(hasUnpairedSurrogate(compact)).toBe(false);
+      // A whole number of pairs survived, so the cut backed off to a boundary
+      // rather than landing between a high and low surrogate.
+      expect(compact.length % 2).toBe(0);
+      // Confirms this really is the marker-does-not-fit path.
+      expect(compact).not.toContain('truncated');
+    },
+  );
+
+  it('returns a short string untouched regardless of the marker length', () => {
+    expect(compactStringForHistory('short', 1000)).toBe('short');
+  });
+});
