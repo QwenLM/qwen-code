@@ -309,6 +309,10 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                 return;
             }
         };
+        if let Err(error) = state.settings.set_workspace(canonical.clone()) {
+            emit_runtime_failure(&app, generation, error);
+            return;
+        }
         match DesktopRuntime::start(&app, &canonical, &state.log_path) {
             Ok(runtime) => {
                 if state.start_generation.load(Ordering::SeqCst) != generation {
@@ -323,11 +327,6 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                         return;
                     }
                 };
-                if let Err(error) = state.settings.set_workspace(canonical.clone()) {
-                    runtime.stop();
-                    emit_runtime_failure(&app, generation, error);
-                    return;
-                }
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();

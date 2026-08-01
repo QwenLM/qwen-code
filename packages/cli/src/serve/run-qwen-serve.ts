@@ -1642,8 +1642,6 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
-    webShellMounted?: boolean;
-    loopbackBind?: boolean;
   } = {},
 ): Application {
   const app = express();
@@ -1664,27 +1662,10 @@ function createDelegatingServeApp(
           path: 'joined',
         };
         const webhookRequest = isChannelWebhookRequest(req);
-        // Web Shell static routes are mounted BEFORE bearerAuth in the runtime
-        // app (a browser navigation cannot attach an Authorization header and
-        // the token travels in the URL fragment, which never reaches the
-        // server). Gating them here would 401 a desktop shell or hand-opened
-        // browser tab that races the deferred runtime startup — skip the gate and
-        // let the runtime app apply its own (pre-auth) policy once ready. When
-        // the shell is not mounted (`--no-web`) there is no pre-auth route to
-        // protect, so keep the gate closed instead of booting the runtime for
-        // an unauthenticated static request. The skip is also loopback-only: a
-        // non-loopback `--hostname` with `--require-auth` keeps the gate closed
-        // so a remote unauthenticated static request cannot force a runtime
-        // boot; the desktop daemon always binds loopback, so its flow is
-        // unchanged.
         const authGate = webhookRequest
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
-          : options.webShellMounted === true &&
-              options.loopbackBind === true &&
-              isPreAuthWebShellRequest(req)
-            ? undefined
-            : options.authenticateDeferredRuntimeRequest;
+          : options.authenticateDeferredRuntimeRequest;
         if (authGate) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
@@ -1722,14 +1703,6 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
-}
-
-// Mirrors the routes `mountWebShellAssets` registers before `bearerAuth` in
-// `createServeApp` (`GET /` and `GET /assets/*`). Only these skip the
-// deferred-runtime auth gate; everything else keeps the bearer requirement.
-function isPreAuthWebShellRequest(req: Request): boolean {
-  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
-  return req.path === '/' || req.path.startsWith('/assets/');
 }
 
 function isChannelWebhookRequest(req: Request): boolean {
@@ -5640,8 +5613,6 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
-      webShellMounted,
-      loopbackBind: isLoopbackBind(opts.hostname),
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but

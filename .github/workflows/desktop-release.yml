@@ -29,6 +29,11 @@ on:
         required: true
         default: false
         type: 'boolean'
+      clobber:
+        description: 'Replace same-named assets when uploading to an existing release.'
+        required: true
+        default: false
+        type: 'boolean'
 
 permissions:
   contents: 'read'
@@ -409,12 +414,17 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
           RELEASE_DRAFT: '${{ inputs.draft }}'
           RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
+          RELEASE_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
           args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Code Desktop v$RELEASE_VERSION" --generate-notes --latest=false)
           if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
           if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [ "$RELEASE_CLOBBER" != 'true' ]; then
+              echo "::error::Release $RELEASE_TAG already exists. Re-run with clobber=true to replace its assets."
+              exit 1
+            fi
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
             release_url="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
           else
