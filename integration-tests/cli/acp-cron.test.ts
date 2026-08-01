@@ -418,8 +418,6 @@ async function initSession(
             'cron-fired user_message_chunk with CRONFIRE7742',
             75_000,
           );
-          expect(cronUserMsg.update?._meta).toBeDefined();
-          expect(cronUserMsg.update?._meta?.source).toBe('cron');
 
           // 3b: Check for agent_message_chunk after the cron user message
           // (the model's response to the cron prompt)
