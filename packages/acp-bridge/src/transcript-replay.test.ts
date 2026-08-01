@@ -745,7 +745,15 @@ describe('createTranscriptReplayMachine', () => {
           callId: 'todo-call',
           resultDisplay: {
             type: 'todo_list',
-            todos: [{ content: 'Ship it', status: 'completed' }],
+            planId: 'plan-1',
+            todos: [
+              {
+                id: 'ship',
+                content: 'Ship it',
+                status: 'completed',
+                blockedBy: ['test'],
+              },
+            ],
           },
         },
       }),
@@ -753,7 +761,14 @@ describe('createTranscriptReplayMachine', () => {
     expect(plan[0]).toMatchObject({
       sessionUpdate: 'plan',
       entries: [
-        { content: 'Ship it', priority: 'medium', status: 'completed' },
+        {
+          content: 'Ship it',
+          priority: 'medium',
+          status: 'completed',
+          _meta: {
+            qwenTodo: { id: 'ship', blockedBy: ['test'] },
+          },
+        },
       ],
       _meta: {
         stats: {
@@ -761,6 +776,11 @@ describe('createTranscriptReplayMachine', () => {
           candidateTokens: 3,
           cachedTokens: 0,
           apiTimeMs: 0,
+        },
+        qwenTodoPlan: { id: 'plan-1' },
+        qwenTranscript: {
+          planToolCallId: 'todo-call',
+          sourceRecordIds: ['todo-result'],
         },
       },
     });

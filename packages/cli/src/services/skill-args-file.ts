@@ -131,10 +131,17 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
       );
       return null;
     }
-    // `O_NOFOLLOW`, so a symlink planted at this path is an error, not a write
-    // through it. `O_TRUNC` because a bare invocation leaves no file, so a stale
-    // one from a previous run must not survive to authorise this one. Mode 0600:
-    // arguments can carry a token, and the default 0644 makes them world-read.
+    if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      debugLogger.warn(
+        `Skill args file ${path} is a symlink; refusing to write through it.`,
+      );
+      return null;
+    }
+    // `O_NOFOLLOW` catches symlink swaps on POSIX. Windows lacks it, so the
+    // lstat pre-check above is the best-effort guard there. `O_TRUNC` because a
+    // bare invocation leaves no file, so a stale one from a previous run must
+    // not survive to authorise this one. Mode 0600: arguments can carry a token,
+    // and the default 0644 makes them world-read.
     //
     // Verbatim otherwise. No trailing newline, no trimming, no shell quoting:
     // the file is the argument string, byte for byte.

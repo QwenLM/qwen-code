@@ -39,7 +39,6 @@ function setup(
 ) {
   const handlers = {
     onDelete: vi.fn(),
-    onInsert: vi.fn(),
     onEdit: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
@@ -53,6 +52,7 @@ function setup(
       <QueuedPromptDisplay
         prompts={prompts}
         t={t}
+        canMutateMidTurn
         {...handlers}
         {...overrides}
       />
@@ -74,10 +74,8 @@ describe('QueuedPromptDisplay', () => {
   });
 
   it('shows server queue status without an insert action', () => {
-    const onInsert = vi.fn();
     const { container } = setup({
       prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
-      onInsert,
     });
 
     expect(container.textContent).toContain('服务器排队中...');
@@ -89,7 +87,58 @@ describe('QueuedPromptDisplay', () => {
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(container.textContent).not.toContain('插入');
-    expect(onInsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps a mid-turn prompt queued until injection', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain('排队中...');
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    const status = container.querySelector('[role="status"]');
+    expect(status?.previousElementSibling?.textContent).toBe('补充信息');
+    expect(status?.nextElementSibling?.querySelectorAll('button')).toHaveLength(
+      2,
+    );
+    expect(
+      [...container.querySelectorAll('button')].every(
+        (button) => !button.disabled,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps actions disabled when an older daemon returns no message id', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],
+    });
+
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+  });
+
+  it('hides mid-turn mutation actions without the capability', () => {
+    const { container } = setup({
+      canMutateMidTurn: false,
+      prompts: [
+        {
+          id: 1,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    expect(container.querySelectorAll('button')).toHaveLength(0);
   });
 
   it('keeps the spinner while a prompt is still submitting', () => {
@@ -266,14 +315,11 @@ describe('QueuedPromptDisplay', () => {
     expect(handlers.onDelete).toHaveBeenCalledWith(42);
   });
 
-  it('disables insert for a command prompt', () => {
+  it('does not render an insert action for a command prompt', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '/help me' }],
     });
-    const insert = [...container.querySelectorAll('button')].find((b) =>
-      (b.textContent || '').includes(t('queue.insert')),
-    );
-    expect(insert).toBeTruthy();
-    expect((insert as HTMLButtonElement).disabled).toBe(true);
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    expect(container.textContent).not.toContain('插入');
   });
 });

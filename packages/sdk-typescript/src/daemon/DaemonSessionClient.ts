@@ -24,6 +24,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -609,6 +610,14 @@ export class DaemonSessionClient {
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removeMidTurnMessage(
+    messageId: string,
+  ): Promise<DaemonRemoveMidTurnMessageResult> {
+    return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
