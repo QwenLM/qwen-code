@@ -6,8 +6,9 @@
 - Date: 2026-07-30
 - Scope: Web Shell, daemon session protocol, ACP bridge, session recording,
   transcript replay, and session persistence
-- Review status: design v6 passed strict review with no Critical, High, or
-  Medium findings
+- Review status: design v6 passed strict review; the 2026-08-01 PR review
+  amendments preserve the architecture while making checkpoint emission and
+  already-missing backup handling best-effort
 
 ## 1. Summary
 
@@ -26,8 +27,8 @@ The design uses four rules:
    snapshot as the corresponding Assistant response, and Core validates the
    checkpoint again when the user branches.
 4. A fork is prepared outside the visible session namespace and becomes
-   discoverable only after its transcript, title, referenced file-history
-   backups, and checkpoint topology are complete.
+   discoverable only after its transcript, title, available referenced
+   file-history backups, and checkpoint topology are complete.
 
 Branching truncates conversation history. It does not rewind or replace the
 current working directory, Git state, or working files.
@@ -299,6 +300,13 @@ must safely release or fail buffered intents according to their existing
 strict or best-effort contract. No child may reference a checkpoint that was
 not durably written.
 
+Checkpoint creation is an optional branching capability, not part of the
+model turn's success contract. If the transaction rejects after the Assistant
+response has completed, Session logs the recording failure and returns the
+original successful turn without a branch point. The response must not be
+retroactively converted into a turn error, and follow-up delivery and
+automatic-queue drains must continue normally.
+
 Auto-title generation may continue outside the fence. Its eventual append is
 still ordered by the central coordinator.
 
@@ -527,12 +535,16 @@ For each referenced name:
 
 1. validate it as a filename, not an arbitrary path;
 2. resolve source and destination paths and verify their directory boundary;
-3. require the source file to exist;
-4. copy or link it into staging; and
-5. treat any missing or partially copied backup as a fork failure.
+3. if the source is already missing or is no longer a regular file, warn and
+   omit it from the target backup manifest;
+4. copy or link every available source into staging; and
+5. treat an access or copy failure for an existing backup as a fork failure.
 
 The branch operation does not restore these backups into the working tree.
 They exist only so a later explicit rewind in the new session remains valid.
+An older source session may already have lost backups to retention cleanup;
+that pre-existing degradation must not prevent ordinary or historical
+branching, although the affected rewind snapshot remains unavailable.
 
 ## 14. Crash-safe Publication
 
@@ -562,7 +574,8 @@ token. Staged transcript and backup files use restrictive permissions.
 ### 14.3 Commit sequence
 
 1. Write the complete titled transcript to staging.
-2. Copy or link every referenced backup to backup staging.
+2. Copy or link every available referenced backup to backup staging and make
+   the claim manifest describe only the successfully staged names.
 3. Re-run target branch-point validation.
 4. Flush staged files and relevant staging directories.
 5. Publish the complete backup directory with claim-guarded, no-overwrite
@@ -573,8 +586,8 @@ token. Staged transcript and backup files use restrictive permissions.
 7. Flush the chats directory.
 
 The transcript publication is the commit point. Before it, the session is not
-discoverable. After it, the session is complete, titled, and owns every backup
-it references.
+discoverable. After it, the session is complete, titled, and owns every
+available referenced backup declared by its creation manifest.
 
 ### 14.4 Ownership after commit
 
@@ -606,8 +619,10 @@ The result reports status per resource and is idempotent. Cleanup failure does
 not replace the original operation error, but logs the session ID, owner token
 fingerprint, and resource statuses.
 
-At startup and on a bounded periodic schedule, garbage collection scans stale
-branch claims and staging manifests:
+On bounded, activity-triggered list and fork entry points, garbage collection
+scans stale branch claims and staging manifests. Construction itself performs
+no filesystem scan, so creating a request-scoped service cannot synchronously
+stall the event loop:
 
 - if the final transcript exists, preserve the session and formal backup
   directory and remove only stale staging, claim, and owner markers;
@@ -621,19 +636,19 @@ Normal session deletion remains separate from this pre-commit cleanup path.
 
 ## 16. Failure Semantics
 
-| Failure point                                                       | Visible session? | Required result                                 |
-| ------------------------------------------------------------------- | ---------------- | ----------------------------------------------- |
-| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                      |
-| Title computation                                                   | No               | Return error; create no target resources        |
-| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                  |
-| Referenced backup missing                                           | No               | Fail and clean staging                          |
-| Backup partially copied                                             | No               | Fail and clean staging                          |
-| Target checkpoint revalidation                                      | No               | Fail and clean staging                          |
-| Process exits before backup publication                             | No               | Startup GC reclaims owned staging               |
-| Process exits after backup publication but before transcript commit | No               | Startup GC removes token-owned orphan backup    |
-| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only |
-| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state   |
-| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session  |
+| Failure point                                                       | Visible session? | Required result                                   |
+| ------------------------------------------------------------------- | ---------------- | ------------------------------------------------- |
+| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                        |
+| Title computation                                                   | No               | Return error; create no target resources          |
+| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                    |
+| Referenced backup already missing                                   | Yes, degraded    | Warn, omit backup, preserve branch                |
+| Backup partially copied                                             | No               | Fail and clean staging                            |
+| Target checkpoint revalidation                                      | No               | Fail and clean staging                            |
+| Process exits before backup publication                             | No               | Activity-triggered GC reclaims owned staging      |
+| Process exits after backup publication but before transcript commit | No               | Activity-triggered GC removes owned orphan backup |
+| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only   |
+| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state     |
+| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session    |
 
 ## 17. Implementation Map
 
@@ -665,6 +680,8 @@ Normal session deletion remains separate from this pre-commit cleanup path.
   against the topology fence.
 - Verify continuous parent chains for checkpoint success, ineligibility, and
   writer failure.
+- Verify a rejected checkpoint transaction still returns the completed
+  `end_turn` without branch metadata.
 
 ### 18.2 Replay and protocol
 
@@ -696,7 +713,10 @@ Normal session deletion remains separate from this pre-commit cleanup path.
 - Retained checkpoints remain valid after creation-metadata filtering.
 - Only referenced backup filenames are copied.
 - Shared backup references are copied once.
-- Missing and partial backup copies leave no visible target session.
+- A backup already missing from the source is warned and omitted without
+  blocking the branch.
+- Access and partial-copy failures for existing backups leave no visible
+  target session.
 - Current working files remain unchanged.
 - Rewind in the fork can consume retained backups.
 

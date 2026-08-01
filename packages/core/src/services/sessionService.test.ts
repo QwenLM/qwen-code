@@ -3856,9 +3856,13 @@ describe('SessionService', () => {
       expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-a']);
     });
 
-    it('leaves no visible target after a partial backup copy fails', async () => {
+    it('omits a missing file-history backup without failing the fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313134';
       const newId = '41414141-4141-4141-4141-414141414144';
+      const warnings: string[] = [];
+      service = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
       const { file, lines } = seedSession(oldId);
       appendFileHistorySnapshot(oldId, file, lines, [
         'backup-present',
@@ -3877,9 +3881,85 @@ describe('SessionService', () => {
         'copied first',
       );
 
-      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
-        'Missing file-history backup: backup-missing',
+      await expect(service.forkSession(oldId, newId)).resolves.toMatchObject({
+        filePath: targetTranscript,
+      });
+
+      expect(fs.existsSync(targetTranscript)).toBe(true);
+      expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-present']);
+      expect(warnings).toEqual([
+        expect.stringContaining(
+          'omitted missing file-history backup backup-missing',
+        ),
+      ]);
+      const claimsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        '.branch-claims',
       );
+      const stagingDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        '.branch-staging',
+      );
+      expect(fs.readdirSync(claimsDir)).toEqual([]);
+      expect(fs.readdirSync(stagingDir)).toEqual([]);
+    });
+
+    it('leaves no visible target after an existing backup cannot be copied', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313135';
+      const newId = '41414141-4141-4141-4141-414141414145';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, [
+        'backup-present',
+        'backup-copy-fails',
+      ]);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      const targetTranscript = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        `${newId}.jsonl`,
+      );
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-present'),
+        'copied first',
+      );
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-copy-fails'),
+        'cannot copy',
+      );
+      const realLinkSync = fs.linkSync;
+      const realCopyFileSync = fs.copyFileSync;
+      const linkSpy = vi.spyOn(fs, 'linkSync').mockImplementation(((
+        source: fs.PathLike,
+        target: fs.PathLike,
+      ) => {
+        if (String(source).endsWith('backup-copy-fails')) {
+          throw new Error('hard link unavailable');
+        }
+        return realLinkSync(source, target);
+      }) as typeof fs.linkSync);
+      const copySpy = vi.spyOn(fs, 'copyFileSync').mockImplementation(((
+        source: fs.PathLike,
+        target: fs.PathLike,
+        mode?: number,
+      ) => {
+        if (String(source).endsWith('backup-copy-fails')) {
+          throw new Error('backup copy failed');
+        }
+        return realCopyFileSync(source, target, mode);
+      }) as typeof fs.copyFileSync);
+
+      try {
+        await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+          'backup copy failed',
+        );
+      } finally {
+        linkSpy.mockRestore();
+        copySpy.mockRestore();
+      }
 
       expect(fs.existsSync(targetTranscript)).toBe(false);
       expect(fs.existsSync(targetBackupDir)).toBe(false);
@@ -4186,6 +4266,22 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
       expect(fs.existsSync(paths.targetBackupPath)).toBe(false);
       expect(fs.existsSync(paths.targetTranscriptPath)).toBe(false);
+    });
+
+    it('defers stale branch GC until an active list operation', async () => {
+      const newId = '66666666-6666-6666-6666-666666666671';
+      const ownerToken = '77777777-7777-7777-7777-777777777781';
+      const paths = seedStaleBranchCreation(newId, ownerToken);
+
+      const gcService = new SessionService(cwd);
+
+      expect(fs.existsSync(paths.claimPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
+
+      await gcService.listSessions();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
     });
 
     it('preserves committed branch resources while removing stale markers', () => {

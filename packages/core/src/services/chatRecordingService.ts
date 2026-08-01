@@ -1059,6 +1059,9 @@ export class ChatRecordingService {
     if (this.topologyFence !== fence) return;
     this.topologyFence = undefined;
     for (const intent of fence.buffered) {
+      // Side artifacts keep updateActiveTail=false, but still move behind the
+      // reserved checkpoint so they cannot become siblings of the completed
+      // turn and invalidate the active transcript topology.
       intent.record.parentUuid = this.lastRecordUuid;
       if (intent.resolve && intent.reject) {
         void this.appendRecordStrict(intent.record, intent.options).then(

@@ -44,6 +44,7 @@ import type {
   CronTaskDelivery,
   InvocationContextV1,
   WorkflowApproval,
+  BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -2533,13 +2534,20 @@ export class Session implements SessionContext {
         channelDeliveryCapture,
         invocationContext,
       );
-      const branchPoint =
-        typeof recording?.recordBranchCheckpointTransaction === 'function'
-          ? await recording.recordBranchCheckpointTransaction({
-              startExclusiveRecordUuid: branchTurnStartRecordUuid,
-              stopReason: result.stopReason,
-            })
-          : undefined;
+      let branchPoint: BranchPoint | undefined;
+      if (typeof recording?.recordBranchCheckpointTransaction === 'function') {
+        try {
+          branchPoint = await recording.recordBranchCheckpointTransaction({
+            startExclusiveRecordUuid: branchTurnStartRecordUuid,
+            stopReason: result.stopReason,
+          });
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to record branch checkpoint; completing the turn without a branch point',
+            error,
+          );
+        }
+      }
       const completedResult: PromptResponse = branchPoint
         ? {
             ...result,

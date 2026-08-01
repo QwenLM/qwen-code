@@ -369,6 +369,8 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    getTranscriptCursor?: ReturnType<typeof vi.fn>;
+    recordBranchCheckpointTransaction?: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -3418,6 +3420,38 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('completes the turn when branch checkpoint recording fails', async () => {
+      const checkpointError = new Error('checkpoint storage unavailable');
+      mockChatRecordingService.getTranscriptCursor = vi
+        .fn()
+        .mockReturnValue({ recordId: 'turn-start' });
+      mockChatRecordingService.recordBranchCheckpointTransaction = vi
+        .fn()
+        .mockRejectedValue(checkpointError);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      debugLoggerWarnSpy.mockClear();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'complete without a checkpoint' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(
+        mockChatRecordingService.recordBranchCheckpointTransaction,
+      ).toHaveBeenCalledWith({
+        startExclusiveRecordUuid: 'turn-start',
+        stopReason: 'end_turn',
+      });
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'Failed to record branch checkpoint; completing the turn without a branch point',
+        checkpointError,
+      );
+    });
+
     it('installs a trusted daemon context only for the root prompt', async () => {
       const trustedContext: core.InvocationContextV1 = {
         version: 1,

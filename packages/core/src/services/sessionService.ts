@@ -406,41 +406,56 @@ function copyFileHistoryBackupsToStaging(
   targetDirectory: string,
   backupNames: ReadonlySet<string>,
   ownerToken: string,
-): void {
-  if (backupNames.size === 0) return;
+  onMissing: (name: string) => void,
+): Set<string> {
+  const copiedNames = new Set<string>();
+  if (backupNames.size === 0) return copiedNames;
   const sourceDir = path.join(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
     sourceSessionId,
   );
-  fs.mkdirSync(targetDirectory, { recursive: false, mode: 0o700 });
-  const ownerMarker = path.join(targetDirectory, '.branch-owner');
-  fs.writeFileSync(
-    ownerMarker,
-    serializeBranchOwnerMarker(targetSessionId, ownerToken),
-    { encoding: 'utf8', mode: 0o600, flag: 'wx' },
-  );
-  fsyncPath(ownerMarker);
+  let stagingCreated = false;
+  const ensureStaging = () => {
+    if (stagingCreated) return;
+    fs.mkdirSync(targetDirectory, { recursive: false, mode: 0o700 });
+    const ownerMarker = path.join(targetDirectory, '.branch-owner');
+    fs.writeFileSync(
+      ownerMarker,
+      serializeBranchOwnerMarker(targetSessionId, ownerToken),
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    fsyncPath(ownerMarker);
+    stagingCreated = true;
+  };
   for (const name of backupNames) {
     const source = validatedBackupPath(sourceDir, name);
     const target = validatedBackupPath(targetDirectory, name);
-    let sourceIsRegularFile = false;
+    let sourceIsRegularFile: boolean;
     try {
       sourceIsRegularFile = fs.lstatSync(source).isFile();
-    } catch {
-      sourceIsRegularFile = false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        onMissing(name);
+        continue;
+      }
+      throw error;
     }
     if (!sourceIsRegularFile) {
-      throw new Error(`Missing file-history backup: ${name}`);
+      onMissing(name);
+      continue;
     }
+    ensureStaging();
     try {
       fs.linkSync(source, target);
     } catch {
       fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
     }
     fsyncPath(target);
+    copiedNames.add(name);
   }
-  fsyncDirectoryBestEffort(targetDirectory);
+  if (stagingCreated) fsyncDirectoryBestEffort(targetDirectory);
+  return copiedNames;
 }
 
 /**
@@ -466,12 +481,11 @@ export class SessionService {
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;
-    this.maybeCleanupStaleBranchCreations();
   }
 
   // SessionService is short-lived in several callers, so an owned interval
-  // would leak timers. Constructor startup plus active list/fork entry points
-  // provide an at-most-hourly, activity-triggered GC schedule instead.
+  // would leak timers. Active list/fork entry points provide an at-most-hourly,
+  // activity-triggered GC schedule without blocking every construction path.
   private maybeCleanupStaleBranchCreations(): void {
     const now = Date.now();
     const gcKey = this.getChatsDir();
@@ -2156,7 +2170,7 @@ export class SessionService {
     const stagedBackupPath = path.join(backupRoot, backupStagingName);
     const targetBackupPath = path.join(backupRoot, newSessionId);
     const backupOwnerMarker = path.join(targetBackupPath, '.branch-owner');
-    const backupNames = collectReferencedFileHistoryBackupNames(forked);
+    let backupNames = collectReferencedFileHistoryBackupNames(forked);
     const manifest: BranchCreationManifestV1 = {
       v: BRANCH_CREATION_MANIFEST_VERSION,
       sessionId: newSessionId,
@@ -2212,27 +2226,42 @@ export class SessionService {
       fsyncDirectoryBestEffort(transcriptStagingDir);
 
       if (backupNames.size > 0) {
-        copyFileHistoryBackupsToStaging(
+        const copiedBackupNames = copyFileHistoryBackupsToStaging(
           sourceSessionId,
           newSessionId,
           stagedBackupPath,
           backupNames,
           ownerToken,
-        );
-        fsyncDirectoryBestEffort(stagedBackupPath);
-        if (fs.existsSync(targetBackupPath)) {
-          throw new Error(`Target session already exists: ${newSessionId}`);
-        }
-        fs.renameSync(stagedBackupPath, targetBackupPath);
-        backupPublished = true;
-        for (const name of backupNames) {
-          if (!fs.existsSync(validatedBackupPath(targetBackupPath, name))) {
-            throw new Error(
-              `Published file-history backup is missing: ${name}`,
+          (name) => {
+            this.warn(
+              `branch ${newSessionId} omitted missing file-history backup ${name}; rewind data for that snapshot is unavailable`,
             );
-          }
+          },
+        );
+        if (copiedBackupNames.size !== backupNames.size) {
+          backupNames = copiedBackupNames;
+          manifest.backupNames = [...backupNames].sort();
+          fs.writeFileSync(claimPath, JSON.stringify(manifest), {
+            encoding: 'utf8',
+          });
+          fsyncPath(claimPath);
         }
-        fsyncDirectoryBestEffort(backupRoot);
+        if (backupNames.size > 0) {
+          fsyncDirectoryBestEffort(stagedBackupPath);
+          if (fs.existsSync(targetBackupPath)) {
+            throw new Error(`Target session already exists: ${newSessionId}`);
+          }
+          fs.renameSync(stagedBackupPath, targetBackupPath);
+          backupPublished = true;
+          for (const name of backupNames) {
+            if (!fs.existsSync(validatedBackupPath(targetBackupPath, name))) {
+              throw new Error(
+                `Published file-history backup is missing: ${name}`,
+              );
+            }
+          }
+          fsyncDirectoryBestEffort(backupRoot);
+        }
       }
 
       validateTargetBranchPoint();

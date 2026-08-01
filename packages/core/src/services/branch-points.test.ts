@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   resolveBranchPoints,
@@ -217,6 +217,71 @@ describe('branch points', () => {
     expect(resolveBranchPoints([user, assistant, first, second])).toEqual(
       new Map(),
     );
+  });
+
+  it('does not slice active-chain prefixes for successive checkpoints', () => {
+    const firstUser = record('user-1', null, 'user', [{ text: 'first' }]);
+    const firstAssistant = record('assistant-1', 'user-1', 'assistant', [
+      { text: 'first answer' },
+    ]);
+    const firstCheckpoint: ChatRecord = {
+      ...record('checkpoint-1', 'assistant-1', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'assistant-1',
+      },
+    };
+    const secondUser = record('user-2', 'checkpoint-1', 'user', [
+      { text: 'second' },
+    ]);
+    const secondAssistant = record('assistant-2', 'user-2', 'assistant', [
+      { text: 'second answer' },
+    ]);
+    const secondCheckpoint: ChatRecord = {
+      ...record('checkpoint-2', 'assistant-2', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: 'checkpoint-1',
+        assistantRecordUuid: 'assistant-2',
+      },
+    };
+
+    const activeChain = [
+      firstUser,
+      firstAssistant,
+      firstCheckpoint,
+      secondUser,
+      secondAssistant,
+      secondCheckpoint,
+    ];
+    const sliceSpy = vi.spyOn(activeChain, 'slice');
+
+    expect(resolveBranchPoints(activeChain)).toEqual(
+      new Map([
+        [
+          'checkpoint-1',
+          {
+            startExclusiveRecordUuid: null,
+            endInclusiveRecordUuid: 'assistant-1',
+            assistantRecordUuid: 'assistant-1',
+            checkpointUuid: 'checkpoint-1',
+          },
+        ],
+        [
+          'checkpoint-2',
+          {
+            startExclusiveRecordUuid: 'checkpoint-1',
+            endInclusiveRecordUuid: 'assistant-2',
+            assistantRecordUuid: 'assistant-2',
+            checkpointUuid: 'checkpoint-2',
+          },
+        ],
+      ]),
+    );
+    expect(sliceSpy).not.toHaveBeenCalled();
   });
 
   it('accepts a retry interval that does not append another user record', () => {

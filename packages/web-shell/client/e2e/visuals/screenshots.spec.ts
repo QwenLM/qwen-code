@@ -62,6 +62,41 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`Assistant response branch action`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Give me the first option.', { id: 1 }),
+          assistantTextEvent('Earlier branchable answer.', {
+            id: 2,
+            branchRecordId: '11111111-1111-4111-8111-111111111111',
+          }),
+          turnCompleteEvent('prompt-branch-1', { id: 3 }),
+          userTextEvent('Now give me another option.', { id: 4 }),
+          assistantTextEvent('Latest branchable answer.', {
+            id: 5,
+            branchRecordId: '22222222-2222-4222-8222-222222222222',
+          }),
+          turnCompleteEvent('prompt-branch-2', { id: 6 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const earlierAnswer = page.getByText('Earlier branchable answer.', {
+        exact: true,
+      });
+      await expect(earlierAnswer).toBeVisible();
+      await earlierAnswer.hover();
+      await expect(
+        page.getByRole('button', { name: 'Branch', exact: true }),
+      ).toHaveCount(2);
+      await captureScreenshot(page, `assistant-response-branch-${theme}`);
+    });
+
     test(`extensions manager`, async ({ page }, testInfo) => {
       // Seed a few extensions so the full-page manager renders real cards —
       // enabled + disabled, marketplace + local, with varied capability counts

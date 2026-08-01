@@ -436,13 +436,24 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
     },
     options.id,
   );

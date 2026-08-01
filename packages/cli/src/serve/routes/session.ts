@@ -2435,6 +2435,9 @@ export function registerSessionRoutes(
           },
           { clientId },
         );
+        // Core has already committed the branch transcript. From this point,
+        // failures release only live Bridge ownership; the complete persisted
+        // session remains recoverable from the session picker.
         try {
           runtime.generationGuard?.assertOpen();
         } catch (error) {
