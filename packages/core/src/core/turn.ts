@@ -156,6 +156,7 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
+  terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   /**
@@ -369,6 +370,8 @@ export interface ChatCompressionInfo {
   newTokenCount: number;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
+  /** Set when the compaction model was swapped for the main model at runtime. */
+  warning?: string;
 }
 
 export type ServerGeminiChatCompressedEvent = {

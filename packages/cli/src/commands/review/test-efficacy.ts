@@ -145,7 +145,23 @@ export function planTestEfficacy(
 
 export type MutantVerdict = 'killed' | 'survived' | 'inconclusive';
 
-export interface MutantCandidate {
+/**
+ * A candidate the probe will run. The two shapes are a union so an operator
+ * without its replacement line is UNREPRESENTABLE: `runOneMutant` takes the
+ * ACTION from `mutated` and the verdict WORDING from `operator`, so a
+ * half-populated candidate would delete a line while reporting "with its
+ * `?? fallback` dropped".
+ */
+export type MutantCandidate = DeletionMutant | ReplacementMutant;
+
+export interface ReplacementMutant extends MutantBase {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  /** The full replacement LINE (untrimmed). Required by construction. */
+  mutated: string;
+}
+
+/** What both mutant shapes carry. */
+export interface MutantBase {
   file: string;
   /** 1-based line number in the post-change file. */
   line: number;
@@ -153,10 +169,21 @@ export interface MutantCandidate {
   statement: string;
 }
 
-export interface MutantResult extends MutantCandidate {
+/**
+ * The legacy shape: the line is DELETED. `operator` is absent (or `'delete'`)
+ * and there is no replacement line — see the union above for why that is
+ * enforced by the type rather than by a convention.
+ */
+export interface DeletionMutant extends MutantBase {
+  operator?: 'delete';
+  mutated?: undefined;
+}
+
+/** An intersection, not `extends`: the candidate is a union now. */
+export type MutantResult = MutantCandidate & {
   verdict: MutantVerdict;
   detail: string;
-}
+};
 
 /**
  * At most this many deletion mutants per run. Every mutant is a full vitest run
@@ -194,6 +221,12 @@ export interface HunkResult extends Omit<HunkCandidate, 'patch'> {
  * are worth probing.
  */
 export const MAX_HUNK_PROBES = 6;
+
+/**
+ * At most this many REPLACEMENT mutants per run, inside the shared cap — see
+ * the selection comment for the 24x pool measurement that forced this.
+ */
+export const REPLACEMENT_SUB_CAP = 3;
 
 /** Deadline for one vitest run (baseline, mutant, or revert probe alike). */
 const PROBE_RUN_TIMEOUT_MS = 300_000;
@@ -558,12 +591,112 @@ export interface MutantSourceFile {
  * backtick derails it) has ALL its candidates dropped and is returned in
  * `derailed` — the caller must disclose that zero for the same reason.
  */
+/**
+ * (Below: the replacement operators. `selectMutants`' own contract doc sits
+ * directly above `selectMutants` — this block documents its helper.)
+ *
+ * Replacement mutants for one added line. High-precision by construction: each
+ * pattern is anchored to a shape whose survival maps to one crisp sentence,
+ * because a survivor becomes a public Suggestion and a fuzzy operator would
+ * flood the report with "so what" mutations.
+ *
+ * The edit is computed on `codeLine` — the scanner's literal-blanked,
+ * comment-stripped, TRIMMED view — and reattached to the raw line's leading
+ * whitespace. That is only sound when the two views agree, so a line whose
+ * trimmed raw text differs from its code view (it carries a string literal or
+ * a comment) yields NO candidate: an index computed on one view and applied to
+ * the other spliced `iftrue 0)` into a guard the first time this ran, and a
+ * mangled mutant is worse than a skipped one — its compile error reads as
+ * `inconclusive` and quietly eats a cap slot. Conservative silence, as with
+ * every other selector here.
+ *
+ * At most ONE candidate per line, first match wins (coalesce → term-drop →
+ * guard-true, most-specific first): two mutants of the same line would run the
+ * suite twice to say nearly the same thing.
+ */
+export function replacementMutantsOf(
+  raw: string,
+  codeLine: string,
+): {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  mutated: string;
+} | null {
+  if (raw.trim() !== codeLine) return null;
+  const lead = /^\s*/.exec(raw)![0];
+  const done = (
+    operator: 'coalesce' | 'guard-true' | 'term-drop',
+    edited: string,
+  ) => ({ operator, mutated: lead + edited });
+
+  // `a ?? b` with a SIMPLE fallback — an identifier/member/call chain, no
+  // operators — so the drop cannot truncate a larger expression.
+  const coalesce =
+    /\s\?\?\s+[\w$.]+(?:\((?:[^()]|\([^()]*\))*\))?(?=\s*[;,)\]}]|\s*$)/.exec(
+      codeLine,
+    );
+  if (coalesce) {
+    return done(
+      'coalesce',
+      codeLine.slice(0, coalesce.index) +
+        codeLine.slice(coalesce.index + coalesce[0].length),
+    );
+  }
+  // `+ UPPER_CONST` — a constant-looking reserve/limit term in arithmetic.
+  const term = /\s\+\s+[A-Z][A-Z0-9_]{2,}\b/.exec(codeLine);
+  if (term) {
+    return done(
+      'term-drop',
+      codeLine.slice(0, term.index) +
+        codeLine.slice(term.index + term[0].length),
+    );
+  }
+  // A single-line `if (…)` whose condition CONTAINS a comparison — guards, not
+  // every branch: `if (ready)` survivors are noise, `if (a !== b)` survivors
+  // mean nothing pins when the guard must not fire. The condition must close on
+  // this line (balanced parens), or `true` would splice mid-expression.
+  // `}` optional before `else`: a brace-less `else if (a !== b)` is the same
+  // guard shape and was silently skipped.
+  const ifm = /^((?:}?\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
+  if (ifm) {
+    let depth = 1;
+    let condEnd = -1;
+    for (let i = 0; i < ifm[2].length; i++) {
+      if (ifm[2][i] === '(') depth++;
+      else if (ifm[2][i] === ')' && --depth === 0) {
+        condEnd = i;
+        break;
+      }
+    }
+    // The comparison must be in the CONDITION, not anywhere after `if (`:
+    // testing the whole remainder admitted `if (ready) emit(a !== b);` — the
+    // comparison-less shape whose survivors are pure noise, which this gate
+    // exists to exclude.
+    if (
+      condEnd > 0 &&
+      // Two exclusions, both measured. `(?<![=!<>])…(?![=>])` keeps an arrow
+      // function's `=>` from reading as a comparison. And the trailing `\s` is
+      // REQUIRED, not an accidental asymmetry with `[!=]==`: without it a
+      // generic call — `if (isRecord<string>(v))` — matches at `<string`, and
+      // a type-guard predicate is exactly the `if (ready)` shape whose
+      // survivors this gate calls noise. Telling `a<b` from `fn<T>(x)` needs a
+      // parser; the gate is silence-biased by design, and Prettier makes the
+      // unformatted comparison near-nonexistent here.
+      /[!=]==|(?<![=!<>])[<>]=?(?![=>])\s/.test(ifm[2].slice(0, condEnd))
+    ) {
+      return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
+    }
+  }
+  return null;
+}
+
 export function selectMutants(
   files: MutantSourceFile[],
   cap: number = MAX_MUTANTS,
 ): { selected: MutantCandidate[]; skippedForCap: number; derailed: string[] } {
   const preferred: MutantCandidate[] = [];
   const rest: MutantCandidate[] = [];
+  const replPreferred: MutantCandidate[] = [];
+  const replRest: MutantCandidate[] = [];
   const derailed: string[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
@@ -576,20 +709,52 @@ export function selectMutants(
       const raw = lines[n - 1];
       if (raw === undefined) continue;
       const t = raw.trim();
-      if (!SAFETY_VERB_RE.test(codeLines[n - 1] ?? '')) continue;
       if (inLiteral[n - 1]) continue;
-      if (!isRemovableStatement(lines, codeLines, n - 1)) continue;
-      (f.hasNewTests ? preferred : rest).push({
-        file: f.file,
-        line: n,
-        statement: t,
-      });
+      const code = codeLines[n - 1] ?? '';
+      if (
+        SAFETY_VERB_RE.test(code) &&
+        isRemovableStatement(lines, codeLines, n - 1)
+      ) {
+        // No `operator` field: deletion is the legacy shape, and stamping it
+        // would churn every existing report reader for zero information.
+        (f.hasNewTests ? preferred : rest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+        });
+        continue; // one candidate per line — deletion is the sharper experiment
+      }
+      const repl = replacementMutantsOf(raw, code);
+      if (repl) {
+        (f.hasNewTests ? replPreferred : replRest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+          operator: repl.operator,
+          mutated: repl.mutated,
+        });
+      }
     }
   }
-  const eligible = [...preferred, ...rest];
+  // Deletions first, then replacements — and replacements carry their OWN
+  // sub-cap. Measured over 40 real commits, the replacement operators produce
+  // ~24x the deletion pool (215 vs 9 candidates; guard-true drives it), and
+  // every mutant run drains the same time window hunk probes draw from last:
+  // uncapped, most diffs with any replacement candidates would leave hunk
+  // probing zero runs and the hunk-survived finding class would silently stop
+  // firing. Three slots keeps the highest-value replacements without buying
+  // coarser answers at the hunk probes' expense; what the sub-cap drops is
+  // counted in skippedForCap, never silently lost.
+  const replacements = [...replPreferred, ...replRest];
+  const eligible = [
+    ...preferred,
+    ...rest,
+    ...replacements.slice(0, REPLACEMENT_SUB_CAP),
+  ];
+  const subCapSkipped = Math.max(0, replacements.length - REPLACEMENT_SUB_CAP);
   return {
     selected: eligible.slice(0, cap),
-    skippedForCap: Math.max(0, eligible.length - cap),
+    skippedForCap: Math.max(0, eligible.length - cap) + subCapSkipped,
     derailed,
   };
 }
@@ -1398,7 +1563,20 @@ export function runOneMutant(
         'the probe tree does not match the selected statement at this line — nothing was mutated',
     };
   }
-  lines.splice(mutant.line - 1, 1);
+  // A replacement operator edits the line; the legacy shape deletes it.
+  const what =
+    mutant.operator === 'coalesce'
+      ? 'with its `?? fallback` dropped'
+      : mutant.operator === 'guard-true'
+        ? 'with its guard condition replaced by `true`'
+        : mutant.operator === 'term-drop'
+          ? 'with its `+ CONSTANT` term dropped'
+          : 'deleted';
+  if (mutant.mutated !== undefined) {
+    lines[mutant.line - 1] = mutant.mutated;
+  } else {
+    lines.splice(mutant.line - 1, 1);
+  }
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
     const { perFile } = runProbeSuite(
@@ -1411,9 +1589,13 @@ export function runOneMutant(
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
-        ? 'the suite went red with this statement deleted — a test catches its removal'
+        ? `the suite went red with this statement ${what} — a test catches it`
         : verdict === 'survived'
-          ? 'every affected test still PASSED with this statement deleted — no test fails when it is removed'
+          ? `every affected test still PASSED with this statement ${what} — no test fails ${
+              mutant.mutated === undefined
+                ? 'when it is removed'
+                : 'when it changes'
+            }`
           : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
     return { ...mutant, verdict, detail };
   } finally {
@@ -1873,7 +2055,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       .map((m) => ({
         file: m.file,
         kind: 'mutant-survived' as const,
-        message: `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
+        message:
+          m.operator === 'coalesce'
+            ? `\`${m.file}:${m.line}\`: dropping the \`?? fallback\` from \`${m.statement}\` leaves every affected test green — the fallback is untested, and it is frequently the only thing standing between a miss and a worse default. Add a test that exercises the miss path.`
+            : m.operator === 'guard-true'
+              ? `\`${m.file}:${m.line}\`: forcing this guard's condition to \`true\` leaves every affected test green — no test pins when the guard must NOT fire. Add a case just on the other side of the condition.`
+              : m.operator === 'term-drop'
+                ? `\`${m.file}:${m.line}\`: dropping the \`+ CONSTANT\` term from \`${m.statement}\` leaves every affected test green — nothing pins what that term contributes. Add a case where its presence decides the outcome (a boundary, if the expression is arithmetic).`
+                : `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
       })),
     ...hunkResults
       .filter((h) => h.verdict === 'survived')
@@ -1932,7 +2121,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   }
   if (mutantsSkippedForCap > 0) {
     writeStdoutLine(
-      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the cap of ${MAX_MUTANTS}`,
+      // BOTH caps, because this count carries drops from either: with 2
+      // deletions and 6 replacements the total is exactly MAX_MUTANTS and the
+      // main cap never fires, yet the sub-cap drops 3. Naming only the main cap
+      // then sends the reader looking for a pool of 11 candidates that does not
+      // exist — the number is right, the reason was not.
+      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the selection caps (${MAX_MUTANTS} total, ${REPLACEMENT_SUB_CAP} of them replacements)`,
     );
   }
   if (mutantsSkippedForBaseline > 0) {
