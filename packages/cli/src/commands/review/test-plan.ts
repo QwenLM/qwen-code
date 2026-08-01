@@ -119,7 +119,10 @@ const PLAN_NAME_RE =
  * same quadratic shape the bold pattern below was rewritten to remove, on the
  * same untrusted line.
  */
-const HEADING_LINE_RE = /^(#{1,6})(.*)$/;
+// `#` must be followed by whitespace or end-of-line (the ATX rule GitHub
+// applies): `#tag`, `#!/bin/bash` outside a fence, `#8176` are prose, and a
+// spaceless line once ended the Test Plan section mid-body.
+const HEADING_LINE_RE = /^(#{1,6})(?:[ \t](.*))?$/;
 
 /** A standalone bold line: `**Test Plan**`, the same heading in another shape. */
 // No `\s*` on either side of the capture and no lazy quantifier: with all
@@ -172,7 +175,7 @@ export function extractTestPlanSection(
       if (!fenced[j]) {
         const next = HEADING_LINE_RE.exec(lines[j]);
         // A bare `#` run with no text is not a heading (the old `\s*\S` bar).
-        if (next && !next[2].trim()) {
+        if (next && !next[2]?.trim()) {
           out.push(lines[j]);
           continue;
         }
@@ -223,6 +226,12 @@ function codeSpans(section: string): string[] {
     // `diff --git a/x b/x` → both). Drop them whole; a diff's body lines
     // carry no runner and match no claim shape on their own.
     if (/^(?:diff --git |\+\+\+ |--- |@@ |index )/.test(line.trim())) return;
+    // A diff BODY line is a claim-shedder too: `-packages/old/gone.ts` matches
+    // PATH_RE (its class admits a leading -/+) and ruled a false contradicted
+    // on a realistic pasted diff. Inside a ```diff fence every content line is
+    // prefixed, so dropping +/- prefixed lines loses no repro command — a
+    // command line in a Test Plan is never itself diff content.
+    if (/^[+-]/.test(line.trim())) return;
     // Strip a prompt marker, then anything after a `#` comment: a repro line is
     // written `npm test   # 471 pass`, and the comment is not part of the command.
     const t = line
@@ -428,11 +437,23 @@ function rulePath(
       note: 'not a repo-relative path',
     };
   }
+  // Existence FIRST: a gitignored file that is nonetheless present (build-test
+  // ran earlier in this worktree and produced it) is a live `reproduces`, and
+  // the ignore guard below must only ever downgrade a would-be contradiction —
+  // reviewed live when it also swallowed that reproduces.
+  if (existsSync(join(worktree, path))) {
+    return {
+      kind: 'path',
+      text,
+      verdict: 'reproduces',
+      note: 'exists in the review worktree',
+    };
+  }
   // A gitignored path (a build output the Environment section names — the
   // template's own example is a dist/ entry point) is absent at the reviewed
   // commit BY CONSTRUCTION, the same reasoning that excludes `.qwen/` paths.
   // check-ignore failing (not a repo, old git) falls through to the normal
-  // ruling — the guard only ever downgrades a would-be contradiction.
+  // ruling.
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', path], {
       stdio: 'ignore',

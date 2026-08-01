@@ -107,6 +107,16 @@ describe('extractTestPlanSection', () => {
     expect(extractTestPlanSection(hostile)).toBeNull();
   });
 
+  it('does not end the section on a spaceless # line (ATX rule)', () => {
+    // `#8176`, `#tag`, an unfenced `#!/bin/bash` are prose, not headings.
+    const s = extractTestPlanSection(
+      '## Test Plan\n\nsee #8176\n#!/usr/bin/env bash\nmore\n### done here\n\n## Risk\n\nx',
+    );
+    expect(s?.content).toContain('#!/usr/bin/env bash');
+    expect(s?.content).toContain('more');
+    expect(s?.content).not.toContain('## Risk');
+  });
+
   it('returns null when there is no Test Plan section', () => {
     expect(extractTestPlanSection('## Summary\n\njust a change')).toBeNull();
   });
@@ -598,6 +608,26 @@ describe('runTestPlan', () => {
         '## Test Plan\n\n```diff\ndiff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```',
       );
       expect(r.claims).toEqual([]);
+    });
+
+    it('sheds no claim from a pasted diff BODY line with a path shape', () => {
+      // `-packages/old/gone.ts` matched PATH_RE (its class admits -/+) and
+      // ruled a false contradicted on a realistic pasted diff.
+      const r = run(
+        '## Test Plan\n\n```diff\ndiff --git a/s.ts b/s.ts\n--- a/s.ts\n+++ b/s.ts\n@@ -1,2 +1,2 @@\n-packages/old/gone.ts\n+packages/new/added.ts\n```',
+      );
+      expect(r.claims).toEqual([]);
+    });
+
+    it('a gitignored file that EXISTS still rules reproduces', () => {
+      // build-test may have produced it earlier in this worktree; the ignore
+      // guard only ever downgrades a would-be contradiction.
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      writeFileSync(join(dir, '.gitignore'), 'artifacts/\n');
+      mkdirSync(join(dir, 'artifacts'), { recursive: true });
+      writeFileSync(join(dir, 'artifacts/report.json'), '{}');
+      const r = run('## Test Plan\n\nWrote `artifacts/report.json`');
+      expect(verdictOf(r.claims, 'artifacts/report.json')).toBe('reproduces');
     });
 
     it('sheds no claim at all for a well-known build directory', () => {

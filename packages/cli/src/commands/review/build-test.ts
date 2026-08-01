@@ -138,13 +138,19 @@ export function trimOutput(s: string): string {
   // find module` line lost to trimming (a long TypeScript log can push one past the
   // head and before the tail) would end the widening early and surface a real
   // graph gap as a false build error. Report stays bounded; the signal survives.
+  // CAPPED: the rescue exists to save a handful of summary/module-error lines,
+  // and an uncapped predicate made the whole trim a no-op on 40k lines of
+  // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
+  // cap the trim's bounded-output contract wins and the rest stays omitted.
+  const RESCUE_MAX = 40;
   const rescued = middle
     .split('\n')
     .filter(
       (l) =>
         MODULE_ERROR_RE.test(l) ||
         RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
-    );
+    )
+    .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
     ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`

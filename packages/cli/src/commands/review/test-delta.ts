@@ -257,6 +257,24 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
     );
   }
+  const unusable = entries.filter(
+    (e) =>
+      !e.unparsed &&
+      e.prFailingFiles.length > 0 &&
+      e.netNew.length === 0 &&
+      e.shared.length === 0,
+  );
+  if (unusable.length) {
+    parts.push(
+      `${unusable.length} command(s) could not be attributed — the base rerun ${unusable
+        .map((e) =>
+          e.base.timedOut
+            ? `\`${e.command}\` timed out`
+            : `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file (an install/toolchain error, not a test result)`,
+        )
+        .join('; ')}; judge those failures by the diff as before`,
+    );
+  }
   if (skippedForBudget.length) {
     parts.push(
       `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
