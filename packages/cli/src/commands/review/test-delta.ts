@@ -54,6 +54,24 @@ import {
 // eslint-disable-next-line no-control-regex -- ESC is the character under test
 const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
+/**
+ * The exact shapes `build-test` emits for a test command — and the only ones
+ * this command will hand to a shell.
+ *
+ * The report is a FILE this reads and then executes from, with `shell: true`,
+ * in the base worktree. Nothing else in the pipeline re-executes a string it
+ * read back off disk, so nothing else has to care where that string came from;
+ * this does. The workspace token is a directory, and a directory is a name a
+ * pull request can choose: `packages/x";curl …|sh;"` is a legal path in git
+ * and on Linux, and it round-trips through the report into a shell.
+ *
+ * Restricting to the emitter's own grammar costs nothing real — `build-test`
+ * produces `npm test` and `npm test --workspace="<dir>"`, both matched here —
+ * and anything outside it is skipped and disclosed rather than run, which is
+ * the same treatment every other thing this command cannot do gets.
+ */
+const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
+
 /** `trimOutput`'s own marker — the one signal that a stored output is partial. */
 const TRIM_MARKER_RE = /\.\.\. \[\d+ characters omitted/;
 
@@ -254,7 +272,13 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   /** Reruns killed by a deadline the BUDGET shortened, not by their own. */
   const budgetClamped: string[] = [];
   const entries: DeltaEntry[] = [];
+  /** Commands that did not match the emitter's grammar, so were never run. */
+  const skippedUnrecognised: string[] = [];
   for (const t of failed) {
+    if (!RERUNNABLE_COMMAND_RE.test(t.command)) {
+      skippedUnrecognised.push(t.command);
+      continue;
+    }
     const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
     if (remaining < 5_000) {
       skippedForBudget.push(t.command);
@@ -336,6 +360,11 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (unparsed) {
     parts.push(
       `${unparsed} command(s) failed but named no parseable failing file — no delta for those; judge them by the diff as before`,
+    );
+  }
+  if (skippedUnrecognised.length) {
+    parts.push(
+      `${skippedUnrecognised.length} failed command(s) were not rerun because they are not the shape \`build-test\` emits (${skippedUnrecognised.join(', ')}) — this command executes what the report names, so it executes only that grammar; their failures stay unattributed, judge them by the diff`,
     );
   }
   if (truncated) {
