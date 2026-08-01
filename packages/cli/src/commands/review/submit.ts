@@ -296,15 +296,25 @@ function compose(
   // a non-function value reaching `bilingualFromPlan` throws and drops the Chinese
   // fold through the fail-safe — the exact regression this PR closes. compose-review's
   // own CLI strips both for the same reason.
-  const { env: _dropped, prBodyFetcher: _droppedFetcher, ...rest } = state;
+  // `draftedComments` joins them: the ledger marker's contents are the comments
+  // this submission actually carries, taken from the payload below — not an
+  // assertion a caller's state JSON gets to make about what it reviewed.
+  const {
+    env: _dropped,
+    prBodyFetcher: _droppedFetcher,
+    draftedComments: _droppedDrafted,
+    ...rest
+  } = state;
   void _dropped;
   void _droppedFetcher;
+  void _droppedDrafted;
 
   const r = composeReview(
     {
       ...rest,
       criticalsInline,
       suggestionsInline,
+      draftedComments: comments,
     },
     cliVersion,
   );
