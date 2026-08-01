@@ -342,6 +342,7 @@ jobs:
               esac
               name="${stem}-${{ matrix.rust_target }}${extension}"
             fi
+            name="${name// /-}"
             cp "$artifact" "$destination/$name"
           done < <(find "$bundle_root" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
           if [ -z "$(find "$destination" -type f -print -quit)" ]; then

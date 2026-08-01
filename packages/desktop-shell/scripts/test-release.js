@@ -66,11 +66,17 @@ function testUpdateManifest(directory) {
   const assets = path.join(directory, 'assets');
   fs.mkdirSync(assets, { recursive: true });
   const artifacts = [
-    'Qwen Code-aarch64-apple-darwin.app.tar.gz',
-    'Qwen Code-x86_64-apple-darwin.app.tar.gz',
-    'Qwen Code_0.1.0_x64-setup.exe',
-    'Qwen Code_0.1.0_amd64.AppImage',
+    'Qwen-Code-aarch64-apple-darwin.app.tar.gz',
+    'Qwen-Code-x86_64-apple-darwin.app.tar.gz',
+    'Qwen-Code_0.1.0_x64-setup.exe',
+    'Qwen-Code_0.1.0_amd64.AppImage',
   ];
+  for (const artifact of artifacts) {
+    assert.ok(
+      !artifact.includes(' '),
+      `Artifact name must not contain spaces: ${artifact}`,
+    );
+  }
   for (const artifact of artifacts) {
     fs.writeFileSync(path.join(assets, artifact), artifact);
     fs.writeFileSync(
