@@ -68,6 +68,7 @@ export class BranchPointInvalidError extends Error {
 export interface ForkSessionOptions {
   atRecordId?: string;
   title?: string;
+  source?: { sourceType: string; sourceId?: string };
 }
 
 /**
@@ -1928,9 +1929,7 @@ export class SessionService {
   async forkSession(
     sourceSessionId: string,
     newSessionId: string,
-    options: {
-      source?: { sourceType: string; sourceId?: string };
-    } = {},
+    options: ForkSessionOptions = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
     this.maybeCleanupStaleBranchCreations();
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
@@ -2031,22 +2030,41 @@ export class SessionService {
       : undefined;
     let prevUuid: string | null = sourceRecord?.uuid ?? null;
     const remappedArtifactIds = new Map<string, string>();
+    const retainedUuids = new Set(sourceRecords.map((record) => record.uuid));
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
         const isArtifactRecord = isSessionArtifactRecord(record);
-        const systemPayload = remapSystemPayloadForFork(
+        let systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
           newSessionId,
           remappedArtifactIds,
         );
+        if (record.subtype === 'branch_checkpoint') {
+          const checkpoint = parseBranchCheckpointPayload(systemPayload);
+          if (checkpoint) {
+            systemPayload = {
+              ...checkpoint,
+              startExclusiveRecordUuid:
+                checkpoint.startExclusiveRecordUuid !== null &&
+                retainedUuids.has(checkpoint.startExclusiveRecordUuid)
+                  ? checkpoint.startExclusiveRecordUuid
+                  : null,
+            };
+          }
+        }
         const next: ChatRecord = {
           ...record,
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
-          parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
+          parentUuid:
+            isArtifactRecord &&
+            record.parentUuid !== null &&
+            retainedUuids.has(record.parentUuid)
+              ? record.parentUuid
+              : prevUuid,
           forkedFrom: {
             sessionId: sourceSessionId,
             messageUuid: record.uuid,

@@ -10241,24 +10241,67 @@ class QwenAgent implements Agent {
           });
         }
 
-        const sourceConfig = sourceSession.getConfig();
-        const recording = sourceConfig.getChatRecordingService();
-        if (recording) {
-          await recording.flush();
+        if (!isSideTask) {
+          try {
+            return await this.runExclusiveHistoryMutation(
+              sessionId,
+              async () => {
+                await sourceSession.assertCanStartTurn();
+                const sourceConfig = sourceSession.getConfig();
+                const recording = sourceConfig.getChatRecordingService();
+                if (recording) await recording.flush();
+                const sessionService = sourceConfig.getSessionService();
+
+                let baseName: string;
+                if (typeof name === 'string' && name.trim().length > 0) {
+                  baseName = name.trim();
+                } else {
+                  const existingTitle = recording?.getCurrentCustomTitle();
+                  const stripped = existingTitle
+                    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+                    .trim();
+                  baseName =
+                    stripped && stripped.length > 0
+                      ? stripped
+                      : sessionId.slice(0, 8);
+                }
+
+                const title = await computeUniqueBranchTitle(
+                  baseName,
+                  sessionService,
+                );
+                const newSessionId = randomUUID();
+                await sessionService.forkSession(sessionId, newSessionId, {
+                  title,
+                  ...(atRecordId !== undefined ? { atRecordId } : {}),
+                });
+                return { newSessionId, title, displayName: title };
+              },
+            );
+          } catch (error) {
+            if (error instanceof BranchPointInvalidError) {
+              throw new RequestError(-32009, error.message, {
+                errorKind: 'branch_point_invalid',
+                recordId: error.recordId,
+              });
+            }
+            throw error;
+          }
         }
 
-        const newSessionId = randomUUID();
+        const sourceConfig = sourceSession.getConfig();
+        const recording = sourceConfig.getChatRecordingService();
+        if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
+        const newSessionId = randomUUID();
         const fork = () =>
-          isSideTask
-            ? sessionService.forkSession(sessionId, newSessionId, {
-                source: {
-                  sourceType: 'side_task',
-                  sourceId: sessionId,
-                },
-              })
-            : sessionService.forkSession(sessionId, newSessionId);
-        if (isSideTask && recording) {
+          sessionService.forkSession(sessionId, newSessionId, {
+            source: {
+              sourceType: 'side_task',
+              sourceId: sessionId,
+            },
+          });
+        if (recording) {
           await recording.runWithWriteBarrier(fork);
         } else {
           await fork();
@@ -10266,52 +10309,41 @@ class QwenAgent implements Agent {
 
         let title: string;
         try {
-          return await this.runExclusiveHistoryMutation(sessionId, async () => {
-            await sourceSession.assertCanStartTurn();
-            const sourceConfig = sourceSession.getConfig();
-            const recording = sourceConfig.getChatRecordingService();
-            if (recording) await recording.flush();
-            const sessionService = sourceConfig.getSessionService();
-
-            let baseName: string;
-            if (typeof name === 'string' && name.trim().length > 0) {
-              baseName = name.trim();
-            } else {
-              const existingTitle = recording?.getCurrentCustomTitle();
-              const stripped = existingTitle
-                ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-                .trim();
-              baseName =
-                stripped && stripped.length > 0
-                  ? stripped
-                  : sessionId.slice(0, 8);
-            }
-
-            title = isSideTask
-              ? baseName
-              : await computeUniqueBranchTitle(baseName, sessionService);
-            const renamed = await sessionService.renameSession(
-              newSessionId,
-              title,
-              'manual',
-            );
-            if (!renamed) {
-              throw new RequestError(
-                -32603,
-                `Failed to set title on forked session ${newSessionId}`,
-                { errorKind: 'internal', sessionId: newSessionId },
-              );
-            }
-          });
-        } catch (error) {
-          if (error instanceof BranchPointInvalidError) {
-            throw new RequestError(-32009, error.message, {
-              errorKind: 'branch_point_invalid',
-              recordId: error.recordId,
-            });
+          let baseName: string;
+          if (typeof name === 'string' && name.trim().length > 0) {
+            baseName = name.trim();
+          } else {
+            const existingTitle = recording?.getCurrentCustomTitle();
+            const stripped = existingTitle
+              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+              .trim();
+            baseName =
+              stripped && stripped.length > 0
+                ? stripped
+                : sessionId.slice(0, 8);
           }
+          title = baseName;
+          const renamed = await sessionService.renameSession(
+            newSessionId,
+            title,
+            'manual',
+          );
+          if (!renamed) {
+            throw new RequestError(
+              -32603,
+              `Failed to set title on forked session ${newSessionId}`,
+              { errorKind: 'internal', sessionId: newSessionId },
+            );
+          }
+        } catch (error) {
+          sessionService.removeSession(newSessionId).catch((removeError) => {
+            process.stderr.write(
+              `qwen serve: failed to clean up orphan session ${newSessionId}: ${removeError instanceof Error ? removeError.message : removeError}\n`,
+            );
+          });
           throw error;
         }
+        return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
         const settings = loadSettings(cwd);

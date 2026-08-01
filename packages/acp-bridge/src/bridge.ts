@@ -6290,6 +6290,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (entry.closing) {
+        throw new SessionNotFoundError(sessionId, 'The session is closing');
+      }
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
@@ -6305,6 +6308,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
+        if (entry.closing || byId.get(sessionId) !== entry) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
+        }
         if (entry.promptActive && !isSideTask) {
           throw new BranchWhilePromptActiveError(sessionId);
         }
@@ -6338,6 +6344,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 sessionId,
                 cwd: boundWorkspace,
                 name: req.name,
+                ...(req.atRecordId !== undefined
+                  ? { atRecordId: req.atRecordId }
+                  : {}),
               },
             ),
             initTimeoutMs,

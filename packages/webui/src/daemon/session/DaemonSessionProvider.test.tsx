@@ -133,7 +133,7 @@ interface MockClient {
   ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
-    req: { name?: string },
+    req: { name?: string; atRecordId?: string },
     clientId?: string,
   ) => Promise<{
     sessionId: string;
@@ -6051,7 +6051,7 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[1]?.[3]).toBe('client-a');
   });
 
-  it('reuses the branched session client when switching after branch', async () => {
+  it('forwards the checkpoint and reuses the branched session client', async () => {
     window.sessionStorage.clear();
     const sourceSession = createMockSession({
       sessionId: 'session-a',
@@ -6080,7 +6080,10 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
 
-    const branch = requireActions(actions).branchSession('Branch 1');
+    const branch = requireActions(actions).branchSession(
+      'Branch 1',
+      'checkpoint-1',
+    );
     await act(async () => {
       await wait(5);
       await flushPromises();
@@ -6092,7 +6095,7 @@ describe('DaemonSessionProvider', () => {
 
     expect(sdkMocks.branchSession).toHaveBeenCalledWith(
       'session-a',
-      { name: 'Branch 1' },
+      { name: 'Branch 1', atRecordId: 'checkpoint-1' },
       'client-a',
     );
     const loadCalls = sdkMocks.MockDaemonSessionClient.load.mock.calls;

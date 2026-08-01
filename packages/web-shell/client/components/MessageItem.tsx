@@ -34,7 +34,6 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onBranchSession?: () => void;
   onBranchSession?: () => void | Promise<void>;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;

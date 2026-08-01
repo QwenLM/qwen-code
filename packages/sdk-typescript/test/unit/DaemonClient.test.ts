@@ -2699,6 +2699,44 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('branchSession', () => {
+    it('posts the historical checkpoint to the encoded session route', async () => {
+      const reply = {
+        sessionId: 'branch-1',
+        workspaceCwd: '/work/a',
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Historical branch',
+        forkedFrom: {
+          sessionId: 'source/1',
+          displayName: 'Source session',
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(201, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.branchSession(
+          'source/1',
+          {
+            name: 'Historical branch',
+            atRecordId: 'checkpoint-1',
+          },
+          'client-1',
+        ),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.url).toBe('http://daemon/session/source%2F1/branch');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Historical branch',
+        atRecordId: 'checkpoint-1',
+      });
+    });
+  });
+
   describe('createSideTaskSession', () => {
     it('uses the dedicated side-task endpoint', async () => {
       const { fetch, calls } = recordingFetch(() =>

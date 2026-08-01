@@ -6969,11 +6969,13 @@ describe('createAcpSessionBridge', () => {
 
     it('serializes rewind behind an admitted branch', async () => {
       const calls: string[] = [];
+      let branchParams: unknown;
       const branchGate = deferred<void>();
       const handle = makeChannel({
-        extMethodImpl: async (method) => {
+        extMethodImpl: async (method, params) => {
           if (method === 'qwen/control/session/branch') {
             calls.push('branch');
+            branchParams = params;
             await branchGate.promise;
             return { newSessionId: 'branch-before-rewind', title: 'Branch' };
           }
@@ -7000,6 +7002,9 @@ describe('createAcpSessionBridge', () => {
       await branch;
       await rewind;
       expect(calls).toEqual(['branch', 'rewind']);
+      expect(branchParams).toMatchObject({
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      });
       await bridge.shutdown();
     });
 
@@ -7036,6 +7041,50 @@ describe('createAcpSessionBridge', () => {
       await rewind;
       await branch;
       expect(calls).toEqual(['rewind', 'branch']);
+      await bridge.shutdown();
+    });
+
+    it('rejects a queued branch when the source starts closing', async () => {
+      const promptStarted = deferred<void>();
+      const promptGate = deferred<void>();
+      const closeGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          promptStarted.resolve();
+          await promptGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            return closeGate.promise;
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            throw new Error('branch must not reach the closing source');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await promptStarted.promise;
+      const branch = bridge.branchSession(session.sessionId, {});
+      const close = bridge.closeSession(session.sessionId);
+
+      promptGate.resolve();
+      await prompt;
+      await expect(branch).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+
+      closeGate.resolve({});
+      await close;
       await bridge.shutdown();
     });
 

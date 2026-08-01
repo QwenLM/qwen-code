@@ -111,7 +111,6 @@ interface MessageListProps {
   onRetryClick?: () => void;
   failedPromptMessageId?: string;
   onRetryFailedPrompt?: () => void;
-  onBranchSession?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;

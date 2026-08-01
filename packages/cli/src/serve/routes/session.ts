@@ -2439,14 +2439,9 @@ export function registerSessionRoutes(
           runtime.generationGuard?.assertOpen();
         } catch (error) {
           if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
+            await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
           } else {
             await runtime.bridge
               .detachClient(result.sessionId, result.clientId)
@@ -2456,16 +2451,11 @@ export function registerSessionRoutes(
         }
         if (!res.writable) {
           if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
+            runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
           } else {
             runtime.bridge
               .detachClient(result.sessionId, result.clientId)

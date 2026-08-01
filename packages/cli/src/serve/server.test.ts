@@ -14588,12 +14588,9 @@ describe('createServeApp', () => {
       expect(branchSession).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['removes', true, 1],
-      ['preserves', false, 0],
-    ])(
-      '%s the persisted branch when generation cleanup kills=%s',
-      async (_label, killed, expectedRemovals) => {
+    it.each([true, false])(
+      'preserves the persisted branch when generation cleanup kills=%s',
+      async (killed) => {
         const runtimeDir = await fsp.mkdtemp(
           path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
         );
@@ -14661,10 +14658,7 @@ describe('createServeApp', () => {
           expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
             requireZeroAttaches: true,
           });
-          expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
-          if (killed) {
-            expect(removeSpy).toHaveBeenCalledWith(staleBranchId);
-          }
+          expect(removeSpy).not.toHaveBeenCalled();
         } finally {
           killSpy.mockRestore();
           removeSpy.mockRestore();

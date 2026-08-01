@@ -64,6 +64,43 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('normalizes replay branch metadata into the Assistant transcript block', () => {
+    const events = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'historical answer' },
+          _meta: {
+            qwenTranscript: { branchRecordId: 'checkpoint-record' },
+          },
+        },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+
+    expect(events).toMatchObject([
+      {
+        type: 'assistant.text.delta',
+        branchRecordId: 'checkpoint-record',
+      },
+    ]);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'historical answer',
+        branchRecordId: 'checkpoint-record',
+      },
+    ]);
+  });
+
   it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
     const events = normalizeDaemonEvent({
       id: 1,

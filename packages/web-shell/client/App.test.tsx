@@ -192,6 +192,10 @@ const {
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
+      branchSession: vi.fn().mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+      }),
       submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
@@ -268,6 +272,7 @@ const {
       latestMessageListProps: null as {
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
+        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
       } | null,
@@ -556,6 +561,7 @@ vi.mock('./components/MessageList', async () => {
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
+        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
         welcomeHeader?: React.ReactNode;
@@ -2267,6 +2273,10 @@ beforeEach(() => {
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
+  mockSessionActions.branchSession.mockResolvedValue({
+    sessionId: 'branch-1',
+    displayName: 'Historical branch',
+  });
   mockSessionActions.submitPermission.mockResolvedValue(undefined);
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
@@ -3645,6 +3655,75 @@ describe('App shell command queueing', () => {
 });
 
 describe('App session callbacks', () => {
+  it('forwards an Assistant checkpoint and returns the pending branch request', async () => {
+    const branch = deferred<{
+      sessionId: string;
+      displayName: string;
+    }>();
+    mockSessionActions.branchSession.mockReturnValue(branch.promise);
+    renderApp();
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'checkpoint-1',
+    );
+    expect(request!).toBeInstanceOf(Promise);
+
+    branch.resolve({
+      sessionId: 'branch-1',
+      displayName: 'Historical branch',
+    });
+    await act(async () => {
+      await request;
+    });
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        text: expect.stringContaining('Historical branch') as string,
+      }),
+    ]);
+  });
+
+  it('reloads the transcript when a historical checkpoint becomes stale', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'stale-checkpoint',
+    );
+    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. The transcript has been refreshed.',
+    );
+  });
+
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
