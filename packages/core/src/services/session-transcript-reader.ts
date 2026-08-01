@@ -122,6 +122,7 @@ interface UuidIndexEntry {
   parentUuid: string | null;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
+  inherited: boolean;
   segments: RecordSegment[];
 }
 
@@ -186,6 +187,15 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+// Windows derives `Stats.ino` from a 64-bit file index that routinely exceeds
+// 2^53, so a safe-integer check would reject every cursor there. Above 2^53 the
+// value loses precision, so file identity on Windows is approximate; a bigint
+// stat would be the durable fix. Byte offsets (snapshotSize/position) are still
+// arithmetic operands and stay safe-integer via isFiniteNonNegativeInteger.
+function isFiniteNonNegativeFileId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
 function cursorPayload(
@@ -326,8 +336,8 @@ function decodeCursorState(
       parsed['v'] !== SESSION_TRANSCRIPT_CURSOR_VERSION ||
       typeof parsed['sessionId'] !== 'string' ||
       !isObjectRecord(fileIdentity) ||
-      !isFiniteNonNegativeInteger(fileIdentity['dev']) ||
-      !isFiniteNonNegativeInteger(fileIdentity['ino']) ||
+      !isFiniteNonNegativeFileId(fileIdentity['dev']) ||
+      !isFiniteNonNegativeFileId(fileIdentity['ino']) ||
       !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
       !isFiniteNonNegativeInteger(parsed['position']) ||
       (parsed['direction'] !== undefined &&
@@ -837,6 +847,7 @@ async function buildIndex(params: {
   let sequence = 0;
   let leafUuid: string | undefined;
   let startTime: string | undefined;
+  let sideTaskSourceUuid: string | undefined;
 
   await forEachLineInSnapshot(
     filePath,
@@ -849,6 +860,14 @@ async function buildIndex(params: {
         const record = validateTranscriptRecord(value).record;
         if (!record || !isTranscriptConversationRecord(record)) {
           continue;
+        }
+        if (
+          record.type === 'system' &&
+          record.subtype === 'session_source' &&
+          isObjectRecord(record.systemPayload) &&
+          record.systemPayload['sourceType'] === 'side_task'
+        ) {
+          sideTaskSourceUuid = record.uuid;
         }
         if (record.timestamp) startTime ??= record.timestamp;
         leafUuid = record.uuid;
@@ -869,6 +888,7 @@ async function buildIndex(params: {
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
+            inherited: record.forkedFrom !== undefined,
             segments: [segment],
           });
         }
@@ -896,7 +916,15 @@ async function buildIndex(params: {
         }
       : undefined;
   });
-  const activeUuids = [...chain.uuids];
+  const sourceBoundary = sideTaskSourceUuid
+    ? chain.uuids.indexOf(sideTaskSourceUuid)
+    : -1;
+  const activeUuids =
+    sourceBoundary >= 0
+      ? chain.uuids
+          .slice(sourceBoundary)
+          .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
+      : [...chain.uuids];
   const goalStatePositions: number[] = [];
   for (let position = 0; position < activeUuids.length; position++) {
     const uuid = activeUuids[position]!;

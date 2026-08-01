@@ -27,6 +27,7 @@ import {
   SDKTestHelper,
   extractText,
   findToolUseBlocks,
+  findToolResults,
   createSharedTestOptions,
 } from './test-helper.js';
 
@@ -392,7 +393,16 @@ describe('SDK MCP Server Integration (E2E)', () => {
   });
 
   describe('Async Tool Handlers', () => {
-    it('should handle async tool handlers with delays', async () => {
+    // FIXME(#8256): Flaky on the live model. The failure recorded for this case
+    // (run 30650798703, macOS shard 2/2) was a 300000ms timeout: the real-model
+    // query() hung / exceeded the 5-minute suite timeout. The suspected shared
+    // cause with the subagents case is model nondeterminism (the model sometimes
+    // answers without calling the delayed_response tool). Already survived
+    // asserting on the deterministic tool result, a forced prompt, retry: 2, and
+    // the 5-minute suite timeout. Skipped like the other model-nondeterministic
+    // cases (permission-control.test.ts); the durable fix is driving it with the
+    // fake OpenAI server harness the interactive tests use.
+    it.skip('should handle async tool handlers with delays', async () => {
       // Define a tool with async delay using Zod schema
       const delayedTool = tool(
         'delayed_response',
@@ -431,7 +441,6 @@ describe('SDK MCP Server Integration (E2E)', () => {
       });
 
       const messages: SDKMessage[] = [];
-      let assistantText = '';
       let foundToolUse = false;
 
       try {
@@ -446,15 +455,19 @@ describe('SDK MCP Server Integration (E2E)', () => {
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
-            assistantText += extractText(message.message.content);
           }
         }
 
         // Validate tool was called
         expect(foundToolUse).toBe(true);
 
-        // Validate result contains the delayed response
-        expect(assistantText.toLowerCase()).toMatch(/test_async/i);
+        // Assert on the deterministic tool result rather than the model's
+        // paraphrased final text, which does not reliably echo the value
+        // verbatim and made this test flaky on main.
+        const toolResults = findToolResults(messages, MCP_DELAYED_RESPONSE);
+        expect(toolResults.length).toBeGreaterThan(0);
+        expect(toolResults[0]?.isError).toBe(false);
+        expect(toolResults[0]?.content.toLowerCase()).toMatch(/test_async/i);
 
         // Validate successful completion
         const lastMessage = messages[messages.length - 1];

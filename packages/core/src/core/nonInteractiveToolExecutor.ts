@@ -8,6 +8,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   Config,
+  RuntimeContentGeneratorView,
 } from '../index.js';
 import {
   CoreToolScheduler,
@@ -23,6 +24,7 @@ export interface ExecuteToolCallOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
+  runtimeView?: RuntimeContentGeneratorView;
 }
 
 /**
@@ -53,7 +55,7 @@ export async function executeToolCall(
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
-      .schedule(toolCallRequest, abortSignal)
+      .schedule(toolCallRequest, abortSignal, options.runtimeView)
       .catch(reject);
   });
 }

@@ -51,6 +51,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through
@@ -132,7 +133,8 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
-import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { DaemonMetricsRing } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
@@ -144,7 +146,7 @@ import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
   ChannelDeliveryError,
   isChannelDeliveryError,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   normalizeWorkerDiagnostic,
@@ -360,7 +362,7 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -1958,9 +1960,27 @@ async function runQwenServeImpl(
           : 'not_scheduled',
     },
   };
+  // Validate before freezing the value into the immutable daemon base env so a
+  // bad scope can never be baked into a runtime, even transiently.
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(
+      optsIn.memoryProjectScope,
+    )
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   preResolveServeFastPathHomeEnvOverrides();
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
+    ...(optsIn.memoryProjectScope !== undefined
+      ? {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
+        }
+      : {}),
   });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
@@ -3109,6 +3129,47 @@ async function runQwenServeImpl(
           envFileReadFailed: false,
           envFileReadFailures: Object.freeze([]),
         };
+    const resolveSessionRuntimeBaseDir = (
+      workspace: string,
+      settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
+      effectiveEnv: Readonly<NodeJS.ProcessEnv>,
+    ): string => {
+      const resolveConfiguredPath = (
+        configuredPath: string,
+        relativeTo: string,
+      ): string => {
+        const expanded =
+          configuredPath === '~'
+            ? os.homedir()
+            : configuredPath.startsWith('~/') ||
+                configuredPath.startsWith('~\\')
+              ? path.join(
+                  os.homedir(),
+                  ...configuredPath
+                    .slice(2)
+                    .split(/[/\\]+/)
+                    .filter(Boolean),
+                )
+              : configuredPath;
+        return path.resolve(relativeTo, expanded);
+      };
+      const runtimeDir = effectiveEnv['QWEN_RUNTIME_DIR'];
+      if (runtimeDir) {
+        return resolveConfiguredPath(runtimeDir, process.cwd());
+      }
+      const settingsDir = settings?.merged.advanced?.runtimeOutputDir;
+      if (settingsDir) {
+        return resolveConfiguredPath(settingsDir, workspace);
+      }
+      const qwenHome = effectiveEnv['QWEN_HOME'];
+      if (qwenHome) {
+        return resolveConfiguredPath(qwenHome, process.cwd());
+      }
+      const homeDir = os.homedir();
+      return homeDir
+        ? path.join(homeDir, '.qwen')
+        : path.join(os.tmpdir(), '.qwen');
+    };
     const logRuntimeEnvFileReadFailures = (
       workspace: string,
       snapshot: {
@@ -3127,8 +3188,14 @@ async function runQwenServeImpl(
       });
     };
     logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
+    const primarySessionRuntimeBaseDir = resolveSessionRuntimeBaseDir(
+      boundWorkspace,
+      runtimeBootSettings,
+      runtimeEnvSnapshot.effectiveEnv,
+    );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
+      QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
     };
     const replaceRuntimeEffectiveEnv = (
       nextEnv: Readonly<NodeJS.ProcessEnv>,
@@ -3137,6 +3204,7 @@ async function runQwenServeImpl(
         delete runtimeEffectiveEnv[key];
       }
       Object.assign(runtimeEffectiveEnv, nextEnv);
+      runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
     };
     const primaryRuntimeEnv: {
       mode: 'runtime-overlay';
@@ -3822,6 +3890,7 @@ async function runQwenServeImpl(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
         ...(workspaceInputs[0]?.displayName
           ? { displayName: workspaceInputs[0].displayName }
           : {}),
@@ -3854,6 +3923,7 @@ async function runQwenServeImpl(
         fallbackReason?: string;
       };
       effectiveEnv: NodeJS.ProcessEnv;
+      sessionRuntimeBaseDir: string;
       replace: (nextEnv: Readonly<NodeJS.ProcessEnv>) => void;
     } => {
       const snapshot = settings
@@ -3871,7 +3941,15 @@ async function runQwenServeImpl(
             envFileReadFailures: Object.freeze([]),
           };
       logRuntimeEnvFileReadFailures(workspace, snapshot);
-      const effectiveEnv: NodeJS.ProcessEnv = { ...snapshot.effectiveEnv };
+      const sessionRuntimeBaseDir = resolveSessionRuntimeBaseDir(
+        workspace,
+        settings,
+        snapshot.effectiveEnv,
+      );
+      const effectiveEnv: NodeJS.ProcessEnv = {
+        ...snapshot.effectiveEnv,
+        QWEN_RUNTIME_DIR: sessionRuntimeBaseDir,
+      };
       const metadata: {
         mode: 'runtime-overlay';
         overlayKeys: string[];
@@ -3891,11 +3969,13 @@ async function runQwenServeImpl(
       return {
         metadata,
         effectiveEnv,
+        sessionRuntimeBaseDir,
         replace(nextEnv) {
           for (const key of Object.keys(effectiveEnv)) {
             delete effectiveEnv[key];
           }
           Object.assign(effectiveEnv, nextEnv);
+          effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
         },
       };
     };
@@ -4185,6 +4265,7 @@ async function runQwenServeImpl(
       const secondaryRuntime: WorkspaceRuntime = {
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        sessionRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...(workspaceInput.displayName
           ? { displayName: workspaceInput.displayName }
           : {}),
@@ -4719,6 +4800,7 @@ async function runQwenServeImpl(
       const wsRuntime: WorkspaceRuntime = {
         workspaceId: wsHash,
         workspaceCwd: cwd,
+        sessionRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(buildOptions?.displayName !== undefined
           ? { displayName: buildOptions.displayName }
           : {}),
@@ -6353,11 +6435,17 @@ async function runQwenServeImpl(
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
               'workspaceManagementHandle'
             ] as { sealAndWait?: () => Promise<void> } | undefined;
+            const initiallyMountedSessionMaintenance = initiallyMountedApp
+              ?.locals?.['sessionArchiveCoordinator'] as
+              | { sealMaintenanceAndWait?: () => Promise<void> }
+              | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
+            const initialSessionMaintenanceWait =
+              initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -6500,9 +6588,18 @@ async function runQwenServeImpl(
                 const workspaceManagementHandle = appForCleanup?.locals?.[
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;
+                const sessionMaintenance = appForCleanup?.locals?.[
+                  'sessionArchiveCoordinator'
+                ] as
+                  | { sealMaintenanceAndWait?: () => Promise<void> }
+                  | undefined;
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
+                }
+                await initialSessionMaintenanceWait;
+                if (sessionMaintenance !== initiallyMountedSessionMaintenance) {
+                  await sessionMaintenance?.sealMaintenanceAndWait?.();
                 }
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[

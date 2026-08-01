@@ -97,6 +97,26 @@ describe('compressCommand', () => {
     expect(context.ui.setPendingItem).toHaveBeenNthCalledWith(2, null);
   });
 
+  it('should display warning when compaction model was swapped', async () => {
+    const compressedResult: ChatCompressionInfo = {
+      originalTokenCount: 200,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      newTokenCount: 100,
+      warning: 'Compaction model "small" context window too small',
+    };
+    mockTryCompressChat.mockResolvedValue(compressedResult);
+
+    await compressCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text: '⚠️ Compaction model "small" context window too small',
+      },
+      expect.any(Number),
+    );
+  });
+
   it('should add an error message if tryCompressChat returns falsy', async () => {
     mockTryCompressChat.mockResolvedValue(null);
 
