@@ -46,6 +46,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildRunEnv,
   trimOutput,
+  spawnTimedOut,
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
@@ -136,9 +137,11 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const err = r.error as (Error & { code?: string }) | undefined;
-  const timedOut =
-    err?.code === 'ETIMEDOUT' || (r.signal === 'SIGTERM' && r.status === null);
+  // The sibling's predicate, not a weaker re-derivation: an external SIGTERM
+  // (container stop, cancelled CI job) sets neither an ETIMEDOUT message nor
+  // an exit code, so the substring form reported timedOut:false with empty
+  // output and fed straight into the base-green path.
+  const timedOut = spawnTimedOut(r);
   return {
     command,
     exitCode: timedOut ? null : (r.status ?? null),
@@ -216,10 +219,13 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // manufacture the strongest evidence this command produces out of an
     // infrastructure timeout. The files stay unattributed (neither list), and
     // the note says why.
-    // ...and so does a base rerun that failed without naming a single failing
-    // file: an install/toolchain failure exits non-zero with no FAIL lines, and
-    // reading that as "base is green" would promote every PR-side failure to
-    // net-new off a base that never ran its tests (reviewed live on this PR).
+    // ...and so does a base rerun that FAILED without naming a single failing
+    // file. An unbuilt base tree, a missing node_modules, a workspace the PR
+    // ADDED (so `npm test --workspace=…` cannot resolve on base), an ENOBUFS
+    // truncation: each exits non-zero with zero FAIL lines, indistinguishable
+    // here from a green base. Reading it as green promotes every PR-side
+    // failure to netNew — the strongest evidence this command emits,
+    // manufactured from a base that never ran a test.
     const baseUnusable =
       base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
     entries.push({
@@ -255,12 +261,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (unparsed) {
     parts.push(
-      `${unparsed} command(s) failed but named no parseable failing file on either side — no delta for those; judge them by the diff as before`,
-    );
-  }
-  if (timedOut) {
-    parts.push(
-      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
+      `${unparsed} command(s) failed but named no parseable failing file — no delta for those; judge them by the diff as before`,
     );
   }
   const unusable = entries.filter(
@@ -268,17 +269,22 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       !e.unparsed &&
       e.prFailingFiles.length > 0 &&
       e.netNew.length === 0 &&
-      e.shared.length === 0,
+      e.shared.length === 0 &&
+      !e.base.timedOut,
   );
   if (unusable.length) {
     parts.push(
       `${unusable.length} command(s) could not be attributed — the base rerun ${unusable
-        .map((e) =>
-          e.base.timedOut
-            ? `\`${e.command}\` timed out`
-            : `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file (an install/toolchain error, not a test result)`,
+        .map(
+          (e) =>
+            `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file, so it did not measure the base (an unbuilt tree, a missing install, a workspace absent at base)`,
         )
         .join('; ')}; judge those failures by the diff as before`,
+    );
+  }
+  if (timedOut) {
+    parts.push(
+      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
     );
   }
   if (skippedForBudget.length) {

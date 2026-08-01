@@ -660,7 +660,14 @@ export function replacementMutantsOf(
     // testing the whole remainder admitted `if (ready) emit(a !== b);` — the
     // comparison-less shape whose survivors are pure noise, which this gate
     // exists to exclude.
-    if (condEnd > 0 && /[!=]==|[<>]=?\s/.test(ifm[2].slice(0, condEnd))) {
+    if (
+      condEnd > 0 &&
+      // `(?<![=!<>])[<>]=?(?!=)` so an arrow function's `=>` is not a
+      // comparison: it ends in `>` followed by a space, and the loose class
+      // made every predicate guard a candidate — the `if (ready)` noise this
+      // gate exists to exclude.
+      /[!=]==|(?<![=!<>])[<>]=?(?!=)\s/.test(ifm[2].slice(0, condEnd))
+    ) {
       return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
     }
   }
@@ -2141,7 +2148,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             : m.operator === 'guard-true'
               ? `\`${m.file}:${m.line}\`: forcing this guard's condition to \`true\` leaves every affected test green — no test pins when the guard must NOT fire. Add a case just on the other side of the condition.`
               : m.operator === 'term-drop'
-                ? `\`${m.file}:${m.line}\`: dropping the \`+ CONSTANT\` term from \`${m.statement}\` leaves every affected test green — the reserve term is unpinned. Add a boundary case where the term decides the outcome.`
+                ? `\`${m.file}:${m.line}\`: dropping the \`+ CONSTANT\` term from \`${m.statement}\` leaves every affected test green — nothing pins what that term contributes. Add a case where its presence decides the outcome (a boundary, if the expression is arithmetic).`
                 : `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
       })),
     ...hunkResults
