@@ -45,11 +45,11 @@
 // `script-lint` gives a deferred checker, for the same reason.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
+import { git } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import { readWorkspacePackages } from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
@@ -467,6 +467,12 @@ function normalizeClaimPath(text: string): string {
  * extraction change, not a live hole. A non-zero exit means either "not
  * ignored" or "no git here"; both fall through to the ordinary ruling, which is
  * why this returns a plain boolean.
+ *
+ * Spawned through the package's own `git` helper rather than a bare
+ * `execFileSync`, for the deadline it carries: every other git invocation in
+ * these commands runs under `GIT_TIMEOUT_MS` because, as that constant's
+ * comment puts it, "a hang must still end". This was the one without it, and
+ * it runs against a worktree the review does not control.
  */
 function isGitIgnored(worktree: string, path: string): boolean {
   const key = `${worktree}\0${path}`;
@@ -474,9 +480,7 @@ function isGitIgnored(worktree: string, path: string): boolean {
   if (memo !== undefined) return memo;
   let ignored: boolean;
   try {
-    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', path], {
-      stdio: 'ignore',
-    });
+    git('-C', worktree, 'check-ignore', '-q', '--', path);
     ignored = true;
   } catch {
     ignored = false;
