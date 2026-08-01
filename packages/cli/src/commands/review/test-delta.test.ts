@@ -82,7 +82,7 @@ describe('runTestDelta', () => {
 
   const runWith = (
     test: CommandResult[],
-    baseOutput: string | ((command: string, cwd?: string) => CommandResult),
+    baseOutput: string | ((command: string, cwd: string) => CommandResult),
   ): TestDeltaReport =>
     runTestDelta({
       report: writeReport(test),
