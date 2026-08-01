@@ -1505,7 +1505,7 @@ describe('InputPrompt', () => {
 
       await waitFor(() => {
         expect(props.onSubmit).toHaveBeenCalledWith(
-          '@.qwen/tmp/clipboard.png\n\ndescribe this image',
+          `@${path.join('.qwen', 'tmp', 'clipboard.png')}\n\ndescribe this image`,
           {
             deferUntilIdle: false,
             submittedPrompt: 'describe this image',

@@ -25,13 +25,15 @@ const KIND_NAMES = {
 } as const;
 
 /**
- * True if any background agent has a tool call parked awaiting user
+ * True if any background agent or workflow has a tool call parked awaiting user
  * approval (permission bubbling). Drives the pill's "needs approval"
  * marker so the user is nudged to open the dialog and answer.
  */
 export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
   return entries.some(
-    (e) => e.kind === 'agent' && (e.pendingApprovals?.length ?? 0) > 0,
+    (e) =>
+      (e.kind === 'agent' || e.kind === 'workflow') &&
+      (e.pendingApprovals?.length ?? 0) > 0,
   );
 }
 

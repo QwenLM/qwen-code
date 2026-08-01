@@ -3090,4 +3090,19 @@ describe('testPlanGate — Test Plan rulings, disclosed but never capping', () =
     expect(testPlanGate(writePlan()).notes).toEqual([]);
     expect(testPlanGate(join(dir, 'nope.json')).notes).toEqual([]);
   });
+
+  it('caps notes at five plus a summary line', () => {
+    const p = writePlan();
+    writeReport(
+      Array.from({ length: 8 }, (_, i) => ({
+        kind: 'count',
+        text: `${i + 1} passed`,
+        verdict: 'differs',
+        observed: '999 passed',
+      })),
+    );
+    const notes = testPlanGate(p).notes;
+    expect(notes).toHaveLength(6);
+    expect(notes[5]).toBe('and 3 more');
+  });
 });

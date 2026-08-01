@@ -98,6 +98,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import type { SkillLevel } from '../skills/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -165,6 +166,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -962,6 +964,11 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
+   * Skill discovery levels that should not be loaded. Sourced from
+   * `settings.skills.disabledLevels`.
+   */
+  disabledSkillLevels?: readonly SkillLevel[];
+  /**
    * Additional directories to scan for skills (SKILL.md files).
    * Sourced from `settings.skills.directories`. Paths are raw
    * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
@@ -1004,6 +1011,11 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional host policy evaluated with final tool arguments immediately
+   * before execution. A configured guard fails closed.
+   */
+  toolInvocationGuard?: ToolInvocationGuard;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1739,6 +1751,7 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -1778,6 +1791,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
@@ -2091,6 +2105,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
@@ -2104,6 +2119,7 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -5002,6 +5018,14 @@ export class Config {
   }
 
   /**
+   * Returns skill discovery levels excluded through
+   * `settings.skills.disabledLevels`.
+   */
+  getDisabledSkillLevels(): ReadonlySet<SkillLevel> {
+    return this.disabledSkillLevels;
+  }
+
+  /**
    * Returns additional skill directories from `settings.skills.directories`.
    * Paths are raw (unexpanded); consumers must handle `~` expansion
    * (see `SkillManager.getSkillsBaseDirs`).
@@ -7642,6 +7666,10 @@ export class Config {
 
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
+  }
+
+  getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    return this.toolInvocationGuard;
   }
 
   /**
