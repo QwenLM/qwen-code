@@ -768,6 +768,8 @@ Write every confirmed finding — high and low confidence alike — as a JSON ar
   --out .qwen/tmp/qwen-review-{target}-findings.json
 ```
 
+**One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
+
 Each entry carries `id` (unique — outcomes and resolved anchors both join on it), `severity`, `confidence`, `source`, `summary`, `failureScenario`, and either `file`/`line`/`anchor` or, for a pattern aggregate, a `locations[]` array with **one entry per location** (`suggestedFix`, `category` and `shortSummary` are optional; `shortSummary` is derived from `summary` when absent). The command validates the shape, refuses a duplicate id, refuses a finding with no failure scenario, sorts by severity → confidence → file → line → id, and writes counts nobody then recomputes by hand. Read the artifact for the numbers you quote in the Summary. This is a **canonicalization**, not a gate: it does not decide the verdict — `compose-review` does that, from the same findings — and it does not run at low effort, where the pass is unverified and emits no verdict.
 
 ### Step 6B: Apply the findings (`--fix`)
