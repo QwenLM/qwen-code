@@ -142,6 +142,17 @@ describe('extractClaims', () => {
     expect(claims[0].text).toBe('471 tests passed');
   });
 
+  it('does not extract a Test Files file-count line as a test-count claim', () => {
+    // A pasted vitest summary nests 'Test Files  3 passed (3)' above
+    // 'Tests  157 passed (157)'. The file-count line must not produce a
+    // count claim — it would always 'differs' against the real test count.
+    const claims = extractClaims(
+      'Test Files  3 passed (3)\n     Tests  157 passed (157)',
+    ).filter((c) => c.kind === 'count');
+    expect(claims).toHaveLength(1);
+    expect(claims[0].text).toContain('157');
+  });
+
   it('emits one claim per distinct count', () => {
     const claims = extractClaims(
       'core: 1135 passed, desktop: 41 passed',
@@ -181,6 +192,24 @@ describe('extractClaims', () => {
       kind: 'path',
       text: 'src/telemetry/loggers.test.ts',
     });
+  });
+
+  it('excludes a cd base under .qwen/ or build output from path claims', () => {
+    // The cd base is a directory the Test Plan tells the reader to CREATE
+    // (.qwen/) or gitignored build output (dist/) — absent at the reviewed
+    // commit by construction, the same exclusion isPathClaim applies to tokens.
+    const qwen = extractClaims('`cd .qwen/tmp/review-pr-9 && npm test`');
+    expect(qwen.filter((c) => c.kind === 'path')).toEqual([]);
+
+    const dist = extractClaims('`cd dist/foo && npm test`');
+    expect(dist.filter((c) => c.kind === 'path')).toEqual([]);
+  });
+
+  it('still extracts a normal cd base as a path claim', () => {
+    const claims = extractClaims(
+      '`cd packages/core && npx vitest run src/a.test.ts`',
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'packages/core' });
   });
 
   it('extracts no path from a `cd` shape it cannot resolve', () => {

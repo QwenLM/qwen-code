@@ -280,7 +280,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
     // The marker is what the fast path above trusts, so it is written only after
     // a build that succeeded, and it records the SHA it vouches for.
-    writeFileSync(marker(), `${baseSha}\n`);
+    try {
+      writeFileSync(marker(), `${baseSha}\n`);
+    } catch {
+      // The tree may be too broken to hold a marker; the next shard rebuilds.
+    }
     return {
       available: true,
       path: tree,
@@ -324,12 +328,17 @@ export const baseTreeCommand: CommandModule = {
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;
-    const report = runBaseTree(args);
-    if (args.out) {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+    try {
+      const report = runBaseTree(args);
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+      writeStderrLine(`base-tree: ${report.note}`);
+    } catch (err) {
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
     }
-    writeStdoutLine(JSON.stringify(report, null, 2));
-    writeStderrLine(`base-tree: ${report.note}`);
   },
 };

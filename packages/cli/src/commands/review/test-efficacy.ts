@@ -62,7 +62,11 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper).
-import { discardWorktree, type SweepResult } from './lib/worktree.js';
+import {
+  discardWorktree,
+  worktreeCreateFailureDetail,
+  type SweepResult,
+} from './lib/worktree.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
@@ -900,29 +904,11 @@ export function safeRmWithin(worktree: string, relPath: string): void {
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
-/**
- * The `inconclusive` detail for a probe worktree that could not be created.
- *
- * Pure, and extracted for that reason: the branch it lives on fires only when
- * `git worktree add` fails, and there is no portable way to force that in a
- * real-git test — the one lever (making `.git/worktrees` unwritable) is bypassed
- * by root and behaves differently under CI's unprivileged user, so a test built
- * on it would assert one thing locally and another in CI. The composition is the
- * part with logic in it, so it is testable here on its own.
- *
- * The stale-sweep's stderr is folded in because it is usually the explanation:
- * when `add` fails on a leftover the sweep could not clear, the sweep is what
- * says why.
- */
 export function probeCreateFailureDetail(
   err: unknown,
   sweepStderr: string,
 ): string {
-  const sweepErr = sweepStderr.trim();
-  return (
-    `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
-    (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
-  );
+  return worktreeCreateFailureDetail('probe', err, sweepStderr);
 }
 
 /**
@@ -1032,6 +1018,11 @@ function runProbeSuite(
  * A column-0 `@@` is unambiguously a hunk header: every body line of a unified
  * diff starts with ' ', '+', '-' or '\', so a removed line whose own text begins
  * `@@` arrives as `-@@` and cannot be mistaken for one.
+ *
+ * Rename patches are not guarded here: `hunkProbeInputs` diffs one pathspec at
+ * a time, so a rename renders as a pure add (`--- /dev/null`) and
+ * `selectHunkProbes` skips it. A rename reaching `runOneHunkProbe` directly
+ * would reverse-apply the rename and leave both paths present.
  */
 export function splitDiffIntoHunks(
   diffText: string,

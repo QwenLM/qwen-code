@@ -206,7 +206,7 @@ const COUNT_RES = [
   // command exists to check went unextracted.
   /\b(\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
   /\btests?:?\s+(\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(?<!Files\s{1,20})(\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /** Extract every backticked span, including fenced-block bodies. */
@@ -255,20 +255,22 @@ export function extractClaims(section: string): Array<{
     claims.push({ kind, text });
   };
 
+  // The review's temp root and gitignored build output are excluded outright:
+  // absent at the reviewed commit by construction. Applied to both standalone
+  // path tokens (via isPathClaim) and cd bases (which legitimately carry no
+  // file extension, so the evidence bar below does not apply to them).
+  const isExcludedPath = (bare: string): boolean =>
+    bare.startsWith('.qwen/') ||
+    /(?:^|\/)(?:dist|build|out|bundle|coverage|node_modules)\//.test(bare);
+
   // A slash token is claimed as a repo path only with EVIDENCE it is one: a
   // file extension on its last segment, or an explicit ./ prefix. A bare
   // `owner/repo` is far more often a slug (`--repo QwenLM/qwen-code`), and
   // `origin/main` a ref — this PR's own Test Plan produced two false
-  // `contradicted` notes before this bar existed. The review's temp root is
-  // excluded outright: `.qwen/tmp/...` paths are things a Test Plan tells the
-  // reader to CREATE, absent at the reviewed commit by construction.
+  // `contradicted` notes before this bar existed.
   const isPathClaim = (t: string): boolean => {
     const bare = t.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
-    if (bare.startsWith('.qwen/')) return false;
-    // Build output is gitignored — absent at the reviewed commit by
-    // construction, the same category as .qwen/ above.
-    if (/(?:^|\/)(?:dist|build|out|bundle|coverage|node_modules)\//.test(bare))
-      return false;
+    if (isExcludedPath(bare)) return false;
     return /\.\w+$/.test(bare) || t.startsWith('./');
   };
 
@@ -295,7 +297,10 @@ export function extractClaims(section: string): Array<{
     const cd = /^cd\s+([^\s&;|]+)\s*(?:&&|;)\s*(.*)$/.exec(span);
     if (!cd && /(^|\s)cd\s/.test(span)) continue;
     const base = cd?.[1] ?? '';
-    if (base && PATH_RE.test(base)) push('path', base);
+    if (base && PATH_RE.test(base)) {
+      const bareBase = base.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
+      if (!isExcludedPath(bareBase)) push('path', base);
+    }
     // Flags that rebase relative paths (`--root ./integration-tests`) are
     // `cd`'s twin: a path token after one is relative to the flag's value,
     // not the repo root. Bail like the exotic-`cd` case — the `cd` directory
