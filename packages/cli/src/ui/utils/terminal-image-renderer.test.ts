@@ -200,7 +200,7 @@ describe('terminalImageRenderer', () => {
       const chafaPath = path.join(binDir, 'chafa');
       await fs.writeFile(
         chafaPath,
-        '#!/usr/bin/env node\nprocess.stdout.write(process.env.TEST_RENDERER_SECRET ? "LEAKED\\n" : `${process.argv.find((arg) => arg.startsWith("--size="))}\\n`);\n',
+        '#!/usr/bin/env node\nprocess.stdout.write(process.env.TEST_RENDERER_SECRET ? "LEAKED\\n" : `${process.argv.find((arg) => arg.startsWith("--colors="))} ${process.argv.find((arg) => arg.startsWith("--size="))}\\n`);\n',
       );
       await fs.chmod(chafaPath, 0o755);
       await fs.writeFile(imagePath, pngWithSize(1600, 800));
@@ -223,7 +223,7 @@ describe('terminalImageRenderer', () => {
 
       expect(result).toEqual({
         kind: 'ansi',
-        lines: ['--size=20x5'],
+        lines: ['--colors=256 --size=20x5'],
       });
       expect(
         getTerminalImageRenderSupport(
