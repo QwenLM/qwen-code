@@ -1515,16 +1515,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       task.id,
     );
     this.transitionInboundTask(task.id, 'running', { attempts });
+    let cancelled = false;
     try {
       await this.handleInbound(envelope);
-      if (this.hasPendingFinalDeliveryForTask(task)) {
-        this.transitionInboundTask(task.id, 'reply_pending', {
-          envelope: undefined,
-        });
-      } else {
-        this.removeInboundTask(task.id);
-      }
-      return true;
+      cancelled = this.cancelledInboundTaskIds.has(task.id);
     } catch (err) {
       const error = sanitizeLogText(
         err instanceof Error ? err.message : String(err),
@@ -1560,6 +1554,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
       this.cancelledInboundTaskIds.delete(task.id);
     }
+    // A base-class cancellation resolves handleInbound normally (the cancel is
+    // absorbed internally), so honour the terminal cancelled state captured
+    // above instead of removing the persisted record. Bookkeeping runs outside
+    // the try so a state read/write failure fails closed rather than being
+    // misclassified as a task failure that recovery would re-run.
+    if (cancelled) return true;
+    if (this.hasPendingFinalDeliveryForTask(task)) {
+      this.transitionInboundTask(task.id, 'reply_pending', {
+        envelope: undefined,
+      });
+    } else {
+      this.removeInboundTask(task.id);
+    }
+    return true;
   }
 
   private async recoverInboundTasks(): Promise<void> {

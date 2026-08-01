@@ -107,7 +107,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 5. **Commit the poll window** only after accepted work completes: mark notifications read and advance the cursor
 6. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
 
-The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are retried up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
+The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
 
 The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed.
 

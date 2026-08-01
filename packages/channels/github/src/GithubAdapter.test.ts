@@ -2730,6 +2730,78 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    it('transitions an agent-phase lifecycle failure to failed', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const privateChannel = channel as unknown as {
+        activeInboundTaskIdsByMessage: Map<string, string>;
+      };
+      privateChannel.activeInboundTaskIdsByMessage.set(
+        'owner/repo|1001',
+        'inbound-task-1',
+      );
+
+      channel.triggerTaskLifecycleForTest({
+        type: 'failed',
+        phase: 'agent',
+        chatId: 'owner/repo',
+        messageId: '1001',
+        error: 'agent failed',
+      });
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          error: 'agent failed',
+        }),
+      ]);
+    });
+
+    it('keeps the cancelled record when cancellation resolves normally', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([task]);
+      channel.handleInboundHook = async () => {
+        channel.triggerTaskLifecycleForTest({
+          type: 'cancelled',
+          chatId: 'owner/repo',
+          messageId: '1001',
+        });
+      };
+      const privateChannel = channel as unknown as {
+        runInboundTask: (task: typeof task) => Promise<boolean>;
+      };
+
+      await privateChannel.runInboundTask(task);
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'cancelled' }),
+      ]);
+    });
+
+    it('fails closed when post-success bookkeeping cannot read state', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([task]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      writeFileSync(pendingPath, '{not valid json', 'utf-8');
+      const privateChannel = channel as unknown as {
+        runInboundTask: (task: typeof task) => Promise<boolean>;
+      };
+
+      await expect(privateChannel.runInboundTask(task)).rejects.toThrow();
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'running' }),
+      ]);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalledWith(
+        expect.objectContaining({ body: expect.stringContaining('Failed') }),
+      );
+    });
+
     it('recovers an accepted task before polling and removes it after success', async () => {
       writeInboundTasks([makeInboundTaskRecord()]);
       channel.handleInboundHook = async () => {
