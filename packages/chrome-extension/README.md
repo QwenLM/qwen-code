@@ -101,7 +101,7 @@ The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 With Chrome running and the unpacked extension loaded, the acceptance runner
 starts an isolated daemon and fixture page, exercises DOM snapshots, console
 messages, network requests, button clicks, link navigation, restores the
-original page, restarts the daemon, and verifies reconnection:
+original page, restarts the daemon, and verifies a cold restart:
 
 ```bash
 QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
@@ -109,7 +109,7 @@ QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
 ```
 
 The command exits successfully only after printing `DEGRADED-MODE: PASS`,
-`RUNTIME-MCP-RECONNECT: PASS`, `FULL-CDP-SMOKE: PASS`, and
+`RUNTIME-MCP-COLD-RESTART: PASS`, `FULL-CDP-SMOKE: PASS`, and
 `REAL-CHROME-E2E: PASS`. It does not read or modify the user's Qwen settings.
 
 ## Packaging for the Chrome Web Store

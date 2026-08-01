@@ -180,7 +180,7 @@ try {
   console.log('RUNTIME-MCP: PASS');
   await stopChild(daemon);
   daemon = await startDaemon({ withAdapter: true });
-  console.log('RUNTIME-MCP-RECONNECT: PASS');
+  console.log('RUNTIME-MCP-COLD-RESTART: PASS');
   await stopChild(daemon);
 
   daemon = await startDaemon({ withAdapter: false, waitForBridge: true });
