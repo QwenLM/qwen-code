@@ -2328,4 +2328,21 @@ export default {
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
+
+  // ============================================================================
+  // reload-env 命令
+  // ============================================================================
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    '從 settings.json 和 .env 檔案重新載入環境變數和 API 金鑰，無需重啟',
+  'Updated keys': '已更新的金鑰',
+  'Removed keys': '已移除的金鑰',
+  'No environment changes detected.': '未偵測到環境變更。',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    '環境已重新載入，API 用戶端已重新整理。新金鑰已生效。',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    '環境已重新載入。新 API 金鑰將在下次請求時生效。',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    '環境已重新載入，但 API 用戶端重新整理失敗。請重啟 CLI 以使新金鑰生效。',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    '警告：解析設定檔失敗。請檢查 JSON 語法錯誤。',
 };

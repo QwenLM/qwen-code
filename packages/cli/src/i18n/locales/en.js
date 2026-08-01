@@ -2739,4 +2739,21 @@ export default {
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
+
+  // ============================================================================
+  // reload-env command
+  // ============================================================================
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    'Reload environment variables and API keys from settings.json and .env files without restarting',
+  'Updated keys': 'Updated keys',
+  'Removed keys': 'Removed keys',
+  'No environment changes detected.': 'No environment changes detected.',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    'Environment reloaded and API client refreshed. New keys are live.',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    'Environment reloaded. New API keys will take effect on the next request.',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    'Warning: Failed to parse settings file. Check for JSON syntax errors.',
 };
