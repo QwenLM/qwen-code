@@ -2,7 +2,7 @@
 
 > Architecture decisions, trade-offs, and rejected alternatives for the `/review` skill.
 
-## Why 12 agents + 1 verify + iterative reverse, not 1 agent?
+## Why 14 agents + 1 verify + iterative reverse, not 1 agent?
 
 **Considered:**
 
@@ -12,9 +12,9 @@
 - **10 parallel agents:** The 9-agent design plus Issue Fidelity & Root-Cause Ownership, which compares linked issue evidence against the PR's claimed fix before accepting a client-side change.
 - **12 parallel agents (current):** The 10-agent design with Correctness split into three procedural walks — 1a line-by-line scan, 1b removed-behavior audit, 1c cross-file tracer — plus up to 2 optional diff-specialized finders (Agent 8) when one domain dominates the diff.
 
-**Decision:** 12 agents. The marginal cost (12x vs 1x) is acceptable because:
+**Decision:** 14 agents. The marginal cost (14x vs 1x) is acceptable because:
 
-1. All 12 agents are submitted in one response and run concurrently up to the runtime's tool-call cap (default 10, `QWEN_CODE_MAX_TOOL_CONCURRENCY`) — wall time is bounded by roughly two waves at worst, still far below twelve sequential agents
+1. All 14 agents are submitted in one response and run concurrently up to the runtime's tool-call cap (default 10, `QWEN_CODE_MAX_TOOL_CONCURRENCY`) — wall time is bounded by roughly two waves at worst, still far below fourteen sequential agents
 2. Dimensional focus produces higher recall (fewer missed issues)
 3. Three undirected personas (attacker / 3am-oncall / maintainer) catch cross-dimensional issues that a single undirected agent's prompt-induced bias would miss
 4. Issue Fidelity prevents a common false approval mode: a PR can be internally well-tested while solving only the author's mistaken diagnosis, not the linked issue's original failure
@@ -30,7 +30,7 @@ Test gaps are a systematic blind spot. Review agents focused on bugs in the new 
 
 ### Why a dedicated Issue Fidelity agent
 
-Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (11 agents instead of 12).
+Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (13 agents instead of 14).
 
 The agent also enforces the root-cause ownership gate: a client-side parser/sanitizer workaround for malformed upstream output is not acceptable as a root-cause fix unless a maintainer explicitly asked for that defensive mitigation.
 
@@ -100,7 +100,7 @@ The original design gave one agent the whole diff plus a growing cumulative find
 
 ### Why the topology gate counts source lines, not diff lines
 
-Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by ten lenses (the diff-reading dimension agents: twelve minus Issue Fidelity and Build & Test).
+Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by twelve lenses (the diff-reading dimension agents: fourteen minus Issue Fidelity and Build & Test).
 
 Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 3200` as an attention bound: past that point asking ten diff-reading lenses each to swallow the whole diff dilutes all of them, and the chunk topology's base cost (`ceil(diffLines / 400) + 4`, counting the whole-diff agents that read the diff — Build & Test reads none) crosses twelve about there. It is not a promise of fewer calls — a heavy file adds three invariant agents and a dominant domain up to two specialized finders — but of one accountable reader per line instead of ten diluted ones. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
 
@@ -523,7 +523,7 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 **Considered:**
 
-- **Always-full (original):** every `/review` runs the full pipeline. Right for a PR verdict; wrong for a 5-line pre-commit sanity check — 12 agents, sharded verification, and ≥2 reverse-audit rounds to re-derive what one reader could see in a single pass.
+- **Always-full (original):** every `/review` runs the full pipeline. Right for a PR verdict; wrong for a 5-line pre-commit sanity check — 14 agents, sharded verification, and ≥2 reverse-audit rounds to re-derive what one reader could see in a single pass.
 - **A `--quick` boolean:** two modes, but "quick" hides what is and isn't checked (rules? cross-file? build?).
 - **Three levels (chosen):** **low** = one orchestrator pass over the chunk plan, hunk-visible bugs only, ≤8 findings. **medium** = the finder angles (1a, 1b, 1c, quality/altitude, performance, conventions) run **sequentially in the orchestrator's own context** — inline sequencing, not subagents, is what makes the level cheap — ≤12 findings. **high** = the full pipeline, unchanged.
 
@@ -633,16 +633,16 @@ The convergence concern that motivated the summary is real but narrower than it 
 
 For a PR with 15 findings:
 
-| Approach                                            | LLM calls            | Notes                                                                                                |
-| --------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
-| Copilot (1 agent)                                   | 1                    | Lowest cost, lowest coverage                                                                         |
-| Gemini (2 LLM tasks)                                | 2                    | Good cost, medium coverage                                                                           |
-| Our design (5 agents, N verify)                     | 21                   | 5+15+1 — too expensive                                                                               |
-| Our design (5 agents, batch verify, single reverse) | 7                    | 5+1+1 — original design                                                                              |
-| Our design (9 agents, iterative reverse)            | 11-13                | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                 |
-| Our design (10 agents)                              | 12-14                | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                     |
-| Our design (12 agents + effort levels, current)     | 15-21 high / 0 quick | 12(+0-2)+ceil(F/8)+(2-5) under 3A; low/medium run inline with no subagents — cost scales with intent |
-| Claude /ultrareview                                 | 5-20                 | Cloud-hosted, cost on Anthropic                                                                      |
+| Approach                                            | LLM calls          | Notes                                                                                                                   |
+| --------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Copilot (1 agent)                                   | 1                  | Lowest cost, lowest coverage                                                                                            |
+| Gemini (2 LLM tasks)                                | 2                  | Good cost, medium coverage                                                                                              |
+| Our design (5 agents, N verify)                     | 21                 | 5+15+1 — too expensive                                                                                                  |
+| Our design (5 agents, batch verify, single reverse) | 7                  | 5+1+1 — original design                                                                                                 |
+| Our design (9 agents, iterative reverse)            | 11-13              | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                                    |
+| Our design (10 agents)                              | 12-14              | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                                        |
+| Our design (14 agents + effort levels, current)     | 17-23 high / 0 low | 14(+0-2)+ceil(F/8)+(2-5) under 3A; low runs inline with no subagents, 3-6 angles by diff size — cost scales with intent |
+| Claude /ultrareview                                 | 5-20               | Cloud-hosted, cost on Anthropic                                                                                         |
 
 ## Future optimization: Fork Subagent
 

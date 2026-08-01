@@ -11,6 +11,7 @@
 import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { composeReviewCommand } from './review/compose-review.js';
+import { findingsCommand } from './review/findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
@@ -55,12 +56,13 @@ export const reviewCommand: CommandModule = {
       .command(presubmitCommand)
       .command(testEfficacyCommand)
       .command(testPlanCommand)
+      .command(findingsCommand)
       .command(composeReviewCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
