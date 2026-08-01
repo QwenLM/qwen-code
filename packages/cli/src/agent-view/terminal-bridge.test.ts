@@ -339,6 +339,62 @@ describe('bridgeAgentViewTerminal', () => {
     await expect(done).rejects.toThrow('stdin failed');
     expect(stdout.output()).toBe('output');
   });
+
+  it('pauses the PTY source when stdout signals backpressure', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new BackpressureWritable();
+    let releaseInput: (() => void) | undefined;
+    const done = bridgeAgentViewTerminal({
+      stdin: delayedInput((release) => {
+        releaseInput = release;
+      }),
+      stdout,
+      pty,
+    });
+
+    pty.emitData('x'.repeat(64));
+
+    // Let the chained write execute: stdout.write returns false, bridge pauses.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pty.paused).toBe(true);
+
+    // Flush stdout so the internal buffer drains and 'drain' fires.
+    stdout.flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pty.paused).toBe(false);
+
+    releaseInput?.();
+    await done;
+    expect(stdout.output()).toBe('x'.repeat(64));
+  });
+
+  it('resumes the PTY when the bridge aborts with a pending backpressured write', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new BackpressureWritable();
+    const controller = new AbortController();
+    let releaseInput: (() => void) | undefined;
+    const done = bridgeAgentViewTerminal({
+      stdin: delayedInput((release) => {
+        releaseInput = release;
+      }),
+      stdout,
+      pty,
+      detachSignal: controller.signal,
+    });
+
+    pty.emitData('x'.repeat(64));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pty.paused).toBe(true);
+
+    // Abort while the write callback is still deferred.
+    controller.abort();
+    releaseInput?.();
+
+    // The bridge drains pending writes before settling, so flush the callback.
+    stdout.flush();
+    await expect(done).resolves.toEqual({ reason: 'detached' });
+    expect(pty.paused).toBe(false);
+  });
 });
 
 async function* bytes(
@@ -362,6 +418,7 @@ class FakeTerminalPty implements AgentViewTerminalPty {
   private readonly inputChunks: Buffer[] = [];
   private dataCallbacks: Array<(data: AgentViewTerminalBytes) => void> = [];
   readonly resizes: AgentViewTerminalSize[] = [];
+  paused = false;
 
   get listenerCount(): number {
     return this.dataCallbacks.length;
@@ -386,6 +443,14 @@ class FakeTerminalPty implements AgentViewTerminalPty {
 
   resize(size: AgentViewTerminalSize): void {
     this.resizes.push(size);
+  }
+
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
   }
 
   emitData(data: AgentViewTerminalBytes): void {
@@ -445,5 +510,31 @@ class FailingWritable extends Writable {
     callback: (error?: Error | null) => void,
   ): void {
     callback(new Error('stdout closed'));
+  }
+}
+
+class BackpressureWritable extends Writable {
+  private readonly chunks: Buffer[] = [];
+  private pending: Array<() => void> = [];
+
+  constructor() {
+    super({ highWaterMark: 16 });
+  }
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    this.pending.push(callback);
+  }
+
+  flush(): void {
+    for (const cb of this.pending.splice(0)) cb();
+  }
+
+  output(): string {
+    return Buffer.concat(this.chunks).toString('utf8');
   }
 }

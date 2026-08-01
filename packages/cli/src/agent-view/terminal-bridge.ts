@@ -23,6 +23,8 @@ export interface AgentViewTerminalPty {
     callback: (data: AgentViewTerminalBytes) => void,
   ): AgentViewTerminalDisposable | void;
   resize?(size: AgentViewTerminalSize): Promise<void> | void;
+  pause?(): void;
+  resume?(): void;
 }
 
 export type AgentViewTerminalInput =
@@ -64,7 +66,14 @@ export async function bridgeAgentViewTerminal(
     const dataDisposable = options.pty.onData((data) => {
       if (bridgeAbort.signal.aborted) return;
       outputWrites = outputWrites
-        .then(() => writeToWritable(options.stdout, toBuffer(data)))
+        .then(() =>
+          writeWithBackpressure(
+            options.stdout,
+            options.pty,
+            toBuffer(data),
+            bridgeAbort.signal,
+          ),
+        )
         .catch(() => {
           bridgeAbort.abort();
         });
@@ -192,14 +201,49 @@ function toBuffer(data: AgentViewTerminalBytes): Buffer {
   return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 }
 
-function writeToWritable(stdout: Writable, data: Buffer): Promise<void> {
+function writeWithBackpressure(
+  stdout: Writable,
+  pty: AgentViewTerminalPty,
+  data: Buffer,
+  signal: AbortSignal,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    stdout.write(data, (error?: Error | null) => {
+    let paused = false;
+    let settled = false;
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (paused) pty.resume?.();
+      if (error) reject(error);
+      else resolve();
+    };
+
+    const canContinue = stdout.write(data, (error?: Error | null) => {
       if (error) {
-        reject(error);
+        finish(error);
         return;
       }
-      resolve();
+      if (paused && stdout.writableNeedDrain && !signal.aborted) {
+        const onDrain = () => {
+          stdout.removeListener('drain', onDrain);
+          signal.removeEventListener('abort', onAbort);
+          finish();
+        };
+        const onAbort = () => {
+          stdout.removeListener('drain', onDrain);
+          finish();
+        };
+        stdout.once('drain', onDrain);
+        signal.addEventListener('abort', onAbort, { once: true });
+      } else {
+        finish();
+      }
     });
+
+    if (!canContinue && !signal.aborted) {
+      paused = true;
+      pty.pause?.();
+    }
   });
 }

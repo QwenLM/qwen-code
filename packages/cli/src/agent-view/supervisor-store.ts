@@ -80,6 +80,15 @@ export async function readAgentViewRoster(
   return normalizeRoster(raw);
 }
 
+async function readAgentViewRosterForWrite(
+  options: StoreOptions = {},
+): Promise<AgentViewRosterFile> {
+  const raw = await readJsonRecordForWrite(
+    getAgentViewStorePaths(options).rosterPath,
+  );
+  return normalizeRoster(raw);
+}
+
 export async function writeAgentViewRoster(
   roster: AgentViewRosterFile,
   options: StoreOptions = {},
@@ -91,12 +100,13 @@ export async function upsertAgentViewRosterEntry(
   entry: AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(entry.sessionId);
   const sessions = roster.sessions.filter(
-    (item) => item.sessionId !== entry.sessionId,
+    (item) => sanitizeSessionId(item.sessionId) !== key,
   );
   const existing = roster.sessions.find(
-    (item) => item.sessionId === entry.sessionId,
+    (item) => sanitizeSessionId(item.sessionId) === key,
   );
   const updated: AgentViewRosterEntry = {
     ...existing,
@@ -116,13 +126,16 @@ export async function removeAgentViewRosterEntry(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(sessionId);
   const now = new Date().toISOString();
   const next: AgentViewRosterFile = {
     ...roster,
     schemaVersion: 1,
     updatedAt: now,
-    sessions: roster.sessions.filter((item) => item.sessionId !== sessionId),
+    sessions: roster.sessions.filter(
+      (item) => sanitizeSessionId(item.sessionId) !== key,
+    ),
   };
   await writeAgentViewRoster(next, options);
   return next;
@@ -133,10 +146,11 @@ export async function updateAgentViewRosterEntry(
   update: (entry: AgentViewRosterEntry) => AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterEntry | undefined> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(sessionId);
   let updated: AgentViewRosterEntry | undefined;
   const sessions = roster.sessions.map((entry) => {
-    if (entry.sessionId !== sessionId) return entry;
+    if (sanitizeSessionId(entry.sessionId) !== key) return entry;
     updated = update(entry);
     return updated;
   });
@@ -156,10 +170,9 @@ export async function readAgentViewSessionState(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile | undefined> {
-  const raw = await readJsonRecord(
-    getAgentViewSessionPaths(sessionId, options).statePath,
-  );
-  return normalizeSessionState(raw, sessionId);
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecord(paths.statePath);
+  return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
 export async function writeAgentViewSessionState(
@@ -224,10 +237,9 @@ export async function readAgentViewLaunch(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewLaunchFile | undefined> {
-  const raw = await readJsonRecord(
-    getAgentViewSessionPaths(sessionId, options).launchPath,
-  );
-  return normalizeLaunch(raw, sessionId);
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecord(paths.launchPath);
+  return normalizeLaunch(raw, path.basename(paths.sessionDir));
 }
 
 export async function writeAgentViewLaunch(
@@ -507,15 +519,9 @@ function normalizeActivity(
   return {
     ...raw,
     schemaVersion: 1,
-    ...(stringValue(raw['summary'])
-      ? { summary: stringValue(raw['summary']) }
-      : {}),
-    ...(stringValue(raw['waitingFor'])
-      ? { waitingFor: stringValue(raw['waitingFor']) }
-      : {}),
-    ...(stringValue(raw['lastResult'])
-      ? { lastResult: stringValue(raw['lastResult']) }
-      : {}),
+    summary: stringValue(raw['summary']),
+    waitingFor: stringValue(raw['waitingFor']),
+    lastResult: stringValue(raw['lastResult']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
   };
@@ -556,7 +562,7 @@ function normalizeSupervisor(
     schemaVersion: 1,
     pid,
     socketPath,
-    ...(authToken ? { authToken } : {}),
+    authToken,
     startedAt,
     updatedAt,
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,

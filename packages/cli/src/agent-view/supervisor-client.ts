@@ -324,6 +324,12 @@ export async function attachAgentViewSupervisorTerminal(
               },
             };
           },
+          pause() {
+            socket.pause();
+          },
+          resume() {
+            socket.resume();
+          },
           resize: (size) => {
             void callAgentViewSupervisor(
               socketPath,
