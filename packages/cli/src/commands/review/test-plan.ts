@@ -205,7 +205,10 @@ const COUNT_RES = [
   // command exists to check went unextracted.
   /\b(\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
   /\btests?:?\s+(\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(\d+)\s+pass(?:ed|ing)\b/gi,
+  // Variable-length lookbehind: `Test Files  45 passed` counts FILES, and
+  // filing its number as a differing TEST count was measured on this PR's own
+  // body. `\s+` because runners pad the summary column with multiple spaces.
+  /(?<!\bFiles\s+)\b(\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /** Extract every backticked span, including fenced-block bodies. */
@@ -292,8 +295,11 @@ export function extractClaims(section: string): Array<{
     // misread.
     const cd = /^cd\s+([^\s&;|]+)\s*(?:&&|;)\s*(.*)$/.exec(span);
     if (!cd && /(^|\s)cd\s/.test(span)) continue;
+    // The cd TARGET is used only to resolve the file tokens after it — it is
+    // not itself claimed: a bare directory carries none of the evidence
+    // isPathClaim requires, and claiming it around the bar re-opened the
+    // false-contradicted class the bar exists to close.
     const base = cd?.[1] ?? '';
-    if (base && PATH_RE.test(base)) push('path', base);
     const tokens = (cd?.[2] ?? span).split(/\s+/);
     for (let i = 0; i < tokens.length; i++) {
       // A token following a flag is that flag's VALUE (`--repo owner/repo`,

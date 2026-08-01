@@ -383,7 +383,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
     isCrossRepository: meta.isCrossRepository,
-    ...(diffText.trim() === '' && mergeBaseSha ? { emptyDiff: true } : {}),
+    // `diffPath` (set only on a SUCCESSFUL capture) gates this: a capture that
+    // threw also leaves diffText empty, and recommending close-as-superseded
+    // off a failed capture would close a live PR on an infrastructure error.
+    ...(diffPath !== null && diffText.trim() === '' ? { emptyDiff: true } : {}),
     // Collapse detection compares recomputed reality against GitHub's
     // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
     // signature, not rounding. Both thresholds are deliberately coarse — this
@@ -436,10 +439,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 export function countDiffChangedLines(diffText: string): number {
   let n = 0;
   for (const line of diffText.split('\n')) {
-    if (
-      (line.startsWith('+') && !line.startsWith('+++')) ||
-      (line.startsWith('-') && !line.startsWith('---'))
-    ) {
+    // `+++`/`---` are FILE headers only at exactly that prefix; a body line
+    // legitimately starts `--x` or `++x` (decrement/increment statements) and
+    // must count. Match one marker followed by NOT-the-same-marker.
+    if (/^\+(?!\+\+)/.test(line) || /^-(?!--)/.test(line)) {
       n++;
     }
   }

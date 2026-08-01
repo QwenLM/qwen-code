@@ -416,12 +416,18 @@ describe('test-efficacy probe isolation (#6832)', () => {
       bin,
       `#!/usr/bin/env node
 const path = require('path');
+const fs = require('fs');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return [{ status: 'failed' }];
+  } catch {}
+  return path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }];
+};
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults:
-      path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }],
+    assertionResults: st(f),
   })),
 }));
 `,
@@ -576,7 +582,8 @@ const fs = require('fs');
 const path = require('path');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const src = fs.readFileSync(path.join(process.cwd(), 'packages/lib/src/f.ts'), 'utf8');
-const failed = src.includes('state.clear()') ? 0 : 1;
+const ctl = files.some((f) => { try { return require('fs').readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL'); } catch { return false; } });
+const failed = ctl ? 1 : src.includes('state.clear()') ? 0 : 1;
 process.stdout.write(JSON.stringify({
   numPassedTests: failed ? 0 : files.length,
   numFailedTests: failed ? files.length : 0,

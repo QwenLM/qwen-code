@@ -165,7 +165,9 @@ describe('extractClaims', () => {
     const claims = extractClaims(
       '`cd packages/core && npx vitest run src/telemetry/loggers.test.ts`',
     );
-    expect(claims).toContainEqual({ kind: 'path', text: 'packages/core' });
+    // The cd TARGET itself is no longer claimed (a bare dir has no path
+    // evidence — round-3 review); it only resolves the file tokens after it.
+    expect(claims).not.toContainEqual({ kind: 'path', text: 'packages/core' });
     expect(claims).toContainEqual({
       kind: 'path',
       text: 'packages/core/src/telemetry/loggers.test.ts',
@@ -183,6 +185,17 @@ describe('extractClaims', () => {
         '`for d in a b; do cd $d && npx vitest run src/x.test.ts; done`',
       ),
     ).toEqual([]);
+  });
+
+  it('does not read a Test FILES summary as a test-count claim', () => {
+    expect(
+      extractClaims('Test Files  45 passed (45)').filter(
+        (c) => c.kind === 'count',
+      ),
+    ).toEqual([]);
+    expect(
+      extractClaims('Tests  100 passed').filter((c) => c.kind === 'count'),
+    ).toHaveLength(1);
   });
 
   it('does not read a bare parenthesised number as a count', () => {

@@ -318,7 +318,16 @@ export const baseTreeCommand: CommandModule = {
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;
-    const report = runBaseTree(args);
+    let report: BaseTreeReport;
+    try {
+      report = runBaseTree(args);
+    } catch (err) {
+      // The one handler without a catch was the one whose throw discarded a
+      // paid-for build: every sibling reports the error and exits non-zero.
+      writeStderrLine(`base-tree: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
     if (args.out) {
       mkdirSync(dirname(resolve(args.out)), { recursive: true });
       writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));

@@ -62,7 +62,11 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper).
-import { discardWorktree, type SweepResult } from './lib/worktree.js';
+import {
+  discardWorktree,
+  worktreeCreateFailureDetail,
+  type SweepResult,
+} from './lib/worktree.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
@@ -1037,31 +1041,6 @@ const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
 /**
- * The `inconclusive` detail for a probe worktree that could not be created.
- *
- * Pure, and extracted for that reason: the branch it lives on fires only when
- * `git worktree add` fails, and there is no portable way to force that in a
- * real-git test — the one lever (making `.git/worktrees` unwritable) is bypassed
- * by root and behaves differently under CI's unprivileged user, so a test built
- * on it would assert one thing locally and another in CI. The composition is the
- * part with logic in it, so it is testable here on its own.
- *
- * The stale-sweep's stderr is folded in because it is usually the explanation:
- * when `add` fails on a leftover the sweep could not clear, the sweep is what
- * says why.
- */
-export function probeCreateFailureDetail(
-  err: unknown,
-  sweepStderr: string,
-): string {
-  const sweepErr = sweepStderr.trim();
-  return (
-    `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
-    (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
-  );
-}
-
-/**
  * The warning for a probe worktree that survived its discard.
  *
  * Pure, and for the same reason as its sibling above: the branch it lives on
@@ -1660,7 +1639,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
       // need no probe, still ship.
-      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
+      const detail = worktreeCreateFailureDetail(
+        'probe',
+        e,
+        String(sweep?.stderr ?? ''),
+      );
       for (const file of probes) {
         results.push({ file, verdict: 'inconclusive' as const, detail });
       }
@@ -1720,19 +1703,31 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // every survivor this run would report is re-classed inconclusive.
           // (A live review measured the cost of lacking this: four survivors
           // reported off a runner whose collected suite never covered them.)
-          const controlOk = runControlMutant(
-            probeTree,
-            greenProbes[0],
-            mutantDeadline,
-            now,
-          );
-          harnessValidated = controlOk;
-          if (!controlOk) {
-            noteMutants(
-              'positive control FAILED: an injected always-failing test left the runner green, so this harness cannot kill anything — every would-be survivor is reported inconclusive',
+          // The control pays for its run like any other experiment: without
+          // this check it silently ate one budgeted slot and skippedForBudget
+          // under-reported by one. No budget for the control means nothing
+          // was validated (null) — never a fabricated true or false.
+          if (!fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
+            mutantsSkippedForBudget = candidates.length;
+            hunksSkippedForBudget = hunkCandidates.length;
+          } else {
+            harnessValidated = runControlMutant(
+              probeTree,
+              greenProbes[0],
+              mutantDeadline,
+              now,
             );
           }
-          for (const c of candidates) {
+          if (harnessValidated === false) {
+            // Three causes share this shape — a runner that executes nothing,
+            // a collector that skips the injected test, a reporter that drops
+            // failures — and none of them can kill, so spending the rest of
+            // the window would only manufacture survivors to re-class.
+            noteMutants(
+              'positive control FAILED (the injected always-failing test did not turn the run red — a dead runner, a collector that skipped it, or a reporter that dropped the failure): nothing here can kill, every would-be survivor is reported inconclusive, and the remaining mutant/hunk window was not spent',
+            );
+          }
+          for (const c of harnessValidated === false ? [] : candidates) {
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
@@ -1750,7 +1745,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // the budget first, and a hunk probe is what the leftovers buy. It
           // also means a diff whose mutants consumed the window reports zero
           // hunk probes with `skippedForBudget` set — never a silent zero.
-          for (const h of hunkCandidates) {
+          for (const h of harnessValidated === false ? [] : hunkCandidates) {
             // A hunk whose OWN collocated test the baseline dropped (red, or the
             // case this exists for: a probe-tree import error that collected
             // nothing) cannot be scored `survived`: the other probes passing
@@ -1862,6 +1857,34 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   }
 
+  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
+  // them before findings are derived, keeping the control's verdict upstream
+  // of everything a reader acts on.
+  if (harnessValidated === false) {
+    const detail =
+      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
+    for (const m of mutantResults) {
+      if (m.verdict === 'survived') {
+        m.verdict = 'inconclusive';
+        m.detail = detail;
+      }
+    }
+    for (const h of hunkResults) {
+      if (h.verdict === 'survived') {
+        h.verdict = 'inconclusive';
+        h.detail = detail;
+      }
+    }
+    // The file-level revert probe's "inert" is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too.
+    for (const r of results) {
+      if (r.verdict === 'inert') {
+        r.verdict = 'inconclusive';
+        r.detail = detail;
+      }
+    }
+  }
+
   const findings = [
     ...unreachable.map((f) => ({
       file: f,
@@ -1906,26 +1929,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         };
       }),
   ];
-
-  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
-  // them before findings are derived, keeping the control's verdict upstream
-  // of everything a reader acts on.
-  if (harnessValidated === false) {
-    const detail =
-      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
-    for (const m of mutantResults) {
-      if (m.verdict === 'survived') {
-        m.verdict = 'inconclusive';
-        m.detail = detail;
-      }
-    }
-    for (const h of hunkResults) {
-      if (h.verdict === 'survived') {
-        h.verdict = 'inconclusive';
-        h.detail = detail;
-      }
-    }
-  }
 
   const count = (v: MutantVerdict) =>
     mutantResults.filter((m) => m.verdict === v).length;
