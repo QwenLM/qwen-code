@@ -2430,8 +2430,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
   it('does not fall back after cancellation', async () => {
     const { chat, config, generateText } = makeFixture();
     const controller = new AbortController();
-    controller.abort();
-    generateText.mockRejectedValue(new DOMException('Aborted', 'AbortError'));
+    controller.abort(new DOMException('Aborted', 'AbortError'));
     const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
 
     await expect(
@@ -2444,6 +2443,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('Aborted');
+    expect(generateText).not.toHaveBeenCalled();
     expect(coldSpy).not.toHaveBeenCalled();
   });
 

@@ -594,6 +594,7 @@ export class ChatCompressionService {
     }
 
     const abortSignal = signal ?? new AbortController().signal;
+    abortSignal.throwIfAborted();
     const runColdCompression = () =>
       runSideQuery(config, {
         purpose: 'chat-compression',
