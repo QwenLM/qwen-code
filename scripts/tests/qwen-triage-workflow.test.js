@@ -2845,6 +2845,125 @@ describe('qwen-triage verify hardening round 2', () => {
     // ...counting emitted envelopes instead of delivered prompts would have
     // hidden every gate on the path.
     expect(flat).toContain('count at the destination, not at the component');
+
+    // #8147 R6: a composer-step replay whose base arm reproduced the
+    // production step's real posted comment byte-for-byte (allowed diffs
+    // named: run id, assets block) — without that calibration the A/B
+    // measures the harness, not the PR.
+    expect(flat).toContain('Calibrate the replay before believing it');
+
+    // #8147 R6: the verbatim-extraction half of the workflow/CI bullet —
+    // a YAML parser, not retyping; bash --noprofile --norc plus the step's
+    // own set line. Without this the calibration half is pinned but the
+    // extraction discipline that feeds it is not.
+    expect(flat).toContain('a YAML parser, not retyping');
+    expect(flat).toContain('bash --noprofile --norc');
+
+    // #8147 R6 §4: round 6 taught the sanitizer that a fence inside a
+    // raw-HTML block is not a fence; the backtick code-span door next to
+    // it was still open, and a list-nested fold never entered the state at
+    // all. Same root cause, one level down — found by walking the
+    // neighbouring doors, not by re-testing the reported shape.
+    expect(flat).toContain('gets its siblings swept');
+
+    // #8147 R6: the fix's new test drove the fence form only, so the suite
+    // was green with and without the two-line patch — proof the code-span
+    // axis was unpinned, visible only by running the mutation in reverse.
+    expect(flat).toContain('cannot tell head from head-plus-fix');
+
+    // #8147 R6 §5: a deferred mangling artifact got WORSE (5 visible
+    // characters became 8) in exactly the shapes the base rendered
+    // correctly — the follow-up status enum needs a cell for that, and
+    // declined/deferred rows must be re-measured, not carried.
+    expect(flat).toContain(
+      'fixed / stands / worsened / superseded / declined-with-rationale',
+    );
+
+    // #8147 R6 §5: the enum alone does not pin the re-measurement rule —
+    // deleting "declined and deferred rows are not exempt" would leave
+    // the enum assertion green while the normative sentence is gone.
+    expect(flat).toContain(
+      'Declined and deferred rows are not exempt from re-measurement',
+    );
+
+    // #8147 R6 §6: the PR named links and images as the accepted rendering
+    // cost; issue cross-references were the unnamed sibling that also
+    // fired, stamping timeline events under the bot identity.
+    expect(flat).toContain('An accepted-tradeoff list is a completeness claim');
+
+    // #8147 R6: the two-line suggested fix shipped with measured zero
+    // collateral — hostile fixtures clean, benign fixtures byte-identical,
+    // suite green — which is what separates evidence from a guess.
+    expect(flat).toContain('A suggested fix is measured, not eyeballed');
+
+    // #8215 §1: an ambiguous line regex ran per line over the PR body and
+    // went 0.96s/3.2s/14.4s/>100s on 2k/3k/5k/20k spaces. A single sample
+    // is 0.0ms and proves nothing — only the ladder shows the curve, and
+    // only tracing the body to a fork contributor makes it a finding.
+    expect(flat).toContain(
+      'Untrusted text reaching a parser is a scaling question',
+    );
+    expect(flat).toContain('ladder');
+    expect(flat).toContain('claimed escape hatch really excludes the path');
+
+    // #8215 §3: "one extra build per review, at most" was a line in an
+    // agent brief, while Step 4 launched ceil(N/8) shards that each got
+    // the same unleased worktree. The benign interleaving crashes; the
+    // one that matters returns an empty BASE arm that reads as a real
+    // behavioural difference and is quoted as deterministic evidence.
+    expect(flat).toContain('An instruction in a prompt is not an invariant');
+    expect(flat).toContain('rank the interleavings by what they produce');
+    expect(flat).toContain(
+      'A race that fabricates a result outranks a race that crashes',
+    );
+
+    // #8215 §4: the test titled "past a workspace flag" used a fixture
+    // where the flag trails the script, so it stepped over nothing — the
+    // shapes that break are the ones the title claims. Not vacuity: the
+    // assertion can fail and the scenario runs; the fixture is just wrong.
+    expect(flat).toContain("a test's name is a claim about its fixture");
+
+    // #8215 §8: the PR priced a base worktree as "one extra build" while
+    // the sibling probe tree in the same subsystem documents that a
+    // repo-nested tree needs no per-tree install. One of the two accounts
+    // is wrong and the reviewer pays whichever it is.
+    expect(flat).toContain("audit it against the repo's own accounting");
+
+    // #8037 F1: the recovery guard keyed on a length ratio, so whether it
+    // fired depended on payload size. Holding the issue's own 1898-char
+    // preamble fixed and varying only the tool showed run_shell_command —
+    // named in the issue — declined at these sizes. The report enumerates
+    // the cases; the fix inherits them.
+    expect(flat).toContain('The bug report is a coverage specification');
+
+    // #8037 F2: the same unescaped parser either dropped a required arg
+    // (schema-rejected, loud) or silently truncated a file. Same defect,
+    // and the silent half is the one to fix first — the same ordering as
+    // the fabricating-race rule.
+    expect(flat).toContain("Rank a defect's variants by observability");
+
+    // #8037 "Not verified": the harness replayed the exact wire bytes of
+    // the reported failure but not the model-side degradation producing
+    // them. A reader otherwise credits an end-to-end reproduction.
+    expect(flat).toContain('not the model-side degradation that produces it');
+
+    // #8005 test plan: step 3 asked the reviewer to insert real user input
+    // into an active turn. No code path does that — and the unrunnable
+    // step was the round's sharpest finding, because it meant the
+    // feature's own completion criterion was unreachable.
+    expect(flat).toContain("Walk the PR's own Reviewer Test Plan step by step");
+
+    // #8005 F1b: the static chain said the user_input branch was
+    // unreachable; 30 captured verifier payloads carried only
+    // delivered_output, which is what turned a reading into a proof.
+    expect(flat).toContain('Prove a negative by census, not by reading');
+
+    // #8005 F3: two mutations survived 429/429 and 326/326 — believable
+    // only because a third, expected-caught mutation turned one test red.
+    // Without it, "no coverage" and "harness never ran" look identical.
+    expect(flat).toContain(
+      'A surviving mutation needs a positive control before it becomes a',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
