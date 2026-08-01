@@ -425,4 +425,41 @@ describe('ToolApproval accessibility', () => {
     });
     expect(optionLabels()).toEqual(['Reject', 'Allow A', 'Allow B']);
   });
+
+  it('re-enables confirmation when a new request arrives', () => {
+    render(undefined);
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('does not re-arm the submit guard when the same request changes options', () => {
+    render(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'reject_always', label: 'Never', kind: 'reject_always' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    // Same request id, but options change so safeDefaultIndex flips 1 -> 0.
+    // The reset effect must NOT re-run: it is keyed strictly to request.id.
+    rerender(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
 });
