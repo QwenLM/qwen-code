@@ -333,11 +333,6 @@ export function ChatPane({
   );
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const notifySuccess = useCallback(
-    (message: string) => store.dispatch([{ type: 'status', text: message }]),
-    [store],
-  );
-
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -407,12 +402,15 @@ export function ChatPane({
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -420,12 +418,12 @@ export function ChatPane({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions: actions,
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -850,8 +848,8 @@ export function ChatPane({
         <QueuedPromptDisplay
           prompts={queuedPrompts}
           t={t}
+          canMutateMidTurn={canMutateMidTurn}
           onDelete={removeQueuedPrompt}
-          onInsert={insertQueuedPrompt}
           onEdit={editQueuedPrompt}
         />
         <ChatEditor

@@ -16,6 +16,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -413,6 +414,10 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  removeMidTurnMessage(
+    messageId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemoveMidTurnMessageResult>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;

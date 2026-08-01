@@ -60,7 +60,6 @@ const daemonActions = {
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
-const insertQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
@@ -105,7 +104,6 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
     queuedTexts: queuedTextsMock,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -221,7 +219,12 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div
+      data-testid="pane-queue"
+      data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+    >
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -289,7 +292,6 @@ beforeEach(() => {
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
-  insertQueuedPrompt.mockClear();
   editQueuedPrompt.mockClear();
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
@@ -1106,6 +1108,20 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
     expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
     expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables mid-turn queue mutations only when advertised', () => {
+    connectionState.capabilities = {
+      features: ['session_mid_turn_message_mutation'],
+    };
+    render();
+
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('true');
+  });
+
+  it('disables mid-turn queue mutations when not advertised', () => {
+    render();
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
   it('passes follow-up suggestions to the pane editor', () => {
