@@ -135,6 +135,233 @@ describe('resolveDesktopVoiceConfig', () => {
 
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
   })
+
+  it('uses an exactly allowlisted private provider from qwen settings', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { PRIVATE_ASR_KEY: 'settings-key' },
+              security: { allowedInsecureVoiceBaseUrls: [`${baseUrl}/`] },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl,
+                    envKey: 'PRIVATE_ASR_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+      apiKey: 'settings-key',
+      allowInsecureBaseUrl: true,
+    })
+  })
+
+  it('applies the exact allowlist to an environment-provided endpoint', async () => {
+    const baseUrl = 'http://voice.region-b.internal.example/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: { OPENAI_API_KEY: 'env-key', OPENAI_BASE_URL: baseUrl },
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
+          : undefined) as T | undefined,
+    })
+
+    expect(config.allowInsecureBaseUrl).toBe(true)
+    expect(config.baseUrl).toBe(baseUrl)
+  })
+
+  it('does not select a private custom provider without an exact allowlist match', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { PRIVATE_ASR_KEY: 'settings-key' },
+                security: {
+                  allowedInsecureVoiceBaseUrls: [
+                    'http://voice.region-a.internal.example/v1',
+                  ],
+                },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl:
+                        'http://voice.region-b.internal.example/v1',
+                      envKey: 'PRIVATE_ASR_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+  })
+
+  it('merges trusted settings scopes with system override precedence', async () => {
+    const defaultUrl = 'http://voice.default.internal.example/v1'
+    const userUrl = 'http://voice.user.internal.example/v1'
+    const systemUrl = 'http://voice.system.internal.example/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      systemDefaultsPath: '/managed/system-defaults.json',
+      systemSettingsPath: '/managed/settings.json',
+      readSystemJson: async <T,>(file: string) =>
+        (file.endsWith('system-defaults.json')
+          ? {
+              env: { DEFAULT_KEY: 'default-key' },
+              security: { allowedInsecureVoiceBaseUrls: [defaultUrl] },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: defaultUrl,
+                    envKey: 'DEFAULT_KEY',
+                  },
+                ],
+              },
+            }
+          : {
+              env: { SYSTEM_KEY: 'system-key' },
+              security: { allowedInsecureVoiceBaseUrls: [systemUrl] },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: systemUrl,
+                    envKey: 'SYSTEM_KEY',
+                  },
+                ],
+              },
+            }) as T,
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { USER_KEY: 'user-key' },
+              security: { allowedInsecureVoiceBaseUrls: [userUrl] },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: userUrl,
+                    envKey: 'USER_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: systemUrl,
+      apiKey: 'system-key',
+      allowInsecureBaseUrl: true,
+    })
+  })
+
+  it('honors a SystemDefaults allowlist when higher scopes do not override it', async () => {
+    const baseUrl = 'http://voice.default.internal.example/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: { OPENAI_API_KEY: 'env-key', OPENAI_BASE_URL: baseUrl },
+      systemDefaultsPath: '/managed/system-defaults.json',
+      systemSettingsPath: '/managed/settings.json',
+      readSystemJson: async <T,>(file: string) =>
+        (file.endsWith('system-defaults.json')
+          ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
+          : undefined) as T | undefined,
+      readQwenJson: async () => undefined,
+    })
+
+    expect(config.allowInsecureBaseUrl).toBe(true)
+  })
+
+  it('selects credentials only from the provider matching the voice model', async () => {
+    const wrongUrl = 'http://voice.region-a.internal.example/v1'
+    const selectedUrl = 'http://voice.region-b.internal.example/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readSystemJson: async () => undefined,
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { WRONG_KEY: 'wrong-key', SELECTED_KEY: 'selected-key' },
+              security: {
+                allowedInsecureVoiceBaseUrls: [wrongUrl, selectedUrl],
+              },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3.7-plus',
+                    baseUrl: wrongUrl,
+                    envKey: 'WRONG_KEY',
+                  },
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: selectedUrl,
+                    envKey: 'SELECTED_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config.baseUrl).toBe(selectedUrl)
+    expect(config.apiKey).toBe('selected-key')
+  })
+
+  it('rejects duplicate providers for the selected voice model', async () => {
+    const firstUrl = 'http://voice.region-a.internal.example/v1'
+    const secondUrl = 'http://voice.region-b.internal.example/v1'
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readSystemJson: async () => undefined,
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { FIRST_KEY: 'first-key', SECOND_KEY: 'second-key' },
+                security: {
+                  allowedInsecureVoiceBaseUrls: [firstUrl, secondUrl],
+                },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: firstUrl,
+                      envKey: 'FIRST_KEY',
+                    },
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: secondUrl,
+                      envKey: 'SECOND_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow("Voice model 'qwen3-asr-flash' is ambiguous")
+  })
 })
 
 describe('getQwenConfigDir', () => {

@@ -2940,6 +2940,20 @@ const SETTINGS_SCHEMA = {
           'When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.',
         showInDialog: false,
       },
+      allowedInsecureVoiceBaseUrls: {
+        type: 'array',
+        label: 'Allowed Insecure Voice Base URLs',
+        category: 'Security',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Exact normalized voice base URLs that may use HTTP or private-network addresses. Wildcards are not supported, and metadata/link-local addresses remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks.',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          description: 'Complete voice provider base URL (no wildcards)',
+        },
+      },
     },
   },
 

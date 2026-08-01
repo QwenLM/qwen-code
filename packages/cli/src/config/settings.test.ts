@@ -3332,6 +3332,91 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('allowedInsecureVoiceBaseUrls scope handling', () => {
+    it('should honor the allowlist from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual([
+        'http://voice.region-a.internal.example/v1',
+      ]);
+    });
+
+    it('should strip and warn about the allowlist from workspace scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(
+        settings.merged.security?.allowedInsecureVoiceBaseUrls,
+      ).toBeUndefined();
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.example.com/*',
+      ]);
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('security.allowedInsecureVoiceBaseUrls'),
+        ),
+      ).toBe(true);
+    });
+
+    it('should preserve a user allowlist when workspace defines another', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+              },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-b.internal.example/v1',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual([
+        'http://voice.region-a.internal.example/v1',
+      ]);
+    });
+  });
+
   describe('reloadScopeFromDisk', () => {
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(

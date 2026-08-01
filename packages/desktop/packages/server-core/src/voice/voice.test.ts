@@ -231,6 +231,65 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     ).resolves.toBeUndefined()
   })
 
+  it('allows an explicitly trusted private address', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://10.0.0.8/v1',
+        'm',
+        undefined,
+        true,
+      ),
+    ).resolves.toBeUndefined()
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://voice.internal.example/v1',
+        'm',
+        async () => [{ address: '10.0.0.9' }],
+        true,
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it('keeps metadata and link-local addresses blocked when trusted', async () => {
+    for (const address of [
+      '169.254.169.254',
+      '100.100.100.200',
+      '[fd00:ec2::254]',
+      '[fd00:0ec2:0000:0000:0000:0000:0000:0254]',
+      '[fe80::1]',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          `http://${address}/v1`,
+          'm',
+          undefined,
+          true,
+        ),
+      ).rejects.toThrow(/private-network/)
+    }
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://voice.internal.example/v1',
+        'm',
+        async () => [{ address: '169.254.169.254' }],
+        true,
+      ),
+    ).rejects.toThrow(/private-network/)
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://voice.internal.example/v1',
+        'm',
+        async () => [
+          { address: 'fd00:0ec2:0000:0000:0000:0000:0000:0254' },
+        ],
+        true,
+      ),
+    ).rejects.toThrow(/private-network/)
+  })
+
   it('skips DNS for IP-literal and loopback hosts', async () => {
     let called = false
     const lookup = async () => {

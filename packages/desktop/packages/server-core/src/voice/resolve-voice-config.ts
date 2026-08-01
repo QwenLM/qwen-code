@@ -1,12 +1,12 @@
 /**
  * Resolve the ASR endpoint + credentials for desktop voice dictation.
  *
- * The desktop drives Qwen over ACP and stores no DashScope baseUrl/apiKey of its
- * own — the real credentials live in the qwen CLI's config (`~/.qwen`). We resolve
+ * The desktop drives Qwen over ACP and stores no voice baseUrl/apiKey of its
+ * own — the real credentials live in Qwen's trusted configuration. We resolve
  * them from, in order:
  *   1. OAuth login        — `~/.qwen/oauth_creds.json` (access_token + resource_url)
- *   2. API-key login      — `~/.qwen/settings.json` (a DashScope compatible-mode
- *                           modelProvider, with its key from settings `env`)
+ *   2. API-key login      — SystemDefaults → User → System settings (the selected
+ *                           modelProvider, or the legacy shared DashScope provider)
  *   3. Environment        — DASHSCOPE_API_KEY, or OPENAI_API_KEY with OPENAI_BASE_URL
  *
  * The voice model is the user-selected one persisted in desktop settings
@@ -14,8 +14,8 @@
  * downstream from the model id.
  */
 
-import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { homedir, platform, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
@@ -32,6 +32,9 @@ interface ResolvedCredentials {
 
 interface ResolveDesktopVoiceConfigDeps {
   readQwenJson?: <T>(file: string) => Promise<T | undefined>;
+  readSystemJson?: <T>(file: string) => Promise<T | undefined>;
+  systemSettingsPath?: string;
+  systemDefaultsPath?: string;
   getVoiceModel?: () => string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -107,6 +110,40 @@ async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
   }
 }
 
+async function readJsonFileFromDisk<T>(file: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await readFile(file, 'utf-8')) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readNoJson<T>(): Promise<T | undefined> {
+  return undefined;
+}
+
+function getSystemSettingsPath(env: NodeJS.ProcessEnv): string {
+  const override = env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+  if (override) return override;
+  if (platform() === 'darwin') {
+    return '/Library/Application Support/QwenCode/settings.json';
+  }
+  if (platform() === 'win32') {
+    return 'C:\\ProgramData\\qwen-code\\settings.json';
+  }
+  return '/etc/qwen-code/settings.json';
+}
+
+function getSystemDefaultsPath(
+  env: NodeJS.ProcessEnv,
+  systemSettingsPath: string,
+): string {
+  return (
+    env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] ||
+    join(dirname(systemSettingsPath), 'system-defaults.json')
+  );
+}
+
 async function getStoredVoiceModel(): Promise<string> {
   const { getVoiceModel } = await import('@craft-agent/shared/config');
   return getVoiceModel();
@@ -137,15 +174,78 @@ async function fromOAuth(
   };
 }
 
-// Provider shape in ~/.qwen/settings.json: the key is referenced by `envKey`
+// Provider shape in trusted Qwen settings: the key is referenced by `envKey`
 // (the env-var name), never stored inline.
 interface QwenProvider {
+  id?: string;
   baseUrl?: string;
   envKey?: string;
 }
+
 interface QwenSettings {
   env?: Record<string, string>;
   modelProviders?: Record<string, QwenProvider[]>;
+  security?: {
+    allowedInsecureVoiceBaseUrls?: string[];
+  };
+}
+
+function mergeTrustedQwenSettings(
+  systemDefaults: QwenSettings | undefined,
+  user: QwenSettings | undefined,
+  system: QwenSettings | undefined,
+): QwenSettings {
+  const scopes = [systemDefaults, user, system];
+  let modelProviders: QwenSettings['modelProviders'];
+  let hasModelProviders = false;
+  for (const scope of scopes) {
+    if (
+      scope &&
+      Object.prototype.hasOwnProperty.call(scope, 'modelProviders')
+    ) {
+      modelProviders = scope.modelProviders;
+      hasModelProviders = true;
+    }
+  }
+
+  return {
+    env: {
+      ...(systemDefaults?.env ?? {}),
+      ...(user?.env ?? {}),
+      ...(system?.env ?? {}),
+    },
+    ...(hasModelProviders ? { modelProviders } : {}),
+    security: {
+      ...(systemDefaults?.security ?? {}),
+      ...(user?.security ?? {}),
+      ...(system?.security ?? {}),
+    },
+  };
+}
+
+function normalizeAllowedVoiceBaseUrl(raw: string): string | undefined {
+  try {
+    const normalized = normalizeBaseUrl(raw);
+    new URL(normalized);
+    return normalized;
+  } catch {
+    return undefined;
+  }
+}
+
+function isInsecureVoiceBaseUrlAllowed(
+  settings: QwenSettings | undefined,
+  normalizedBaseUrl: string,
+): boolean {
+  const allowed = settings?.security?.allowedInsecureVoiceBaseUrls;
+  return (
+    Array.isArray(allowed) &&
+    allowed.some(
+      (candidate) =>
+        typeof candidate === 'string' &&
+        normalizeAllowedVoiceBaseUrl(candidate) === normalizedBaseUrl,
+    )
+  );
 }
 
 /** qwen3-asr models live on the DashScope OpenAI-compatible endpoint. Exported for tests. */
@@ -162,21 +262,50 @@ export function isDashscopeCompatible(url: string): boolean {
 }
 
 /** 2) API-key login: a DashScope compatible-mode provider in settings.json. */
-async function fromQwenSettings(
-  deps: Required<Pick<ResolveDesktopVoiceConfigDeps, 'readQwenJson' | 'env'>>,
-): Promise<ResolvedCredentials | undefined> {
-  const settings = await deps.readQwenJson<QwenSettings>('settings.json');
+function fromQwenSettings(
+  settings: QwenSettings | undefined,
+  envSource: NodeJS.ProcessEnv,
+  voiceModel: string,
+): ResolvedCredentials | undefined {
   if (!settings) return undefined;
-  const env = settings.env ?? {};
+  const settingsEnv = settings.env ?? {};
   const keyFor = (p: QwenProvider): string | undefined => {
     if (!p.envKey) return undefined;
-    return deps.env[p.envKey]?.trim() || env[p.envKey]?.trim() || undefined;
+    return (
+      envSource[p.envKey]?.trim() ||
+      settingsEnv[p.envKey]?.trim() ||
+      undefined
+    );
   };
   const providers = Object.values(settings.modelProviders ?? {}).flat();
-  for (const provider of providers) {
-    if (provider.baseUrl && isDashscopeCompatible(provider.baseUrl)) {
+  const matches = providers.filter((provider) => provider.id === voiceModel);
+  if (matches.length > 1) {
+    throw new Error(`Voice model '${voiceModel}' is ambiguous.`);
+  }
+  const provider = matches[0];
+  if (provider?.baseUrl) {
+    const baseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
+    if (
+      baseUrl &&
+      (isDashscopeCompatible(provider.baseUrl) ||
+        isInsecureVoiceBaseUrlAllowed(settings, baseUrl))
+    ) {
       const apiKey = keyFor(provider);
-      if (apiKey) return { baseUrl: normalizeBaseUrl(provider.baseUrl), apiKey };
+      if (apiKey) return { baseUrl, apiKey };
+    }
+  }
+  if (provider) return undefined;
+
+  // Preserve the pre-existing API-key flow for settings that provide a shared
+  // DashScope endpoint rather than a model-specific voice entry. Custom
+  // allowlisted endpoints never use this fallback because selecting one for an
+  // unrelated model could cross a region or trust boundary.
+  for (const fallback of providers) {
+    if (fallback.baseUrl && isDashscopeCompatible(fallback.baseUrl)) {
+      const apiKey = keyFor(fallback);
+      if (apiKey) {
+        return { baseUrl: normalizeBaseUrl(fallback.baseUrl), apiKey };
+      }
     }
   }
   return undefined;
@@ -213,24 +342,55 @@ export async function resolveDesktopVoiceConfig(
 ): Promise<VoiceConfig> {
   const resolvedDeps = {
     readQwenJson: deps.readQwenJson ?? readQwenJsonFromDisk,
+    // Supplying a user-settings reader is test dependency injection; do not
+    // unexpectedly fall through to the host machine's real system settings.
+    readSystemJson:
+      deps.readSystemJson ??
+      (deps.readQwenJson ? readNoJson : readJsonFileFromDisk),
     env: deps.env ?? process.env,
     now: deps.now ?? Date.now,
   };
+  const voiceModel = deps.getVoiceModel
+    ? deps.getVoiceModel()
+    : await getStoredVoiceModel();
+  const systemSettingsPath =
+    deps.systemSettingsPath ?? getSystemSettingsPath(resolvedDeps.env);
+  const systemDefaultsPath =
+    deps.systemDefaultsPath ??
+    getSystemDefaultsPath(resolvedDeps.env, systemSettingsPath);
+  const [systemDefaults, userSettings, systemSettings] = await Promise.all([
+    resolvedDeps.readSystemJson<QwenSettings>(systemDefaultsPath),
+    resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
+    resolvedDeps.readSystemJson<QwenSettings>(systemSettingsPath),
+  ]);
+  const qwenSettings = mergeTrustedQwenSettings(
+    systemDefaults,
+    userSettings,
+    systemSettings,
+  );
   const creds =
     (await fromOAuth(resolvedDeps)) ??
-    (await fromQwenSettings(resolvedDeps)) ??
+    fromQwenSettings(qwenSettings, resolvedDeps.env, voiceModel) ??
     fromEnv(resolvedDeps.env);
   if (!creds) {
     throw new Error(NO_CREDENTIALS_ERROR);
   }
-  // Voice audio must not travel in cleartext.
+  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
+    qwenSettings,
+    creds.baseUrl,
+  );
   const parsed = new URL(creds.baseUrl);
-  if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
+  if (
+    parsed.protocol !== 'https:' &&
+    !isLoopbackHost(parsed.hostname) &&
+    !allowInsecureBaseUrl
+  ) {
     throw new Error('Voice endpoint must use an https baseUrl.');
   }
   return {
-    model: deps.getVoiceModel ? deps.getVoiceModel() : await getStoredVoiceModel(),
+    model: voiceModel,
     baseUrl: creds.baseUrl,
     apiKey: creds.apiKey,
+    ...(allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
   };
 }

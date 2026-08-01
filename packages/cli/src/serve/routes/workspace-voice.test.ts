@@ -758,6 +758,40 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST accepts an exactly allowlisted private voice provider', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    await writeJson(path.join(h.home, 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            baseUrl,
+            envKey: 'PRIVATE_ASR_KEY',
+          },
+        ],
+      },
+      env: { PRIVATE_ASR_KEY: 'sk-secret' },
+      security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.enabled',
+      true,
+      expect.any(Function),
+    );
+  });
+
   it('POST allows disabling voice without a selected model', async () => {
     const res = await request(h.app)
       .post('/workspace/voice')

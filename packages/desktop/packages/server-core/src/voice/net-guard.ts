@@ -29,6 +29,19 @@ export function isLoopbackHost(hostname: string): boolean {
   );
 }
 
+function isAwsIpv6MetadataAddress(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isIP(host) !== 6) return false;
+  try {
+    return (
+      normalizeHostname(new URL(`http://[${host}]/`).hostname) ===
+      'fd00:ec2::254'
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** IP-literal private-network check; hostname resolution is handled separately. */
 export function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeHostname(hostname);
@@ -71,8 +84,44 @@ export function isPrivateNetworkIp(hostname: string): boolean {
   return false;
 }
 
-function isBlockedResolvedIp(address: string): boolean {
-  return isLoopbackHost(address) || isPrivateNetworkIp(address);
+function isAlwaysBlockedVoiceAddress(address: string): boolean {
+  const host = normalizeHostname(address);
+  if (isLoopbackHost(host)) return true;
+  if (host.includes(':')) {
+    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (ipv4Embedded) {
+      return isAlwaysBlockedVoiceAddress(ipv4Embedded[1]!);
+    }
+  }
+  if (host.startsWith('::ffff:')) return true;
+  if (isIP(host) === 4) {
+    const [first = 0, second = 0] = host.split('.').map(Number);
+    return (
+      first === 0 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      host === '100.100.100.200'
+    );
+  }
+  if (isIP(host) === 6) {
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
+    return (
+      host === '::' ||
+      isAwsIpv6MetadataAddress(host) ||
+      (firstHextet & 0xffc0) === 0xfe80
+    );
+  }
+  return false;
+}
+
+function isBlockedResolvedIp(
+  address: string,
+  allowInsecureBaseUrl: boolean,
+): boolean {
+  return (
+    isAlwaysBlockedVoiceAddress(address) ||
+    (!allowInsecureBaseUrl && isPrivateNetworkIp(address))
+  );
 }
 
 async function defaultLookupHost(
@@ -86,6 +135,7 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   baseUrl: string,
   model: string,
   lookupHost?: VoiceHostLookup,
+  allowInsecureBaseUrl = false,
 ): Promise<void> {
   const hostname = new URL(baseUrl).hostname;
   if (isLoopbackHost(hostname)) {
@@ -93,7 +143,10 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   }
   const host = normalizeHostname(hostname);
   if (isIP(host) !== 0) {
-    if (isPrivateNetworkIp(host)) {
+    if (
+      isPrivateNetworkIp(host) &&
+      (!allowInsecureBaseUrl || isAlwaysBlockedVoiceAddress(host))
+    ) {
       throw new Error(
         `Voice model '${model}': baseUrl is a private-network address.`,
       );
@@ -109,7 +162,11 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     );
   }
   const records = Array.isArray(result) ? result : [result];
-  if (records.some((record) => isBlockedResolvedIp(record.address))) {
+  if (
+    records.some((record) =>
+      isBlockedResolvedIp(record.address, allowInsecureBaseUrl),
+    )
+  ) {
     throw new Error(
       `Voice model '${model}' resolved to a private-network address.`,
     );

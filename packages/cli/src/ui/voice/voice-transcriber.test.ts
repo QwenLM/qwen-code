@@ -29,9 +29,18 @@ function createConfig(models: ReturnType<Config['getAllConfiguredModels']>) {
 function createSettings(
   env: Record<string, string> = {},
   apiKey?: string,
+  allowedInsecureVoiceBaseUrls?: string[],
 ): LoadedSettings {
   return {
-    merged: { env, security: { auth: { apiKey } } },
+    merged: {
+      env,
+      security: {
+        auth: { apiKey },
+        ...(allowedInsecureVoiceBaseUrls
+          ? { allowedInsecureVoiceBaseUrls }
+          : {}),
+      },
+    },
   } as unknown as LoadedSettings;
 }
 
@@ -490,6 +499,153 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
       }),
     ).toThrow(/must use an https baseUrl/);
+  });
+
+  it('rejects unsupported URL schemes even when exactly allowlisted', () => {
+    const baseUrl = 'ftp://voice.region-a.internal.example/v1';
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Private Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings({}, undefined, [baseUrl]),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/must use an http or https baseUrl/);
+  });
+
+  it('allows an exact trusted HTTP private voice base URL', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    const resolved = resolveVoiceTranscriptionConfig({
+      config: createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Private Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: `${baseUrl}/`,
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }, undefined, [
+        baseUrl,
+      ]),
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    expect(resolved).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+      apiKey: 'sk-test',
+      allowInsecureBaseUrl: true,
+    });
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(resolved, async () => ({
+        address: '10.23.45.67',
+      })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('keeps metadata DNS results blocked for a trusted voice URL', async () => {
+    const trusted = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://voice.internal.example/v1',
+      allowInsecureBaseUrl: true,
+    };
+
+    for (const address of [
+      '169.254.169.254',
+      '100.100.100.200',
+      'fd00:0ec2:0000:0000:0000:0000:0000:0254',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(trusted, async () => ({ address })),
+      ).rejects.toThrow(/private-network address/);
+    }
+  });
+
+  it('requires the trusted voice base URL to match host, port, and path', () => {
+    for (const baseUrl of [
+      'http://voice.region-b.internal.example/v1',
+      'http://voice.region-a.internal.example:8080/v1',
+      'http://voice.region-a.internal.example/v2',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Private Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]);
+
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings({}, undefined, [
+            'http://voice.region-a.internal.example/v1',
+          ]),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(/must use an https baseUrl/);
+    }
+  });
+
+  it('does not apply an HTTP exception to the HTTPS variant', async () => {
+    const resolved = resolveVoiceTranscriptionConfig({
+      config: createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Private Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://voice.region-a.internal.example/v1',
+        },
+      ]),
+      settings: createSettings({}, undefined, [
+        'http://voice.region-a.internal.example/v1',
+      ]),
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    expect(resolved.allowInsecureBaseUrl).toBeUndefined();
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(resolved, async () => ({
+        address: '10.23.45.67',
+      })),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it('keeps metadata and link-local addresses blocked after an exact opt-in', () => {
+    for (const blockedBaseUrl of [
+      'http://169.254.169.254/v1',
+      'http://100.100.100.200/v1',
+      'http://[fd00:ec2::254]/v1',
+      'http://[fd00:0ec2:0000:0000:0000:0000:0000:0254]/v1',
+      'http://[fe80::1]/v1',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Blocked ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: blockedBaseUrl,
+        },
+      ]);
+
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings({}, undefined, [blockedBaseUrl]),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(/private-network baseUrl/);
+    }
   });
 
   it('rejects private-network voice URLs', () => {

@@ -41,6 +41,7 @@ export interface VoiceTranscriptionConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface VoiceStreamConfig {
@@ -49,6 +50,7 @@ export interface VoiceStreamConfig {
   apiKey?: string;
   language?: string;
   keytermsContext?: string;
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface ResolvedVoiceStreamConfig extends VoiceStreamConfig {
@@ -122,6 +124,33 @@ function normalizeBaseUrl(baseUrl: string, modelName: string): string {
   return trimTrailingSlashes(url.toString());
 }
 
+function normalizeAllowedVoiceBaseUrl(baseUrl: string): string | undefined {
+  try {
+    const url = new URL(baseUrl.trim());
+    if (url.username || url.password) {
+      return undefined;
+    }
+    return trimTrailingSlashes(url.toString());
+  } catch {
+    return undefined;
+  }
+}
+
+function isInsecureVoiceBaseUrlAllowed(
+  settings: LoadedSettings,
+  normalizedBaseUrl: string,
+): boolean {
+  const allowed = settings.merged.security?.allowedInsecureVoiceBaseUrls;
+  return (
+    Array.isArray(allowed) &&
+    allowed.some(
+      (candidate) =>
+        typeof candidate === 'string' &&
+        normalizeAllowedVoiceBaseUrl(candidate) === normalizedBaseUrl,
+    )
+  );
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[|\]$/g, '');
 }
@@ -129,6 +158,21 @@ function normalizeHostname(hostname: string): string {
 function isLoopbackHost(hostname: string): boolean {
   const host = normalizeHostname(hostname);
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function isAwsIpv6MetadataAddress(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isIP(host) !== 6) {
+    return false;
+  }
+  try {
+    return (
+      normalizeHostname(new URL(`http://[${host}]/`).hostname) ===
+      'fd00:ec2::254'
+    );
+  } catch {
+    return false;
+  }
 }
 
 function readIpv4CompatibleIpv6(host: string): string | undefined {
@@ -201,6 +245,46 @@ function isPrivateNetworkIp(hostname: string): boolean {
   return false;
 }
 
+function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4Mapped) {
+    return isAlwaysBlockedVoiceAddress(ipv4Mapped[1]!);
+  }
+  const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4Compatible) {
+    return isAlwaysBlockedVoiceAddress(ipv4Compatible[1]!);
+  }
+  const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
+  if (normalizedIpv4Compatible) {
+    return isAlwaysBlockedVoiceAddress(normalizedIpv4Compatible);
+  }
+  if (host.startsWith('::ffff:')) {
+    return true;
+  }
+  if (isIP(host) === 4) {
+    const [first = 0, second = 0] = host.split('.').map(Number);
+    return (
+      first === 0 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      host === '100.100.100.200'
+    );
+  }
+  if (isIP(host) === 6) {
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '', 16);
+    return (
+      host === '::' ||
+      isAwsIpv6MetadataAddress(host) ||
+      (firstHextet >= 0xfe80 && firstHextet <= 0xfebf)
+    );
+  }
+  return false;
+}
+
 async function defaultLookupHost(
   hostname: string,
 ): Promise<Array<{ address: string }>> {
@@ -217,7 +301,11 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     return;
   }
   if (isIP(hostname) !== 0) {
-    if (isPrivateNetworkIp(hostname)) {
+    if (
+      isPrivateNetworkIp(hostname) &&
+      (!voiceConfig.allowInsecureBaseUrl ||
+        isAlwaysBlockedVoiceAddress(hostname))
+    ) {
       throw new Error(
         `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
       );
@@ -254,7 +342,13 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     if (onAbort) abortSignal?.removeEventListener('abort', onAbort);
   }
   const records = Array.isArray(result) ? result : [result];
-  if (records.some((record) => isPrivateNetworkIp(record.address))) {
+  if (
+    records.some((record) =>
+      voiceConfig.allowInsecureBaseUrl
+        ? isAlwaysBlockedVoiceAddress(record.address)
+        : isPrivateNetworkIp(record.address),
+    )
+  ) {
     throw new Error(
       `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
     );
@@ -320,12 +414,33 @@ export function resolveVoiceTranscriptionConfig({
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
   const parsedBaseUrl = new URL(normalizedBaseUrl);
   const isLocalhost = isLoopbackHost(parsedBaseUrl.hostname);
-  if (parsedBaseUrl.protocol !== 'https:' && !isLocalhost) {
+  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
+    settings,
+    normalizedBaseUrl,
+  );
+  if (
+    parsedBaseUrl.protocol !== 'http:' &&
+    parsedBaseUrl.protocol !== 'https:'
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an http or https baseUrl.`,
+    );
+  }
+  if (
+    parsedBaseUrl.protocol !== 'https:' &&
+    !isLocalhost &&
+    !allowInsecureBaseUrl
+  ) {
     throw new Error(
       `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext.`,
     );
   }
-  if (isPrivateNetworkIp(parsedBaseUrl.hostname)) {
+  if (
+    !isLocalhost &&
+    isPrivateNetworkIp(parsedBaseUrl.hostname) &&
+    (!allowInsecureBaseUrl ||
+      isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname))
+  ) {
     throw new Error(
       `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
     );
@@ -340,6 +455,7 @@ export function resolveVoiceTranscriptionConfig({
     model: voiceModel,
     baseUrl: normalizedBaseUrl,
     ...(apiKey ? { apiKey } : {}),
+    ...(allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
   };
 }
 
@@ -374,6 +490,7 @@ export function resolveVoiceStreamConfig(
     baseUrl: base.baseUrl,
     model: base.model,
     ...(base.apiKey ? { apiKey: base.apiKey } : {}),
+    ...(base.allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
     ...(language ? { language } : {}),
     ...(keytermsContext ? { keytermsContext } : {}),
   };

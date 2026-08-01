@@ -96,7 +96,12 @@ async function defaultOpenStreamFor(
   config: VoiceConfig,
   callbacks: VoiceStreamCallbacks,
 ): Promise<VoiceStreamSession> {
-  await assertVoiceBaseUrlNetworkAllowed(config.baseUrl, config.model);
+  await assertVoiceBaseUrlNetworkAllowed(
+    config.baseUrl,
+    config.model,
+    undefined,
+    config.allowInsecureBaseUrl,
+  );
   const cfg = toStreamConfig(config);
   const transport = resolveVoiceTransport(config.model);
   return openVoiceStreamWithRetry(() =>
@@ -111,7 +116,12 @@ async function defaultTranscribeBatch(
   pcm: Uint8Array,
   signal: AbortSignal,
 ): Promise<string> {
-  await assertVoiceBaseUrlNetworkAllowed(config.baseUrl, config.model);
+  await assertVoiceBaseUrlNetworkAllowed(
+    config.baseUrl,
+    config.model,
+    undefined,
+    config.allowInsecureBaseUrl,
+  );
   return transcribeQwenAsrBatch(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
     config,
