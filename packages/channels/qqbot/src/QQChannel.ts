@@ -253,20 +253,21 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
-    // groupAllPolicy 'keyword' or 'all' requires 'thread' session scope for
-    // per-group shared context (routing key = channel:chatId, so every group /
-    // private chat gets its own session). We warn but do NOT force the scope:
-    // forcibly flattening the user's multi-level session isolation into a
-    // global single session was incorrect (see PR #6457 review). The user's
-    // sessionScope choice wins; with a non-thread scope, group messages may
-    // fragment per user instead of sharing one context per group.
+    // groupAllPolicy 'keyword' or 'all' requires a shared-context session
+    // scope ('thread' for per-group shared context, 'single' for one global
+    // session — routing key = channel:chatId / channel:__single__). Only
+    // 'user' fragments group messages per sender. We warn but do NOT force
+    // the scope: forcibly flattening the user's multi-level session isolation
+    // into a global single session was incorrect (see PR #6457 review). The
+    // user's sessionScope choice wins.
     const qqCfg = config as unknown as QQChannelConfig;
     if (
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
-      config.sessionScope !== 'thread'
+      config.sessionScope !== 'thread' &&
+      config.sessionScope !== 'single'
     ) {
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context; with the current scope group messages may fragment per user.\n`,
+        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not a shared-context scope). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context (or 'single' for one global session); with sessionScope 'user' group messages fragment per sender.\n`,
       );
     }
 
@@ -1085,7 +1086,9 @@ export class QQChannel extends ChannelBase {
         ) {
           anchor = anchorEntry.msgId;
         } else {
-          this.sessionReplyMsgId.delete(sessionId);
+          // Drop the stale anchor through the release path so its orphaned
+          // msg_seq counter is purged too (a raw delete would leave it behind).
+          this.releaseSessionReplyAnchor(sessionId);
         }
       }
       state = {
@@ -1187,16 +1190,23 @@ export class QQChannel extends ChannelBase {
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
           // #2: Flush immediately — idle timer would add unnecessary delay
-          // onResponseComplete already fired: release the per-session reply
-          // anchor now. Any later window's chunks still carry state.msgId
-          // (captured in the state object), so this cannot detach them.
-          this.releaseSessionReplyAnchor(sessionId);
+          // onResponseComplete already fired. When a residual buffer is still
+          // queued, do NOT release the per-session reply anchor here: the
+          // re-flush's sendMessage reads msg_seq from msgSeqMap, and dropping
+          // the counter now would reset msg_seq to 1 (QQ dedupes on msg_id +
+          // msg_seq and silently drops the tail). Re-arm the pending flag so
+          // whichever branch settles the re-flush chain (its .then() success
+          // path, or .catch() retry/exhaustion) performs the release exactly
+          // once.
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
+            this.pendingStreamDelete.add(sessionId);
             // Don't clear buffer or retryCount — idleFlush will pick them up.
             this.idleFlush(sessionId, this._reconnectId);
             // Don't return — let .finally() clear flushingSessions
             // so deferred idleFlush can proceed.
+          } else {
+            this.releaseSessionReplyAnchor(sessionId);
           }
         }
 
@@ -1239,7 +1249,11 @@ export class QQChannel extends ChannelBase {
         // #1: Never undo previously-succeeded flush records on failure
 
         if (this.pendingStreamDelete.has(sessionId)) {
-          // Session is ending - retry up to MAX_FLUSH_RETRIES
+          // Session is ending - retry up to MAX_FLUSH_RETRIES. When a retry is
+          // scheduled, re-arm the pending flag so whichever branch settles the
+          // retry chain (its .then() success path, or exhaustion below)
+          // performs the anchor release exactly once — releasing earlier would
+          // reset msg_seq for the retried tail send (see .then() above).
           this.pendingStreamDelete.delete(sessionId);
           const current = this.streamState.get(sessionId);
           if (current === state) {
@@ -1249,6 +1263,7 @@ export class QQChannel extends ChannelBase {
               this.maxFlushRetries <= 0 ||
               current.retryCount < this.maxFlushRetries
             ) {
+              this.pendingStreamDelete.add(sessionId);
               const reconnectId = this._reconnectId;
               const delay =
                 current.retryCount > 1
@@ -1389,7 +1404,6 @@ export class QQChannel extends ChannelBase {
         : undefined;
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
-    this.releaseSessionReplyAnchor(sessionId);
     if (remaining) {
       if (capturedMsgId) {
         // Final segment keeps this session's reply anchor (per-session msgId),
@@ -1399,6 +1413,14 @@ export class QQChannel extends ChannelBase {
         await super.onResponseComplete(chatId, remaining, sessionId);
       }
     }
+    // Release the anchor only AFTER the final segment went out. Releasing
+    // first would drop the msgSeqMap counter for capturedMsgId (when no other
+    // session is anchored to it and the chat entry has moved on), making the
+    // final sendMessage above resolve nextSeq = 1 — QQ dedupes on msg_id +
+    // msg_seq and would silently drop the reply tail. If sendMessage throws,
+    // ChannelBase's finally still runs onPromptEnd, which releases the anchor
+    // (idempotent — a second release here is a no-op).
+    this.releaseSessionReplyAnchor(sessionId);
   }
 
   override onSessionDied(sessionId: string): void {
@@ -1804,7 +1826,11 @@ export class QQChannel extends ChannelBase {
     for (const [, entry] of this.replyMsgId) {
       if (entry.msgId === anchor.msgId) return;
     }
-    this.msgSeqMap.delete(anchor.msgId);
+    if (this.msgSeqMap.delete(anchor.msgId)) {
+      // Persist the dropped counter so a cold restart does not resurrect an
+      // orphaned seq for a msgId that can never be used again.
+      this.saveQQState();
+    }
   }
 
   /**

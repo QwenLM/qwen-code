@@ -349,7 +349,10 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
 });
 
 describe('purgeSingleScopeOrphans', () => {
-  function makeChannelWithRouter(router: unknown): QQChannelInstance {
+  function makeChannelWithRouter(
+    router: unknown,
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
     return new QQChannel(
       'test-bot',
       {
@@ -364,6 +367,7 @@ describe('purgeSingleScopeOrphans', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        ...overrides,
       },
       {} as unknown as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
@@ -404,6 +408,21 @@ describe('purgeSingleScopeOrphans', () => {
   it('is a safe no-op when getAll returns nothing', () => {
     const removeSessionId = vi.fn();
     const ch = makeChannelWithRouter({ getAll: () => [], removeSessionId });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op under explicit single scope (live routing state, not orphans)', () => {
+    const removeSessionId = vi.fn();
+    const router = {
+      getAll: () => [
+        // Under 'single' scope, `channel:__single__` IS the live routing key —
+        // purging it would silently reset the user's global session on restart.
+        { key: 'test-bot:__single__', sessionId: 'live-session' },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
     callPurge(ch);
     expect(removeSessionId).not.toHaveBeenCalled();
   });

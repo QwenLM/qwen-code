@@ -704,8 +704,11 @@ describe('onToolCall flush', () => {
     }
     await drain();
 
-    // Re-buffered for retry instead of silently dropped
-    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    // Re-buffered for retry instead of silently dropped. The pending flag is
+    // re-armed for the retry chain so its settle path releases the reply
+    // anchor exactly once (the anchor must survive until the tail's send has
+    // resolved its msg_seq from msgSeqMap).
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe('text before tool');
 
@@ -763,6 +766,37 @@ describe('onResponseComplete', () => {
       'final tail',
     );
     expect(body['msg_id']).toBe('msg-A');
+  });
+
+  it('final segment goes out as an active send when the anchor has expired (TTL)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    // onPromptStart anchors sess-A to msg-A; the first chunk snaps it into
+    // streamState while it is still fresh.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'final tail', 'sess-A');
+    // The final segment only arrives after the 5-minute TTL elapsed — the
+    // anchor is stale by the time onResponseComplete reads it, so the send
+    // must fall back to the active path (no msg_id, no msg_seq).
+    sessionAnchors.set('sess-A', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - (300_000 + 1000),
+    });
+
+    await onResponseComplete(ch, 'test-chat', 'ignored-fulltext', 'sess-A');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'final tail',
+    );
+    expect(body['msg_id']).toBeUndefined();
+    // The stale anchor is dropped via the release path.
+    expect(sessionAnchors.has('sess-A')).toBe(false);
   });
 
   it('falls back to fullText when no streamState', async () => {
@@ -891,8 +925,11 @@ describe('pendingStreamDelete coordination', () => {
     }
     await drain();
 
-    // Re-buffered for retry instead of silently dropped
-    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    // Re-buffered for retry instead of silently dropped. The pending flag is
+    // re-armed for the retry chain so its settle path releases the reply
+    // anchor exactly once (the anchor must survive until the tail's send has
+    // resolved its msg_seq from msgSeqMap).
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe('text');
 
@@ -1029,8 +1066,10 @@ describe('error recovery paths', () => {
     vi.advanceTimersByTime(2000);
     await drain();
 
-    // pendingStreamDelete should be cleared, buffer restored for retry
-    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    // pendingStreamDelete should be re-armed for the retry chain (the anchor
+    // must survive until the retried tail's send has read its msg_seq), buffer
+    // restored for retry
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe('last words');
 
     // Advance retry timer
@@ -1039,6 +1078,8 @@ describe('error recovery paths', () => {
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
     expect(streamState(ch).has('sess-1')).toBe(false);
+    // The retry chain's .then() released the pending flag on success.
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
   });
 
   it('onToolCall retries after send failure', async () => {
@@ -1329,9 +1370,10 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     resolveSend!(mockResponse(true));
     await drain();
 
-    // .then() should: delete pendingStreamDelete, see non-empty buffer,
-    // and schedule a new idleFlush timer
-    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    // .then() should: delete pendingStreamDelete, re-arm it for the re-flush
+    // chain (residual buffer still queued — the anchor must survive until the
+    // tail's send has read its msg_seq), and schedule a new idleFlush timer
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe(' part2');
     expect(streamState(ch).get('sess-1')!.timer).not.toBeNull();
