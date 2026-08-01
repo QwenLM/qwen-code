@@ -412,4 +412,17 @@ describe('ToolApproval accessibility', () => {
       'Yes, allow once',
     ]);
   });
+
+  it('falls back to distinct server labels when options share an i18n key', () => {
+    render(undefined, {
+      id: 'req-collide',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow A', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: 'Allow B', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual(['Reject', 'Allow A', 'Allow B']);
+  });
 });
