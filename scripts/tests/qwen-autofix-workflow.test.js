@@ -3660,24 +3660,22 @@ describe('qwen-autofix workflow', () => {
     // Re-running the identical address-everything prompt after a timeout
     // walks straight into the same wall (#7929 burned three 50-minute
     // timeouts that way, #7846 two). From the second attempt on, the
-    // feedback file ends with an explicit narrowing instruction: smallest
-    // blocking subset first, commit early, and defer through the SKILL
-    // contract (out of resolved-comments.txt, into comment-replies.json)
-    // — never only into the summary, which is exactly the cheap path a
-    // budget-pressured agent would otherwise take.
+    // feedback carries the measured timeout fact; the project skill owns the
+    // narrowing policy so Actions and local entry points do not grow separate
+    // model instructions.
     expect(prepareBranchAndFeedbackStep).toContain('PRIOR_TIMEOUTS=');
     expect(prepareBranchAndFeedbackStep).toContain(
       'Budget warning: previous round(s) ran out of time',
     );
-    expect(prepareBranchAndFeedbackStep).toContain(
+    const skill = readAutofixSkill();
+    expect(skill).toContain('smallest blocking subset');
+    expect(skill).toContain('comment-replies.json');
+    expect(skill).toContain('decline nonessential refactors');
+    expect(skill).toContain('fix that exact rejection before other feedback');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
       'commit as soon as that subset is done',
     );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      'record each deferral in comment-replies.json',
-    );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      'decline refactors and nice-to-haves with a one-line reason',
-    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('Fix this first');
     // The trigger threshold itself is pinned — a `-ge 99` mutation would
     // otherwise leave the feature inert with every string pin green.
     expect(prepareBranchAndFeedbackStep).toContain(
@@ -3812,10 +3810,11 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('switches to Critical-only feedback after five change rounds', () => {
-    // ROUND counts change-producing rounds, so 4 still starts the fifth
-    // suggestion-capable change while 5 starts the first Critical-only round.
-    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
+  it('switches to Critical-only feedback after ten change rounds', () => {
+    // ROUND counts change-producing rounds, so 9 still starts the tenth
+    // suggestion-capable change while 10 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '10'");
+    expect(workflow).not.toContain('TAKEOVER_CRITICAL_ONLY_AFTER_ROUND');
     expect(prepareBranchAndFeedbackStep).toContain(
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
@@ -3828,12 +3827,12 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(4)).toBe('false');
-    expect(modeAt(5)).toBe('true');
+    expect(modeAt(9)).toBe('false');
+    expect(modeAt(10)).toBe('true');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -4588,7 +4587,7 @@ describe('qwen-autofix workflow', () => {
     // The develop-issue mode must also require a Verification section in its
     // e2e-report, not just address-review — same regression, different mode.
     expect(flat).toContain(
-      'section that lists each command you ran and its result (see Shared Rules)',
+      'section that lists each command you ran and its result (see GitHub Actions Rules)',
     );
     // The Verification section ends the English body, before the collapsed
     // Chinese translation — not after it.
@@ -5217,7 +5216,74 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('keeps the current autofix skill limited to workflow-invoked modes', () => {
+  it('uses the project skill for manual local convergence', () => {
+    const skill = readAutofixSkill();
+    const flatSkill = skill.replace(/\s+/g, ' ');
+    const launchIndex = skill.indexOf('Launch exactly this command');
+    const flatLaunchIndex = flatSkill.indexOf('Launch exactly this command');
+
+    expect(skill).toContain('disable-model-invocation: true');
+    expect(skill).toContain('Mode: local working tree');
+    expect(flatSkill).toContain('explicit confirmation');
+    expect(skill).toContain('repository-defined build or test commands');
+    expect(skill).toContain('retains model credentials and network access');
+    expect(flatSkill).toContain('bare `/autofix` invocation is not consent');
+    expect(skill).toContain('Git Bash/MSYS');
+    expect(launchIndex).toBeGreaterThan(0);
+    expect(flatLaunchIndex).toBeGreaterThan(0);
+    expect(flatSkill.indexOf('explicit confirmation')).toBeLessThan(
+      flatLaunchIndex,
+    );
+    expect(skill.indexOf('Git Bash/MSYS')).toBeLessThan(launchIndex);
+    expect(skill.slice(0, launchIndex)).toContain('`BLOCKED`');
+    expect(skill).toContain(
+      'env -u SANDBOX QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --approval-mode auto --effort high --json --quiet',
+    );
+    expect(skill).toContain('is_background: true');
+    expect(flatSkill).toContain('terminal task notification');
+    expect(flatSkill).toContain(
+      'yield the current assistant pass without an outcome',
+    );
+    expect(flatSkill).toContain(
+      'including ACP, stream-json, and headless runs',
+    );
+    expect(flatSkill).toContain('at least 30 seconds between checks');
+    expect(flatSkill).toContain("shell tool's shorter foreground limit");
+    expect(flatSkill).toContain(
+      'Clearing inherited `SANDBOX` prevents a stale marker from bypassing sandbox startup',
+    );
+    expect(flatSkill).toContain('content fingerprint');
+    expect(flatSkill).toContain('review-time or concurrent changes');
+    expect(flatSkill).toContain(
+      'match the post-review fingerprint from this round',
+    );
+    expect(skill).toContain('staged, unstaged, and untracked');
+    for (const resultField of [
+      'completed',
+      'timedOut',
+      'childSignal',
+      'childExitCode',
+      'reportPath',
+      'event',
+      'baseEvent',
+      'cappedBy',
+      'downgraded',
+    ]) {
+      expect(skill).toContain(`\`${resultField}\``);
+    }
+    expect(skill).toContain('There is no fixed round limit');
+    expect(skill).toContain('changes oscillate');
+    expect(skill).toContain('staged-diff hash must match');
+    expect(skill).toContain('NO_CHANGES');
+    expect(skill).toContain('CONVERGED');
+    expect(skill).toContain('BLOCKED');
+    expect(skill).toContain('STALLED');
+    expect(skill).not.toContain('/autofix on');
+    expect(skill).not.toContain('/autofix off');
+    expect(skill).not.toContain('/autofix status');
+  });
+
+  it('keeps the runner limited to workflow-invoked modes', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
@@ -6262,17 +6328,19 @@ describe('qwen-autofix workflow', () => {
     expect(repairDeterministicRejectionStep).toContain(
       'cat "${WORKDIR}/gate-rejection.md"',
     );
-    expect(repairDeterministicRejectionStep).toContain(
+    expect(repairDeterministicRejectionStep).not.toContain(
       'Keep that commit and add one follow-up commit',
+    );
+    expect(readAutofixSkill().replace(/\s+/g, ' ')).toContain(
+      'preserve the existing rejected commit and add one verified follow-up commit',
     );
     const repairCleanup =
       repairDeterministicRejectionStep.match(
         /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
       )?.[1] ?? '';
     expect(repairCleanup).toContain('gate-rejection.md');
-    expect(repairDeterministicRejectionStep).not.toContain(
-      '"${WORKDIR}/resolved-comments.txt"',
-    );
+    expect(repairCleanup).toContain('"${WORKDIR}/resolved-comments.txt"');
+    expect(repairCleanup).toContain('"${WORKDIR}/comment-replies.json"');
     expect(
       repairDeterministicRejectionStep.match(
         /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
@@ -6312,6 +6380,42 @@ describe('qwen-autofix workflow', () => {
     expect(finalizeStatusCommentStep).toContain(
       "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
     );
+    const verificationHeadCapture = reviewVerificationRunner.indexOf(
+      'VERIFICATION_HEAD="$(git rev-parse HEAD)"',
+    );
+    const schemaCheck = reviewVerificationRunner.indexOf(
+      "run_check 'settings schema is stale on the agent-committed fix'",
+    );
+    const contractCheck = reviewVerificationRunner.indexOf(
+      "run_check 'cross-package contract verification failed'",
+    );
+    const noOpCheck = reviewVerificationRunner.indexOf(
+      'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
+    );
+    const buildCheck = reviewVerificationRunner.indexOf(
+      "run_check 'build failed on the agent-committed fix' npm run build",
+    );
+    const assertions = [
+      ...reviewVerificationRunner.matchAll(/^assert_verification_tree$/gm),
+    ].map((match) => match.index);
+    const verifiedHeadOutput = reviewVerificationRunner.indexOf(
+      'echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'workspace is dirty before deterministic verification'",
+    );
+    expect(verificationHeadCapture).toBeGreaterThan(-1);
+    expect(schemaCheck).toBeGreaterThan(verificationHeadCapture);
+    expect(contractCheck).toBeGreaterThan(schemaCheck);
+    expect(assertions).toHaveLength(2);
+    expect(assertions[0]).toBeGreaterThan(contractCheck);
+    expect(noOpCheck).toBeGreaterThan(assertions[0]);
+    expect(buildCheck).toBeGreaterThan(noOpCheck);
+    expect(assertions[1]).toBeGreaterThan(buildCheck);
+    expect(verifiedHeadOutput).toBeGreaterThan(assertions[1]);
+    expect(pushAndReportStep).toContain(
+      "VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'",
+    );
 
     const body = finalizeVerificationStep
       .match(/ {8}run: \|-\n([\s\S]*)$/)?.[1]
@@ -6329,9 +6433,11 @@ describe('qwen-autofix workflow', () => {
           GITHUB_OUTPUT: output,
           FIRST_OUTCOME: '',
           FIRST_COMMITTED: '',
+          FIRST_VERIFIED_HEAD: '',
           REPAIR_ATTEMPTED: '',
           REPAIR_OUTCOME: '',
           REPAIR_COMMITTED: '',
+          REPAIR_VERIFIED_HEAD: '',
           ...env,
         },
       });
@@ -6340,9 +6446,11 @@ describe('qwen-autofix workflow', () => {
       return { status: result.status, written };
     };
 
-    expect(run({ FIRST_OUTCOME: 'fixed' })).toMatchObject({
+    expect(
+      run({ FIRST_OUTCOME: 'fixed', FIRST_VERIFIED_HEAD: 'first-sha' }),
+    ).toMatchObject({
       status: 0,
-      written: expect.stringContaining('outcome=fixed'),
+      written: expect.stringContaining('verified_head=first-sha'),
     });
     expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
       status: 0,
@@ -6352,25 +6460,28 @@ describe('qwen-autofix workflow', () => {
       run({
         FIRST_OUTCOME: 'failed',
         FIRST_COMMITTED: 'true',
+        FIRST_VERIFIED_HEAD: 'stale-first-sha',
         REPAIR_ATTEMPTED: 'true',
         REPAIR_OUTCOME: 'fixed',
         REPAIR_COMMITTED: 'true',
+        REPAIR_VERIFIED_HEAD: 'repair-sha',
       }),
     ).toMatchObject({
       status: 0,
-      written: expect.stringContaining('outcome=fixed'),
+      written: expect.stringContaining('verified_head=repair-sha'),
     });
-    expect(
-      run({
-        FIRST_OUTCOME: 'failed',
-        FIRST_COMMITTED: 'true',
-        REPAIR_ATTEMPTED: 'true',
-        REPAIR_OUTCOME: 'fixed',
-      }),
-    ).toMatchObject({
+    const repairedWithoutVerifiedHead = run({
+      FIRST_OUTCOME: 'failed',
+      FIRST_COMMITTED: 'true',
+      FIRST_VERIFIED_HEAD: 'stale-first-sha',
+      REPAIR_ATTEMPTED: 'true',
+      REPAIR_OUTCOME: 'fixed',
+    });
+    expect(repairedWithoutVerifiedHead).toMatchObject({
       status: 0,
       written: expect.stringContaining('committed=true'),
     });
+    expect(repairedWithoutVerifiedHead.written).not.toContain('verified_head=');
     expect(
       run({
         FIRST_OUTCOME: 'failed',
@@ -7849,13 +7960,12 @@ describe('qwen-autofix workflow', () => {
     // itself (its sandbox carries no token), so it records the inline-comment
     // ids it implemented and the push step maps each to its thread.
     const lines = workflow.split('\n');
-    const i = lines.findIndex((l) =>
-      l.includes('resolved-comments.txt" ]]; then'),
-    );
+    const i = lines.findIndex((l) => l.includes("CAN_RESOLVE_THREADS='false'"));
     const j = lines.findIndex(
-      (l, k) => k > i && l.trim().startsWith('echo "🧵 resolved'),
+      (l, k) => k > i && l.trim().startsWith('echo "🧵 confirmed'),
     );
     expect(i).toBeGreaterThan(-1);
+    expect(j).toBeGreaterThan(i);
     const block = lines.slice(i, j + 2).join('\n');
     // feedback.md must carry the handle the agent echoes back.
     expect(workflow).toContain('- [rc:\\(.id)]');
@@ -7869,58 +7979,293 @@ describe('qwen-autofix workflow', () => {
       join(bin, 'gh'),
       [
         '#!/usr/bin/env bash',
-        'for a in "$@"; do [[ "$a" == threadId=* ]] && printf "%s\\n" "${a#threadId=}" >> "$RESOLVED_LOG"; done',
-        'exit 0',
+        'if [[ "$1 $2" == "pr view" ]]; then',
+        '  saw_json=false; saw_head_field=false; saw_jq=false; saw_head_filter=false',
+        '  for a in "$@"; do',
+        '    [[ "$a" == --json ]] && saw_json=true',
+        '    [[ "$a" == headRefOid ]] && saw_head_field=true',
+        '    [[ "$a" == --jq ]] && saw_jq=true',
+        '    [[ "$a" == \'.headRefOid // ""\' ]] && saw_head_filter=true',
+        '  done',
+        '  [[ "$saw_json $saw_head_field $saw_jq $saw_head_filter" == "true true true true" ]] || exit 2',
+        '  [[ "${LIVE_HEAD_EXIT:-0}" == 0 ]] || exit "${LIVE_HEAD_EXIT}"',
+        '  count="$(cat "$HEAD_READ_COUNT")"',
+        '  count=$((count + 1))',
+        '  printf "%s" "$count" > "$HEAD_READ_COUNT"',
+        '  if [[ -n "${LIVE_HEAD_SEQUENCE:-}" ]]; then',
+        '    value="$(cut -d, -f"$count" <<< "$LIVE_HEAD_SEQUENCE")"',
+        '    printf "%s" "${value:-${LIVE_HEAD:-}}"',
+        '  else',
+        '    printf "%s" "${LIVE_HEAD:-}"',
+        '  fi',
+        '  exit 0',
+        'fi',
+        'query=""; thread_id=""',
+        'for a in "$@"; do',
+        '  [[ "$a" == query=* ]] && query="${a#query=}"',
+        '  [[ "$a" == threadId=* ]] && thread_id="${a#threadId=}"',
+        'done',
+        'if [[ "$query" == *"reviewThreads(first:100)"* ]]; then',
+        '  printf \'%s\' "$THREADS_RAW_STUB"',
+        '  exit 0',
+        'fi',
+        'if [[ "$query" == *PullRequestReviewThread* ]]; then',
+        '  saw_jq=false; saw_guard_filter=false',
+        '  for a in "$@"; do',
+        '    [[ "$a" == --jq ]] && saw_jq=true',
+        '    [[ "$a" == \'[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv\' ]] && saw_guard_filter=true',
+        '  done',
+        '  [[ "$saw_jq $saw_guard_filter" == "true true" ]] || exit 2',
+        '  count="$(cat "$HEAD_READ_COUNT")"',
+        '  count=$((count + 1))',
+        '  printf "%s" "$count" > "$HEAD_READ_COUNT"',
+        '  value="$(cut -d, -f"$count" <<< "${LIVE_HEAD_SEQUENCE:-}")"',
+        '  head="${value:-${LIVE_HEAD:-}}"',
+        '  resolved=false',
+        '  if [[ "${UNKNOWN_THREAD_STATE:-}" == "$thread_id" ]]; then resolved=null; elif grep -qxF "$thread_id" "$THREAD_STATE_FILE" || [[ "${OTHER_ACTOR_RESOLVED:-}" == "$thread_id" ]]; then resolved=true; fi',
+        '  printf "%s\\t%s\\n" "$head" "$resolved"',
+        '  exit 0',
+        'fi',
+        'if [[ "$query" == *resolveReviewThread* ]]; then',
+        '  printf "resolve:%s\\n" "$thread_id" >> "$RESOLVED_LOG"',
+        '  if [[ "${RESOLVE_APPLIES:-true}" == true ]]; then',
+        '    grep -qxF "$thread_id" "$THREAD_STATE_FILE" || printf "%s\\n" "$thread_id" >> "$THREAD_STATE_FILE"',
+        '  fi',
+        '  [[ "${RESOLVE_EXIT:-0}" == 0 ]] || exit "${RESOLVE_EXIT}"',
+        '  exit 0',
+        'fi',
+        'exit 1',
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
     // 111 was implemented; 333's thread is already resolved; 999 matches
     // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
-    const out = execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        WORKDIR: dir,
-        REPO: 'QwenLM/qwen-code',
-        PR: '7308',
-        RESOLVED_LOG: resolvedLog,
-        // The threads fetch is hoisted above the resolve block (shared with the
-        // reply block), so the test supplies the mapped threads directly.
-        THREADS_JSON: JSON.stringify([
-          {
-            id: 'T_open_1',
-            isResolved: false,
-            comments: { nodes: [{ databaseId: 111 }] },
-          },
-          {
-            id: 'T_open_2',
-            isResolved: false,
-            comments: { nodes: [{ databaseId: 222 }] },
-          },
-          {
-            id: 'T_done',
-            isResolved: true,
-            comments: { nodes: [{ databaseId: 333 }] },
-          },
-        ]),
-      },
+    const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
+    }).trim();
+    const threadsRaw = JSON.stringify({
+      nodes: [
+        {
+          id: 'T_open_1',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 111 }] },
+        },
+        {
+          id: 'T_open_2',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 222 }] },
+        },
+        {
+          id: 'T_open_3',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 444 }] },
+        },
+        {
+          id: 'T_done',
+          isResolved: true,
+          comments: { nodes: [{ databaseId: 333 }] },
+        },
+      ],
+      pageInfo: { hasNextPage: false },
     });
-    const resolved = readFileSync(resolvedLog, 'utf8')
-      .trim()
-      .split('\n')
-      .filter(Boolean);
-    expect(resolved).toEqual(['T_open_1']);
-    expect(resolved).not.toContain('T_open_2'); // declined stays open
-    expect(resolved).not.toContain('T_done'); // already resolved
-    expect(out).toContain('resolved 1 review thread');
+    const headReadCount = join(dir, 'head-read-count');
+    const threadStateFile = join(dir, 'thread-state');
+    const runResolve = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          WORKDIR: dir,
+          REPO: 'QwenLM/qwen-code',
+          PR: '7308',
+          RESOLVED_LOG: resolvedLog,
+          HEAD_READ_COUNT: headReadCount,
+          THREAD_STATE_FILE: threadStateFile,
+          THREADS_RAW_STUB: threadsRaw,
+          VERIFIED_HEAD: localHead,
+          LIVE_HEAD: localHead,
+          PUSH_RACE_MERGED: 'false',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return {
+        status: result.status,
+        out: `${result.stdout}${result.stderr}`,
+        resolved: readFileSync(resolvedLog, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean),
+      };
+    };
+
+    expect(block).toContain(
+      'gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}"',
+    );
+    expect(block).toContain('pullRequest(number:$pr){headRefOid}');
+    expect(block).toContain(
+      'node(id:$threadId){... on PullRequestReviewThread{isResolved}}',
+    );
+
+    const matching = runResolve();
+    expect(matching.status).toBe(0);
+    expect(matching.resolved).toEqual(['resolve:T_open_1']);
+    expect(matching.resolved).not.toContain('resolve:T_open_2'); // declined stays open
+    expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
+    expect(matching.out).toContain(
+      'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    const movedBeforeMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(movedBeforeMutation.status).toBe(0);
+    expect(movedBeforeMutation.resolved).toEqual([]);
+    expect(movedBeforeMutation.out).toContain(
+      'live PR head moved before resolving comment 111',
+    );
+
+    const movedDuringMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(movedDuringMutation.status).toBe(0);
+    expect(movedDuringMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(movedDuringMutation.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(movedDuringMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const lostMutationResponse = runResolve({ RESOLVE_EXIT: '1' });
+    expect(lostMutationResponse.status).toBe(0);
+    expect(lostMutationResponse.resolved).toEqual(['resolve:T_open_1']);
+    expect(lostMutationResponse.out).toContain(
+      'another actor or a lost response may be responsible',
+    );
+    expect(lostMutationResponse.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const lostResponseThenDrift = runResolve({
+      RESOLVE_EXIT: '1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(lostResponseThenDrift.status).toBe(0);
+    expect(lostResponseThenDrift.resolved).toEqual(['resolve:T_open_1']);
+    expect(lostResponseThenDrift.out).toContain(
+      'another actor or a lost response may be responsible',
+    );
+    expect(lostResponseThenDrift.out).toContain(
+      'live PR head moved before resolving comment 444',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const failedMutation = runResolve({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '1',
+    });
+    expect(failedMutation.status).toBe(0);
+    expect(failedMutation.resolved).toEqual([
+      'resolve:T_open_1',
+      'resolve:T_open_3',
+    ]);
+    expect(failedMutation.out).toContain(
+      'could not resolve the review thread for comment 111',
+    );
+    expect(failedMutation.out).toContain(
+      'could not resolve the review thread for comment 444',
+    );
+    expect(failedMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const falseSuccess = runResolve({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(falseSuccess.status).toBe(0);
+    expect(falseSuccess.resolved).toEqual(['resolve:T_open_1']);
+    expect(falseSuccess.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(falseSuccess.out).not.toContain('resolve:T_open_3');
+    expect(falseSuccess.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    const ambiguousMutation = runResolve({
+      RESOLVE_EXIT: '1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(ambiguousMutation.status).toBe(0);
+    expect(ambiguousMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(ambiguousMutation.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(ambiguousMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const resolvedByOtherActor = runResolve({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+    });
+    expect(resolvedByOtherActor.status).toBe(0);
+    expect(resolvedByOtherActor.resolved).toEqual([]);
+    expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const unknownThreadState = runResolve({
+      UNKNOWN_THREAD_STATE: 'T_open_1',
+    });
+    expect(unknownThreadState.status).toBe(0);
+    expect(unknownThreadState.resolved).toEqual([]);
+    expect(unknownThreadState.out).toContain(
+      'state of comment 111 could not be proven',
+    );
+    expect(unknownThreadState.out).not.toContain('resolve:T_open_3');
+
+    const movedBeforeSecondMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(movedBeforeSecondMutation.status).toBe(0);
+    expect(movedBeforeSecondMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(movedBeforeSecondMutation.out).toContain(
+      'live PR head moved before resolving comment 444',
+    );
+    expect(movedBeforeSecondMutation.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    for (const env of [
+      { LIVE_HEAD: 'new-contributor-head' },
+      { LIVE_HEAD_EXIT: '1' },
+      { VERIFIED_HEAD: 'different-verified-head' },
+      { PUSH_RACE_MERGED: 'true' },
+    ]) {
+      const uncertain = runResolve(env);
+      expect(uncertain.status).toBe(0);
+      expect(uncertain.resolved).toEqual([]);
+      expect(uncertain.out).toContain('skipping review-thread resolution');
+      expect(uncertain.out).not.toContain(
+        'confirmed 1 selected review thread(s) resolved',
+      );
+    }
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
     const skill = readAutofixSkill();
     expect(skill).toContain('RESOLVED IN THE CODE');
     expect(skill).toMatch(/already fixed that you re-verified still holds/);
+    expect(skill).toContain('live PR head is still the exact commit');
     expect(skill).toContain('comment-replies.json');
     rmSync(dir, { recursive: true, force: true });
   });

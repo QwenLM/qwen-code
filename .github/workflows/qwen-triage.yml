@@ -91,6 +91,14 @@ jobs:
       # gets a pinned head OID, a pre-execution risk screen, and a full
       # workspace wipe. Empty for every non-verify event.
       verify_trust: '${{ steps.perm.outputs.verify_trust }}'
+      # Whether the verify LANE should run at all. `/verify` sets it, and so
+      # does a `/triage` comment on a PR — triage reads, verify runs, and a
+      # maintainer asking for a review usually wants both. Kept separate from
+      # should_run because the two fail differently: an unreadable author
+      # permission denies an explicit `/verify` outright (it is the input to
+      # the control selection), but must NOT take the triage down with it, so
+      # the piggybacked lane just turns itself off and triage proceeds.
+      verify_lane: '${{ steps.perm.outputs.verify_lane }}'
       # Head OID snapped AT SPONSORSHIP TIME for an external run: the
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
@@ -112,10 +120,25 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
+          # `github.event.issue.pull_request` is an object on PRs and null on
+          # issues; compare against null rather than truthiness so the shell
+          # receives a plain true/false.
+          IS_PR: '${{ github.event.issue.pull_request != null }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
+          # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
+          # typed /verify". They differ only for the piggybacked lane, where
+          # a classification failure must skip verify without denying triage.
+          VERIFY_LANE=false
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            # Automatic per-PR triage deliberately does NOT pull the verify
+            # lane with it. Runner capacity is not the reason — the ECS pool
+            # is maintainer-provided and expandable, and cheaper than the
+            # tokens. The reason is the AGENT budget: a verify run is up to
+            # 110 minutes of model time, and every `synchronize` would spend
+            # one, including the ones that fix a typo. Commenting is what
+            # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -147,9 +170,21 @@ jobs:
               case "$body_lc" in
                 '@qwen-code /verify'|'@qwen-code /verify '*)
                   IS_VERIFY=true
+                  VERIFY_LANE=true
                   principals="$COMMENT_USER"
                   ;;
                 '@qwen-code /tmux'|'@qwen-code /tmux '*) principals="$ISSUE_AUTHOR" ;;
+                '@qwen-code /triage'*)
+                  # /triage on a PR also starts verify, in parallel — the
+                  # two answer different questions and neither waits on the
+                  # other. On a plain ISSUE there is nothing to build, so
+                  # the lane stays off and no author lookup is spent.
+                  # `principals` is unchanged: both lanes already gate on
+                  # the commenter, so this adds a control selection, not a
+                  # new gate.
+                  [ "$IS_PR" = 'true' ] && VERIFY_LANE=true
+                  principals="$COMMENT_USER"
+                  ;;
                 *) principals="$COMMENT_USER" ;;
               esac
               ;;
@@ -220,12 +255,27 @@ jobs:
           # Fail closed on every lookup: an unreadable author permission or
           # an unresolvable head OID denies the run outright — classifying
           # a request we cannot read would silently pick a trust level.
-          if [ "$IS_VERIFY" = true ]; then
+          # For the lane piggybacked on /triage, "fail closed" means the
+          # LANE closes, not the whole run: the commenter asked for a
+          # review, and taking that away because an unrelated API call
+          # flaked would be a worse answer than shipping triage alone.
+          # Either way no code executes unclassified, which is the property
+          # the four external-only controls (head-OID pin, risk screen,
+          # pre- and post-run workspace wipes) depend on.
+          if [ "$VERIFY_LANE" = true ]; then
+            deny_verify() {
+              echo "$1" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$IS_VERIFY" = true ]; then
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "verify_lane=false" >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
             if [ -z "$ISSUE_AUTHOR" ] ||
                ! author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              echo "Could not resolve the PR author's permission for /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              deny_verify "Could not resolve the PR author's permission for the verify lane; skipping it."
             fi
             case "$author_perm" in
               admin|maintain|write)
@@ -234,15 +284,14 @@ jobs:
               *)
                 if ! sponsor_oid="$(gh pr view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid' 2>/dev/null)" ||
                    [ -z "$sponsor_oid" ]; then
-                  echo "Could not snapshot the PR head for a sponsored /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-                  echo "should_run=false" >> "$GITHUB_OUTPUT"
-                  exit 0
+                  deny_verify "Could not snapshot the PR head for a sponsored verify lane; skipping it."
                 fi
                 echo "verify_trust=external" >> "$GITHUB_OUTPUT"
                 echo "verify_head_oid=${sponsor_oid}" >> "$GITHUB_OUTPUT"
-                echo "Sponsored /verify for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
+                echo "Sponsored verify lane for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
+            echo "verify_lane=true" >> "$GITHUB_OUTPUT"
           fi
           echo "should_run=true" >> "$GITHUB_OUTPUT"
 
@@ -1875,22 +1924,25 @@ jobs:
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.issue.state == 'open' &&
-      (github.event.comment.body == '@qwen-code /verify' ||
-       startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+      needs.authorize.outputs.verify_lane == 'true' &&
       needs.authorize.outputs.should_run == 'true' &&
       vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
     # One verification per PR at a time, mirroring the tmux job: concurrent
     # runs would share the same self-hosted workspace and clobber each other.
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
     # keep non-runnable triggers out of the shared per-PR group.
+    #
+    # `verify_lane` is the single source of truth for "does this trigger
+    # start verify" — authorize decides it, and the command strings are
+    # matched in exactly one place. Enumerating them here too is what let
+    # the trust classification and the lane trigger drift apart.
     concurrency:
       group: >-
         ${{
           (github.event_name == 'issue_comment' &&
            github.event.issue.pull_request &&
            github.event.issue.state == 'open' &&
-           (github.event.comment.body == '@qwen-code /verify' ||
-            startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+           needs.authorize.outputs.verify_lane == 'true' &&
            needs.authorize.outputs.should_run == 'true' &&
            vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
@@ -3403,6 +3455,240 @@ jobs:
             printf '%s%s\n' "$esc" "$truncated"
             printf '</code></pre>\n\n</details>\n\n'
           }
+          # Render report.md as MARKDOWN instead of an escaped <pre> dump.
+          # The report is a curated bilingual document (tables, nested
+          # <details>, headings); the pre/code embedding displayed it as a
+          # wall of raw source (#8140's comment was the exhibit). The section
+          # is wrapped in a collapsed <details> so it still costs one line in
+          # the conversation but renders as real markdown when opened.
+          #
+          # A node sanitizer (not sed) does the escaping so it can tell code
+          # regions apart from prose. CommonMark does NOT decode entities in
+          # code spans or fenced blocks — they render literally there — so
+          # escaping & < > @ unconditionally showed the reader &amp;&amp;,
+          # &lt;T&gt;, &#64;pkg inside the very commands, generic types, and
+          # scoped-package paths a verification report is read to copy (the
+          # #8140 symptom, relocated into code). The security floor now rests
+          # on four line-independent guarantees:
+          #   1. in PROSE every < is escaped, then only the structural tags
+          #      the report uses as raw HTML (details/summary) are un-escaped
+          #      back to live tags — no other tag can form in ordinary
+          #      prose, so <img>/<script>/onerror never render there. A
+          #      line-level inHtml flag tracks raw-HTML blocks opened by
+          #      details/summary (at any indent, so list-nested folds
+          #      enter the state too): inside one, neither fence lines
+          #      NOR code spans are code — CommonMark/GitHub reads both
+          #      as literal text in a raw-HTML block — so the sanitizer
+          #      prose-escapes the whole line instead of splitting it
+          #      through proseLine, closing the divergence where GitHub
+          #      saw live HTML the sanitizer treated as inert code.
+          #      & and > are left alone in prose (a decoded entity
+          #      yields text, never markup, and an unescaped > cannot
+          #      open a tag once < is escaped), which keeps &&, ->, and
+          #      blockquotes readable. Code-span parity is a paragraph
+          #      property in CommonMark but a line property here, so a prose
+          #      line carrying an unmatched backtick run makes the rest of the
+          #      paragraph's code/prose split unknowable; the scanner fails
+          #      closed and prose-escapes every line until the next blank line
+          #      (over-escaping is the safe direction — a multi-line code span
+          #      shows its entities literally, inert not live). Outside HTML
+          #      blocks, inside code spans/fences < & @ are left alone: <img>
+          #      and @mentions are inert under a code/pre ancestor, and
+          #      escaping them there only mangles the rendered text;
+          #   2. the comment-open token is broken EVERYWHERE, prose and code
+          #      alike (<!-- becomes an escaped no-op, the autofix-proven
+          #      neutralizer). The break must stay global: the upsert greps
+          #      the RAW body for the running marker and a fence prints
+          #      verbatim, so a forged marker inside a fence must not survive;
+          #   3. in prose @ gains a zero-width space (@&#8203;) — renders
+          #      identically, never fires a mention (GitHub decodes &#64;
+          #      back to @ before the mention filter runs, so the entity
+          #      alone was inert; the ZWSP breaks the mention token). A
+          #      mention cannot fire under a code/pre ancestor, so code
+          #      keeps a literal @;
+          #   4. <details> folds are balanced over PROSE only — a </details>
+          #      quoted in a code span/fence is inert text and is no longer
+          #      counted — surplus closers are dropped (they would otherwise
+          #      close the wrapping fold early) and unclosed opens are closed
+          #      at the end, so a malformed report can neither swallow the
+          #      footer nor escape its wrapper. The flat scanner diverges
+          #      from GitHub's container-aware parser whenever a fence it
+          #      holds open cannot exist in GitHub's view, so two signals
+          #      exit non-zero (emit_report then degrades to the escaped
+          #      fallback rather than guessing): a fence still open at EOF
+          #      (GitHub closes a list-nested fence at the container's end,
+          #      not at EOF), and a non-blank line that dedents below the
+          #      fence opener's indent while it is open — the container
+          #      boundary moved, so GitHub already closed the fence and a
+          #      balancing closer later in the file would otherwise let the
+          #      scanner pass unescaped prose through escCode.
+          # Accepted tradeoff (named, not accidental): rendering promotes the
+          # report from inert text to parsed markdown, so [links](…) and
+          # ![images](…) now render live where emit_block showed them literal.
+          # report.md is agent output from a sandbox that ran PR code; images
+          # are camo-proxied (mostly noise) and a phishing link under the bot
+          # identity is the residual surface. That surface exists only while
+          # the four guarantees hold, so the fail-closed bails above are what
+          # keep deferring link defusing defensible; defusing link targets is
+          # a deliberate follow-up, not done here. Two safe-but-ugly display
+          # costs are named, not bugs: a code span that opens on one line and
+          # closes on the next is prose-escaped (the reader sees &lt;T&gt;
+          # inside it — the #8140 symptom relocated but inert), and escCode
+          # breaks <!-- to &lt;!\-\- which renders LITERALLY in a fence
+          # (entities do not decode there), so a fenced comment example shows
+          # as &lt;!\-\-.
+          # An OVERSIZED report falls back to emit_block wholesale (cut
+          # markdown dangles fences/folds), as does any sanitizer failure.
+          emit_report() {
+            local file="$1" max="$2"
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (report exceeds size cap) for $file" >&2
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
+            local san_file
+            san_file="$(mktemp)"
+            # Node is present on every runner that runs this job (emit_block
+            # already shells out to it for the UTF-8-safe cut). The script
+            # rides inside a single-quoted shell string, so it uses double
+            # quotes throughout and carries no single quotes of its own.
+            local node_status=0
+            node -e '
+              const fs = require("node:fs");
+              const text = fs.readFileSync(process.argv[1], "utf8").replace(/[\u0000\u0001]/g, "");
+              function escProse(s) {
+                // Allowlisted tags are stashed behind a \u0001 sentinel (stripped
+                // from input) BEFORE the < pass and restored from it, so a literal
+                // &lt;details> the author typed stays escaped text instead of being
+                // promoted back to a live tag by the un-escape step.
+                return s
+                  .replace(/<(\/?)(details|summary)>/g, "\u0001$1$2>")
+                  .replace(/</g, "&lt;")
+                  .replace(/\u0001(\/?)(details|summary)>/g, "<$1$2>")
+                  .replace(/&lt;!--/g, "&lt;!\\-\\-")
+                  .replace(/@/g, "@&#8203;");
+              }
+              function escCode(s) {
+                return s.replace(/<!--/g, "&lt;!\\-\\-");
+              }
+              let depth = 0;
+              function balance(s) {
+                return s.replace(/<\/?details>/g, function (t) {
+                  if (t === "<details>") { depth += 1; return t; }
+                  if (depth > 0) { depth -= 1; return t; }
+                  return "";
+                });
+              }
+              function proseLine(line) {
+                let out = "";
+                let buf = "";
+                let i = 0;
+                const flush = function () {
+                  if (buf) { out += balance(escProse(buf)); buf = ""; }
+                };
+                while (i < line.length) {
+                  if (line[i] !== "`") { buf += line[i]; i += 1; continue; }
+                  // A backslash-escaped backtick does not OPEN a code span (the
+                  // CommonMark escape rule consumes it first) but still CLOSES one
+                  // — an asymmetry a line-scoped scanner cannot model. Fail closed
+                  // like an unmatched run so the whole line is prose-escaped.
+                  let bs = 0, b = i - 1;
+                  while (b >= 0 && line[b] === "\\") { bs += 1; b -= 1; }
+                  if (bs % 2 === 1) { unmatched = true; buf += line[i]; i += 1; continue; }
+                  let j = i;
+                  while (j < line.length && line[j] === "`") j += 1;
+                  const run = j - i;
+                  let k = j, cs = -1, ce = -1;
+                  while (k < line.length) {
+                    if (line[k] === "`") {
+                      let m = k;
+                      while (m < line.length && line[m] === "`") m += 1;
+                      if (m - k === run) { cs = k; ce = m; break; }
+                      k = m;
+                    } else k += 1;
+                  }
+                  if (cs === -1) { unmatched = true; buf += line.slice(i, j); i = j; }
+                  else { flush(); out += escCode(line.slice(i, ce)); i = ce; }
+                }
+                flush();
+                return out;
+              }
+              const lines = text.split("\n");
+              const out = [];
+              let inFence = false, fc = "", fl = 0, fi = 0, inHtml = false;
+              let spanUnknown = false, unmatched = false;
+              for (const line of lines) {
+                if (!inFence) {
+                  const blank = /^\s*$/.test(line);
+                  if (inHtml && blank) inHtml = false;
+                  if (blank) spanUnknown = false;
+                  const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+                  if (m && !(m[1][0] === "`" && m[2].indexOf("`") !== -1)) {
+                    inFence = true; fc = m[1][0]; fl = m[1].length; fi = line.match(/^ */)[0].length;
+                    out.push(escCode(line));
+                    continue;
+                  }
+                  let rendered;
+                  if (inHtml || spanUnknown) {
+                    rendered = balance(escProse(line));
+                  } else {
+                    unmatched = false;
+                    rendered = proseLine(line);
+                    if (unmatched) { spanUnknown = true; rendered = balance(escProse(line)); }
+                  }
+                  if (/^\s*<\/?(details|summary)\b/.test(rendered)) inHtml = true;
+                  out.push(rendered);
+                } else {
+                  if (/\S/.test(line) && line.match(/^ */)[0].length < fi) process.exit(3);
+                  const cm = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+                  if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
+                  out.push(escCode(line));
+                }
+              }
+              if (inFence) process.exit(3);
+              let result = out.join("\n");
+              if (depth > 0) {
+                if (result && !result.endsWith("\n")) result += "\n";
+                result += "</details>\n".repeat(depth);
+              }
+              process.stdout.write(result);
+            ' "$file" > "$san_file" || node_status=$?
+            if [ "$node_status" -ne 0 ]; then
+              if [ "$node_status" -eq 3 ]; then
+                echo "::warning::emit_report fell back to escaped embedding (report ended inside an open code fence) for $file" >&2
+              else
+                echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
+              fi
+              rm -f "$san_file"
+              emit_block 'Verification report (report.md, escaped fallback)' "$file" "$max"
+              return 0
+            fi
+            # Wrap in a collapsed <details> (one-line footprint, markdown when
+            # opened) and bound the WHOLE emitted section — wrapper, balanced
+            # report, appended closers — so the cap is a true bound on what
+            # lands in the comment. The old normal path skipped the header
+            # bytes the deficit branch did budget; folding the wrapper into
+            # the measured output removes that asymmetry and the separate
+            # fold-closer gate (closers now land in san_file before this gate).
+            local out_file
+            out_file="$(mktemp)"
+            {
+              printf '<details>\n<summary>Verification report</summary>\n\n'
+              cat "$san_file"
+              printf '\n</details>\n'
+            } > "$out_file"
+            rm -f "$san_file"
+            if [ "$(wc -c < "$out_file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap) for $file" >&2
+              rm -f "$out_file"
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
+            cat "$out_file"
+            rm -f "$out_file"
+            printf '\n'
+          }
 
           # Host the agent's evidence images (if any) on a per-PR branch
           # (pr-assets/<N>-verify, matching hand-run convention) and build
@@ -3773,7 +4059,7 @@ jobs:
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
-              emit_block 'Verification report (report.md)' "$REPORT" 45000
+              emit_report "$REPORT" 45000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi
