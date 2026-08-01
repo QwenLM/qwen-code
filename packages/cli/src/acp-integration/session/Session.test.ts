@@ -5114,6 +5114,15 @@ describe('Session', () => {
         expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
           'Skipped because loop detection stopped the current turn before this tool call could run.',
         );
+        // Loop-detection skips are not approval-mode denials: they must record
+        // UNKNOWN, not EXECUTION_DENIED, so the denial metric stays accurate.
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            callId: 'read_after_loop',
+            errorType: core.ToolErrorType.UNKNOWN,
+          }),
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after repeated tool parameter errors from missing_tool',

@@ -6576,7 +6576,11 @@ export class Session implements SessionContext {
             executionStatus: 'not_started',
             resultDisplay: undefined,
             error,
-            errorType: errorType ?? ToolErrorType.EXECUTION_DENIED,
+            errorType:
+              errorType ??
+              (message === LOOP_DETECTED_SKIP_MESSAGE
+                ? ToolErrorType.UNKNOWN
+                : ToolErrorType.EXECUTION_DENIED),
           },
         });
         if (emitStart) {

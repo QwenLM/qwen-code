@@ -17,8 +17,10 @@ recording compatibility:
 type ToolExecutionStatus = 'not_started' | 'success' | 'error' | 'cancelled';
 ```
 
-Built-in Core and ACP producers always set the field. Missing values from
-older recordings or third-party producers become `unknown` only at the
+The Core scheduler (`CoreToolScheduler`) and ACP `Session.runTool` always set
+the field. Missing values from older recordings, third-party producers, and
+subagent result projections (the non-interactive `buildResponse` path, which
+replays another agent's reported outcome) become `unknown` only at the
 telemetry boundary and are never inferred from the terminal call status.
 
 The terminal and execution axes are intentionally independent:
@@ -75,7 +77,9 @@ span from an unresolved request name.
 
 The public response and event fields stay optional. Built-in producers use an
 internal required shape, while old JSONL recordings are not migrated or
-backfilled. Manual recording projections in Core, ACP, TUI, and
+backfilled. New JSONL recordings include `executionStatus` on recorded tool
+results; the field is additive, so replay readers that ignore unknown fields
+are unaffected. Manual recording projections in Core, ACP, TUI, and
 non-interactive modes copy the new scalar without exposing it in user-facing
 JSON output. A call cancelled before tool resolution can omit `tool` and
 `invocation` from the public `CancelledToolCall` variant, so consumers of that

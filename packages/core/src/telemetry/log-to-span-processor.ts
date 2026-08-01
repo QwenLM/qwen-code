@@ -22,7 +22,11 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
+import {
+  EVENT_SUBAGENT_EXECUTION,
+  EVENT_TOOL_CALL,
+  SERVICE_NAME,
+} from './constants.js';
 import {
   deriveTraceId,
   randomHexString,
@@ -458,7 +462,12 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
-  if (attrs['status'] === 'cancelled') {
+  // Only tool calls freeze a `cancelled` terminal that must stay UNSET; other
+  // events (e.g. auth) can be cancelled AND carry an error, which stays ERROR.
+  if (
+    attrs['event.name'] === EVENT_TOOL_CALL &&
+    attrs['status'] === 'cancelled'
+  ) {
     return { code: SpanStatusCode.UNSET };
   }
   if (

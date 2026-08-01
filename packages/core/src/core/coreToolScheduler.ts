@@ -5922,7 +5922,7 @@ export class CoreToolScheduler {
     try {
       this.onToolCallsUpdate([...this.toolCalls]);
     } catch (error) {
-      debugLogger.warn(
+      debugLogger.error(
         `Tool call update observer failed: ${
           error instanceof Error ? error.message : String(error)
         }`,

@@ -4692,6 +4692,7 @@ describe('CoreToolScheduler', () => {
               tool_response: expect.objectContaining({
                 error: 'gamma failed',
                 error_type: ToolErrorType.UNKNOWN,
+                execution_status: 'error',
               }),
             }),
           ],
