@@ -24,6 +24,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getCliVersion } from '../../utils/version.js';
 import {
   coverageFromTranscripts,
   verificationGaps,
@@ -233,7 +234,10 @@ function toBool(value: unknown, field: string): boolean {
   return value;
 }
 
-export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
+export function composeReview(
+  input: ComposeReviewInput,
+  cliVersion = 'unknown',
+): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
     input.suggestionsInline,
@@ -692,7 +696,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     }
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review_`;
+  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1487,7 +1491,7 @@ export const composeReviewCommand: CommandModule = {
           'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
           'the bilingual body-language recovery has to fetch the PR description',
       }),
-  handler: (argv) => {
+  handler: async (argv) => {
     const { input, comments, out, host } =
       argv as unknown as ComposeReviewCliArgs;
     // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
@@ -1540,10 +1544,13 @@ export const composeReviewCommand: CommandModule = {
       );
     }
     const drafted = readDraftedComments(comments);
-    const result = composeReview({
-      ...parsed,
-      ...countInlineFindings(drafted),
-    });
+    const result = composeReview(
+      {
+        ...parsed,
+        ...countInlineFindings(drafted),
+      },
+      await getCliVersion(),
+    );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
