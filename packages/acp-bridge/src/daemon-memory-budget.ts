@@ -132,12 +132,16 @@ export function legacyChildCeilingMb(availableMemoryMb?: number): number {
  * memory is `resolveDaemonMemoryBudget`'s job, because that is a capping
  * decision rather than a rejection.
  */
+export function isValidMemoryBudgetMb(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= MIN_MEMORY_BUDGET_MB &&
+    value <= MAX_MEMORY_BUDGET_MB
+  );
+}
+
 export function normalizeMemoryBudgetMb(value: number): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    value < MIN_MEMORY_BUDGET_MB ||
-    value > MAX_MEMORY_BUDGET_MB
-  ) {
+  if (!isValidMemoryBudgetMb(value)) {
     throw new TypeError(
       `Invalid memoryBudgetMb: ${value}. ` +
         `Must be a safe integer in [${MIN_MEMORY_BUDGET_MB}, ${MAX_MEMORY_BUDGET_MB}].`,
@@ -215,4 +219,26 @@ export function resolveDaemonMemoryBudget(
     legacyChildCeilingMb: legacyChildCeilingMb(availableMemoryMb),
     insufficientMemory: effectiveBudgetMb < MIN_MEMORY_BUDGET_MB,
   };
+}
+
+export function formatMemoryBudgetStderr(budget: DaemonMemoryBudget): string {
+  let message =
+    `qwen serve: memory budget ${budget.effectiveBudgetMb} MB ` +
+    `(${budget.budgetSource}, ${budget.availableMemoryMb} MB available ` +
+    `via ${budget.availableMemorySource})`;
+  if (budget.effectiveBudgetMb < budget.configuredBudgetMb) {
+    message += `; capped down from the configured ${budget.configuredBudgetMb} MB`;
+  }
+  if (budget.insufficientMemory) {
+    message += `; below the ${MIN_MEMORY_BUDGET_MB} MB minimum budget`;
+    if (budget.budgetSource === 'derived') {
+      const minHostMb = Math.ceil(
+        MIN_MEMORY_BUDGET_MB / DEFAULT_MEMORY_BUDGET_FRACTION,
+      );
+      message +=
+        ` (a derived budget needs a host with at least ~${minHostMb} MB;` +
+        ` pass --memory-budget-mb to override)`;
+    }
+  }
+  return message;
 }

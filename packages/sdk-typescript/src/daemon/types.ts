@@ -634,13 +634,13 @@ export interface DaemonStatusReport {
       budgetSource: 'flag' | 'derived';
       availableMemoryMb: number;
       availableMemorySource: 'constrained' | 'host';
-      legacyChildCeilingMb: number;
       insufficientMemory: boolean;
       /** Derived figures for a capacity policy that has not shipped. */
       modeled: {
         rootReserveMb: number;
         childPoolMb: number;
         minChildHeapMb: number;
+        legacyChildCeilingMb: number;
       };
     } | null;
   };
@@ -682,9 +682,10 @@ export interface DaemonStatusReport {
     /**
      * Live counts against the resolved memory budget, with advisory per-child
      * shares. Additive and observation-only; absent when no budget resolved.
-     * Each share is floored at the minimum child heap, so on a small host
-     * share x count can exceed the child pool; read a share as a per-child
-     * floor, not a partition of the pool.
+     * Each share is capped at the legacy child ceiling, and floored at the
+     * minimum child heap only when the ceiling allows — on a small host the
+     * ceiling sits below the floor, so share x count can exceed the child
+     * pool. Read a share as advisory, not a partition of the pool.
      */
     memory?: {
       /**

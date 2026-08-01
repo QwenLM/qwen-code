@@ -495,12 +495,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const memoryBudgetMb = argv['memory-budget-mb'];
     if (
       memoryBudgetMb !== undefined &&
-      (!Number.isSafeInteger(memoryBudgetMb) ||
-        memoryBudgetMb < MIN_MEMORY_BUDGET_MB ||
-        memoryBudgetMb > MAX_MEMORY_BUDGET_MB)
+      !isValidMemoryBudgetMb(memoryBudgetMb)
     ) {
       writeStderrLine(
-        `qwen serve: --memory-budget-mb must be an integer in ` +
+        'qwen serve: --memory-budget-mb must be an integer in ' +
           `[${MIN_MEMORY_BUDGET_MB}, ${MAX_MEMORY_BUDGET_MB}].`,
       );
       process.exit(1);

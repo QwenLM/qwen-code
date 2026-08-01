@@ -42,7 +42,7 @@ import {
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
-  MIN_MEMORY_BUDGET_MB,
+  formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
@@ -2366,18 +2366,7 @@ async function runQwenServeImpl(
     opts.daemonMemoryBudget.budgetSource === 'flag' ||
     opts.daemonMemoryBudget.insufficientMemory
   ) {
-    const budget = opts.daemonMemoryBudget;
-    writeStderrLine(
-      `qwen serve: memory budget ${budget.effectiveBudgetMb} MB ` +
-        `(${budget.budgetSource}, ${budget.availableMemoryMb} MB available ` +
-        `via ${budget.availableMemorySource})` +
-        (budget.effectiveBudgetMb < budget.configuredBudgetMb
-          ? `; capped down from the configured ${budget.configuredBudgetMb} MB`
-          : '') +
-        (budget.insufficientMemory
-          ? `; below the ${MIN_MEMORY_BUDGET_MB} MB minimum this daemon is sized for`
-          : ''),
-    );
+    writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (

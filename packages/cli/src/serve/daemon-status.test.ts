@@ -142,9 +142,12 @@ describe('buildDaemonStatusResponse', () => {
         effectiveBudgetMb: 16_384,
         budgetSource: 'derived',
         availableMemoryMb: 32_768,
-        legacyChildCeilingMb: 16_384,
         insufficientMemory: false,
-        modeled: { rootReserveMb: 1_024, childPoolMb: 15_360 },
+        modeled: {
+          rootReserveMb: 1_024,
+          childPoolMb: 15_360,
+          legacyChildCeilingMb: 16_384,
+        },
       });
     });
   });

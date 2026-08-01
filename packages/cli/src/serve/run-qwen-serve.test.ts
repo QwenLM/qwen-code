@@ -1911,12 +1911,12 @@ describe('runQwenServe memory budget', () => {
             effectiveBudgetMb: number;
             budgetSource: string;
             availableMemoryMb: number;
-            legacyChildCeilingMb: number;
             insufficientMemory: boolean;
             modeled: {
               rootReserveMb: number;
               childPoolMb: number;
               minChildHeapMb: number;
+              legacyChildCeilingMb: number;
             };
           } | null;
         };
@@ -1952,7 +1952,7 @@ describe('runQwenServe memory budget', () => {
       expect(memory?.modeled.childPoolMb).toBeLessThan(
         memory?.effectiveBudgetMb ?? 0,
       );
-      expect(memory?.legacyChildCeilingMb).toBeGreaterThan(0);
+      expect(memory?.modeled.legacyChildCeilingMb).toBeGreaterThan(0);
 
       const runtimeMemory = body.runtime.memory;
       expect(runtimeMemory?.registeredWorkspaces).toBe(1);

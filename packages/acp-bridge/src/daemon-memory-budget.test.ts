@@ -8,6 +8,8 @@ import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   detectAvailableMemoryMb,
+  formatMemoryBudgetStderr,
+  isValidMemoryBudgetMb,
   legacyChildCeilingMb,
   MAX_CHILD_HEAP_MB,
   MAX_MEMORY_BUDGET_MB,
@@ -167,6 +169,15 @@ describe('recommendedChildShareMb', () => {
     expect(recommendedChildShareMb(large, 1)).toBe(MAX_CHILD_HEAP_MB);
   });
 
+  it('can sit below the per-child floor when the legacy ceiling is lower', () => {
+    // On a small host the legacy ceiling sits below MIN_CHILD_HEAP_MB, and
+    // the final Math.min(share, ceiling) wins over the clamp's floor.
+    const small = resolveDaemonMemoryBudget({ availableMemoryMb: 768 });
+    expect(small.legacyChildCeilingMb).toBeLessThan(MIN_CHILD_HEAP_MB);
+    expect(recommendedChildShareMb(small, 1)).toBe(small.legacyChildCeilingMb);
+    expect(recommendedChildShareMb(small, 1)).toBeLessThan(MIN_CHILD_HEAP_MB);
+  });
+
   it('exposes the registered-vs-live gap it exists to measure', () => {
     // 25 registered but one live child: dividing by registrations would cut
     // that child ~25x for memory no dormant workspace is holding. This is why
@@ -211,5 +222,70 @@ describe('detectAvailableMemoryMb', () => {
       memoryMb: 8_192,
       source: 'host',
     });
+  });
+
+  it('treats a cgroup limit exactly equal to the host total as unconstrained', () => {
+    vi.spyOn(os, 'totalmem').mockReturnValue(16_384 * MB);
+    vi.spyOn(
+      process as { constrainedMemory: () => number },
+      'constrainedMemory',
+    ).mockReturnValue(16_384 * MB);
+    expect(detectAvailableMemoryMb()).toEqual({
+      memoryMb: 16_384,
+      source: 'host',
+    });
+  });
+});
+
+describe('isValidMemoryBudgetMb', () => {
+  it('accepts the boundaries', () => {
+    expect(isValidMemoryBudgetMb(MIN_MEMORY_BUDGET_MB)).toBe(true);
+    expect(isValidMemoryBudgetMb(MAX_MEMORY_BUDGET_MB)).toBe(true);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, 1_023, MAX_MEMORY_BUDGET_MB + 1])(
+    'rejects %p',
+    (value) => {
+      expect(isValidMemoryBudgetMb(value)).toBe(false);
+    },
+  );
+});
+
+describe('formatMemoryBudgetStderr', () => {
+  it('formats a plain derived budget above the minimum', () => {
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 32_768 });
+    expect(formatMemoryBudgetStderr(budget)).toBe(
+      'qwen serve: memory budget 16384 MB (derived, 32768 MB available via host)',
+    );
+  });
+
+  it('formats the capped-down branch', () => {
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: MAX_MEMORY_BUDGET_MB,
+      availableMemoryMb: 2_048,
+    });
+    expect(formatMemoryBudgetStderr(budget)).toContain(
+      '; capped down from the configured',
+    );
+  });
+
+  it('names the host floor on the derived insufficient path', () => {
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 768 });
+    const message = formatMemoryBudgetStderr(budget);
+    expect(message).toContain('; below the 1024 MB minimum budget');
+    expect(message).toContain(
+      'a derived budget needs a host with at least ~2048 MB',
+    );
+    expect(message).toContain('pass --memory-budget-mb to override');
+  });
+
+  it('does not mention the derived host floor on the flag path', () => {
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: 1_024,
+      availableMemoryMb: 512,
+    });
+    const message = formatMemoryBudgetStderr(budget);
+    expect(message).toContain('; below the 1024 MB minimum budget');
+    expect(message).not.toContain('a derived budget needs');
   });
 });

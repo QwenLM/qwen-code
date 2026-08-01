@@ -199,12 +199,6 @@ interface DaemonStatusMemoryLimits {
   /** Cgroup limit when one applies, otherwise host total. */
   availableMemoryMb: number;
   availableMemorySource: 'constrained' | 'host';
-  /**
-   * A conservative model of the ceiling an ACP child receives today, with no
-   * budget involved. Re-derived rather than observed, so it can sit below the
-   * figure a child actually receives (see the spawn-path divergences).
-   */
-  legacyChildCeilingMb: number;
   insufficientMemory: boolean;
   /**
    * Derived figures for a capacity policy that has not shipped. Grouped, and
@@ -215,6 +209,12 @@ interface DaemonStatusMemoryLimits {
     rootReserveMb: number;
     childPoolMb: number;
     minChildHeapMb: number;
+    /**
+     * A conservative model of the ceiling an ACP child receives today, with no
+     * budget involved. Re-derived rather than observed, so it can sit below
+     * the figure a child actually receives (see the spawn-path divergences).
+     */
+    legacyChildCeilingMb: number;
   };
 }
 
@@ -300,9 +300,11 @@ interface DaemonStatusRuntimeMemory {
    */
   childRssCoverage: 'primary_only';
   /**
-   * Modeled per-child shares. Advisory; nothing applies them. Each is floored
-   * at the minimum child heap, so share x count can exceed the child pool on a
-   * small host — read a share as a per-child floor, not a partition of the pool.
+   * Modeled per-child shares. Advisory; nothing applies them. Each is capped
+   * at the legacy child ceiling, and floored at the minimum child heap only
+   * when the ceiling allows — on a small host the ceiling sits below the
+   * floor, so share x count can exceed the child pool. Read a share as
+   * advisory, not a partition of the pool.
    */
   modeled: {
     /** `null` when no workspace is registered — there is no share to divide. */
@@ -438,34 +440,49 @@ export async function buildDaemonStatusResponse(
   // is the registration count. Registered-but-dormant workspaces still have no
   // live child, which is why the registered count remains unsafe to divide by.
   const memoryBudget = input.opts.daemonMemoryBudget;
-  // Resolved only when a budget is reported, since nothing else consumes them.
-  const managedRuntimes = memoryBudget
-    ? input.workspaceRegistry?.listManaged()
-    : undefined;
-  // Reuse the snapshots already taken above rather than asking each bridge
-  // again. Two reasons: `getDaemonStatusSnapshot()` rebuilds the whole session
-  // array on every call, and a second pass would read the tree at a different
-  // instant, so the child count could disagree with the rest of this response.
-  // Only a managed runtime the first pass missed — one whose entry is not in
-  // `active` state — needs a fresh snapshot.
-  const snapshotByBridge = new Map(
-    workspaceSnapshots.flatMap((item) =>
-      item.bridge ? [[item.bridge, item.snapshot] as const] : [],
-    ),
-  );
-  const activeAcpChildCount = managedRuntimes
-    ? managedRuntimes.filter(
-        (runtime) =>
-          (
-            snapshotByBridge.get(runtime.bridge) ??
-            runtime.bridge.getDaemonStatusSnapshot()
-          ).channelLive,
-      ).length
-    : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
-  const registeredWorkspaceCount =
-    memoryBudget && input.workspaceRegistry
+  let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
+  if (memoryBudget) {
+    // Resolved only when a budget is reported, since nothing else consumes them.
+    const managedRuntimes = input.workspaceRegistry?.listManaged();
+    // Reuse the snapshots already taken above rather than asking each bridge
+    // again. Two reasons: `getDaemonStatusSnapshot()` rebuilds the whole session
+    // array on every call, and a second pass would read the tree at a different
+    // instant, so the child count could disagree with the rest of this response.
+    // Only a managed runtime the first pass missed — one whose entry is not in
+    // `active` state — needs a fresh snapshot.
+    const snapshotByBridge = new Map(
+      workspaceSnapshots.flatMap((item) =>
+        item.bridge ? [[item.bridge, item.snapshot] as const] : [],
+      ),
+    );
+    const activeAcpChildCount = managedRuntimes
+      ? managedRuntimes.filter(
+          (runtime) =>
+            (
+              snapshotByBridge.get(runtime.bridge) ??
+              runtime.bridge.getDaemonStatusSnapshot()
+            ).channelLive,
+        ).length
+      : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
+    const registeredWorkspaceCount = input.workspaceRegistry
       ? input.workspaceRegistry.listEntries().length
       : workspaceSnapshots.length;
+    runtimeMemory = {
+      registeredWorkspaces: registeredWorkspaceCount,
+      activeAcpChildren: activeAcpChildCount,
+      childRssCoverage: 'primary_only',
+      modeled: {
+        recommendedShareAtRegisteredMb:
+          registeredWorkspaceCount > 0
+            ? recommendedChildShareMb(memoryBudget, registeredWorkspaceCount)
+            : null,
+        recommendedShareAtActiveMb:
+          activeAcpChildCount > 0
+            ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)
+            : null,
+      },
+    };
+  }
   const aggregatedLastActivity = workspaceSnapshots.reduce<number | null>(
     (latest, item) =>
       item.lastActivity !== null &&
@@ -620,12 +637,12 @@ export async function buildDaemonStatusResponse(
             budgetSource: memoryBudget.budgetSource,
             availableMemoryMb: memoryBudget.availableMemoryMb,
             availableMemorySource: memoryBudget.availableMemorySource,
-            legacyChildCeilingMb: memoryBudget.legacyChildCeilingMb,
             insufficientMemory: memoryBudget.insufficientMemory,
             modeled: {
               rootReserveMb: memoryBudget.rootReserveMb,
               childPoolMb: memoryBudget.childPoolMb,
               minChildHeapMb: MIN_CHILD_HEAP_MB,
+              legacyChildCeilingMb: memoryBudget.legacyChildCeilingMb,
             },
           }
         : null,
@@ -702,28 +719,7 @@ export async function buildDaemonStatusResponse(
             ? Date.now() - aggregatedLastActivity
             : null,
       },
-      ...(memoryBudget
-        ? {
-            memory: {
-              registeredWorkspaces: registeredWorkspaceCount,
-              activeAcpChildren: activeAcpChildCount,
-              childRssCoverage: 'primary_only' as const,
-              modeled: {
-                recommendedShareAtRegisteredMb:
-                  registeredWorkspaceCount > 0
-                    ? recommendedChildShareMb(
-                        memoryBudget,
-                        registeredWorkspaceCount,
-                      )
-                    : null,
-                recommendedShareAtActiveMb:
-                  activeAcpChildCount > 0
-                    ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)
-                    : null,
-              },
-            },
-          }
-        : {}),
+      ...(runtimeMemory ? { memory: runtimeMemory } : {}),
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
