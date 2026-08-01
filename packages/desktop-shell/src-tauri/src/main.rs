@@ -520,7 +520,7 @@ fn check_updates_silently(app: AppHandle) {
             }
         })
         .await;
-        if confirmed != Ok(true) {
+        if !matches!(confirmed, Ok(true)) {
             return;
         }
         if update
