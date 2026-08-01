@@ -12,8 +12,9 @@
  * even after the originating prompt has already returned.
  *
  * Uses fake-openai-server for deterministic model responses, eliminating
- * model output variance as a failure source. The cron scheduler still
- * operates on real minute-boundary timing.
+ * model output variance as a failure source. The QWEN_CODE_TEST_CRON_FAST
+ * test seam auto-fires cron jobs after a short delay instead of waiting
+ * for the wall-clock minute boundary.
  */
 
 import { spawn } from 'node:child_process';
@@ -110,6 +111,11 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
         // Defends against an ambient proxy intercepting the local fake server.
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
+        // Enable the CronScheduler test seam: newly created session-only
+        // jobs auto-fire after 5s instead of waiting for the wall-clock
+        // minute boundary (see cron-interactive.test.ts).
+        QWEN_CODE_TEST_CRON_FAST: '1',
+        QWEN_CODE_TEST_CRON_DELAY_MS: '5000',
       },
     },
   );
@@ -370,7 +376,7 @@ async function initSession(
           // Fail fast if the cron_create tool call was not served to the first
           // user prompt. An internal model call before the first prompt (title
           // generation, a classifier pass) would shift dispatch and otherwise
-          // surface only as an opaque 75s timeout in Part 3.
+          // surface only as an opaque 75s timeout in Part 3a.
           expect(
             JSON.stringify(fakeServer.requests[0]?.body['messages']),
             'requestIndex 0 was not the cron_create prompt — dispatch shifted',
@@ -390,10 +396,11 @@ async function initSession(
           })) as { stopReason: string };
           expect(interactiveResult.stopReason).toBe('end_turn');
 
-          // --- Part 3: Wait for cron-fired notification (up to 75s) ---
-          // The cron fires at the next minute boundary. The model response
-          // should stream back as sessionUpdate notifications after the
-          // originating prompt has already returned.
+          // --- Part 3: Wait for cron-fired notification ---
+          // With QWEN_CODE_TEST_CRON_FAST the job auto-fires ~5s after
+          // creation. The model response should stream back as
+          // sessionUpdate notifications after the originating prompt has
+          // already returned.
 
           // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
           const cronUserMsg = await waitForSessionUpdate(
