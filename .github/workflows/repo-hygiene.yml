@@ -75,7 +75,7 @@ jobs:
     if: '${{ needs.dedup.outputs.open_prs_present == ''false'' }}'
     needs: 'dedup'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       contents: 'read'
     env:
@@ -147,6 +147,7 @@ jobs:
 
       - name: 'Run scan agent'
         id: 'scan'
+        timeout-minutes: 70
         env:
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -208,7 +209,7 @@ jobs:
     if: '${{ needs.scan.result == ''success'' }}'
     needs: 'scan'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 90
+    timeout-minutes: 180
     permissions:
       contents: 'read'
     env:
@@ -254,6 +255,10 @@ jobs:
           fi
           if ! jq -e . "${WORKDIR}/findings.json" > /dev/null; then
             echo '::error::findings.json is not valid JSON.'
+            exit 1
+          fi
+          if ! jq -e '(.fixes | type == "array") and (.reportOnly | type == "array")' "${WORKDIR}/findings.json" > /dev/null; then
+            echo '::error::findings.json missing fixes/reportOnly arrays.'
             exit 1
           fi
           echo "Findings: $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
@@ -347,6 +352,7 @@ jobs:
       - name: 'Run fix agent'
         if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         id: 'agent'
+        timeout-minutes: 80
         env:
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -894,6 +900,12 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'fix-artifacts'
-          path: '${{ env.WORKDIR }}'
+          path: |
+            ${{ env.WORKDIR }}/findings.json
+            ${{ env.WORKDIR }}/report-only.md
+            ${{ env.WORKDIR }}/failure.md
+            ${{ env.WORKDIR }}/agent.log
+            ${{ env.WORKDIR }}/pr-title.txt
+            ${{ env.WORKDIR }}/pr-body.md
           if-no-files-found: 'ignore'
           retention-days: 14
