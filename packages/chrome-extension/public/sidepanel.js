@@ -113,6 +113,9 @@ async function probeState(baseUrl, token) {
     }
     mcpProbeCounter += 1;
     mcpSnapshot = cachedMcpSnapshot;
+  } else {
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
   }
   return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl);
 }
@@ -193,6 +196,11 @@ async function tick() {
       framedMisses = 0;
       showWelcome(status, allowOriginCommand(chrome.runtime.id));
     }
+  } catch {
+    showWelcome(
+      { state: 'down', shellReady: false, warning: null },
+      allowOriginCommand(chrome.runtime.id),
+    );
   } finally {
     ticking = false;
   }

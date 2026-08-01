@@ -123,7 +123,7 @@ export function deriveCapabilityStatus(
           argUrl.port === daemonUrl.port
         );
       } catch {
-        return true;
+        return false;
       }
     });
     if (!usesTunnel) {

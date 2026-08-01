@@ -215,6 +215,8 @@ try {
     (text) => text.includes('/api/click'),
   );
   checks.network = networkRequests.includes('/api/click');
+  checks.networkExactlyOnce =
+    (networkRequests.match(/\/api\/click/g) || []).length === 1;
 
   if (freshLinkUid) await call('click', { uid: freshLinkUid });
   const targetSnapshot = await waitUntil(
@@ -252,7 +254,9 @@ const passed =
   checks.buttonClick &&
   checks.console &&
   checks.network &&
+  checks.linkAppeared &&
   checks.linkNavigation &&
+  checks.networkExactlyOnce &&
   checks.restoredOriginalUrl &&
   !checks.error &&
   !checks.restoreCommandFailed &&

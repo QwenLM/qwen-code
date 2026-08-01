@@ -88,6 +88,15 @@ describe('toChromeManifestVersion', () => {
     ).toThrow('Invalid nightly extension build number');
   });
 
+  it('rejects nightly releases with an impossible date', () => {
+    expect(() =>
+      toChromeManifestVersion('0.20.0-nightly.20261332.abc', 100),
+    ).toThrow('Invalid extension package version');
+    expect(() =>
+      toChromeManifestVersion('0.20.0-nightly.20260230.abc', 100),
+    ).toThrow('Invalid extension package version');
+  });
+
   it('rejects non-numeric version components', () => {
     expect(() => toChromeManifestVersion('next')).toThrow(
       'Invalid extension package version',
@@ -127,10 +136,7 @@ describe('toChromeManifestVersion', () => {
       );
 
       expect(manifest.version).toBe(
-        toChromeManifestVersion(
-          packageJson.version,
-          resolveNightlyBuildNumber(packageJson.version),
-        ),
+        toChromeManifestVersion(packageJson.version, 1),
       );
       expect(manifest.version_name).toBe(packageJson.version);
     } finally {
@@ -192,5 +198,14 @@ describe('resolveNightlyBuildNumber', () => {
     expect(() =>
       resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
     ).toThrow('Unable to derive');
+  });
+
+  it('throws an actionable error when git is unavailable', () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error('spawn git ENOENT');
+    });
+    expect(() =>
+      resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
+    ).toThrow('Set QWEN_CHROME_EXTENSION_BUILD_NUMBER');
   });
 });

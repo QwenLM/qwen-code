@@ -348,4 +348,30 @@ describe('deriveCapabilityStatus', () => {
         'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
     });
   });
+
+  it('does not treat a filesystem path containing /cdp/ as the tunnel', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--userDataDir', '/tmp/cdp/profile'],
+              },
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
 });

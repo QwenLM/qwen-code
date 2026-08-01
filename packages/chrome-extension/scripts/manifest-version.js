@@ -18,11 +18,18 @@ export function resolveNightlyBuildNumber(packageVersion) {
   if (!packageVersion.includes('-nightly.')) return undefined;
   const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
   if (configured) return Number(configured);
-  const shallow = execFileSync(
-    'git',
-    ['rev-parse', '--is-shallow-repository'],
-    { cwd: repoRoot, encoding: 'utf8' },
-  ).trim();
+  let shallow;
+  try {
+    shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    throw new Error(
+      'Unable to derive the nightly extension build number from git history. ' +
+        'Set QWEN_CHROME_EXTENSION_BUILD_NUMBER to an explicit build number.',
+    );
+  }
   if (shallow === 'true') {
     throw new Error(
       'Cannot derive a monotonic nightly build number from a shallow clone. ' +

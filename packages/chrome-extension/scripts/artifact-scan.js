@@ -46,7 +46,7 @@ export async function scanEsbuildMetafile(
     const normalized = input.replaceAll('\\', '/');
     for (const signature of signatures) {
       if (normalized.includes(signature)) {
-        findings.push({ file: metafilePath, signature });
+        findings.push({ file: `${metafilePath}:${normalized}`, signature });
       }
     }
   }

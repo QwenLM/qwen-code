@@ -90,7 +90,7 @@ describe('scanArtifactRoots', () => {
 
       await expect(scanEsbuildMetafile(metafile)).resolves.toEqual([
         {
-          file: metafile,
+          file: `${metafile}:node_modules/chrome-devtools-mcp/build/src/index.js`,
           signature: 'node_modules/chrome-devtools-mcp/',
         },
       ]);
