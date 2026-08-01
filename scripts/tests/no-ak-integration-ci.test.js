@@ -33,16 +33,23 @@ describe('no-AK integration CI wiring', () => {
 
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
-        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests',
+        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2',
         './fake-openai-server.test.ts',
+        './cli/daemon-invocation-context.test.ts',
+        './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
-        './cli/daemon-invocation-context.test.ts',
+        './sdk-typescript/abort-and-lifecycle.test.ts',
+        './sdk-typescript/permission-control.test.ts',
+        './sdk-typescript/sdk-mcp-server.test.ts',
+        './sdk-typescript/subagents.test.ts',
+        './sdk-typescript/system-control.test.ts',
+        './sdk-typescript/tool-control.test.ts',
       ].join(' '),
     );
   });
 
-  it('runs the no-AK integration script in the Ubuntu gate only', () => {
+  it('runs the no-AK integration script in the required Linux gate only', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -54,8 +61,9 @@ describe('no-AK integration CI wiring', () => {
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
 
-    expect(ubuntuJob).toContain("name: 'Run no-AK integration smoke tests'");
+    expect(ubuntuJob).toContain("name: 'Run required no-AK integration gate'");
     expect(ubuntuJob).toContain("github.event_name == 'pull_request'");
+    expect(ubuntuJob).toContain("github.event_name == 'merge_group'");
     expect(ubuntuJob).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
