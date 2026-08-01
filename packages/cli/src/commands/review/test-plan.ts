@@ -49,6 +49,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
+import { git } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import { readWorkspacePackages } from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
@@ -259,6 +260,18 @@ function maskFileCounts(section: string): string {
 function codeSpans(section: string): string[] {
   const spans: string[] = [];
   const add = (line: string) => {
+    // A pasted unified diff is EVIDENCE, and the PR template invites pasting
+    // it inside the Test Plan ("paste logs or test output"). Its syntax lines
+    // would otherwise shed false path claims (`+++ b/<path>` → `b/<path>`,
+    // `diff --git a/x b/x` → both). Drop them whole; a diff's body lines
+    // carry no runner and match no claim shape on their own.
+    if (/^(?:diff --git |\+\+\+ |--- |@@ |index )/.test(line.trim())) return;
+    // A diff BODY line is a claim-shedder too: `-packages/old/gone.ts` matches
+    // PATH_RE (its class admits a leading -/+) and ruled a false contradicted
+    // on a realistic pasted diff. Inside a ```diff fence every content line is
+    // prefixed, so dropping +/- prefixed lines loses no repro command — a
+    // command line in a Test Plan is never itself diff content.
+    if (/^[+-]/.test(line.trim())) return;
     // Strip a prompt marker, then anything after a `#` comment: a repro line is
     // written `npm test   # 471 pass`, and the comment is not part of the command.
     const t = line
@@ -442,6 +455,42 @@ function normalizeClaimPath(text: string): string {
   return normalize(text.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, ''));
 }
 
+/**
+ * Is `path` gitignored in `worktree`? One `git` spawn per distinct path, memoed
+ * for the process — a Test Plan naming the same artifact in its Evidence and
+ * its Environment sections should not pay twice.
+ *
+ * `--` before the path is belt-and-braces, and measured as such: `PATH_RE`'s
+ * class admits a leading `-`, but no `-`-leading text survives extraction today
+ * (`extractClaims('`-packages/old/gone.ts`')` returns nothing), so nothing
+ * reaches `check-ignore` in OPTION position. It is one token against a future
+ * extraction change, not a live hole. A non-zero exit means either "not
+ * ignored" or "no git here"; both fall through to the ordinary ruling, which is
+ * why this returns a plain boolean.
+ *
+ * Spawned through the package's own `git` helper rather than a bare
+ * `execFileSync`, for the deadline it carries: every other git invocation in
+ * these commands runs under `GIT_TIMEOUT_MS` because, as that constant's
+ * comment puts it, "a hang must still end". This was the one without it, and
+ * it runs against a worktree the review does not control.
+ */
+function isGitIgnored(worktree: string, path: string): boolean {
+  const key = `${worktree}\0${path}`;
+  const memo = ignoreCache.get(key);
+  if (memo !== undefined) return memo;
+  let ignored: boolean;
+  try {
+    git('-C', worktree, 'check-ignore', '-q', '--', path);
+    ignored = true;
+  } catch {
+    ignored = false;
+  }
+  ignoreCache.set(key, ignored);
+  return ignored;
+}
+
+const ignoreCache = new Map<string, boolean>();
+
 function rulePath(
   text: string,
   worktree: string,
@@ -469,12 +518,32 @@ function rulePath(
       note: 'not a repo-relative path',
     };
   }
+  // ONE existence check, and the ignore status only ever picks the WORDING or
+  // downgrades a would-be contradiction — never swallows a `reproduces`. Two
+  // existence checks with the ignore probe between them made the second one
+  // unreachable and silently retired its note, which is the distinction a
+  // reader needs: a tracked file that is present is state at the reviewed
+  // commit, an ignored file that is present is something this run produced.
+  const ignored = isGitIgnored(worktree, path);
   if (existsSync(join(worktree, path))) {
     return {
       kind: 'path',
       text,
       verdict: 'reproduces',
-      note: 'exists at the reviewed commit (the diff does not change it)',
+      note: ignored
+        ? 'exists in the review worktree — gitignored, so it is a build output this run produced, not state at the reviewed commit'
+        : 'exists at the reviewed commit (the diff does not change it)',
+    };
+  }
+  // A gitignored path (a build output the Environment section names — the
+  // template's own example is a dist/ entry point) is absent at the reviewed
+  // commit BY CONSTRUCTION, the same reasoning that excludes `.qwen/` paths.
+  if (ignored) {
+    return {
+      kind: 'path',
+      text,
+      verdict: 'unchecked',
+      note: 'gitignored — a build output, absent at the reviewed commit by construction',
     };
   }
   return {

@@ -305,6 +305,83 @@ describe('parseReviewArgs', () => {
   });
 });
 
+describe('parseReviewArgs — `--fix` is `--comment` reflected: it needs a tree, not a PR', () => {
+  // The two flags are gated on opposite targets, and each is *ignored with a
+  // warning* on the other's. A PR review's tree is the ephemeral worktree Step 9
+  // deletes; "fixed" edits there are discarded minutes later, and a review that
+  // reported them as applied would be lying about work that no longer exists.
+
+  it('is effective on a local review and floors the effort at medium', () => {
+    const got = parseReviewArgs('--fix');
+    expect(got.target.type).toBe('local');
+    expect(got.fix).toEqual({ requested: true, effective: true });
+    // Local defaults to medium already — no force, no warning about one.
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('is effective on a file review', () => {
+    const got = parseReviewArgs('src/foo.ts --fix');
+    expect(got.target.type).toBe('file');
+    expect(got.fix).toEqual({ requested: true, effective: true });
+  });
+
+  it('forces low up to medium — an unverified finding must not edit the tree', () => {
+    const got = parseReviewArgs('--effort low --fix');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('forced-by-fix');
+    expect(got.warnings).toEqual([
+      expect.stringContaining('`--fix` edits your working tree'),
+    ]);
+  });
+
+  it('does not drag high down to medium', () => {
+    const got = parseReviewArgs('--effort high --fix');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('explicit');
+  });
+
+  it('is ignored on a PR target, with a warning naming the ephemeral worktree', () => {
+    const got = parseReviewArgs('6711 --fix');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.fix).toEqual({ requested: true, effective: false });
+    expect(got.warnings).toEqual([
+      expect.stringContaining('`--fix` flag is ignored'),
+    ]);
+    // And an ignored --fix changes nothing about the level.
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+  });
+
+  it('never both: --comment and --fix cannot be effective in the same run', () => {
+    const pr = parseReviewArgs('6711 --comment --fix');
+    expect(pr.comment.effective).toBe(true);
+    expect(pr.fix.effective).toBe(false);
+    expect(pr.effort).toBe('high');
+
+    const local = parseReviewArgs('--comment --fix');
+    expect(local.comment.effective).toBe(false);
+    expect(local.fix.effective).toBe(true);
+    // The ignored --comment must not force high; the effective --fix floors at
+    // medium, and local's default is already medium.
+    expect(local.effort).toBe('medium');
+  });
+
+  it('is absent by default, not undefined', () => {
+    const got = parseReviewArgs('6711');
+    expect(got.fix).toEqual({ requested: false, effective: false });
+  });
+
+  it('is not a target token', () => {
+    // `--fix` is a recognized flag, so it must not fall through to
+    // `unknownFlags` (which would warn) nor be classified as a file path.
+    const got = parseReviewArgs('--fix');
+    expect(got.unknownFlags).toEqual([]);
+    expect(got.extraTokens).toEqual([]);
+  });
+});
+
 describe('parseReviewArgs — repeated --effort warnings state what is actually in effect', () => {
   it('valid then invalid keeps the valid effort and the warning says so (bug: warned "using the default" while low stayed active)', () => {
     const got = parseReviewArgs('6711 --effort low --effort=typo');

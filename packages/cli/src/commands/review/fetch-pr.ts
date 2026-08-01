@@ -106,6 +106,21 @@ type FetchPrResult = PlanReport & {
   headRefName: string;
   isCrossRepository: boolean;
   diffStat: { files: number; additions: number; deletions: number };
+  /**
+   * The merge-base diff is EMPTY: the branch tree is byte-identical to its
+   * base — the work already landed (a merge resolved everything away, or the
+   * PR was superseded). Reviewing it would review nothing; the skill stops and
+   * says so instead of fanning out agents over zero hunks.
+   */
+  emptyDiff?: boolean;
+  /**
+   * The recomputed merge-base diff is far smaller than the PR's advertised
+   * GitHub stat — overlapping PRs merged since the author's last rebase have
+   * collapsed this one to a residual, and the description likely narrates work
+   * that is already on the base branch. The review scope is the RECOMPUTED
+   * diff; the body's claims about the rest are description-of-history.
+   */
+  collapsedFromUpstream?: boolean;
   /** Merge-base of the PR head and its base branch — the diff's left side. */
   mergeBaseSha: string | null;
   /** True when the base branch could not be fetched; `mergeBaseSha` may be stale. */
@@ -368,6 +383,39 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
     isCrossRepository: meta.isCrossRepository,
+    // Two gates, because the SKILL acts on this by recommending the PR be
+    // closed as superseded — the one ruling here that is expensive to get
+    // wrong. `diffPath` (set only on a SUCCESSFUL capture): a capture that
+    // threw also leaves diffText empty, and closing off that would close a
+    // live PR on an infrastructure error. `baseFetchFailed`: the merge base is
+    // then "resolved from a possibly stale local ref" (the warning above says
+    // so), and a stale base ref that already contains the head commits diffs
+    // to empty — the same wrong recommendation, one cause further out.
+    ...(isEmptyDiff({ diffPath, baseFetchFailed, diffText })
+      ? { emptyDiff: true }
+      : {}),
+    // Collapse detection compares recomputed reality against GitHub's
+    // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
+    // signature, not rounding. Both thresholds are deliberately coarse — this
+    // is a disclosure, never a gate.
+    //
+    // The two sides are produced by different tools, so the ratio has floors
+    // under it for a reason. Rename detection is the divergence that matters:
+    // `--find-renames` is pinned here and GitHub applies its own, and a move
+    // whose similarity lands on opposite sides of the two thresholds shrinks
+    // one side and not the other. That is what the 4x buys — a threshold
+    // disagreement moves the ratio by the size of one file, a genuine
+    // upstream collapse moves it by the size of the PR. Kept as a disclosure
+    // precisely because the ratio is not a measurement of the same quantity
+    // twice.
+    ...(isCollapsedFromUpstream({
+      diffText,
+      baseFetchFailed,
+      additions: meta.additions,
+      deletions: meta.deletions,
+    })
+      ? { collapsedFromUpstream: true }
+      : {}),
     diffStat: {
       files: meta.changedFiles,
       additions: meta.additions,
@@ -405,6 +453,95 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         .join(', ')}`,
     );
   }
+}
+
+/**
+ * Whether the capture found nothing to review.
+ *
+ * Extracted and pure because the SKILL ACTS on it — it recommends the PR be
+ * closed as superseded — which makes it the one disclosure here that is
+ * expensive to get wrong, and it was the one with no test. Both guards are
+ * load-bearing and neither is about the diff: a capture that THREW also leaves
+ * `diffText` empty (`diffPath` is set only on success), and a merge base
+ * resolved from a stale local ref can already contain the head commits and so
+ * diff to empty. Either would close a live PR on an infrastructure error.
+ */
+export function isEmptyDiff(i: {
+  diffPath: string | null;
+  baseFetchFailed: boolean;
+  diffText: string;
+}): boolean {
+  return i.diffPath !== null && !i.baseFetchFailed && i.diffText.trim() === '';
+}
+
+/**
+ * Whether the recomputed diff has collapsed against GitHub's advertised stat —
+ * the rebase-lag signature.
+ *
+ * Both thresholds are coarse on purpose, and the reason is that the two sides
+ * are produced by DIFFERENT tools: `--find-renames` is pinned locally while
+ * GitHub applies its own, so a move whose similarity lands on opposite sides of
+ * the two thresholds shrinks one side and not the other. The 4x is what buys
+ * past that — a threshold disagreement moves the ratio by one file, a genuine
+ * upstream collapse moves it by the size of the PR — and the 200-line floor
+ * keeps small PRs, where one file IS the ratio, out of it entirely. A
+ * disclosure, never a gate, precisely because it is not the same quantity
+ * measured twice.
+ */
+export function isCollapsedFromUpstream(i: {
+  diffText: string;
+  baseFetchFailed: boolean;
+  additions: number;
+  deletions: number;
+}): boolean {
+  // The sibling guard, for the sibling reason — and it is the guard, not the
+  // ratio, that was missing here. `isEmptyDiff` refuses to rule when the merge
+  // base came from a possibly stale local ref because such a base can already
+  // contain the head commits and diff to empty. The PARTIAL form of the same
+  // cause lands here instead: a stale ref holding most of the head commits
+  // shrinks the recomputed diff past the 4x ratio, and this flag then tells
+  // Agent 0 a story — "overlapping merged PRs collapsed this one, read the
+  // body as description-of-history" — that is wrong in the way that matters,
+  // because the body's claims may be perfectly current and the real cause is
+  // an infrastructure failure. A disclosure that steers how the body is read
+  // has to be as sure of its base as a gate does.
+  const advertised = i.additions + i.deletions;
+  return (
+    !i.baseFetchFailed &&
+    i.diffText.trim() !== '' &&
+    advertised >= 200 &&
+    countDiffChangedLines(i.diffText) * 4 <= advertised
+  );
+}
+
+/** Changed (+/-) lines in a unified diff — headers excluded. */
+export function countDiffChangedLines(diffText: string): number {
+  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+  // every line starting `--`, and a DELETED line whose own content starts `--`
+  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+  // comments, a `--flag` in a script. Each one silently dropped a real changed
+  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+  // (the disclosure fires when the recomputed count comes in LOW).
+  //
+  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
+  // headers there — so track hunk state and count every `+`/`-` line in it.
+  let n = 0;
+  let inHunk = false;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('@@')) {
+      inHunk = true;
+      continue;
+    }
+    // `diff --git` opens the next file's header block; `\ No newline at end of
+    // file` is a marker, not content, and git emits it inside the hunk.
+    if (line.startsWith('diff --git')) {
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk || line.startsWith('\\')) continue;
+    if (line.startsWith('+') || line.startsWith('-')) n++;
+  }
+  return n;
 }
 
 export const fetchPrCommand: CommandModule = {
