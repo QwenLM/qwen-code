@@ -194,6 +194,27 @@ describe('goalCommand', () => {
     },
   );
 
+  it.each(['edit revised', 'pause', 'resume'] as const)(
+    'rejects /goal %s in ACP mode',
+    async (args) => {
+      const { runtime } = makeRuntime(goalSnapshot());
+      const { context, getGoalRuntimeReady } = makeContext(runtime, {
+        executionMode: 'acp',
+      });
+
+      const result = await goalCommand.action!(context, args);
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringMatching(/not available in ACP mode/i),
+      });
+      expect(getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
+      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
+    },
+  );
+
   it('strips the set keyword before forwarding to the legacy ACP path', async () => {
     mockRegisterGoalHook.mockReturnValue({
       condition: 'Ship it',
