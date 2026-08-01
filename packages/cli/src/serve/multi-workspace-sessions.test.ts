@@ -3043,7 +3043,7 @@ describe('multi-workspace session dispatch', () => {
         sessionId,
         cwd: SECONDARY_CWD,
         timestamp: '2026-07-08T00:00:00.000Z',
-        prompt: 'x'.repeat(4 * 1024 * 1024),
+        prompt: 'x'.repeat(33 * 1024 * 1024),
         mtime: new Date('2026-07-08T00:00:00.000Z'),
       });
       const { app, secondaryBridge } = makeHarness({
@@ -3058,11 +3058,44 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body).toMatchObject({
         code: 'transcript_page_too_large',
         sessionId,
-        maxBytes: 4 * 1024 * 1024,
+        maxBytes: 32 * 1024 * 1024,
       });
       expect(response.body.pageBytes).toBeGreaterThan(
         response.body.maxBytes as number,
       );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('serves an indivisible record that exceeds the reader page budget', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440280';
+      const prompt = 'x'.repeat(5 * 1024 * 1024);
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt,
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      // A single record cannot be split, so it rides over the 4 MiB reader
+      // budget (hard ceiling remains the 32 MiB serialization cap).
+      expect(response.status).toBe(200);
+      expect(
+        response.body.events.some(
+          (event: { data?: { content?: { text?: string } } }) =>
+            event.data?.content?.text?.length === prompt.length,
+        ),
+      ).toBe(true);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
     });
