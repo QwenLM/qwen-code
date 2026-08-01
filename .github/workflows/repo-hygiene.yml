@@ -408,6 +408,7 @@ jobs:
                   "write_file(/.github/**)",
                   "write_file(/.qwen/**)",
                   "write_file(**/package.json)",
+                  "write_file(**/package-lock.json)",
                   "write_file(**/.npmrc)",
                   "write_file(**/makefile)",
                   "write_file(**/Makefile)",
@@ -665,6 +666,13 @@ jobs:
           )
           mkdir -p "${WORKDIR}/sandbox-home" "${WORKDIR}/npm-cache"
 
+          # Re-stage gate scripts from the trusted checkout: the agent's
+          # write_file deny list cannot cover RUNNER_TEMP (out-of-workspace),
+          # so overwrite any tampered copies before verification uses them.
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+
           # Typecheck only, by design: it catches most bad model-generated
           # commits cheaply. Lint/build breakage still fails the job below.
           REVERTED=0
@@ -761,7 +769,7 @@ jobs:
             | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-autofix-contracts.sh'"
 
           CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
-            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
+            | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/resolve-owning-packages.sh'")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping tests.'
           else
