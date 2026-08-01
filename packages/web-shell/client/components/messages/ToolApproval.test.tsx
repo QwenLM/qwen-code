@@ -90,6 +90,12 @@ function optionButtons(): HTMLButtonElement[] {
   );
 }
 
+function optionLabels(): (string | null | undefined)[] {
+  return optionButtons().map(
+    (o) => o.querySelector('[data-web-shell-option-label]')?.textContent,
+  );
+}
+
 function pressKey(target: Element, key: string): void {
   act(() => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
@@ -202,7 +208,7 @@ describe('ToolApproval accessibility', () => {
         language,
       );
 
-      expect(optionButtons().map((option) => option.textContent)).toEqual([
+      expect(optionLabels()).toEqual([
         expect.stringContaining(allowOnceLabel),
         expect.stringContaining(switchLabel),
       ]);
@@ -308,5 +314,152 @@ describe('ToolApproval accessibility', () => {
     // interception exists. (jsdom doesn't synthesize the native Enter->click, so
     // we assert the handler leaves the event un-cancelled instead.)
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('deduplicates options with the same id', () => {
+    const dupRequest: PermissionRequest = {
+      id: 'req-dup',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, dupRequest);
+    const opts = optionButtons();
+    expect(opts).toHaveLength(2);
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('reject');
+    expect(opts[1]!.getAttribute('data-option-id')).toBe('proceed_once');
+  });
+
+  it.each([
+    [
+      'en' as const,
+      ['Reject', 'Yes, restore previous mode', 'Yes, allow once'],
+    ],
+    ['zh-CN' as const, ['拒绝', '是，恢复之前的模式', '是，允许一次']],
+  ])(
+    'renders plan-mode allow_once options as distinct, localized buttons in %s',
+    (language, expectedLabels) => {
+      // plan mode emits two allow_once options (restore_previous +
+      // proceed_once). They must stay distinct AND both localize: before
+      // restore_previous got its own i18n key, zh-CN leaked the English server
+      // labels for both.
+      render(
+        undefined,
+        {
+          id: 'req-plan',
+          content: [],
+          options: [
+            {
+              id: 'restore_previous',
+              label: 'Yes, restore previous mode (default)',
+              kind: 'allow_once',
+            },
+            {
+              id: 'proceed_once',
+              label: 'Yes, and manually approve edits',
+              kind: 'allow_once',
+            },
+            { id: 'reject', label: 'Reject', kind: 'reject_once' },
+          ],
+        },
+        language,
+      );
+      const opts = optionButtons();
+      expect(opts).toHaveLength(3);
+      expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+        'reject',
+        'restore_previous',
+        'proceed_once',
+      ]);
+      expect(optionLabels()).toEqual(expectedLabels);
+    },
+  );
+
+  it('falls back to i18n when a standard option has an empty label', () => {
+    render(undefined, {
+      id: 'req-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'reject', label: '', kind: 'reject_once' },
+      ],
+    });
+    const labels = optionLabels();
+    expect(labels).toContain('Yes, allow once');
+    expect(labels).toContain('Reject');
+  });
+
+  it('never renders a blank button when colliding options have empty labels', () => {
+    // Two generic allow_once options share the allowOnce key, so the collision
+    // guard reaches for their server labels, but both are empty. It must
+    // degrade to the localized string (duplicated yet readable) rather than
+    // render an unlabeled button a screen reader cannot announce.
+    render(undefined, {
+      id: 'req-collide-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: '', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual([
+      'Reject',
+      'Yes, allow once',
+      'Yes, allow once',
+    ]);
+  });
+
+  it('falls back to distinct server labels when options share an i18n key', () => {
+    render(undefined, {
+      id: 'req-collide',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow A', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: 'Allow B', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual(['Reject', 'Allow A', 'Allow B']);
+  });
+
+  it('re-enables confirmation when a new request arrives', () => {
+    render(undefined);
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('does not re-arm the submit guard when the same request changes options', () => {
+    render(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'reject_always', label: 'Never', kind: 'reject_always' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    // Same request id, but options change so safeDefaultIndex flips 1 -> 0.
+    // The reset effect must NOT re-run: it is keyed strictly to request.id.
+    rerender(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });
