@@ -118,7 +118,10 @@ const PLAN_NAME_RE =
  * same quadratic shape the bold pattern below was rewritten to remove, on the
  * same untrusted line.
  */
-const HEADING_LINE_RE = /^(#{1,6})(.*)$/;
+// `#` must be followed by whitespace or end-of-line (the ATX rule GitHub
+// applies): `#tag`, `#!/bin/bash` outside a fence, `#8176` are prose, and a
+// spaceless line once ended the Test Plan section mid-body.
+const HEADING_LINE_RE = /^(#{1,6})(?:[ \t](.*))?$/;
 
 /** A standalone bold line: `**Test Plan**`, the same heading in another shape. */
 // No `\s*` on either side of the capture and no lazy quantifier: with all
@@ -171,7 +174,7 @@ export function extractTestPlanSection(
       if (!fenced[j]) {
         const next = HEADING_LINE_RE.exec(lines[j]);
         // A bare `#` run with no text is not a heading (the old `\s*\S` bar).
-        if (next && !next[2].trim()) {
+        if (next && !next[2]?.trim()) {
           out.push(lines[j]);
           continue;
         }
