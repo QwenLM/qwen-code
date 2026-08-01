@@ -36,8 +36,8 @@ import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { loadSettingsCached } from '../../config/settings-cache.js';
-import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
-import { parseChannelDelivery } from '../channel-delivery.js';
+import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
+import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
