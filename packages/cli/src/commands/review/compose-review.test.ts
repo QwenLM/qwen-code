@@ -37,7 +37,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+vi.mock('../../utils/version.js', () => ({
+  getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
+}));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+
+const runComposeReviewCommand = (argv: unknown): Promise<void> =>
+  Promise.resolve(composeReviewCommand.handler(argv as never) as void);
 
 const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -351,7 +357,7 @@ function blindPlan(): string {
   return plan();
 }
 
-const FOOTER = `_— ${MODEL} via Qwen Code /review_`;
+const FOOTER = `_— ${MODEL} via Qwen Code /review (vunknown)_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   return {
@@ -373,6 +379,14 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+  });
+
+  it('includes the injected CLI version without breaking the stable marker', () => {
+    const r = composeReview(base({}), '0.21.2');
+    expect(r.body).toContain('via Qwen Code /review');
+    expect(
+      r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
   });
 
   it('C=0, S≥1 → COMMENT with the no-blockers opener', () => {
@@ -876,7 +890,7 @@ describe('composeReview — presubmit permission gates certification even when n
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {
-  it('reads --input, counts the drafted comments, and writes the result JSON to --out', () => {
+  it('reads --input, counts the drafted comments, and writes the result JSON to --out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
     const inputPath = join(dir, 'compose.json');
     const commentsPath = join(dir, 'comments.json');
@@ -891,7 +905,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       ]),
       'utf8',
     );
-    (composeReviewCommand.handler as (argv: unknown) => void)({
+    await runComposeReviewCommand({
       input: inputPath,
       comments: commentsPath,
       out: outPath,
@@ -901,10 +915,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ) as ComposeReviewResult;
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
-    expect(written.body.endsWith(FOOTER)).toBe(true);
+    expect(
+      written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
   });
 
-  it('routes its gh calls via the PR host — --host reaches setGhHost', () => {
+  it('routes its gh calls via the PR host — --host reaches setGhHost', async () => {
     // The bilingual body-language recovery calls `gh pr view`; on GitHub Enterprise
     // that call must hit the PR's host, or the composed body's language disagrees
     // with what `submit` (which routes by host) posts. Drop the `setGhHost(host)`
@@ -916,7 +932,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     writeFileSync(commentsPath, '[]', 'utf8');
     setGhHost(undefined);
     try {
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         host: 'github.example.com',
@@ -927,7 +943,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
-  it('a drafted inline Critical reaches the verdict line — the report-only hole', () => {
+  it('a drafted inline Critical reaches the verdict line — the report-only hole', async () => {
     // The dogfooded failure this boundary exists for: a report-only run (no
     // submit, so nothing downstream recounts) moved its one Critical from
     // `bodyCriticals` to an inline comment, dropped the count on the way, and
@@ -951,7 +967,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         ]),
         'utf8',
       );
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,
@@ -973,7 +989,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
-  it('accepts the review-payload shape too — the same file submit takes', () => {
+  it('accepts the review-payload shape too — the same file submit takes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-payload-shape-'));
     try {
       const inputPath = join(dir, 'compose.json');
@@ -988,7 +1004,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         }),
         'utf8',
       );
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,
@@ -1007,7 +1023,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ['suggestionsInline', { suggestionsInline: 2 }],
   ])(
     'refuses a state JSON carrying %s — counts are counted, not typed',
-    (_, extra) => {
+    async (_, extra) => {
       const dir = mkdtempSync(join(tmpdir(), 'compose-typed-count-'));
       try {
         const inputPath = join(dir, 'compose.json');
@@ -1018,19 +1034,19 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           'utf8',
         );
         writeFileSync(commentsPath, '[]', 'utf8');
-        expect(() =>
-          (composeReviewCommand.handler as (argv: unknown) => void)({
+        await expect(
+          runComposeReviewCommand({
             input: inputPath,
             comments: commentsPath,
           }),
-        ).toThrow(/counted from the --comments file/);
+        ).rejects.toThrow(/counted from the --comments file/);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
   );
 
-  it('refuses a drafted comment with no severity marker — it would weigh nothing', () => {
+  it('refuses a drafted comment with no severity marker — it would weigh nothing', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-unmarked-'));
     try {
       const inputPath = join(dir, 'compose.json');
@@ -1044,12 +1060,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         ]),
         'utf8',
       );
-      expect(() =>
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+      await expect(
+        runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
         }),
-      ).toThrow(/comments\[1\].*neither/s);
+      ).rejects.toThrow(/comments\[1\].*neither/s);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1064,42 +1080,42 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ],
   ])(
     'refuses %s — omission is the failure mode, not a default',
-    (_, commentsPath, pattern) => {
+    async (_, commentsPath, pattern) => {
       const dir = mkdtempSync(join(tmpdir(), 'compose-no-comments-'));
       try {
         const inputPath = join(dir, 'compose.json');
         writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
-        expect(() =>
-          (composeReviewCommand.handler as (argv: unknown) => void)({
+        await expect(
+          runComposeReviewCommand({
             input: inputPath,
             comments: commentsPath,
           }),
-        ).toThrow(pattern as RegExp);
+        ).rejects.toThrow(pattern as RegExp);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
   );
 
-  it('refuses a comments file that is not an array (nor a payload with one)', () => {
+  it('refuses a comments file that is not an array (nor a payload with one)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-bad-comments-'));
     try {
       const inputPath = join(dir, 'compose.json');
       const commentsPath = join(dir, 'comments.json');
       writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
       writeFileSync(commentsPath, JSON.stringify({ criticals: 3 }), 'utf8');
-      expect(() =>
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+      await expect(
+        runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
         }),
-      ).toThrow(/must be a JSON array of comment objects/);
+      ).rejects.toThrow(/must be a JSON array of comment objects/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('strips a model-supplied `env` — it cannot redirect the transcript lookup', () => {
+  it('strips a model-supplied `env` — it cannot redirect the transcript lookup', async () => {
     // The input is a JSON the model wrote. `env` decides where the harness
     // transcripts are read from; if the handler honoured it, a model could point
     // it at a directory of transcripts it fabricated — the whole gate reopened
@@ -1193,7 +1209,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       const prevProj = process.env['QWEN_CODE_PROJECT_DIR'];
       delete process.env['QWEN_CODE_PROJECT_DIR']; // real env cannot find transcripts
       try {
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+        await runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
           out: outPath,
@@ -1637,7 +1653,7 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain('never opened its brief, so it reviewed without');
   });
 
-  it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
+  it('the handler prints every FIX to stderr, before the verdict, never to stdout', async () => {
     // The array on the result is data; the command boundary is the interface the
     // orchestrator actually reads. Without this, rerouting FIX lines to stdout
     // (corrupting the JSON callers parse) or printing them after `Verdict:` (so
@@ -1666,7 +1682,7 @@ describe('coverage is recomputed, never accepted', () => {
     try {
       vi.mocked(writeStderrLine).mockClear();
       vi.mocked(writeStdoutLine).mockClear();
-      (composeReviewCommand.handler as (a: Record<string, unknown>) => void)({
+      await runComposeReviewCommand({
         input,
         comments: commentsPath,
       });
@@ -2468,7 +2484,7 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
     expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
   });
 
-  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', () => {
+  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', async () => {
     // The handler deletes prBodyFetcher from the input JSON (the same way it
     // deletes env). Without that delete, "suppress" reaches bilingualFromPlan,
     // is called as a function, throws, and the catch drops the fold — the exact
@@ -2493,7 +2509,7 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
       const commentsPath = join(handlerDir, 'comments.json');
       writeFileSync(commentsPath, '[]', 'utf8');
       const outPath = join(handlerDir, 'out.json');
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,

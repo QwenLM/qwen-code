@@ -107,6 +107,8 @@ export class BundledSkillLoader implements ICommandLoader {
           // Resolve template variables in skill body
           let body = skill.body;
           const modelId = this.config?.getModel()?.trim() || '';
+          const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
+          body = body.replaceAll('{{cliVersion}}', cliVersion);
           if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
             body = body.replaceAll('{{model}}', modelId);
             body = body.replaceAll('YOUR_MODEL_ID', modelId);

@@ -426,7 +426,7 @@ export function findRootId<
  * file, letting the re-check approve past the blocker.
  */
 const CANONICAL_LGTM_RE =
-  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review_\s*)?$/i;
+  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;
 
 /**
  * Should this review-level summary be shown to agents?
