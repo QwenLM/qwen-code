@@ -703,5 +703,30 @@ describe('<HistoryItemDisplay />', () => {
 
       expect(toggle).not.toHaveBeenCalled();
     });
+
+    it('hides the click hint when ui.mouseTracking is false despite VP being on', () => {
+      const settingsNoMouse = new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: true, mouseTracking: false } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={thoughtItem}
+          terminalWidth={100}
+          isPending={false}
+        />,
+        { settings: settingsNoMouse },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
+    });
   });
 });

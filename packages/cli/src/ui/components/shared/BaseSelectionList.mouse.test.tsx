@@ -110,4 +110,23 @@ describe('BaseSelectionList with mouse enabled (integration)', () => {
     expect(lastFrame()).toContain('Beta');
     expect(enabledAnyWritten()).toBe(false);
   });
+
+  it('does not mount the mouse layer when ui.mouseTracking is false despite VP being on', () => {
+    const ui = { ui: { useTerminalBuffer: true, mouseTracking: false } };
+    const settingsNoMouse = new LoadedSettings(
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: ui, originalSettings: ui },
+      { path: '', settings: {}, originalSettings: {} },
+      true,
+      new Set(),
+    );
+    const { lastFrame } = renderWithProviders(
+      <RadioButtonSelect items={items} onSelect={() => {}} />,
+      { settings: settingsNoMouse },
+    );
+    expect(lastFrame()).toContain('Alpha');
+    expect(lastFrame()).toContain('Beta');
+    expect(enabledAnyWritten()).toBe(false);
+  });
 });
