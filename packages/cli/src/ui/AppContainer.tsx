@@ -2002,7 +2002,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // background agent's PTY must not block the toggle on the main chat.
   agentViewActiveShellPtyRef.current =
     agentViewState.activeView !== 'main' &&
-    agentViewState.agentViewHasActiveShellPty;
+    agentViewState.activeAgentHasShellPty;
   const {
     dialogOpen: bgTasksDialogOpen,
     entries: bgTaskEntries,

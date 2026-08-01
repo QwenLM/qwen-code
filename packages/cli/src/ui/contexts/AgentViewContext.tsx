@@ -50,6 +50,8 @@ export interface AgentViewState {
   agentShellFocused: boolean;
   /** Whether any agent tab has an active embedded shell PTY. */
   agentViewHasActiveShellPty: boolean;
+  /** Whether the currently active agent tab has an active embedded shell PTY. */
+  activeAgentHasShellPty: boolean;
   /** Last synced text from the active agent tab's input buffer. */
   agentInputBufferText: string;
   /** Whether the tab bar has keyboard focus (vs the agent input). */
@@ -90,6 +92,7 @@ const DEFAULT_STATE: AgentViewState = {
   agents: new Map(),
   agentShellFocused: false,
   agentViewHasActiveShellPty: false,
+  activeAgentHasShellPty: false,
   agentInputBufferText: '',
   agentTabBarFocused: false,
   agentApprovalModes: new Map(),
@@ -143,6 +146,7 @@ export function AgentViewProvider({
     Set<string>
   >(() => new Set());
   const agentViewHasActiveShellPty = agentViewActiveShellPtySet.size > 0;
+  const activeAgentHasShellPty = agentViewActiveShellPtySet.has(activeView);
   const [agentInputBufferText, setAgentInputBufferText] = useState('');
   const [agentTabBarFocused, setAgentTabBarFocused] = useState(false);
   const [agentApprovalModes, setAgentApprovalModes] = useState<
@@ -274,6 +278,7 @@ export function AgentViewProvider({
       agents,
       agentShellFocused,
       agentViewHasActiveShellPty,
+      activeAgentHasShellPty,
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
@@ -283,6 +288,7 @@ export function AgentViewProvider({
       agents,
       agentShellFocused,
       agentViewHasActiveShellPty,
+      activeAgentHasShellPty,
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,

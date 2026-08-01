@@ -124,4 +124,51 @@ describe('agentViewActiveShellPtySet tracking', () => {
     act(() => latest.actions!.unregisterAll());
     expect(latest.state!.agentViewHasActiveShellPty).toBe(false);
   });
+
+  // Regression for the model-toggle blocker: the toggle guard must key off
+  // the ACTIVE agent's PTY, not the global "any agent has a PTY" boolean.
+  // A background agent's PTY must not block the toggle while the user views
+  // a different agent tab (or main) that has none.
+  it('activeAgentHasShellPty tracks only the active view, not every agent', () => {
+    const config = makeConfig();
+    render(
+      <AgentViewProvider config={config}>
+        <Consumer />
+      </AgentViewProvider>,
+    );
+
+    // Register two agents so switchToAgent can move the active view.
+    const interactiveAgent = {
+      getCore: () => ({ runtimeContext: { getApprovalMode: () => 'default' } }),
+    } as never;
+    act(() => {
+      latest.actions!.registerAgent('agent-1', interactiveAgent, 'm', 'red');
+      latest.actions!.registerAgent('agent-2', interactiveAgent, 'm', 'blue');
+    });
+
+    // Both agents have a PTY → the global flag is true...
+    act(() => {
+      latest.actions!.setAgentViewHasActiveShellPty('agent-1', true);
+      latest.actions!.setAgentViewHasActiveShellPty('agent-2', true);
+    });
+    expect(latest.state!.agentViewHasActiveShellPty).toBe(true);
+
+    // ...but on the main view the active agent has none.
+    expect(latest.state!.activeView).toBe('main');
+    expect(latest.state!.activeAgentHasShellPty).toBe(false);
+
+    // Viewing agent-1 (which has a PTY) → per-agent flag flips on.
+    act(() => latest.actions!.switchToAgent('agent-1'));
+    expect(latest.state!.activeAgentHasShellPty).toBe(true);
+
+    // Drop agent-1's PTY while agent-2 keeps one: the global flag stays true
+    // but the per-agent flag (active view = agent-1) turns off.
+    act(() => latest.actions!.setAgentViewHasActiveShellPty('agent-1', false));
+    expect(latest.state!.agentViewHasActiveShellPty).toBe(true);
+    expect(latest.state!.activeAgentHasShellPty).toBe(false);
+
+    // Switching to agent-2 (still has a PTY) turns the per-agent flag back on.
+    act(() => latest.actions!.switchToAgent('agent-2'));
+    expect(latest.state!.activeAgentHasShellPty).toBe(true);
+  });
 });

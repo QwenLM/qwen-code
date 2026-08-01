@@ -5081,12 +5081,177 @@ describe('AppContainer State Management', () => {
       handleKeypress!(ctrlF);
       expect(switchModelSpy).toHaveBeenCalledTimes(2);
 
-      // Structural (error path clears the return-model ref): the handler body
-      // must reset previousModelRef on failure so the next toggle attempts a
-      // fresh forward switch.
-      expect(handleKeypress!.toString()).toContain(
-        'previousModelRef.current = null',
+      // Behavioral: the error path cleared previousModelRef, so the second
+      // toggle is a fresh forward switch to the configured target (model-b),
+      // not a backward switch to a stale return model. Same-provider toggle
+      // passes no switchOptions (undefined third argument).
+      expect(switchModelSpy).toHaveBeenNthCalledWith(
+        2,
+        AuthType.USE_OPENAI,
+        'model-b',
+        undefined,
       );
+    });
+  });
+
+  // Wiring coverage for the Ctrl+F toggle glue in AppContainer.tsx:
+  //  - review #3: a cross-provider toggle into QWEN_OAUTH must forward
+  //    `{ requireCachedCredentials: true }` (needsCachedCredentials wiring);
+  //  - review #4: in vim mode the REAL vimHandleInput wrapper must suppress
+  //    the text-buffer cursor-right when the toggle guard passes, while the
+  //    global key handler still performs the model switch.
+  describe('Model toggle (Ctrl+F) wiring', () => {
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...overrides,
+      }) as Key;
+
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleToggleKeypress'),
+        ) as ((key: Key) => void) | undefined;
+
+    const ctrlF = makeKey({ name: 'f', ctrl: true, sequence: '\x06' });
+
+    const settingsWithToggle = (toggleModel: string) =>
+      ({
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+          model: { toggleModel },
+        },
+        setValue: vi.fn(),
+      }) as unknown as LoadedSettings;
+
+    it('passes requireCachedCredentials on a cross-provider toggle into QWEN_OAUTH', () => {
+      // Current model is model-a under openai; the qualified toggle target
+      // model-b(qwen-oauth) resolves to AuthType.QWEN_OAUTH, so the switch is
+      // cross-provider into QWEN_OAUTH and needs cached credentials.
+      mockSettings = settingsWithToggle('model-b(qwen-oauth)');
+
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+      vi.spyOn(mockConfig, 'getAvailableModelsForAuthType').mockReturnValue([]);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockResolvedValue(undefined);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(ctrlF);
+
+      expect(switchModelSpy).toHaveBeenCalledWith(
+        AuthType.QWEN_OAUTH,
+        'model-b',
+        { requireCachedCredentials: true },
+      );
+    });
+
+    it('passes no switchOptions on a same-provider toggle', () => {
+      // Bare model-b resolves against the current auth type (openai), so the
+      // toggle stays same-provider and the third argument must be undefined.
+      mockSettings = settingsWithToggle('model-b');
+
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+      vi.spyOn(mockConfig, 'getAvailableModelsForAuthType').mockReturnValue([]);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockResolvedValue(undefined);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(ctrlF);
+
+      expect(switchModelSpy).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'model-b',
+        undefined,
+      );
+    });
+
+    it('suppresses the vim cursor-right while the toggle fires', () => {
+      mockSettings = settingsWithToggle('model-b');
+
+      // Vim mode enabled; capture the real useVim().handleInput so we can
+      // assert the wrapper does NOT delegate Ctrl+F to it.
+      const vimHandleInputSpy = vi.fn();
+      mockedUseVim.mockReturnValue({ handleInput: vimHandleInputSpy });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'NORMAL',
+      });
+
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+      vi.spyOn(mockConfig, 'getAvailableModelsForAuthType').mockReturnValue([]);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockResolvedValue(undefined);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      // The REAL vimHandleInput wrapper (UIActionsContext) sees Ctrl+F while
+      // the toggle guard passes: it must return true (key handled) WITHOUT
+      // delegating to useVim().handleInput, so the cursor does not move right.
+      const handled = capturedUIActions.vimHandleInput(ctrlF);
+      expect(handled).toBe(true);
+      expect(vimHandleInputSpy).not.toHaveBeenCalled();
+
+      // The same keypress, routed through the global key handler, performs the
+      // model switch — proving the toggle still fires in vim mode.
+      handleKeypress!(ctrlF);
+      expect(switchModelSpy).toHaveBeenCalledTimes(1);
+      expect(switchModelSpy).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'model-b',
+        undefined,
+      );
+      // The wrapper never delegated to vim for the toggle key.
+      expect(vimHandleInputSpy).not.toHaveBeenCalled();
     });
   });
 
