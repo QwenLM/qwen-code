@@ -2742,6 +2742,7 @@ const ZH: Messages = {
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
   'toolName.image_gen': '生成图片',
+  'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
   'toolName.shell': 'Shell 命令',

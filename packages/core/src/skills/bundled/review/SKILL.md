@@ -118,7 +118,7 @@ Based on the parsed `target.type`:
     Worktree isolation: all subsequent steps (agents, build/test) operate inside `worktreePath`, not the user's working tree. Cache and reports (Step 8) are written to the **main project directory**, not the worktree.
 
   - **Incremental review check** (high effort only — neither low nor medium consults or updates the cache): if `.qwen/review-cache/pr-<n>.json` exists, read `lastCommitSha` and `lastModelId`. Compare to `fetchedSha` from the fetch report and the current model ID (`{{model}}`):
-    - If SHAs differ → continue with the worktree just created. Compute the incremental diff (`git diff <lastCommitSha>..HEAD` inside the worktree) and use as the review scope; if the cached commit was rebased away, fall back to the full diff and log a warning.
+    - If SHAs differ → continue with the worktree just created. Compute the incremental diff (`git diff <lastCommitSha>..HEAD` inside the worktree) and use as the review scope; if the cached commit was rebased away, fall back to the full diff and log a warning. **Also read the cache's `findings` ledger** (older caches have none — then there is nothing to track): these are the previous round's findings with their ids, and Step 6 owes each of them a ruling this round.
     - If SHAs match **and** model matches **and** `--comment` was NOT specified → inform the user "No new changes since last review", run `"${QWEN_CODE_CLI:-qwen}" review cleanup pr-<n>` to remove the worktree just created, and stop.
     - If SHAs match **and** model matches **but** `--comment` WAS specified → run the full review anyway. Inform the user: "No new code changes. Running review to post inline comments."
     - If SHAs match **but** model differs → continue. Inform: "Previous review used {cached_model}. Running full review with {{model}} for a second opinion."
@@ -464,6 +464,8 @@ Rules: at most 2; launch none when no domain stands out (the common case — mos
 
 Build and test results are **deterministic facts**. A code-caused failure skips Step 4 verification — the `[build]` / `[test]` source tag is how it is recognised as pre-confirmed. An environment/setup failure (a missing dependency, a tool not installed) is informational only and must not affect the verdict. Test-efficacy findings are deterministic in the same way, and likewise pre-confirmed.
 
+When the PR side's tests fail, Agent 7's brief has it **measure** the attribution rather than judge it by path: `base-tree` + `test-delta` rerun the same failed commands on the built merge base and diff the failing **file sets**. `netNew` (fails on the PR side only) is the PR's own failure by measurement — a Critical even in a file the diff never touched; `shared` (fails on base too) is pre-existing by measurement — never filed, even in a file the diff rewrote. Counts are deliberately not compared: a flaky suite fails different test names between two runs of the same tree, so the file-set difference is the signal and an empty `netNew` is the strongest "pre-existing" statement available. Where the delta cannot rule — no merge base, an unparsed failure, a timed-out base rerun, a base rerun that failed without naming any failing file (it did not measure the base), or a command the whole-command budget could not fit — the old path judgment stands, and the report names each case with its own reason rather than folding them into one.
+
 If the probe reports `inconclusive`, that is **not a finding and must never be reported as one**: reverting the source often breaks the test's own compile, and a runner that collected nothing is not a test catching a regression. Note it in the terminal and move on.
 
 ## Step 3C: Inline pass (low effort)
@@ -630,6 +632,16 @@ If there are no low-confidence findings, omit this section.
 List every chunk that returned `Uncoverable` in Step 3, with the files it spans, **and every dimension in `unreviewedDimensions`** (an agent that whiffed twice — its lens ran over nothing), **and every entry in the capture's `skippedFiles`** (a local review only — an untracked file too large to inline). All three are scope nobody reviewed: a single line longer than one `read_file` returns in the first case, a silent agent in the second, a file nobody opened in the third. Say so plainly rather than implying coverage — in the terminal output of every run, posting or not.
 
 If there are none of these, omit this section.
+
+### Previous round's findings (incremental re-review only)
+
+When Step 1 loaded a findings ledger from the cache, this review is **round N+1 of the same PR**, and the single most useful thing it can tell the reader is what happened to round N's findings — a re-reviewer who only lists new findings leaves the author to diff two reports by hand. Rule on **every** ledger entry against the code at the reviewed commit, exactly the way the open-Criticals re-check below rules (trace the mechanism; the diff containing a fix is not the same claim as the defect no longer firing):
+
+- **fixed** — the mechanism can no longer fire. Say so, by id, in one line: `R1-2 fixed by <what>`. Do not re-report it as a finding.
+- **still stands** — re-report it **under its original id**, updating the location if the code moved. It keeps its severity; a still-standing Critical blocks exactly as a new one would.
+- **cannot tell** — say so by id; a previous-round _Critical_ you cannot rule on joins `cannotTellCriticals` (it caps like any undecided blocker), a Suggestion is just disclosed.
+
+Render the rulings as a short table at the top of the Findings section — id, one-line title, this round's status — so the report reads as a continuation, the way a human reviewer's round-2 comment opens with "M1 is fixed". The incremental scope rule does not conflict with this: the _diff_ reviewed is `lastCommitSha..HEAD`, but a ledger ruling reads the code at HEAD, which every agent already has.
 
 ### Before an Approve or a zero-Critical verdict: re-check the open Criticals
 
@@ -994,10 +1006,23 @@ If reviewing a PR **at high effort**, update the review cache for incremental re
      "lastCommitSha": "<HEAD SHA captured in Step 1>",
      "lastModelId": "{{model}}",
      "lastReviewDate": "<ISO timestamp>",
+     "round": <N — 1 on a first review, previous round + 1 after>,
      "findingsCount": <number>,
-     "verdict": "<verdict>"
+     "verdict": "<verdict>",
+     "findings": [
+       {
+         "id": "R<round>-<n>",
+         "severity": "Critical | Suggestion",
+         "file": "<path>",
+         "line": <number>,
+         "title": "<one line — enough for the next round to re-locate the claim>",
+         "status": "open"
+       }
+     ]
    }
    ```
+
+   The `findings` ledger is what lets the **next** high-effort run open with "R1-2 is fixed" instead of a from-scratch list (see Step 6's previous-round section). Write every **newly confirmed high-confidence** finding under a fresh `R<round>-<n>` id, and carry a still-standing previous entry forward **under the id it already has** — the whole payoff is that `R1-2` names the same claim in every round, so a finding that survives is re-reported, never renumbered — a finding ruled `fixed` this round leaves the ledger (the report said so; the cache is for what the next round must check, not history). Low-confidence and terminal-only findings stay out: the ledger holds claims this review stands behind, because next round re-asserts each one by id.
 
 3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.
 
