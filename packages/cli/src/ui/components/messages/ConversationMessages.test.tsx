@@ -9,6 +9,7 @@ import { Text } from 'ink';
 import { vi } from 'vitest';
 import {
   AssistantMessage,
+  AssistantMessageContent,
   ThinkMessage,
   ThinkMessageContent,
   toggleKeyHint,
@@ -24,6 +25,21 @@ describe('<AssistantMessage />', () => {
   it('routes assistant images through TerminalImage', () => {
     const { lastFrame } = render(
       <AssistantMessage
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+});
+
+describe('<AssistantMessageContent />', () => {
+  it('routes continuation images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessageContent
         text=""
         images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
         isPending={false}

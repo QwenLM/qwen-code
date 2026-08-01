@@ -6359,6 +6359,90 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('discards every staged mixed-content run on model fallback', async () => {
+      vi.useFakeTimers();
+
+      let emitFallback!: () => void;
+      const waitForFallback = new Promise<void>((resolve) => {
+        emitFallback = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'failed.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          await waitForFallback;
+          yield {
+            type: ServerGeminiEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show a chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+
+      await act(async () => {
+        emitFallback();
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) => item.type === 'gemini' || item.type === 'gemini_content',
+          ),
+      ).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'notification',
+          text: 'Model primary-model unavailable, falling back to fallback-model',
+        },
+        expect.any(Number),
+      );
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('discards staged mixed content before an explicit retry after a thrown stream', async () => {
       const failedImage = {
         data: 'aW1hZ2U=',
@@ -9482,6 +9566,81 @@ describe('useGeminiStream', () => {
       // Only the awaiting_approval tool should be processed
       expect(mockOnConfirmAwaiting).toHaveBeenCalledTimes(1);
       expect(mockOnConfirmExecuting).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Citation event', () => {
+    it('preserves streamed text across hidden citation events', async () => {
+      const settingsWithCitationsHidden = {
+        ...mockLoadedSettings,
+        merged: {
+          ...mockLoadedSettings.merged,
+          ui: {
+            ...mockLoadedSettings.merged.ui,
+            showCitations: false,
+          },
+        },
+      } as LoadedSettings;
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Hello world',
+          };
+          yield {
+            type: ServerGeminiEventType.Citation,
+            value: 'Citation text',
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: ' more',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          settingsWithCitationsHidden,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('test hidden citation');
+      });
+
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter((item) => item.type === 'gemini'),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'Hello world more' }),
+      ]);
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.INFO }),
+        expect.any(Number),
+      );
     });
   });
 

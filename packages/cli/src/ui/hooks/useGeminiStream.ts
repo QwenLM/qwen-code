@@ -2474,7 +2474,9 @@ export const useGeminiStream = (
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
               handleCitationEvent(event.value, userMessageTimestamp);
-              geminiMessageBuffer = '';
+              if (showCitations(settings)) {
+                geminiMessageBuffer = '';
+              }
               break;
             case ServerGeminiEventType.LoopDetected:
               flushBufferedStreamEvents();
@@ -2734,6 +2736,7 @@ export const useGeminiStream = (
       handleMaxSessionTurnsEvent,
       handleSessionTokenLimitExceededEvent,
       handleCitationEvent,
+      settings,
       startRetryCountdown,
       clearRetryCountdown,
       setThought,
