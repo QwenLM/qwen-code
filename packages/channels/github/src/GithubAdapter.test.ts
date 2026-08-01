@@ -19,8 +19,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getWorkspaceScopeDirName } from '../../base/src/paths.js';
 import {
+  getWorkspaceScopeDirName,
   type ChannelAgentBridge,
   type ChannelConfig,
   type Envelope,
@@ -258,6 +258,10 @@ class TestableGithubChannel extends GithubChannel {
     if (this.handleInboundError) throw this.handleInboundError;
     if (this.usePreflight && !(await this.preflightInbound(envelope))) return;
     this.inboundEnvelopes.push(envelope);
+  }
+
+  triggerTaskLifecycleForTest(event: unknown): void {
+    this.onTaskLifecycle(event as never);
   }
 
   async testSendThreadMessage(
@@ -580,7 +584,20 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
         .mockResolvedValueOnce([makeComment()]);
-      await pollOnce();
+      let releaseInbound!: () => void;
+      channel.handleInboundHook = () =>
+        new Promise<void>((resolve) => {
+          releaseInbound = resolve;
+        });
+      const poll = pollOnce();
+      await vi.waitFor(() =>
+        expect(mockOctokit.paginate).toHaveBeenCalledTimes(2),
+      );
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      releaseInbound();
+      await poll;
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
@@ -2570,10 +2587,8 @@ describe('GithubChannel', () => {
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).not.toHaveBeenCalledWith({
-        last_read_at: '2026-07-02T10:00:00.000Z',
-        read: true,
-      });
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001']);
       expect(readInboundTasks()).toEqual([
         expect.objectContaining({
@@ -2584,6 +2599,108 @@ describe('GithubChannel', () => {
           error: 'agent down',
         }),
       ]);
+    });
+
+    it('bounds failed task recovery and avoids duplicate error comments', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      await pollOnce();
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 3,
+          errorCommentPosted: true,
+        }),
+      ]);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(1);
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+    });
+
+    it('blocks cursor commit when inbound task state is invalid', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          dedupe: { dispatchedComments: 'C_1001' },
+        }),
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+
+      await expect(pollOnce()).rejects.toThrow(
+        'invalid GitHub inbound task state',
+      );
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('persists cancellation as a terminal task state', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const privateChannel = channel as unknown as {
+        activeInboundTaskIdsByMessage: Map<string, string>;
+      };
+      privateChannel.activeInboundTaskIdsByMessage.set(
+        'owner/repo|1001',
+        'inbound-task-1',
+      );
+
+      channel.triggerTaskLifecycleForTest({
+        type: 'cancelled',
+        chatId: 'owner/repo',
+        messageId: '1001',
+      });
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'cancelled' }),
+      ]);
+    });
+
+    it('does not turn cancellation into a retryable failure', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([task]);
+      channel.handleInboundHook = async () => {
+        channel.triggerTaskLifecycleForTest({
+          type: 'cancelled',
+          chatId: 'owner/repo',
+          messageId: '1001',
+        });
+        throw new Error('cancelled');
+      };
+      const privateChannel = channel as unknown as {
+        runInboundTask: (task: typeof task) => Promise<boolean>;
+      };
+
+      await privateChannel.runInboundTask(task);
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'cancelled' }),
+      ]);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalledWith(
+        expect.objectContaining({ body: expect.stringContaining('Failed') }),
+      );
     });
 
     it('recovers an accepted task before polling and removes it after success', async () => {
@@ -2643,7 +2760,7 @@ describe('GithubChannel', () => {
             updated_at: '2026-07-02T10:00:00.000Z',
           }),
         ])
-        .mockResolvedValueOnce([]);
+        .mockResolvedValueOnce([makeComment()]);
 
       const privateChannel = channel as unknown as {
         octokit: typeof mockOctokit;
