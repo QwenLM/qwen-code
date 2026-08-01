@@ -1067,6 +1067,44 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('waits for an active Goal turn before admitting real user input', async () => {
+    setupMetricsMock();
+    await prepareGoalState('active');
+    const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
+    expect(occupyingPermit).toBeDefined();
+    const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    mockFinishedGoalWorker();
+    const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'A queued user update',
+      'goal-queued-user',
+    );
+
+    await vi.waitFor(() =>
+      expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
+    );
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+
+    await finishOccupyingTurn(occupyingPermit!);
+    await run;
+
+    const sendOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    expect(sendOptions).toMatchObject({
+      type: SendMessageType.UserQuery,
+      goalOrigin: 'user',
+      goalTurnKey: 'goal-queued-user',
+      goalPermit: {
+        goalId: occupyingPermit!.goalId,
+        revision: occupyingPermit!.revision,
+        turnId: expect.any(String),
+      },
+    });
+    expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
+  });
+
   it('emits direct Goal v2 state before the legacy partial projection', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
