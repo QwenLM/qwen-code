@@ -612,6 +612,64 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('prefers the resolved config baseUrl over the picker entry when persisting a default', async () => {
+    // Covers the `after?.baseUrl` branch of
+    // `after?.baseUrl ?? selectedEntry?.model.baseUrl`: when the resolved config
+    // carries an authoritative baseUrl (e.g. normalized by switchModel), it must
+    // win over the picker entry's baseUrl so the persisted disambiguator stays
+    // consistent with the config that effectiveModelId comes from.
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({ persistDefault: true }, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      // Resolved config carries an authoritative baseUrl that differs from the
+      // picker entry's; it must win over `selectedEntry?.model.baseUrl`.
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        baseUrl: 'https://normalized.example.com/v1',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    // baseUrl comes from the resolved config, not the picker entry.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://normalized.example.com/v1',
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('shows MiniMax-M3 image + video modality and 1M context details', () => {
     const { getByText } = renderComponent({}, {
       getModel: vi.fn(() => 'MiniMax-M3'),
