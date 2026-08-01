@@ -64,20 +64,19 @@ describe('no-AK integration CI wiring', () => {
     const gateStepMarker =
       "      - name: 'Run required no-AK integration gate'";
     const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
-    const gateStep = ubuntuJob.slice(
-      gateStepStart,
-      ubuntuJob.indexOf(
-        '\n      - name:',
-        gateStepStart + gateStepMarker.length,
-      ),
+    expect(gateStepStart).toBeGreaterThanOrEqual(0);
+    const nextStepIndex = ubuntuJob.indexOf(
+      '\n      - name:',
+      gateStepStart + gateStepMarker.length,
     );
+    expect(nextStepIndex).toBeGreaterThan(0);
+    const gateStep = ubuntuJob.slice(gateStepStart, nextStepIndex);
 
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     expect(workflowTriggers).toContain('\n  pull_request:\n');
     expect(workflowTriggers).toContain('\n  merge_group:\n');
 
-    expect(gateStepStart).toBeGreaterThanOrEqual(0);
     expect(gateStep).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
@@ -88,18 +87,26 @@ describe('no-AK integration CI wiring', () => {
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',
       'BAILIAN_TOKEN_PLAN_API_KEY',
       'DASHSCOPE_API_KEY',
       'DEEPSEEK_API_KEY',
       'GEMINI_API_KEY',
+      'GEMINI_MODEL',
       'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
       'IDEALAB_API_KEY',
       'MINIMAX_API_KEY',
       'MODELSCOPE_API_KEY',
       'OPENAI_API_KEY',
+      'OPENAI_BASE_URL',
+      'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWEN_DEFAULT_AUTH_TYPE',
+      'QWEN_MODEL',
       'REQUESTY_API_KEY',
       'XAI_API_KEY',
       'ZAI_API_KEY',

@@ -410,12 +410,15 @@ jobs:
 
       - name: 'Run required no-AK integration gate'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        timeout-minutes: 20
         env:
           HOME: '${{ runner.temp }}/qwen-no-ak-home'
           USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
           QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
+          ANTHROPIC_BASE_URL: ''
+          ANTHROPIC_MODEL: ''
           BAILIAN_CODING_PLAN_API_KEY: ''
           BAILIAN_TOKEN_PLAN_API_KEY: ''
           DEEPSEEK_API_KEY: ''
@@ -424,9 +427,11 @@ jobs:
           OPENAI_MODEL: ''
           DASHSCOPE_API_KEY: ''
           GOOGLE_API_KEY: ''
+          GOOGLE_MODEL: ''
           QWEN_API_KEY: ''
           QWEN_MODEL: ''
           GEMINI_API_KEY: ''
+          GEMINI_MODEL: ''
           IDEALAB_API_KEY: ''
           MINIMAX_API_KEY: ''
           MODELSCOPE_API_KEY: ''
