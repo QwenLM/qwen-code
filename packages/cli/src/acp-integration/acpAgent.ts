@@ -7251,7 +7251,7 @@ class QwenAgent implements Agent {
   /**
    * Resolve the cwd for `qwen/settings/*` handlers with per-session
    * worktree awareness. Priority: explicit `cwd` param (handled by
-   * caller) > session.worktreeCwd > config.getActiveWorktree() >
+   * caller) > session.worktreeCwd > session config's activeWorktree >
    * agent-level defaultSettingsCwd > process.cwd().
    */
   private resolveSettingsCwd(params: Record<string, unknown>): string {
@@ -7259,12 +7259,13 @@ class QwenAgent implements Agent {
     if (typeof sessionId === 'string' && sessionId.length > 0) {
       const session = this.sessions.get(sessionId);
       if (session) {
-        return session.worktreeCwd ?? process.cwd();
+        const configWt = session.getConfig().getActiveWorktree?.();
+        return session.worktreeCwd ?? configWt ?? process.cwd();
       }
     }
-    const activeWorktree = this.config?.getActiveWorktree?.();
-    if (activeWorktree) {
-      return activeWorktree;
+    for (const session of this.sessions.values()) {
+      const wt = session.getConfig().getActiveWorktree?.();
+      if (wt) return wt;
     }
     return this.defaultSettingsCwd || process.cwd();
   }

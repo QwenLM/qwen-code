@@ -298,8 +298,9 @@ export function registerWorkspaceSettingsRoutes(
       const assertGenerationOpen =
         deps.captureGenerationAssertion?.() ?? (() => {});
       assertGenerationOpen();
+      const getWorkspace = resolveEffectiveWorkspace?.() ?? boundWorkspace;
       const response = buildSettingsResponse(
-        boundWorkspace,
+        getWorkspace,
         allowedKeys,
         deps.isWorkspaceTrusted?.() ?? true,
       );

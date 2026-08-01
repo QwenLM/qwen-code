@@ -7,12 +7,15 @@
 import { describe, expect, it } from 'vitest';
 import { findEffectiveWorkspace } from './worktree-workspace.js';
 
+const always = () => true;
+const never = () => false;
+
 describe('findEffectiveWorkspace', () => {
   const ws = '/repo/project';
 
   it('returns boundWorkspace when no sessions exist', () => {
     const bridge = { listWorkspaceSessions: () => [] };
-    expect(findEffectiveWorkspace(bridge, ws)).toBe(ws);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
   });
 
   it('returns boundWorkspace when no session has a worktree', () => {
@@ -22,10 +25,10 @@ describe('findEffectiveWorkspace', () => {
         { worktree: undefined },
       ],
     };
-    expect(findEffectiveWorkspace(bridge, ws)).toBe(ws);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
   });
 
-  it('returns the worktree path when a session has one', () => {
+  it('returns the worktree path when a session has one on disk', () => {
     const worktree = '/repo/project/.qwen/worktrees/feat';
     const bridge = {
       listWorkspaceSessions: () => [
@@ -33,10 +36,18 @@ describe('findEffectiveWorkspace', () => {
         { worktree: { path: worktree } },
       ],
     };
-    expect(findEffectiveWorkspace(bridge, ws)).toBe(worktree);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(worktree);
   });
 
-  it('returns the first worktree when multiple sessions have one', () => {
+  it('skips a worktree whose path no longer exists on disk', () => {
+    const worktree = '/repo/project/.qwen/worktrees/deleted';
+    const bridge = {
+      listWorkspaceSessions: () => [{ worktree: { path: worktree } }],
+    };
+    expect(findEffectiveWorkspace(bridge, ws, never)).toBe(ws);
+  });
+
+  it('returns the first existing worktree when multiple sessions have one', () => {
     const wt1 = '/repo/project/.qwen/worktrees/alpha';
     const wt2 = '/repo/project/.qwen/worktrees/beta';
     const bridge = {
@@ -45,6 +56,6 @@ describe('findEffectiveWorkspace', () => {
         { worktree: { path: wt2 } },
       ],
     };
-    expect(findEffectiveWorkspace(bridge, ws)).toBe(wt1);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(wt1);
   });
 });
