@@ -1836,7 +1836,6 @@ export class GeminiChat {
    */
   async tryCompress(
     promptId: string,
-    model: string,
     force = false,
     signal?: AbortSignal,
     options?: TryCompressOptions,
@@ -1845,7 +1844,6 @@ export class GeminiChat {
     const { newHistory, info } = await service.compress(this, {
       promptId,
       force,
-      model,
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount:
@@ -2211,7 +2209,6 @@ export class GeminiChat {
       } else {
         compressionInfo = await this.tryCompress(
           prompt_id,
-          model,
           shouldForceFromHard,
           params.config?.abortSignal,
           {
@@ -2694,7 +2691,6 @@ export class GeminiChat {
                 try {
                   const reactiveInfo = await self.tryCompress(
                     prompt_id,
-                    model,
                     true,
                     params.config?.abortSignal,
                     {

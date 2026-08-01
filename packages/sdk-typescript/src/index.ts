@@ -139,6 +139,7 @@ export {
   type DaemonPendingPromptSummary,
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
+  type DaemonRemoveMidTurnMessageResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
