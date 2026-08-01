@@ -146,6 +146,8 @@ interface FullDaemonStatus {
 
 interface WorkspaceBridgeStatusSnapshot {
   workspaceCwd: string;
+  /** Present only when the snapshot came from a registry runtime. */
+  bridge?: AcpSessionBridge;
   snapshot: BridgeDaemonStatusSnapshot;
   lastActivity: number | null;
 }
@@ -401,6 +403,7 @@ export async function buildDaemonStatusResponse(
   const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
     workspaceRuntimes?.map((runtime) => ({
       workspaceCwd: runtime.workspaceCwd,
+      bridge: runtime.bridge,
       snapshot:
         runtime.bridge === input.bridge
           ? bridgeSnapshot
@@ -439,9 +442,24 @@ export async function buildDaemonStatusResponse(
   const managedRuntimes = memoryBudget
     ? input.workspaceRegistry?.listManaged()
     : undefined;
+  // Reuse the snapshots already taken above rather than asking each bridge
+  // again. Two reasons: `getDaemonStatusSnapshot()` rebuilds the whole session
+  // array on every call, and a second pass would read the tree at a different
+  // instant, so the child count could disagree with the rest of this response.
+  // Only a managed runtime the first pass missed — one whose entry is not in
+  // `active` state — needs a fresh snapshot.
+  const snapshotByBridge = new Map(
+    workspaceSnapshots.flatMap((item) =>
+      item.bridge ? [[item.bridge, item.snapshot] as const] : [],
+    ),
+  );
   const activeAcpChildCount = managedRuntimes
     ? managedRuntimes.filter(
-        (runtime) => runtime.bridge.getDaemonStatusSnapshot().channelLive,
+        (runtime) =>
+          (
+            snapshotByBridge.get(runtime.bridge) ??
+            runtime.bridge.getDaemonStatusSnapshot()
+          ).channelLive,
       ).length
     : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
   const registeredWorkspaceCount =

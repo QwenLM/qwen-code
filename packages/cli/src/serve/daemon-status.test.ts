@@ -398,6 +398,51 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('still takes one snapshot per bridge when a memory budget is resolved', async () => {
+    // The reuse above is guarded by a test that does not resolve a budget, so a
+    // second snapshot pass taken only on the budget path would stay invisible
+    // to it — while running on every production /daemon/status call.
+    const primarySnapshot = vi.fn(() => BASE_BRIDGE_SNAPSHOT);
+    const secondarySnapshot = vi.fn(() => BASE_BRIDGE_SNAPSHOT);
+    const primaryBridge = {
+      getDaemonStatusSnapshot: primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const runtimes = [
+      {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        bridge: primaryBridge,
+      },
+      {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        bridge: secondaryBridge,
+      },
+    ];
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+    options.workspaceRegistry = {
+      primary: runtimes[0],
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () =>
+        runtimes.map((r) => ({ workspaceCwd: r.workspaceCwd })),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    await buildDaemonStatusResponse('summary', options);
+
+    expect(primarySnapshot).toHaveBeenCalledTimes(1);
+    expect(secondarySnapshot).toHaveBeenCalledTimes(1);
+  });
+
   it('reuses the primary bridge snapshot when a workspace registry is installed', async () => {
     const primarySnapshot = vi.fn(() => ({
       ...BASE_BRIDGE_SNAPSHOT,
