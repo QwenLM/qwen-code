@@ -219,6 +219,89 @@ describe('terminalImageRenderer', () => {
     },
   );
 
+  it.runIf(process.platform !== 'win32')(
+    'does not trust a project-local node_modules/.bin/chafa',
+    async () => {
+      const localBin = path.join(tempDir, 'node_modules', '.bin');
+      await fs.mkdir(localBin, { recursive: true });
+      const chafaPath = path.join(localBin, 'chafa');
+      await fs.writeFile(
+        chafaPath,
+        '#!/usr/bin/env node\nprocess.stdout.write("HACKED\\n");\n',
+      );
+      await fs.chmod(chafaPath, 0o755);
+
+      expect(
+        getTerminalImageRenderSupport(
+          {
+            PATH: localBin,
+            TERM: 'xterm-256color',
+            TERM_PROGRAM: 'WarpTerminal',
+          },
+          true,
+        ),
+      ).toEqual({
+        available: false,
+        reason:
+          'No compatible native image protocol was detected, and chafa is not installed.',
+      });
+
+      const result = renderTerminalImage({
+        display: {
+          type: 'terminal_image',
+          filePath: imagePath,
+          mimeType: 'image/png',
+        },
+        contentWidth: 20,
+        env: {
+          PATH: localBin,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+        stdoutIsTTY: true,
+      });
+      expect(result).toEqual({
+        kind: 'unavailable',
+        reason:
+          'No compatible native image protocol was detected, and chafa is not installed.',
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'surfaces chafa stderr when rendering fails',
+    async () => {
+      const binDir = path.join(tempDir, 'bin');
+      await fs.mkdir(binDir);
+      const chafaPath = path.join(binDir, 'chafa');
+      await fs.writeFile(
+        chafaPath,
+        '#!/usr/bin/env node\nprocess.stderr.write("libpng: invalid IHDR data\\n");\nprocess.exit(1);\n',
+      );
+      await fs.chmod(chafaPath, 0o755);
+
+      const result = renderTerminalImage({
+        display: {
+          type: 'terminal_image',
+          filePath: imagePath,
+          mimeType: 'image/png',
+        },
+        contentWidth: 20,
+        env: {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+        stdoutIsTTY: true,
+      });
+
+      expect(result.kind).toBe('unavailable');
+      expect(result.kind === 'unavailable' && result.reason).toContain(
+        'libpng: invalid IHDR data',
+      );
+    },
+  );
+
   it('returns a readable fallback when chafa is unavailable', async () => {
     const result = await renderTerminalImage({
       display: {

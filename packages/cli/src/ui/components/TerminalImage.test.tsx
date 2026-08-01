@@ -115,4 +115,42 @@ describe('TerminalImage', () => {
     expect(lastFrame()).toContain('outside the current workspace');
     expect(mockedRenderTerminalImage).not.toHaveBeenCalled();
   });
+
+  it('does not re-emit the Kitty sequence when the emit effect re-runs', async () => {
+    mockedRenderTerminalImage.mockReturnValue({
+      kind: 'kitty',
+      sequence: '\x1b_Gpayload\x1b\\',
+      placeholder: {
+        color: '#00002a',
+        imageId: 42,
+        lines: ['placeholder'],
+      },
+    });
+
+    const renderWith = (writer: (...args: unknown[]) => void) => (
+      <TerminalOutputProvider value={writer}>
+        <TerminalImage
+          data={IMAGE}
+          config={configWithWorkspaceResult(true)}
+          contentWidth={80}
+          availableTerminalHeight={20}
+        />
+      </TerminalOutputProvider>
+    );
+
+    const firstWriteRaw = vi.fn();
+    const { rerender } = render(renderWith(firstWriteRaw));
+
+    await vi.waitFor(() => {
+      expect(firstWriteRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
+    });
+    expect(firstWriteRaw).toHaveBeenCalledTimes(1);
+
+    const secondWriteRaw = vi.fn();
+    rerender(renderWith(secondWriteRaw));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(secondWriteRaw).not.toHaveBeenCalled();
+    expect(firstWriteRaw).toHaveBeenCalledTimes(1);
+  });
 });

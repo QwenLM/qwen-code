@@ -127,4 +127,15 @@ describe('DisplayImageTool', () => {
       .execute(new AbortController().signal);
     expect(oversized.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
   });
+
+  it('rejects a truncated PNG header', async () => {
+    const truncatedPath = path.join(workspace, 'truncated.png');
+    await fs.writeFile(truncatedPath, Buffer.from('89504e470d0a1a0a', 'hex'));
+
+    const result = await tool
+      .build({ file_path: truncatedPath })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+  });
 });

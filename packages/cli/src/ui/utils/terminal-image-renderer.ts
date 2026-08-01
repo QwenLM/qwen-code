@@ -6,7 +6,6 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   MAX_TERMINAL_IMAGE_BYTES,
@@ -17,7 +16,9 @@ import {
   buildKittyPlaceholder,
   createRendererChildEnv,
   encodeKittyVirtualImage,
+  findExecutable,
   readPngSize,
+  shouldRunThroughShell,
   type KittyImagePlaceholder,
 } from './mermaidImageRenderer.js';
 
@@ -78,7 +79,7 @@ export function getTerminalImageRenderSupport(
   // this runs during display_image execution and must never spawn a
   // synchronous subprocess. A render failure still surfaces later, as a
   // fallback notice, when renderTerminalImage actually runs chafa.
-  return findChafa(env)
+  return findExecutable('chafa', env)
     ? { available: true }
     : {
         available: false,
@@ -212,9 +213,20 @@ function renderWithChafa(
   shape: { widthCells: number; rows: number },
   env: NodeJS.ProcessEnv,
 ): Extract<TerminalImageRenderResult, { kind: 'ansi' | 'unavailable' }> {
+  // Resolve chafa through the hardened lookup so a project-local
+  // node_modules/.bin/chafa is never executed unless the user opted in, then
+  // spawn the resolved path rather than a bare name resolved off PATH.
+  const chafaPath = findExecutable('chafa', env);
+  if (!chafaPath) {
+    return {
+      kind: 'unavailable',
+      reason:
+        'No compatible native image protocol was detected, and chafa is not installed.',
+    };
+  }
   try {
     const stdout = execFileSync(
-      'chafa',
+      chafaPath,
       [
         '--animate=off',
         '--format=symbols',
@@ -225,6 +237,7 @@ function renderWithChafa(
       {
         encoding: 'utf8',
         env: createRendererChildEnv(env),
+        shell: shouldRunThroughShell(chafaPath),
         maxBuffer: CHAFA_MAX_OUTPUT_BYTES,
         timeout: CHAFA_TIMEOUT_MS,
       },
@@ -235,35 +248,14 @@ function renderWithChafa(
       : { kind: 'unavailable', reason: 'chafa produced no output.' };
   } catch (error) {
     const execError = error as Error & {
-      code?: string | number;
       stderr?: Buffer | string;
     };
     return {
       kind: 'unavailable',
       reason:
-        execError.code === 'ENOENT'
-          ? 'No compatible native image protocol was detected, and chafa is not installed.'
-          : String(execError.stderr ?? '').trim() ||
-            execError.message ||
-            'chafa could not render the image.',
+        String(execError.stderr ?? '').trim() ||
+        execError.message ||
+        'chafa could not render the image.',
     };
   }
-}
-
-function findChafa(env: NodeJS.ProcessEnv): boolean {
-  const extensions =
-    process.platform === 'win32'
-      ? (env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
-      : [''];
-  for (const dir of (env['PATH'] ?? '').split(path.delimiter).filter(Boolean)) {
-    for (const extension of extensions) {
-      try {
-        fs.accessSync(path.join(dir, `chafa${extension}`), fs.constants.X_OK);
-        return true;
-      } catch {
-        // Not executable at this PATH entry; keep searching.
-      }
-    }
-  }
-  return false;
 }

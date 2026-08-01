@@ -859,7 +859,7 @@ function findMmdc(env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
-function findExecutable(
+export function findExecutable(
   command: string,
   env: NodeJS.ProcessEnv,
 ): string | null {
@@ -1049,7 +1049,7 @@ async function renderPngWithMmdcAsync(
   }
 }
 
-function shouldRunThroughShell(command: string): boolean {
+export function shouldRunThroughShell(command: string): boolean {
   return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
 }
 
