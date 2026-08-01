@@ -354,6 +354,36 @@ describe('runTestDelta', () => {
     expect(ran).toEqual(['npm test', 'npm test --workspace="packages/core"']);
   });
 
+  it('holds the 30s floor: a FAST command is still skipped, not clamped', () => {
+    // The floor is what separates "skipped, judge it by the diff" from
+    // "started, timed out, disclosed as infrastructure". A 5s floor admits a
+    // one-second command into a twenty-second window, where it gets a deadline
+    // it cannot meet and comes back labelled `budgetClamped` — the exact
+    // mislabelling the priced floor exists to prevent. Every other budget test
+    // leaves the floor non-binding, so only this one moves if it regresses.
+    const ticks = [0, 0, 520_000]; // 520s of the 540s budget gone -> 20s left
+    let i = 0;
+    const r = runWith(
+      [
+        cmd({
+          command: 'npm test --workspace="a"',
+          output: 'FAIL a/x.test.ts',
+          seconds: 1,
+        }),
+        cmd({
+          command: 'npm test --workspace="b"',
+          output: 'FAIL b/y.test.ts',
+          seconds: 1,
+        }),
+      ],
+      ' FAIL a/x.test.ts',
+      () => ticks[Math.min(i++, ticks.length - 1)],
+    );
+    expect(r.note).toContain('npm test --workspace="b"');
+    expect(r.note).toContain('the whole-command budget was exhausted');
+    expect(r.note).not.toContain('timed out');
+  });
+
   it('prefers the failing set the run measured over re-parsing trimmed output', () => {
     // The base rerun parses its own raw text; `output` is only the bounded copy
     // that lands in the report. Re-parsing it would lose whatever the trim's

@@ -1039,14 +1039,12 @@ for (const f of files) { try { fs.unlinkSync(f); } catch {} }
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
     // Three safety-verb candidates, but the budget expires after one: the
     // counter, the `skippedForBudget` report field, and the stdout line are
-    // exercised end-to-end. The injected clock advances 100 s per SUITE RUN
-    // (the fake runner logs each run; the real budget is 540 s and a real run
-    // cannot reach it in a test) — a simulated duration, not a count of
-    // `Date.now()` calls, so the implementation is free to consult the clock
-    // as often as it likes. The mutant deadline is 240 s (540 − 300 revert
-    // reservation), the baseline measures 100 s, so `estimatedRunMs` is
-    // 115 s; after the baseline and one mutant the clock reads 200 s and the
-    // remaining 40 s cannot fit another run.
+    // exercised end-to-end. The injected clock reads a simulated DURATION off
+    // the fake runner's suite-run count, not a count of `Date.now()` calls, so
+    // the implementation is free to consult the clock as often as it likes.
+    // The arithmetic lives at the `now:` argument below and only there — this
+    // comment carried a second copy of it, and when the per-run figure changed
+    // the copy did not, leaving two disagreeing budgets inside one test.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
     write(
       'packages/lib/src/f.ts',
