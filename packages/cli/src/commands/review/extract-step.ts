@@ -172,9 +172,12 @@ const KEYWORDS = new Set([
  * Replace every `${{ … }}` with an opaque token. A GitHub expression is not
  * shell, and it routinely contains `||` — splitting on that as if it were a
  * pipeline reports both operands as invoked commands (`matrix.arch`,
- * `github.event.inputs.version`). The token starts with a quote, so an
- * expression sitting in command position contributes nothing, which is honest:
- * what it expands to is unknown here by design.
+ * `github.event.inputs.version`). The token has to OCCUPY the position rather
+ * than vanish from it: masking to a quoted token let the quote-stripper delete
+ * it, and `${{ steps.x.outputs.cmd }} arg` then reported `arg` as the command.
+ * `$EXPR` survives stripping and cannot match a command word, so an expression
+ * in command position contributes nothing — honest, since what it expands to
+ * is unknown here by design.
  */
 function maskExpressions(line: string): string {
   let out = '';
@@ -183,7 +186,7 @@ function maskExpressions(line: string): string {
     const start = line.indexOf('${{', i);
     if (start === -1) return out + line.slice(i);
     const end = line.indexOf('}}', start + 3);
-    out += `${line.slice(i, start)}'\${EXPR}'`;
+    out += `${line.slice(i, start)}$EXPR`;
     if (end === -1) return out;
     i = end + 2;
   }
@@ -200,10 +203,12 @@ function maskExpressions(line: string): string {
 function stripQuoted(
   line: string,
   open: '"' | "'" | null,
-): { live: string; open: '"' | "'" | null; heredoc: string | null } {
+): { live: string; open: '"' | "'" | null; heredocs: string[] } {
   let live = '';
   let quote = open;
-  let heredoc: string | null = null;
+  // `cat <<A <<B` opens two, and their bodies follow in order. Tracking only
+  // the first leaves the second body — and its terminator — read as commands.
+  const heredocs: string[] = [];
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote !== null) {
@@ -218,10 +223,10 @@ function stripQuoted(
     // the end of the script would be swallowed waiting for a terminator that
     // never comes. The quoted forms (`<<'EOF'`) are consumed by the match, so
     // their quotes never open a span either.
-    if (c === '<' && line[i + 1] === '<' && heredoc === null) {
+    if (c === '<' && line[i + 1] === '<') {
       const m = HEREDOC_OPENER.exec(line.slice(i));
       if (m) {
-        heredoc = m[1] ?? m[2] ?? m[3];
+        heredocs.push((m[1] ?? m[2] ?? m[3]) as string);
         i += m[0].length - 1;
         live += ' ';
         continue;
@@ -238,7 +243,7 @@ function stripQuoted(
       live += c;
     }
   }
-  return { live, open: quote, heredoc };
+  return { live, open: quote, heredocs };
 }
 
 /** `<<WORD`, `<<-WORD`, `<<'WORD'` — the body that follows is data. */
@@ -258,6 +263,12 @@ export function invokedCommandsOf(script: string): string[] {
     for (const word of words) {
       // Step over leading `name=value` assignment prefixes, any case.
       if (/^[\w]+=/.test(word)) continue;
+      // ...and over a `case` pattern label, whose command follows it on the
+      // same line: `blocked) gh api x ;;` invokes `gh`, and stopping at the
+      // label loses it. An UNDER-report is the worse direction here — a
+      // missed `gh` is a stub the verifier does not write, so the extraction
+      // reaches the network.
+      if (/^[^()\s]+\)$/.test(word)) continue;
       if (/^[A-Za-z][\w.:+-]*$/.test(word) && !KEYWORDS.has(word)) {
         seen.add(word);
       }
@@ -277,26 +288,31 @@ export function invokedCommandsOf(script: string): string[] {
     return stripped;
   };
 
-  let heredocTerminator: string | null = null;
+  const heredocQueue: string[] = [];
   let openQuote: '"' | "'" | null = null;
   // A backslash-continued command is ONE command: scanning the continuation
   // as its own line puts the next argument in command position, which is how
   // `apt-get install -y \` / `  libx11-dev` reported the package as a command.
   let pending: string | null = null;
   for (const rawLine of script.split('\n')) {
-    if (heredocTerminator !== null) {
-      if (rawLine.trim() === heredocTerminator) heredocTerminator = null;
-      continue; // a heredoc body is input to a command, not a list of them
+    if (heredocQueue.length > 0) {
+      // a heredoc body is input to a command, not a list of them
+      if (rawLine.trim() === heredocQueue[0]) heredocQueue.shift();
+      continue;
     }
-    const joined = pending === null ? rawLine : pending + rawLine;
+    // Annotated because the narrowing is loop-carried: `pending`'s type at
+    // this line is the union of the entry value and the back edge below, and
+    // that back edge is derived from `joined` — a cycle the checker gives up
+    // on with an implicit `any` (TS7022) unless the type is stated outright.
+    const joined: string = pending === null ? rawLine : pending + rawLine;
     if (CONTINUES.test(joined)) {
       pending = `${joined.slice(0, -1)} `;
       continue;
     }
     pending = null;
-    const { open, heredoc } = scanLogicalLine(joined, openQuote);
+    const { open, heredocs } = scanLogicalLine(joined, openQuote);
     openQuote = open;
-    heredocTerminator = heredoc;
+    heredocQueue.push(...heredocs);
   }
   if (pending !== null) scanLogicalLine(pending, openQuote);
   return [...seen].sort();
