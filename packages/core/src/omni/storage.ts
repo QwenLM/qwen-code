@@ -139,7 +139,8 @@ export class OmniObjectStore {
           return { objectPath, deduped: true };
         }
       }
-      await fs.rm(objectPath, { force: true });
+      // recursive covers a planted directory/symlink at the object path.
+      await fs.rm(objectPath, { force: true, recursive: true });
     }
 
     await fs.mkdir(objectDir, { recursive: true, mode: 0o700 });
@@ -161,13 +162,17 @@ export class OmniObjectStore {
       await fs.rename(tmpPath, objectPath);
     } catch (err) {
       await fs.rm(tmpPath, { force: true });
+      // A user abort must surface as the abort, not be converted into a
+      // dedup "success" (and must not trigger an unabortable re-hash).
+      if (signal?.aborted) throw err;
       // Concurrent writer may have won the rename race with verified
       // bytes of the same hash — treat as dedup, but only if it verifies.
       const winner = await fs.lstat(objectPath).catch(() => undefined);
       if (
         winner?.isFile() &&
         !winner.isSymbolicLink() &&
-        (await hashFileSha256(objectPath).catch(() => undefined)) === sha256
+        (await hashFileSha256(objectPath, signal).catch(() => undefined)) ===
+          sha256
       ) {
         return { objectPath, deduped: true };
       }

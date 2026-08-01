@@ -87,8 +87,10 @@ async function summarizeHttpFailure(res: Response): Promise<string> {
   return `HTTP ${res.status}`;
 }
 
-/** Rethrow user/timeout aborts untouched so cancellation propagates as
- * cancellation instead of being wrapped into a generic failure. */
+/** Rethrow user aborts untouched so cancellation propagates as
+ * cancellation instead of being wrapped into a generic failure. Timeout
+ * aborts (combined signal fired without the user signal) are NOT
+ * rethrown — a timeout is a failure, not a cancellation. */
 function rethrowIfAborted(err: unknown, signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw err;
 }
@@ -123,16 +125,31 @@ export class DashScopeUploader {
     url.searchParams.set('action', 'getPolicy');
     url.searchParams.set('model', model);
 
-    let res: Response;
+    // The combined signal must stay live until the response BODY has been
+    // consumed, not just until headers arrive — undici cancels in-flight
+    // body reads through the request signal, so cleaning up earlier would
+    // leave a stalled body read unabortable (no timeout, no ESC).
     const combined = combineAbortSignals([signal], {
       timeoutMs: GET_POLICY_TIMEOUT_MS,
     });
+    let failureSummary: string | undefined;
+    let payload: { data?: Partial<DashScopeUploadPolicy> } | undefined;
     try {
-      res = await this.fetchFn(url, {
+      const res = await this.fetchFn(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${this.apiKey}` },
         signal: combined.signal,
       });
+      if (res.ok) {
+        try {
+          payload = (await res.json()) as typeof payload;
+        } catch (err) {
+          if (combined.signal.aborted) throw err;
+          payload = undefined; // Malformed JSON → incomplete-payload error.
+        }
+      } else {
+        failureSummary = await summarizeHttpFailure(res);
+      }
     } catch (err) {
       rethrowIfAborted(err, signal);
       throw new Error(
@@ -143,14 +160,9 @@ export class DashScopeUploader {
     } finally {
       combined.cleanup();
     }
-    if (!res.ok) {
-      throw new Error(
-        `DashScope upload getPolicy failed: ${await summarizeHttpFailure(res)}`,
-      );
+    if (failureSummary) {
+      throw new Error(`DashScope upload getPolicy failed: ${failureSummary}`);
     }
-    const payload = (await res.json().catch(() => undefined)) as
-      | { data?: Partial<DashScopeUploadPolicy> }
-      | undefined;
     const data = payload?.data;
     if (
       !data?.policy ||
@@ -208,16 +220,23 @@ export class DashScopeUploader {
     }
     form.append('file', blob, path.basename(filePath));
 
-    let res: Response;
+    // Keep the combined signal live through the body handling (see
+    // getPolicy for why cleanup must not run at headers-arrival time).
     const combined = combineAbortSignals([signal], {
       timeoutMs: UPLOAD_TIMEOUT_MS,
     });
+    let failureSummary: string | undefined;
     try {
-      res = await this.fetchFn(policy.upload_host, {
+      const res = await this.fetchFn(policy.upload_host, {
         method: 'POST',
         body: form,
         signal: combined.signal,
       });
+      if (res.ok) {
+        await res.body?.cancel().catch(() => {});
+      } else {
+        failureSummary = await summarizeHttpFailure(res);
+      }
     } catch (err) {
       rethrowIfAborted(err, signal);
       throw new Error(
@@ -228,12 +247,9 @@ export class DashScopeUploader {
     } finally {
       combined.cleanup();
     }
-    if (!res.ok) {
-      throw new Error(
-        `DashScope media upload failed: ${await summarizeHttpFailure(res)}`,
-      );
+    if (failureSummary) {
+      throw new Error(`DashScope media upload failed: ${failureSummary}`);
     }
-    await res.body?.cancel().catch(() => {});
     return `${OSS_URL_PREFIX}${key}`;
   }
 }
