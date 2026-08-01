@@ -298,7 +298,6 @@ export class DaemonMetricsRing {
   }
 }
 
-
 /** Coerce a host-supplied gauge to a finite number (NaN/±Infinity → 0) so a
  *  bad reading serializes as 0 rather than JSON null and never gaps the chart. */
 function finiteGauge(value: number): number {
