@@ -225,9 +225,11 @@ function codeSpans(section: string): string[] {
       .trim();
     if (t) spans.push(t);
   };
-  const fence = /(?:```|~~~)[^\n]*\n([\s\S]*?)(?:```|~~~)/g;
+  // Backreference: a ``` fence closes only on ``` and ~~~ only on ~~~ — the
+  // alternation form let a ~~~ line inside a ``` block end the span early.
+  const fence = /(```|~~~)[^\n]*\n([\s\S]*?)\1/g;
   let m: RegExpExecArray | null;
-  while ((m = fence.exec(section))) m[1].split('\n').forEach(add);
+  while ((m = fence.exec(section))) m[2].split('\n').forEach(add);
 
   const inline = /`([^`\n]+)`/g;
   const outsideFences = section.replace(fence, ' ');
@@ -299,6 +301,10 @@ export function extractClaims(section: string): Array<{
     // misread.
     const cd = /^cd\s+([^\s&;|]+)\s*(?:&&|;)\s*(.*)$/.exec(span);
     if (!cd && /(^|\s)cd\s/.test(span)) continue;
+    // A CHAINED cd (`cd a && cd b && …`) matches the leading-cd shape but the
+    // single-hop resolver would join file tokens against the FIRST directory
+    // only — a wrong base is worse than none. Bail like the exotic case.
+    if (cd && /(^|\s)cd\s/.test(cd[2])) continue;
     const base = cd?.[1] ?? '';
     if (base && PATH_RE.test(base)) {
       const bareBase = base.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
@@ -444,8 +450,12 @@ export function npmScriptOf(command: string): string | null {
   // ("`npm run test:unit` was renamed") lives entirely in the allowed forms.
   const m = /^(?:npm|pnpm|yarn|bun)\s+run\s+([\w:.-]+)/.exec(command);
   if (m && !m[1].startsWith('-')) return m[1];
-  const alias =
-    /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)(?=\s|$)/.exec(command);
+  // `bun test` is bun's own built-in runner, not a package-script alias — it
+  // runs whether or not any manifest defines `test`, so ruling it against the
+  // scripts table filed a false contradicted.
+  const alias = /^(?:npm|pnpm|yarn)\s+(test|start|stop|restart)(?=\s|$)/.exec(
+    command,
+  );
   return alias ? alias[1] : null;
 }
 
