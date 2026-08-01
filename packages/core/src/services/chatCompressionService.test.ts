@@ -2175,6 +2175,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
   function makeFixture(options?: {
     history?: Content[];
     authType?: AuthType;
+    baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
   }): {
@@ -2211,6 +2212,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         model: 'test-model',
         authType: options?.authType ?? AuthType.USE_ANTHROPIC,
+        baseUrl: options?.baseUrl,
         contextWindowSize: 200_000,
         enableCacheControl: options?.enableCacheControl ?? true,
       }),
@@ -2377,6 +2379,37 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(result.info.newTokenCount).toBeGreaterThan(100_000);
   });
 
+  it('accepts a complete shared summary when thinking reaches the output cap', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(40_000) }] },
+      { role: 'model', parts: [{ text: 'y'.repeat(40_000) }] },
+    ];
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockResolvedValue({
+      text: '<analysis>long reasoning</analysis><state_snapshot>complete summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: COMPACT_MAX_OUTPUT_TOKENS,
+        totalTokenCount: 190_000,
+        cachedContentTokenCount: 160_000,
+      },
+      hadToolCall: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: 'tool call',
@@ -2502,6 +2535,13 @@ describe('ChatCompressionService.compress cache sharing', () => {
     {
       name: 'a provider without explicit cache support',
       options: { authType: AuthType.USE_GEMINI },
+    },
+    {
+      name: 'a non-DashScope OpenAI-compatible provider',
+      options: {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+      },
     },
     {
       name: 'disabled cache control',

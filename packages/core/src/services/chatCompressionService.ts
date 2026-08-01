@@ -752,9 +752,10 @@ export class ChatCompressionService {
         );
     }
 
-    // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
-    // summary is likely truncated mid-content and unsafe to persist. Drop it
-    // and surface as a failure so the consecutive-failure breaker counts it —
+    // Defensive guard: if the dedicated side-query hit
+    // COMPACT_MAX_OUTPUT_TOKENS, the summary is likely truncated mid-content
+    // and unsafe to persist. Drop it and surface as a failure so the
+    // consecutive-failure breaker counts it —
     // if the model consistently produces max-length summaries we want to stop
     // trying after MAX_CONSECUTIVE_FAILURES strikes rather than burn an API
     // call on every send. Reactive overflow still catches the catastrophic
@@ -766,6 +767,7 @@ export class ChatCompressionService {
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
     if (
+      !usedCacheSharing &&
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
       compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
