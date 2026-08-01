@@ -393,9 +393,20 @@ jobs:
                   "run_shell_command(pwd)"
                 ],
                 "deny": [
+                  "write_file(/.git/**)",
                   "write_file(/.husky/**)",
                   "write_file(/.github/**)",
-                  "write_file(/.qwen/**)"
+                  "write_file(/.qwen/**)",
+                  "write_file(**/package.json)",
+                  "write_file(**/.npmrc)",
+                  "write_file(**/makefile)",
+                  "write_file(**/Makefile)",
+                  "write_file(**/gnumakefile)",
+                  "write_file(**/GNUmakefile)",
+                  "write_file(**/justfile)",
+                  "write_file(**/.justfile)",
+                  "write_file(**/taskfile.yml)",
+                  "write_file(**/taskfile.yaml)"
                 ]
               },
               "tools": {
