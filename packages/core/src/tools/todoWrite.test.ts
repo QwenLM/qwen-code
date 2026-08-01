@@ -327,7 +327,7 @@ describe('TodoWriteTool', () => {
 
       const result = await tool
         .build({
-          todos: [{ id: '1', content: 'Still done', status: 'completed' }],
+          todos: [{ id: '1', content: 'Done', status: 'completed' }],
         })
         .execute(mockAbortSignal);
 
@@ -348,7 +348,7 @@ describe('TodoWriteTool', () => {
       mockAtomicWrite.mockResolvedValue(undefined);
 
       const result = await tool
-        .build({ todos: [{ id: '2', content: 'New', status: 'pending' }] })
+        .build({ todos: [{ id: '1', content: 'New', status: 'pending' }] })
         .execute(mockAbortSignal);
       const display = result.returnDisplay as { planId?: string };
 
@@ -368,7 +368,7 @@ describe('TodoWriteTool', () => {
 
       const result = await tool
         .build({
-          todos: [{ id: '2', content: 'Already done', status: 'completed' }],
+          todos: [{ id: '1', content: 'Already done', status: 'completed' }],
         })
         .execute(mockAbortSignal);
       const display = result.returnDisplay as { planId?: string };
