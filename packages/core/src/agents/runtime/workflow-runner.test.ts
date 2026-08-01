@@ -7,9 +7,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../config/config.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
-const { logWorkflowRunMock, writeWorkflowSnapshotMock } = vi.hoisted(() => ({
+const {
+  createProductionDispatchMock,
+  logWorkflowRunMock,
+  writeWorkflowSnapshotMock,
+} = vi.hoisted(() => ({
+  createProductionDispatchMock: vi.fn(),
   logWorkflowRunMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
@@ -21,6 +27,15 @@ vi.mock('../../telemetry/loggers.js', () => ({
 vi.mock('../workflow-snapshot.js', () => ({
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./workflow-orchestrator.js')>();
+  return {
+    ...actual,
+    createProductionDispatch: createProductionDispatchMock,
+  };
+});
 
 function configWithRegistry(): {
   config: Config;
@@ -58,8 +73,57 @@ function observeSettlement(registry: WorkflowRunRegistry): {
 
 describe('WorkflowRunner', () => {
   beforeEach(() => {
+    createProductionDispatchMock.mockReset();
     logWorkflowRunMock.mockClear();
     writeWorkflowSnapshotMock.mockClear();
+  });
+
+  it('passes the registry approval bridge only to production dispatch', async () => {
+    const production = configWithRegistry();
+    const productionBridge = vi.spyOn(
+      production.registry,
+      'bridgeApprovalEvents',
+    );
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+
+    const productionHandle = await WorkflowRunner.start({
+      config: production.config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+    });
+    await expect(productionHandle.completion).resolves.toMatchObject({
+      ok: true,
+    });
+
+    const bridgeApprovalEvents = createProductionDispatchMock.mock
+      .calls[0]?.[3] as
+      | ((emitter: AgentEventEmitter) => () => void)
+      | undefined;
+    expect(bridgeApprovalEvents).toEqual(expect.any(Function));
+    const emitter = new AgentEventEmitter();
+    const cleanup = vi.fn();
+    productionBridge.mockReturnValue(cleanup);
+    expect(bridgeApprovalEvents?.(emitter)).toBe(cleanup);
+    expect(productionBridge).toHaveBeenCalledWith(
+      productionHandle.runId,
+      emitter,
+    );
+
+    const injected = configWithRegistry();
+    const injectedBridge = vi.spyOn(injected.registry, 'bridgeApprovalEvents');
+    const injectedHandle = await WorkflowRunner.start({
+      config: injected.config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: async () => 'injected',
+    });
+    await expect(injectedHandle.completion).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(createProductionDispatchMock).toHaveBeenCalledOnce();
+    expect(injectedBridge).not.toHaveBeenCalled();
   });
 
   it('keeps one registry-owned handle through exactly-once completion', async () => {

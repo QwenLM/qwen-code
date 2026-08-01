@@ -743,6 +743,26 @@ describe('useComposerCore history and drafts', () => {
   });
 });
 
+describe('useComposerCore paste', () => {
+  it('lets long plain text paste directly into the editor', async () => {
+    await mount();
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        items: [{ type: 'text/plain', getAsFile: () => null }],
+        getData: () => 'line\n'.repeat(200),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect(latest!.getText()).toBe('line\n'.repeat(200));
+    expect(latest!.getText()).not.toContain('Pasted Content');
+  });
+});
+
 describe('useComposerCore tags', () => {
   it('keeps the composer API stable across tag updates', async () => {
     await mount();

@@ -93,6 +93,7 @@ export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
+export * from './core/tool-invocation-guard.js';
 export * from './core/turn.js';
 export * from './core/turn-interruption.js';
 
@@ -271,6 +272,7 @@ export {
   LargeNonUtf8TextError,
   TextScanBudgetExceededError,
 } from './utils/read-text-range.js';
+export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';

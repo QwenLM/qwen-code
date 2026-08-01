@@ -807,6 +807,7 @@ export function ChatPane({
                   : undefined
               }
               onTurnOutputOpen={handleRightPanelOpen}
+              onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
                   ? actions.generateSessionContent
@@ -881,6 +882,7 @@ export function ChatPane({
           sessionId={connection.sessionId}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
+          animatePlaceholder={false}
         />
         {CustomComposerFooter && (
           <CustomComposerFooter

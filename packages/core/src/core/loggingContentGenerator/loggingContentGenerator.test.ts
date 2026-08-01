@@ -59,6 +59,8 @@ const loggingSpanRecords = vi.hoisted(
 const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
   () => new Set<string>(),
 );
+const loggingSpanAttributeFailures = vi.hoisted(() => new Set<string>());
+const loggingSpanAttributeSetAttempts = vi.hoisted((): string[] => []);
 const genAiExchangeState = vi.hoisted(
   (): {
     controllers: Array<{ finalize: ReturnType<typeof vi.fn> }>;
@@ -166,6 +168,10 @@ vi.mock('../../telemetry/index.js', () => {
         record.statuses.push(status);
       },
       setAttribute(key: string, value: string | number | boolean) {
+        loggingSpanAttributeSetAttempts.push(key);
+        if (loggingSpanAttributeFailures.has(key)) {
+          throw new Error('set-attribute-fail');
+        }
         record.attributes[key] = value;
       },
       setAttributes(attrs: Record<string, string | number | boolean>) {
@@ -385,6 +391,8 @@ describe('LoggingContentGenerator', () => {
     activeOtelContext.current = 'root';
     loggingSpanRecords.length = 0;
     loggingSpanNamesWithSetStatusFailure.clear();
+    loggingSpanAttributeFailures.clear();
+    loggingSpanAttributeSetAttempts.length = 0;
     genAiExchangeState.controllers.length = 0;
     genAiExchangeState.finalizeResult = undefined;
   });
@@ -543,7 +551,6 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.attributes).toMatchObject({
       model: 'test-model',
       prompt_id: 'prompt-span',
-      'llm_request.stream': false,
     });
     expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
@@ -624,7 +631,7 @@ describe('LoggingContentGenerator', () => {
     });
   });
 
-  it('marks non-stream LLM span with llm_request.stream=false', async () => {
+  it('omits standard stream attributes from non-stream LLM spans', async () => {
     const wrapped = createWrappedGenerator(
       vi
         .fn()
@@ -646,10 +653,14 @@ describe('LoggingContentGenerator', () => {
     await generator.generateContent(request, 'prompt-stream-attr');
 
     const spanRecord = getGenerateContentSpanRecord();
-    expect(spanRecord.attributes['llm_request.stream']).toBe(false);
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBeUndefined();
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
   });
 
-  it('marks streaming LLM span with llm_request.stream=true', async () => {
+  it('marks streaming LLM spans with the standard stream attributes', async () => {
     const streamFn = vi.fn().mockResolvedValue(
       (async function* () {
         yield createResponse('resp-1', 'test-model', [{ text: 'ok' }]);
@@ -675,7 +686,11 @@ describe('LoggingContentGenerator', () => {
     }
 
     const spanRecord = getStreamSpanRecord();
-    expect(spanRecord.attributes['llm_request.stream']).toBe(true);
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBe(true);
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
   });
 
   it('forwards token counts and duration to endLLMRequestSpan on non-stream success', async () => {
@@ -831,19 +846,39 @@ describe('LoggingContentGenerator', () => {
     });
   });
 
-  it('captures ttftMs on the first user-visible stream chunk (Phase 4a)', async () => {
-    // Two chunks: first has text (user-visible), second has only usage.
-    // ttftMs must be set on the first chunk and not overwritten by the second.
-    const streamFn = vi.fn().mockResolvedValue(
-      (async function* () {
-        yield createResponse('r1', 'test-model', [{ text: 'hi' }]);
-        yield createResponse('r2', 'test-model', [], {
+  it('separates standard first-chunk timing from user-visible TTFT', async () => {
+    let wallClockMs = 0;
+    let monotonicClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    const performanceNowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonicClockMs);
+    const streamFn = vi.fn().mockImplementation(async () => {
+      wallClockMs = 40;
+      monotonicClockMs = 40;
+      return (async function* () {
+        // The wall clock is deliberately driven apart from the monotonic
+        // clock: time_to_first_chunk must come from performance.now()
+        // (100ms -> 0.1s), so a mutant reading Date.now() (900ms -> 0.9s)
+        // fails the toBeCloseTo(0.1) assertion below instead of passing.
+        wallClockMs = 900;
+        monotonicClockMs = 100;
+        yield createResponse('r1', 'test-model', [], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 0,
+          totalTokenCount: 10,
+        });
+        wallClockMs = 300;
+        monotonicClockMs = 300;
+        yield createResponse('r2', 'test-model', [{ text: 'hi' }], {
           promptTokenCount: 10,
           candidatesTokenCount: 2,
           totalTokenCount: 12,
         });
-      })(),
-    );
+      })();
+    });
     const wrapped = createWrappedGenerator(vi.fn(), streamFn);
     const generator = new LoggingContentGenerator(wrapped, createConfig(), {
       model: 'test-model',
@@ -855,21 +890,27 @@ describe('LoggingContentGenerator', () => {
       contents: 'Hello',
     } as unknown as GenerateContentParameters;
 
-    const stream = await generator.generateContentStream(
-      request,
-      'prompt-ttft',
-    );
-    for await (const _ of stream) {
-      // consume
-    }
+    try {
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-ttft',
+      );
+      for await (const _ of stream) {
+        // consume
+      }
 
-    const spanRecord = getStreamSpanRecord();
-    const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
-    expect(meta).toBeDefined();
-    expect(typeof meta!.ttftMs).toBe('number');
-    expect(meta!.ttftMs!).toBeGreaterThanOrEqual(0);
-    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
-    expect(responseEvent.ttft_ms).toBe(meta!.ttftMs);
+      const spanRecord = getStreamSpanRecord();
+      expect(
+        spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+      ).toBeCloseTo(0.1);
+      const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
+      expect(meta?.ttftMs).toBe(300);
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.ttft_ms).toBe(300);
+    } finally {
+      dateNowSpy.mockRestore();
+      performanceNowSpy.mockRestore();
+    }
   });
 
   it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
@@ -944,8 +985,91 @@ describe('LoggingContentGenerator', () => {
     const spanRecord = getStreamSpanRecord();
     const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
     expect(meta!.ttftMs).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.ttft_ms).toBeUndefined();
+  });
+
+  it('omits first-chunk timing when a stream yields no chunks', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield* [] as GenerateContentResponse[];
+      })(),
+    );
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn(), streamFn),
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-empty-stream',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    expect(
+      getStreamSpanRecord().attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+  });
+
+  it('does not retry first-chunk telemetry after setAttribute fails', async () => {
+    loggingSpanAttributeFailures.add('gen_ai.response.time_to_first_chunk');
+    const responses = [
+      createResponse('r1', 'test-model', [], {
+        promptTokenCount: 5,
+        candidatesTokenCount: 0,
+        totalTokenCount: 5,
+      }),
+      createResponse('r2', 'test-model', [{ text: 'ok' }]),
+    ];
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield* responses;
+      })(),
+    );
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn(), streamFn),
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-first-chunk-attribute-failure',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const response of stream) {
+      seen.push(response);
+    }
+
+    expect(seen).toEqual(responses);
+    expect(
+      loggingSpanAttributeSetAttempts.filter(
+        (key) => key === 'gen_ai.response.time_to_first_chunk',
+      ),
+    ).toHaveLength(1);
+    expect(
+      getStreamSpanRecord().attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
   });
 
   it('forwards cachedInputTokens to endLLMRequestSpan on non-stream success (Phase 4a)', async () => {
@@ -1467,6 +1591,11 @@ describe('LoggingContentGenerator', () => {
     expect(spanEndedDuringApiError).toBe(false);
 
     const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBe(true);
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
     expect(spanRecord.statuses).toEqual([
       { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
@@ -1525,6 +1654,9 @@ describe('LoggingContentGenerator', () => {
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
 
     const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
     expect(spanRecord.statuses).toEqual([
       { code: SpanStatusCode.ERROR, message: 'API call failed' },
     ]);
@@ -1578,7 +1710,11 @@ describe('LoggingContentGenerator', () => {
         // consume
       }
     }).rejects.toThrow('aborted upstream');
-    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+    const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+    expect(spanRecord.endMetadata).toMatchObject({
       success: false,
       error: 'API call aborted',
       responseModel: 'model-stream',
@@ -1722,6 +1858,9 @@ describe('LoggingContentGenerator', () => {
 
       const spanRecord = getStreamSpanRecord();
       expect(spanRecord.attributes['stream.timed_out']).toBe(true);
+      expect(
+        spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+      ).toBeGreaterThanOrEqual(0);
       expect(spanRecord.endMetadata?.success).toBe(false);
       expect(spanRecord.endMetadata?.error).toBe(
         'Stream span timed out (idle)',
@@ -1958,6 +2097,9 @@ describe('LoggingContentGenerator', () => {
     }
 
     const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
     expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
     expect(
@@ -2723,6 +2865,10 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
       model: 'test-model',
       contents: 'Hello',
     } as unknown as GenerateContentParameters;
+    let iterator: AsyncGenerator<GenerateContentResponse> | undefined;
+    let pendingNext:
+      | Promise<IteratorResult<GenerateContentResponse>>
+      | undefined;
 
     // Start the stream inside a retry context. The generator creation
     // (generateContentStream) runs synchronously enough to capture the
@@ -2736,10 +2882,10 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
           request,
           'prompt-idle-timeout',
         );
-        const iter = stream[Symbol.asyncIterator]();
+        iterator = stream[Symbol.asyncIterator]();
         // Start iteration — this enters for-await, resets the idle timer,
         // then blocks on streamBlocker.
-        void iter.next();
+        pendingNext = iterator.next();
       },
     );
 
@@ -2748,7 +2894,9 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
 
     // Release the stream so the generator can clean up
     releaseStream!();
-    await vi.advanceTimersByTimeAsync(100);
+    const lateChunk = await pendingNext;
+    expect(lateChunk?.done).toBe(false);
+    await iterator?.return(undefined);
 
     vi.useRealTimers();
 
@@ -2760,6 +2908,9 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
       (r) => r.endMetadata?.error === 'Stream span timed out (idle)',
     );
     expect(timeoutRecord).toBeDefined();
+    expect(
+      timeoutRecord!.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
     const meta = timeoutRecord!.endMetadata as {
       attempt?: number;
       requestSetupMs?: number;
