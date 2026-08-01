@@ -38,19 +38,6 @@ export {
 export { OpenAIContentConverter } from './converter.js';
 
 /**
- * Whether an OpenAI-compatible provider can reuse an unchanged prompt prefix.
- * Keep provider detection here so services consume a capability query instead
- * of depending on a concrete provider implementation.
- */
-export function supportsOpenAIPrefixCaching(
-  contentGeneratorConfig: ContentGeneratorConfig,
-): boolean {
-  return DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-    contentGeneratorConfig,
-  );
-}
-
-/**
  * Create an OpenAI-compatible content generator with the appropriate provider
  */
 export function createOpenAIContentGenerator(
