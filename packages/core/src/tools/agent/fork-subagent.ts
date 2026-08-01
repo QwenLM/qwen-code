@@ -74,7 +74,15 @@ export function resolveForkExecutionAllowedTools(
     return requestedToolNames ? [...requestedToolNames] : undefined;
   }
 
-  return requestedToolNames?.filter((name) => name !== ToolNames.DISPLAY_IMAGE);
+  // display_image is main-session-only. "Unrestricted" (undefined) minus
+  // display_image cannot be written as a finite allowlist, so fail closed to
+  // deny-all instead of returning undefined — that would hand the fork
+  // unrestricted execution, including the very tool this strips. Every live
+  // caller passes a concrete list (buildForkExecutionAllowlist always returns
+  // an array); DisplayImageInvocation.execute() also enforces this locally.
+  return (
+    requestedToolNames?.filter((name) => name !== ToolNames.DISPLAY_IMAGE) ?? []
+  );
 }
 
 /**

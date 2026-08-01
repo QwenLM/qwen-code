@@ -44,6 +44,12 @@ describe('resolveForkExecutionAllowedTools', () => {
       ]),
     ).toEqual([ToolNames.READ_FILE]);
   });
+
+  it('fails closed when display_image is advertised without an allowlist', () => {
+    expect(resolveForkExecutionAllowedTools(parentTools, undefined)).toEqual(
+      [],
+    );
+  });
 });
 
 describe('validateForkToolList', () => {

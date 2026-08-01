@@ -63,7 +63,6 @@ export const TerminalImage: React.FC<TerminalImageProps> = ({
     process.nextTick(() => writeRaw(kittySequence));
   }, [kittySequence, writeRaw]);
 
-  const fileName = sanitizeMultilineForDisplay(path.basename(filePath));
   if (!safePath) {
     return (
       <Text color={theme.status.error}>
@@ -73,6 +72,7 @@ export const TerminalImage: React.FC<TerminalImageProps> = ({
   }
   if (!result) return null;
   if (result.kind === 'unavailable') {
+    const fileName = sanitizeMultilineForDisplay(path.basename(filePath));
     return (
       <Text color={theme.text.secondary} wrap="wrap">
         {fileName}: {sanitizeTerminalText(result.reason)}

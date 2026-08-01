@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
+import { runInForkContext } from './agent/fork-subagent.js';
 import { ToolErrorType } from './tool-error.js';
 import { DisplayImageTool } from './display-image.js';
 import { MAX_TERMINAL_IMAGE_BYTES } from './tools.js';
@@ -62,6 +63,20 @@ describe('DisplayImageTool', () => {
     expect(result.llmContent).toContain('does not provide the image contents');
     expect(JSON.stringify(result)).not.toContain(PNG_1X1.toString('base64'));
     expect(invocation.toolLocations()).toEqual([{ path: imagePath }]);
+  });
+
+  it('refuses to execute inside a fork subagent', async () => {
+    const imagePath = path.join(workspace, 'pixel.png');
+    await fs.writeFile(imagePath, PNG_1X1);
+
+    const invocation = tool.build({ file_path: imagePath });
+    const result = await runInForkContext(() =>
+      invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toContain('main agent');
+    expect(result.returnDisplay).not.toHaveProperty('type', 'terminal_image');
   });
 
   it('requires an absolute workspace path', () => {

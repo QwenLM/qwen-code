@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
   renderTerminalImage,
   supportsKittyImageProtocol,
@@ -60,8 +61,8 @@ describe('terminalImageRenderer', () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it('renders a Kitty virtual image with placeholder rows', async () => {
-    const result = await renderTerminalImage({
+  it('renders a Kitty virtual image with placeholder rows', () => {
+    const result = renderTerminalImage({
       display: {
         type: 'terminal_image',
         filePath: imagePath,
@@ -144,6 +145,24 @@ describe('terminalImageRenderer', () => {
     );
   });
 
+  it('detects Kitty and Ghostty native placement', () => {
+    expect(
+      supportsKittyImageProtocol(
+        { KITTY_WINDOW_ID: '1', TERM: 'xterm-256color' },
+        true,
+      ),
+    ).toBe(true);
+    expect(supportsKittyImageProtocol({ TERM_PROGRAM: 'ghostty' }, true)).toBe(
+      true,
+    );
+    expect(
+      supportsKittyImageProtocol(
+        { TERM_PROGRAM: 'ghostty', TMUX: '/tmp/tmux' },
+        true,
+      ),
+    ).toBe(false);
+  });
+
   it('does not use Kitty Unicode placeholders in Warp', () => {
     expect(
       supportsKittyImageProtocol(
@@ -186,7 +205,7 @@ describe('terminalImageRenderer', () => {
       await fs.chmod(chafaPath, 0o755);
       await fs.writeFile(imagePath, pngWithSize(1600, 800));
 
-      const result = await renderTerminalImage({
+      const result = renderTerminalImage({
         display: {
           type: 'terminal_image',
           filePath: imagePath,
@@ -302,8 +321,100 @@ describe('terminalImageRenderer', () => {
     },
   );
 
-  it('returns a readable fallback when chafa is unavailable', async () => {
-    const result = await renderTerminalImage({
+  it.runIf(process.platform !== 'win32')(
+    'bounds a verbose chafa failure to a capped first line',
+    async () => {
+      const binDir = path.join(tempDir, 'bin');
+      await fs.mkdir(binDir);
+      const chafaPath = path.join(binDir, 'chafa');
+      await fs.writeFile(
+        chafaPath,
+        '#!/usr/bin/env node\nprocess.stderr.write("E".repeat(300) + "\\nsecond line\\n");\nprocess.exit(1);\n',
+      );
+      await fs.chmod(chafaPath, 0o755);
+
+      const result = renderTerminalImage({
+        display: {
+          type: 'terminal_image',
+          filePath: imagePath,
+          mimeType: 'image/png',
+        },
+        contentWidth: 20,
+        env: {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+        stdoutIsTTY: true,
+      });
+
+      expect(result.kind).toBe('unavailable');
+      if (result.kind !== 'unavailable') return;
+      expect(result.reason).toBe(`${'E'.repeat(200)}…`);
+      expect(result.reason).not.toContain('\n');
+      expect(result.reason).not.toContain('second line');
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'caches a render so resize and restore do not re-spawn chafa',
+    async () => {
+      const binDir = path.join(tempDir, 'bin');
+      await fs.mkdir(binDir);
+      const chafaPath = path.join(binDir, 'chafa');
+      await fs.writeFile(
+        chafaPath,
+        '#!/usr/bin/env node\nconst fs = require("fs");\nconst path = require("path");\nfs.appendFileSync(path.join(__dirname, "count.txt"), "x\\n");\nprocess.stdout.write(`${process.argv.find((arg) => arg.startsWith("--size="))}\\n`);\n',
+      );
+      await fs.chmod(chafaPath, 0o755);
+      await fs.writeFile(imagePath, pngWithSize(1600, 800));
+
+      const options = {
+        display: {
+          type: 'terminal_image' as const,
+          filePath: imagePath,
+          mimeType: 'image/png' as const,
+        },
+        contentWidth: 20,
+        env: {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+        stdoutIsTTY: true,
+      };
+      const spawnCount = async () => {
+        try {
+          const raw = await fs.readFile(path.join(binDir, 'count.txt'), 'utf8');
+          return raw.split('x').length - 1;
+        } catch {
+          return 0;
+        }
+      };
+
+      const first = renderTerminalImage(options);
+      expect(first.kind).toBe('ansi');
+      const second = renderTerminalImage(options);
+      expect(second).toEqual(first);
+      expect(await spawnCount()).toBe(1);
+
+      // A different shape misses the cache and re-spawns the renderer.
+      await fs.writeFile(imagePath, pngWithSize(800, 1600));
+      const third = renderTerminalImage(options);
+      expect(third.kind).toBe('ansi');
+      expect(await spawnCount()).toBe(2);
+
+      // The same shape with a newer mtime invalidates the cached entry.
+      const future = new Date(Date.now() + 10_000);
+      await fs.utimes(imagePath, future, future);
+      const fourth = renderTerminalImage(options);
+      expect(fourth.kind).toBe('ansi');
+      expect(await spawnCount()).toBe(3);
+    },
+  );
+
+  it('returns a readable fallback when chafa is unavailable', () => {
+    const result = renderTerminalImage({
       display: {
         type: 'terminal_image',
         filePath: imagePath,
@@ -326,7 +437,7 @@ describe('terminalImageRenderer', () => {
   });
 
   it('rejects missing and invalid PNG files during restored rendering', async () => {
-    const missing = await renderTerminalImage({
+    const missing = renderTerminalImage({
       display: {
         type: 'terminal_image',
         filePath: path.join(tempDir, 'missing.png'),
@@ -339,7 +450,7 @@ describe('terminalImageRenderer', () => {
     expect(missing.kind).toBe('unavailable');
 
     await fs.writeFile(imagePath, 'not a png');
-    const invalid = await renderTerminalImage({
+    const invalid = renderTerminalImage({
       display: {
         type: 'terminal_image',
         filePath: imagePath,
@@ -358,7 +469,7 @@ describe('terminalImageRenderer', () => {
     const handle = await fs.open(oversizedPath, 'w');
     await handle.truncate(8 * 1024 * 1024 + 1);
     await handle.close();
-    const oversized = await renderTerminalImage({
+    const oversized = renderTerminalImage({
       display: {
         type: 'terminal_image',
         filePath: oversizedPath,
@@ -372,5 +483,37 @@ describe('terminalImageRenderer', () => {
     expect(oversized.kind === 'unavailable' && oversized.reason).toContain(
       'display limit',
     );
+  });
+});
+
+describe('containsCmdShellMetacharacters', () => {
+  it('flags cmd.exe metacharacters in a model-supplied path', () => {
+    for (const dangerous of [
+      'chart & whoami.png',
+      'a|b.png',
+      'a<b.png',
+      'a>b.png',
+      'a^b.png',
+      'a%PATH%.png',
+      'a"b.png',
+      'a!b.png',
+      'a(b).png',
+      'a\nb.png',
+      'a\rb.png',
+    ]) {
+      expect(containsCmdShellMetacharacters(dangerous)).toBe(true);
+    }
+  });
+
+  it('accepts ordinary image paths', () => {
+    for (const safe of [
+      '/workspace/chart.png',
+      '/workspace/reports/q3-summary.png',
+      '/workspace/img_2026-08-01.png',
+      '/workspace/my image.png',
+      'C:\\Users\\me\\Pictures\\vacation.png',
+    ]) {
+      expect(containsCmdShellMetacharacters(safe)).toBe(false);
+    }
   });
 });

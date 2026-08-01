@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
+import { isInForkExecution } from './agent/fork-subagent.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
@@ -58,6 +59,15 @@ class DisplayImageInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
+    // The fork registry keeps this tool's declaration for prompt-cache parity,
+    // so the execution ban cannot live in declaration stripping alone. Enforce
+    // it here so the invariant holds no matter how the allowlist is wired.
+    if (isInForkExecution()) {
+      return errorResult(
+        'display_image can only be executed by the main agent.',
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
     const filePath = path.resolve(this.params.file_path);
 
     let stat: Awaited<ReturnType<typeof fs.stat>>;

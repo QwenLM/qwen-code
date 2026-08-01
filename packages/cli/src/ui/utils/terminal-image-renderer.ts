@@ -28,6 +28,21 @@ const MAX_PREVIEW_WIDTH_CELLS = 72;
 const MAX_PREVIEW_ROWS = 24;
 const ESTIMATED_CELL_WIDTH_PX = 8;
 const ESTIMATED_CELL_HEIGHT_PX = 16;
+const MAX_REASON_CHARS = 200;
+// cmd.exe treats these as command separators / metacharacters. With shell:true
+// Node forwards arguments unquoted, so a model-chosen path containing any of
+// them is a command-injection vector through a .cmd/.bat chafa shim.
+const CMD_SHELL_METACHARACTERS = /[&|<>^%"!()\n\r]/;
+
+// Completed tool rows enter Ink's append-only Static region immediately, so
+// rendering must stay synchronous. A terminal resize or a restored session
+// re-renders every visible image, which would otherwise re-read the file and
+// re-spawn chafa for each one. This cache makes those repeats cheap; it mirrors
+// the bounded LRU the Mermaid renderer keeps for the same reason.
+const RENDER_CACHE_LIMIT = 40;
+const RENDER_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
+const renderCache = new Map<string, TerminalImageRenderResult>();
+let renderCacheBytes = 0;
 
 export type TerminalImageRenderResult =
   | {
@@ -88,6 +103,10 @@ export function getTerminalImageRenderSupport(
       };
 }
 
+export function containsCmdShellMetacharacters(filePath: string): boolean {
+  return CMD_SHELL_METACHARACTERS.test(filePath);
+}
+
 export function renderTerminalImage({
   display,
   contentWidth,
@@ -119,6 +138,30 @@ export function renderTerminalImage({
     };
   }
 
+  // Read only the 24-byte PNG header to size the preview and build the cache
+  // key, so a cache hit never re-reads the full file or re-spawns chafa.
+  const headerSize = readPngHeaderSize(display.filePath);
+  if (!headerSize) {
+    return { kind: 'unavailable', reason: 'Image is not a valid PNG.' };
+  }
+
+  const shape = fitImageToTerminal(
+    headerSize,
+    contentWidth,
+    availableTerminalHeight,
+  );
+  const useKitty = supportsKittyImageProtocol(env, stdoutIsTTY);
+  const chafaPath = useKitty ? null : findExecutable('chafa', env);
+  const cacheKey = createRenderCacheKey(
+    display.filePath,
+    stat,
+    shape,
+    useKitty,
+    chafaPath,
+  );
+  const cached = getCachedRenderResult(cacheKey);
+  if (cached) return cached;
+
   let png: Buffer;
   try {
     png = fs.readFileSync(display.filePath);
@@ -136,27 +179,118 @@ export function renderTerminalImage({
       reason: `Image exceeds the ${MAX_TERMINAL_IMAGE_BYTES} byte display limit.`,
     };
   }
-  const size = readPngSize(png);
-  if (!size) {
-    return { kind: 'unavailable', reason: 'Image is not a valid PNG.' };
+
+  const result: TerminalImageRenderResult = useKitty
+    ? renderKitty(png, shape)
+    : renderWithChafa(display.filePath, shape, env, chafaPath);
+  if (result.kind !== 'unavailable') {
+    rememberRenderResult(cacheKey, result);
+  }
+  return result;
+}
+
+function readPngHeaderSize(
+  filePath: string,
+): { width: number; height: number } | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const header = Buffer.alloc(24);
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+    return bytesRead === header.length ? readPngSize(header) : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Closing a read-only handle should not fail the render.
+      }
+    }
+  }
+}
+
+function createRenderCacheKey(
+  filePath: string,
+  stat: fs.Stats,
+  shape: { widthCells: number; rows: number },
+  useKitty: boolean,
+  chafaPath: string | null,
+): string {
+  return [
+    filePath,
+    stat.mtimeMs,
+    stat.size,
+    shape.widthCells,
+    shape.rows,
+    useKitty ? 'kitty' : (chafaPath ?? 'none'),
+  ].join('\0');
+}
+
+function getCachedRenderResult(
+  key: string,
+): TerminalImageRenderResult | undefined {
+  const cached = renderCache.get(key);
+  if (cached) {
+    renderCache.delete(key);
+    renderCache.set(key, cached);
+  }
+  return cached;
+}
+
+function rememberRenderResult(
+  key: string,
+  result: TerminalImageRenderResult,
+): void {
+  const bytes = estimateRenderResultBytes(result);
+  if (bytes > RENDER_CACHE_BYTE_LIMIT) {
+    renderCache.delete(key);
+    return;
   }
 
-  const shape = fitImageToTerminal(size, contentWidth, availableTerminalHeight);
-  if (supportsKittyImageProtocol(env, stdoutIsTTY)) {
-    const imageId = createImageId(png, shape);
-    return {
-      kind: 'kitty',
-      sequence: encodeKittyVirtualImage(
-        png,
-        imageId,
-        shape.widthCells,
-        shape.rows,
-      ),
-      placeholder: buildKittyPlaceholder(imageId, shape.widthCells, shape.rows),
-    };
+  const existing = renderCache.get(key);
+  if (existing) {
+    renderCacheBytes -= estimateRenderResultBytes(existing);
   }
+  renderCache.set(key, result);
+  renderCacheBytes += bytes;
+  while (
+    renderCache.size > RENDER_CACHE_LIMIT ||
+    renderCacheBytes > RENDER_CACHE_BYTE_LIMIT
+  ) {
+    const oldest = renderCache.keys().next().value;
+    if (!oldest) break;
+    const oldestResult = renderCache.get(oldest);
+    if (oldestResult) {
+      renderCacheBytes -= estimateRenderResultBytes(oldestResult);
+    }
+    renderCache.delete(oldest);
+  }
+}
 
-  return renderWithChafa(display.filePath, shape, env);
+function estimateRenderResultBytes(result: TerminalImageRenderResult): number {
+  switch (result.kind) {
+    case 'kitty':
+      return (
+        Buffer.byteLength(result.sequence, 'utf8') +
+        result.placeholder.lines.reduce(
+          (total, line) => total + Buffer.byteLength(line, 'utf8'),
+          0,
+        )
+      );
+    case 'ansi':
+      return result.lines.reduce(
+        (total, line) => total + Buffer.byteLength(line, 'utf8'),
+        0,
+      );
+    case 'unavailable':
+      return Buffer.byteLength(result.reason, 'utf8');
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
 }
 
 function fitImageToTerminal(
@@ -208,20 +342,45 @@ function createImageId(
   return id === 0 ? 1 : id;
 }
 
+function renderKitty(
+  png: Buffer,
+  shape: { widthCells: number; rows: number },
+): Extract<TerminalImageRenderResult, { kind: 'kitty' }> {
+  const imageId = createImageId(png, shape);
+  return {
+    kind: 'kitty',
+    sequence: encodeKittyVirtualImage(
+      png,
+      imageId,
+      shape.widthCells,
+      shape.rows,
+    ),
+    placeholder: buildKittyPlaceholder(imageId, shape.widthCells, shape.rows),
+  };
+}
+
 function renderWithChafa(
   filePath: string,
   shape: { widthCells: number; rows: number },
   env: NodeJS.ProcessEnv,
+  chafaPath: string | null,
 ): Extract<TerminalImageRenderResult, { kind: 'ansi' | 'unavailable' }> {
   // Resolve chafa through the hardened lookup so a project-local
   // node_modules/.bin/chafa is never executed unless the user opted in, then
   // spawn the resolved path rather than a bare name resolved off PATH.
-  const chafaPath = findExecutable('chafa', env);
   if (!chafaPath) {
     return {
       kind: 'unavailable',
       reason:
         'No compatible native image protocol was detected, and chafa is not installed.',
+    };
+  }
+  const useShell = shouldRunThroughShell(chafaPath);
+  if (useShell && containsCmdShellMetacharacters(filePath)) {
+    return {
+      kind: 'unavailable',
+      reason:
+        'Image path contains characters that cannot be safely passed to the renderer on this platform.',
     };
   }
   try {
@@ -237,7 +396,7 @@ function renderWithChafa(
       {
         encoding: 'utf8',
         env: createRendererChildEnv(env),
-        shell: shouldRunThroughShell(chafaPath),
+        shell: useShell,
         maxBuffer: CHAFA_MAX_OUTPUT_BYTES,
         timeout: CHAFA_TIMEOUT_MS,
       },
@@ -250,12 +409,18 @@ function renderWithChafa(
     const execError = error as Error & {
       stderr?: Buffer | string;
     };
+    const stderr = firstLineBounded(String(execError.stderr ?? '').trim());
     return {
       kind: 'unavailable',
       reason:
-        String(execError.stderr ?? '').trim() ||
-        execError.message ||
-        'chafa could not render the image.',
+        stderr || execError.message || 'chafa could not render the image.',
     };
   }
+}
+
+function firstLineBounded(text: string): string {
+  const firstLine = text.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  return firstLine.length > MAX_REASON_CHARS
+    ? `${firstLine.slice(0, MAX_REASON_CHARS)}…`
+    : firstLine;
 }
