@@ -886,12 +886,12 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
     {
       "path": "src/file.ts",
       "line": 42,
-      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_",
+      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
     },
     {
       "path": "src/other.ts",
       "line": 88,
-      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_",
+      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
     },
   ],
   "state": {
@@ -930,7 +930,7 @@ The verdict is a computed fact and this is the second place it must not be re-de
 
   When `startLine === line`, emit only `"line"` — a single-line comment needs no side (it defaults to `RIGHT`, which is what every comment here is). Do **not** send `start_line` on its own: the multi-line form that omits `start_side` is the one shape of this feature that fails, and it fails by discarding every inline blocker in the review.
 
-- Comment body format: `**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The `description` MUST carry the finding's concrete failure scenario (the trigger and the wrong outcome, or the concrete cost) — a posted comment that says only what to change, without why it fails, has lost the evidence the finder was required to produce. The prefix must be the **first thing in the body** and the footer must be present: `.github/workflows/qwen-autofix.yml` keys off both to keep Suggestion findings out of the autofix loop. Changing either string silently makes the autofix bot start applying non-blocking suggestions.
+- Comment body format: `**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The `description` MUST carry the finding's concrete failure scenario (the trigger and the wrong outcome, or the concrete cost) — a posted comment that says only what to change, without why it fails, has lost the evidence the finder was required to produce. The prefix must be the **first thing in the body** and the footer must be present: `.github/workflows/qwen-autofix.yml` keys off both to keep Suggestion findings out of the autofix loop. Changing either string silently makes the autofix bot start applying non-blocking suggestions.
 - The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
