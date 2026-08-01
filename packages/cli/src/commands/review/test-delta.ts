@@ -224,6 +224,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     (Number.isFinite(args.timeout) ? args.timeout : DEFAULT_TIMEOUT_S) * 1000;
   const startedAt = Date.now();
   const skippedForBudget: string[] = [];
+  /** Reruns killed by a deadline the BUDGET shortened, not by their own. */
+  const budgetClamped: string[] = [];
   const entries: DeltaEntry[] = [];
   for (const t of failed) {
     const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
@@ -235,7 +237,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       t.output ?? '',
       args.prWorktree ?? '',
     );
+    // A clamped deadline is not the same fact as a slow command: if the
+    // budget cut this rerun short, "timed out — infrastructure" would send the
+    // reader hunting a hang that is really an exhausted budget. Record which.
+    const clamped = remaining < perCommandMs;
     const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
+    if (base.timedOut && clamped) budgetClamped.push(t.command);
     const baseFailingFiles = base.timedOut
       ? []
       : failingFilesOf(base.output, baseline);
@@ -314,7 +321,10 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (timedOut) {
     parts.push(
-      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
+      `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence` +
+        (budgetClamped.length
+          ? ` (${budgetClamped.length} of them on a deadline the whole-command budget shortened, not their own: ${budgetClamped.join(', ')} — a rerun with budget to spare may still measure them)`
+          : ''),
     );
   }
   if (skippedForBudget.length) {

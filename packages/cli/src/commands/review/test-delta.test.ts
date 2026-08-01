@@ -267,6 +267,41 @@ describe('runTestDelta', () => {
     }
   });
 
+  it('says when a rerun died on a BUDGET-shortened deadline, not its own', () => {
+    // Otherwise "timed out — infrastructure" sends the reader hunting a hang
+    // that is really an exhausted budget, and a rerun with room to spare would
+    // have measured it.
+    const real = Date.now;
+    let t = 0;
+    // `runWith` passes timeout: 60, so `remaining` must fall below 60s while
+    // staying above the 5s hard skip. Each call advances 490s: startedAt lands
+    // at 490s, the first iteration sees remaining = 540 - 490 = 50s (clamped),
+    // and the second falls past the skip threshold.
+    Date.now = () => {
+      t += 490_000;
+      return t;
+    };
+    try {
+      const r = runWith(
+        [
+          cmd({
+            command: 'npm test --workspace="a"',
+            output: 'FAIL a/x.test.ts',
+          }),
+          cmd({
+            command: 'npm test --workspace="b"',
+            output: 'FAIL b/y.test.ts',
+          }),
+        ],
+        (command) =>
+          cmd({ command, timedOut: true, exitCode: null, output: '' }),
+      );
+      expect(r.note).toContain('the whole-command budget shortened');
+    } finally {
+      Date.now = real;
+    }
+  });
+
   it('refuses an unreadable report and a missing base tree without throwing', () => {
     expect(
       runTestDelta({ report: join(dir, 'nope.json'), baseline, timeout: 60 })
