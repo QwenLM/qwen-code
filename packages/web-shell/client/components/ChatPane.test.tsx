@@ -990,6 +990,11 @@ describe('ChatPane', () => {
         ],
       },
     ];
+    messagesState.push({
+      id: 'revision',
+      role: 'user',
+      content: 'Revise the wording',
+    });
     pendingPermission = {
       id: 'perm-plan',
       toolKind: 'switch_mode',

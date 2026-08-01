@@ -47,7 +47,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
-import { getFloatingTodos } from '../utils/todos';
+import { getLatestActiveTodos } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
@@ -352,7 +352,7 @@ export function ChatPane({
     pendingToolApproval?.toolKind === 'switch_mode' &&
     pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
   const planTodos = useMemo(
-    () => (isExitPlanApproval ? getFloatingTodos(messages).todos : []),
+    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
     [isExitPlanApproval, messages],
   );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
