@@ -31,5 +31,7 @@ export function findEffectiveWorkspace(
       path.normalize(s.worktree.path).startsWith(normalizedBound + path.sep) &&
       pathExists(s.worktree.path),
   );
-  return relocated?.worktree?.path ?? boundWorkspace;
+  return relocated?.worktree
+    ? path.normalize(relocated.worktree.path)
+    : boundWorkspace;
 }

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 import { findEffectiveWorkspace } from './worktree-workspace.js';
 
@@ -36,7 +38,9 @@ describe('findEffectiveWorkspace', () => {
         { worktree: { path: worktree } },
       ],
     };
-    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(worktree);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(
+      path.normalize(worktree),
+    );
   });
 
   it('skips a worktree whose path no longer exists on disk', () => {
@@ -56,7 +60,9 @@ describe('findEffectiveWorkspace', () => {
         { worktree: { path: wt2 } },
       ],
     };
-    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(wt1);
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(
+      path.normalize(wt1),
+    );
   });
 
   it('skips a worktree whose path is outside boundWorkspace', () => {
@@ -73,5 +79,15 @@ describe('findEffectiveWorkspace', () => {
       listWorkspaceSessions: () => [{ worktree: { path: sibling } }],
     };
     expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
+  });
+
+  it('returns a normalized worktree path when the raw path contains .. segments', () => {
+    const raw = '/repo/project/.qwen/worktrees/../worktrees/feat';
+    const bridge = {
+      listWorkspaceSessions: () => [{ worktree: { path: raw } }],
+    };
+    const result = findEffectiveWorkspace(bridge, ws, always);
+    expect(result).not.toContain('..');
+    expect(result).toBe(path.normalize('/repo/project/.qwen/worktrees/feat'));
   });
 });
