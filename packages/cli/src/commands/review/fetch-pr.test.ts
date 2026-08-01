@@ -6,7 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
-import { fetchPrCommand, countDiffChangedLines } from './fetch-pr.js';
+import {
+  fetchPrCommand,
+  countDiffChangedLines,
+  isEmptyDiff,
+  isCollapsedFromUpstream,
+} from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
@@ -447,6 +452,90 @@ describe('fetch-pr report assembly', () => {
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
     });
+  });
+});
+
+describe('isEmptyDiff', () => {
+  // The SKILL acts on this by recommending the PR be closed as superseded, so
+  // each guard is tested for the live PR it would otherwise close.
+  const base = {
+    diffPath: '/tmp/d.patch',
+    baseFetchFailed: false,
+    diffText: '',
+  };
+
+  it('is true only when a SUCCESSFUL capture found nothing', () => {
+    expect(isEmptyDiff(base)).toBe(true);
+    expect(isEmptyDiff({ ...base, diffText: '   \n  ' })).toBe(true);
+  });
+
+  it('is false when the capture never succeeded', () => {
+    // A capture that threw leaves diffText empty too. Reading that as "no
+    // changes" closes a live PR on an infrastructure error.
+    expect(isEmptyDiff({ ...base, diffPath: null })).toBe(false);
+  });
+
+  it('is false when the merge base came from a possibly stale local ref', () => {
+    // A stale base that already contains the head commits diffs to empty —
+    // same wrong recommendation, one cause further out.
+    expect(isEmptyDiff({ ...base, baseFetchFailed: true })).toBe(false);
+  });
+
+  it('is false whenever there is any diff at all', () => {
+    expect(isEmptyDiff({ ...base, diffText: '+a\n' })).toBe(false);
+  });
+});
+
+describe('isCollapsedFromUpstream', () => {
+  /** A diff with `n` changed lines. */
+  const diff = (n: number) =>
+    `diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n${'+x\n'.repeat(n)}`;
+
+  it('fires when the recomputed diff is 4x smaller past the 200-line floor', () => {
+    expect(
+      isCollapsedFromUpstream({
+        diffText: diff(50),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('holds the 4x boundary exactly', () => {
+    // 51 * 4 = 204 > 200: one line the other side of the ratio and the
+    // signature is gone. Pinned so the comparison cannot drift to `<`.
+    expect(
+      isCollapsedFromUpstream({
+        diffText: diff(51),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it('holds the 200-line floor exactly', () => {
+    // Below it one file IS the ratio, which is what the floor exists to keep
+    // out — a rename-threshold disagreement, not an upstream collapse.
+    expect(
+      isCollapsedFromUpstream({
+        diffText: diff(40),
+        additions: 199,
+        deletions: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isCollapsedFromUpstream({
+        diffText: diff(40),
+        additions: 100,
+        deletions: 100,
+      }),
+    ).toBe(true);
+  });
+
+  it('never fires on an empty diff — that is emptyDiff, a different claim', () => {
+    expect(
+      isCollapsedFromUpstream({ diffText: '', additions: 5000, deletions: 0 }),
+    ).toBe(false);
   });
 });
 
