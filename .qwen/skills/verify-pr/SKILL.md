@@ -213,10 +213,11 @@ differs only by the change under test; the verdict is the pair of counts.
   scanner that runs over input an outsider writes — a PR body, a diff, a
   log line, a filename — probe it with a **ladder** rather than a single
   case: the same hostile shape at 2 k, 3 k, 5 k, 20 k characters, timed.
-  Run each rung under `timeout <N>` and record the cap as the result
-  (`>N s`); the rung that hits the cap **is** the finding, and no rung is
+  Run each rung under `timeout 30` and record the cap as the result
+  (`>30 s`); the rung that hits the cap is the evidence, and no rung is
   worth more of the budget than that.
-  The superlinear curve is the finding; one fast sample proves nothing.
+  The superlinear curve across rungs is the finding; one fast sample
+  proves nothing.
   Measured example: a line matcher whose three parts could each match a
   space (`\s*`, a lazy `[^*\n]+?`, `\s*`) took 0.96 s, 3.2 s, 14.4 s, then
   over 100 s on `**` followed by 2 k / 3 k / 5 k / 20 k spaces — run once
@@ -364,6 +365,15 @@ differs only by the change under test; the verdict is the pair of counts.
   base-side command then returned **empty output** — which reads as "the PR
   changed this behaviour" and is quoted downstream as deterministic
   evidence. A race that fabricates a result outranks a race that crashes.
+- **Rank a defect's variants by observability, not by blast radius.** Where
+  one root cause yields both a loud failure and a quiet one, the quiet one
+  is the finding. Measured example: an unescaped non-greedy parser fed a
+  payload containing its own close tag either dropped a required argument —
+  rejected by schema validation, loud, recoverable — or silently truncated
+  the value and wrote a truncated file. Same bug; the second is the one to
+  fix first. This is the same ordering as the concurrency rule above, where
+  a race that fabricates a result outranks one that crashes: a wrong answer
+  nobody is told about outranks a failure that announces itself.
 
 ### Scoping from the report and the plan
 
@@ -391,26 +401,6 @@ differs only by the change under test; the verdict is the pair of counts.
   "stop once the user sends X" could never complete. A step you cannot run
   is either a missing code path or a wrong plan; say which, and say the
   plan needs fixing either way.
-- **Prove a negative by census, not by reading.** When the finding is that
-  something can never happen — a branch nothing reaches, an evidence kind
-  never produced, a request never sent — the static chain through the code
-  is the argument and a count over real runs is the proof. Measured
-  example: a verifier demanded evidence of kind `user_input`, whose only
-  producer sat behind a queue filter admitting slash commands only; the
-  chain said unreachable, and 30 verifier payloads captured from one
-  session carried exactly one kind, `delivered_output`, with zero
-  `user_input` records even though the user typed three messages during
-  that run. Report both, and state the window the census covers — an
-  absence claim is only as strong as the observations behind it.
-- **Rank a defect's variants by observability, not by blast radius.** Where
-  one root cause yields both a loud failure and a quiet one, the quiet one
-  is the finding. Measured example: an unescaped non-greedy parser fed a
-  payload containing its own close tag either dropped a required argument —
-  rejected by schema validation, loud, recoverable — or silently truncated
-  the value and wrote a truncated file. Same bug; the second is the one to
-  fix first. This is the same ordering as the concurrency rule above, where
-  a race that fabricates a result outranks one that crashes: a wrong answer
-  nobody is told about outranks a failure that announces itself.
 
 ### Vacuity check on new/changed tests
 
@@ -481,6 +471,18 @@ the adapter emitted" versus "prompts that actually reached the agent" differ
 by every filter on the path. Assert the number a user would experience; a
 count taken at the seam can be right while the feature is silently dropped
 downstream.
+
+- **Prove a negative by census, not by reading.** When the finding is that
+  something can never happen — a branch nothing reaches, an evidence kind
+  never produced, a request never sent — the static chain through the code
+  is the argument and a count over real runs is the proof. Measured
+  example: a verifier demanded evidence of kind `user_input`, whose only
+  producer sat behind a queue filter admitting slash commands only; the
+  chain said unreachable, and 30 verifier payloads captured from one
+  session carried exactly one kind, `delivered_output`, with zero
+  `user_input` records even though the user typed three messages during
+  that run. Report both, and state the window the census covers — an
+  absence claim is only as strong as the observations behind it.
 
 **Timing-triggered assertions have a threshold — measure it, do not sample
 it.** When an assertion's outcome depends on a wall-clock timer racing an

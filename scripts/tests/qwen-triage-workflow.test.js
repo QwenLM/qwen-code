@@ -2410,8 +2410,10 @@ describe('qwen-triage verify hardening round 2', () => {
     // went 0.96s/3.2s/14.4s/>100s on 2k/3k/5k/20k spaces. A single sample
     // is 0.0ms and proves nothing — only the ladder shows the curve, and
     // only tracing the body to a fork contributor makes it a finding.
-    expect(flat).toContain('is a scaling question');
-    expect(flat).toContain('probe it with a');
+    expect(flat).toContain(
+      'Untrusted text reaching a parser is a scaling question',
+    );
+    expect(flat).toContain('ladder');
     expect(flat).toContain('claimed escape hatch really excludes the path');
 
     // #8215 §3: "one extra build per review, at most" was a line in an
@@ -2453,7 +2455,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // #8037 "Not verified": the harness replayed the exact wire bytes of
     // the reported failure but not the model-side degradation producing
     // them. A reader otherwise credits an end-to-end reproduction.
-    expect(flat).toContain('Distinguish reproducing the');
+    expect(flat).toContain('not the model-side degradation that produces it');
 
     // #8005 test plan: step 3 asked the reviewer to insert real user input
     // into an active turn. No code path does that — and the unrunnable
