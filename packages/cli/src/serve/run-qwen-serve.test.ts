@@ -4753,6 +4753,69 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('keeps the deferred bearer gate closed for static routes on a non-loopback bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qws-runtime-web-shell-nonloopback-'),
+      ),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    // The shell IS mounted here, but the bind is non-loopback: the pre-auth
+    // skip must stay closed so a remote unauthenticated static request cannot
+    // force a runtime boot (the desktop daemon always binds loopback).
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.get('/', (_req, res) => {
+        res.status(200).type('html').send('<html>shell</html>');
+      });
+      app.get('/assets/app.js', (_req, res) => {
+        res.status(200).type('text/javascript').send('// chunk');
+      });
+      return app;
+    });
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(
+      path.join(tmpDir, 'web-shell'),
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: true,
+        token: 'nonloopback-secret',
+        requireAuth: true,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // The daemon binds 0.0.0.0; reach it over loopback so the test does not
+      // depend on a routable external interface.
+      const port = new URL(handle.url).port;
+      const base = `http://127.0.0.1:${port}`;
+      const shell = await fetch(`${base}/`);
+      expect(shell.status).toBe(401);
+      const asset = await fetch(`${base}/assets/app.js`);
+      expect(asset.status).toBe(401);
+      // Both were rejected at the gate before the runtime started.
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps the deferred bearer gate closed for static routes when the Web Shell is not mounted', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-no-web-gate-')),

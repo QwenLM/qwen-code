@@ -391,13 +391,15 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum -- * > SHA256SUMS.txt
+          # Generate the updater manifest before checksumming so SHA256SUMS.txt
+          # also covers desktop-latest.json (fetched unauthenticated by clients).
           node ../.github/scripts/create-desktop-update-manifest.mjs \
             --assets . \
             --repository "$GH_REPO" \
             --tag "$RELEASE_TAG" \
             --version "$RELEASE_VERSION" \
             --output desktop-latest.json
+          sha256sum -- * > SHA256SUMS.txt
 
       - name: 'Create GitHub release'
         id: 'release'

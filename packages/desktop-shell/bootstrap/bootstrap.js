@@ -89,9 +89,23 @@ async function installUpdate() {
   }
 }
 
+async function openLogs() {
+  if (!invoke) return;
+  try {
+    await invoke('open_logs');
+  } catch (failure) {
+    setStatus(
+      'error',
+      'Logs could not open',
+      'Review the details or try again.',
+      String(failure),
+    );
+  }
+}
+
 choose.addEventListener('click', chooseWorkspace);
 retry.addEventListener('click', retryRuntime);
-logs.addEventListener('click', () => invoke?.('open_logs'));
+logs.addEventListener('click', openLogs);
 update.addEventListener('click', installUpdate);
 
 async function initialize() {

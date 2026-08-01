@@ -1643,6 +1643,7 @@ function createDelegatingServeApp(
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
     webShellMounted?: boolean;
+    loopbackBind?: boolean;
   } = {},
 ): Application {
   const app = express();
@@ -1671,11 +1672,17 @@ function createDelegatingServeApp(
         // let the runtime app apply its own (pre-auth) policy once ready. When
         // the shell is not mounted (`--no-web`) there is no pre-auth route to
         // protect, so keep the gate closed instead of booting the runtime for
-        // an unauthenticated static request.
+        // an unauthenticated static request. The skip is also loopback-only: a
+        // non-loopback `--hostname` with `--require-auth` keeps the gate closed
+        // so a remote unauthenticated static request cannot force a runtime
+        // boot; the desktop daemon always binds loopback, so its flow is
+        // unchanged.
         const authGate = webhookRequest
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
-          : options.webShellMounted === true && isPreAuthWebShellRequest(req)
+          : options.webShellMounted === true &&
+              options.loopbackBind === true &&
+              isPreAuthWebShellRequest(req)
             ? undefined
             : options.authenticateDeferredRuntimeRequest;
         if (authGate) {
@@ -5634,6 +5641,7 @@ async function runQwenServeImpl(
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
       webShellMounted,
+      loopbackBind: isLoopbackBind(opts.hostname),
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but

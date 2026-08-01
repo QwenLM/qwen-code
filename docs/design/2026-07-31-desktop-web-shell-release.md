@@ -100,7 +100,7 @@ flowchart LR
 
 ## 安全边界
 
-- bootstrap CSP：`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。
+- bootstrap CSP：`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。
 - Web Shell 仍由 daemon 生成自身 CSP；桌面壳不放宽 daemon 页面策略。
 - 主窗口只允许 bootstrap 自定义协议和选定 daemon 的同源导航。
 - `http`、`https`、`mailto` 外链交给系统浏览器；`file`、`javascript`、自定义协议拒绝。

@@ -194,9 +194,14 @@ fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
 }
 
 fn random_token() -> String {
+    use std::fmt::Write as _;
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
 }
 
 fn capture_stdout(

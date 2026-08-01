@@ -25,7 +25,6 @@ const BOOTSTRAP_URL: &str = "tauri://localhost";
 #[serde(rename_all = "camelCase")]
 struct BootstrapState {
     desktop_version: String,
-    log_path: String,
     status: &'static str,
     workspace: Option<String>,
     error: Option<String>,
@@ -111,11 +110,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
         stop_runtime(&runtime_exit_handle);
         *lock(&state.origin) = None;
+        let message = format!("Qwen Code stopped: {}", stopped.status);
+        *lock(&state.last_error) = Some(message.clone());
         let _ = navigate_to_bootstrap(&runtime_exit_handle);
-        let _ = runtime_exit_handle.emit(
-            "runtime-failed",
-            format!("Qwen Code stopped: {}", stopped.status),
-        );
+        let _ = runtime_exit_handle.emit("runtime-failed", message);
     });
     let (width, height) = default_window_size();
 
@@ -163,7 +161,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let _ = handle.emit("workspace-required", ());
     }
-    check_updates_silently(handle);
+    check_updates_silently(handle.clone());
     spawn_window_state_flusher(handle);
     Ok(())
 }
@@ -174,7 +172,6 @@ fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
     let running = lock(&state.runtime).is_some();
     BootstrapState {
         desktop_version: env!("CARGO_PKG_VERSION").to_string(),
-        log_path: state.log_path.to_string_lossy().into_owned(),
         status: if running {
             "ready"
         } else if starting {

@@ -38,7 +38,6 @@ export default tseslint.config(
       'packages/desktop-shell/src-tauri/target/**',
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
-      '**/vite.config.ts.timestamp-*', // transient Vite config-resolution artifacts
     ],
   },
   eslint.configs.recommended,
