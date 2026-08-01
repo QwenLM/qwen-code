@@ -224,7 +224,15 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   }
   try {
     mkdirSync(lock);
-  } catch {
+  } catch (err) {
+    // Only EEXIST means "another builder holds it". EPERM/EROFS/ENOSPC is a
+    // real failure this run owns — reporting it as busy sends the caller into
+    // a retry loop against a lock that will never appear.
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      return unavailable(
+        `could not take the base-tree build lock: ${(err as Error).message}`,
+      );
+    }
     return unavailable(
       'another probe is building the base tree right now — retry when its ' +
         'marker appears (the fast path will then reuse it), or settle the ' +

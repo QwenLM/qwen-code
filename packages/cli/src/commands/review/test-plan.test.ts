@@ -398,6 +398,29 @@ describe('npmScriptOf', () => {
     expect(npmScriptOf('npm run test:unit')).toBe('test:unit');
   });
 
+  it("never rules bun test against the scripts table — it is bun's built-in runner", () => {
+    expect(npmScriptOf('bun test')).toBeNull();
+    expect(npmScriptOf('bun run lint')).toBe('lint'); // the run form still rules
+  });
+
+  it('bails on a CHAINED cd instead of joining against the first hop', () => {
+    // `cd a && cd b && vitest run x.test.ts` once produced `a/x.test.ts`.
+    expect(
+      extractClaims('`cd a && cd packages/b && npx vitest run src/x.test.ts`'),
+    ).toEqual([]);
+  });
+
+  it('closes a fence only on its own marker inside codeSpans', () => {
+    // A ~~~ line inside a ``` block ended the span early — lines after it
+    // fell OUT of the fence and were lost to span extraction entirely.
+    const claims = extractClaims(
+      '```bash\nnpx vitest run src/real.test.ts\n~~~\nnpx vitest run src/inside.test.ts\n```',
+    );
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/real.test.ts' });
+    // Still inside the ``` block, so still extracted:
+    expect(claims).toContainEqual({ kind: 'path', text: 'src/inside.test.ts' });
+  });
+
   it('is null for every npm builtin outside the run form and script aliases', () => {
     // The denylist knew four verbs; npm has ~fifty. Each of the rest became a
     // false `no package defines this script` on a correct Test Plan.
