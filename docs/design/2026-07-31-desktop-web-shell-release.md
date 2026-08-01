@@ -144,7 +144,7 @@ Windows WebView2 使用 download bootstrapper；系统离线且缺失 WebView2 �
 
 1. 输入 desktop 版本和需要 vendor 的 Qwen Code ref。
 2. 校验 ref 可追溯到允许发布的提交。
-3. 同步 desktop-shell package、Cargo 和 Tauri 版本。
+3. 同步 desktop-shell package、Cargo 和 Tauri 版本。版本仅在每次构建时由 CI 瞬时设置，不会提交回仓库；`main` 分支有意保持开发占位版本（`0.0.1`），已发布版本以 git tag 为准。
 4. 每个平台准备 runtime，运行 checksum/runtime smoke 和 Rust 测试。
 5. 构建安装包和 updater artifacts。
 6. 平台 runner 安装并启动 packaged app，等待 daemon/Web Shell ready 证据。

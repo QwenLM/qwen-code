@@ -81,15 +81,13 @@ impl SettingsStore {
     }
 
     fn update(&self, update: impl FnOnce(&mut DesktopSettings)) -> Result<(), String> {
-        let serialized = {
-            let mut settings = match self.settings.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            update(&mut settings);
-            serde_json::to_string_pretty(&*settings)
-                .map_err(|error| format!("Failed to serialize desktop settings: {error}"))?
+        let mut settings = match self.settings.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
+        update(&mut settings);
+        let serialized = serde_json::to_string_pretty(&*settings)
+            .map_err(|error| format!("Failed to serialize desktop settings: {error}"))?;
         write_atomic(&self.path, format!("{serialized}\n").as_bytes())
     }
 

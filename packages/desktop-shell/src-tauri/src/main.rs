@@ -97,6 +97,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
     let window_state = settings.window();
     let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&log_path, b"");
     let origin = Arc::new(Mutex::new(None));
     let navigation_origin = Arc::clone(&origin);
     let runtime_exit_handle = handle.clone();
