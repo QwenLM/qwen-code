@@ -513,6 +513,7 @@ describe('useGeminiStream', () => {
         expect.objectContaining({
           type: SendMessageType.Notification,
           notificationDisplayText: displayText,
+          todoWorkChainId: 'workflow-chain',
         }),
       );
     });
