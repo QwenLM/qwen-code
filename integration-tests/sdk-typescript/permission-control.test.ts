@@ -618,6 +618,10 @@ describe('Permission Control (E2E)', () => {
       const firstFile = 'first.txt';
       const secondFile = 'second.txt';
       const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        // Turn 1 consumes requests 0 (tool call) and 1 ('Done.'), so turn 2's
+        // tool call is request 2. Absolute indexing is deliberate: the fake
+        // server never retries, so an extra model request means the protocol
+        // sequence changed and this test should fail loudly rather than drift.
         if (requestIndex === 0) {
           return {
             toolCalls: [
