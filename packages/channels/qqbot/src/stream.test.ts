@@ -181,6 +181,23 @@ function setReplyMsgId(
   ).setReplyMsgId(chatId, msgId);
 }
 
+function onPromptStart(
+  ch: QQChannelClass,
+  chatId: string,
+  sessionId: string,
+  messageId?: string,
+) {
+  (
+    ch as unknown as {
+      onPromptStart: (
+        c: string,
+        s: string,
+        m?: string,
+      ) => void;
+    }
+  ).onPromptStart(chatId, sessionId, messageId);
+}
+
 function toolCall(sessionId: string): ToolCallEvent {
   return {
     sessionId,
@@ -261,12 +278,11 @@ describe('onResponseChunk', () => {
     expect(clearTimeout).toHaveBeenCalledWith(firstTimer);
   });
 
-  it('captures the current replyMsgId into the streamState entry on creation (per-session anchor)', () => {
+  it('snaps the onPromptStart anchor into the streamState entry on creation', () => {
     const ch = makeChannel();
-    const chp = ch as unknown as Record<string, unknown>;
-    (
-      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
-    ).set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    // onPromptStart anchors the session; the first chunk carries it into
+    // the new streamState entry.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
 
     onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
 
@@ -361,8 +377,8 @@ describe('idle-flush timer', () => {
 
   it('keeps chunks anchored to the originating msgId when a newer message overwrites replyMsgId mid-stream', async () => {
     const ch = makeChannel();
-    // User A's message starts a streaming reply.
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    // User A's message starts a streaming reply; onPromptStart anchors it.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'chunk1 ', 'sess-A');
 
     // User B's message arrives mid-stream and overwrites the chat-level entry.
@@ -380,10 +396,11 @@ describe('idle-flush timer', () => {
   it('two sessions on the same chat each anchor their streaming chunks to their own msgId', async () => {
     const ch = makeChannel();
     // A triggers a stream.
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'part-A ', 'sess-A');
     // B arrives mid-stream, overwrites the entry, and triggers its own stream.
     setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 'sess-B', 'msg-B');
     onResponseChunk(ch, 'test-chat', 'part-B ', 'sess-B');
 
     vi.advanceTimersByTime(2000);
@@ -401,7 +418,7 @@ describe('idle-flush timer', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'part1 ', 'sess-A');
 
     // A's first chunk is sent (seq 1 for msg-A).
@@ -429,13 +446,16 @@ describe('idle-flush timer', () => {
     expect(secondBody['msg_seq']).toBe(2);
   });
 
-  it('onPromptEnd releases a cancelled session anchor so the next prompt re-captures it', async () => {
+  it('onPromptEnd releases a cancelled session anchor so the next prompt sets a fresh one', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
     // A stale anchor left behind by a cancelled turn (onResponseComplete is
     // skipped on cancel, so only onPromptEnd can release it).
-    sessionAnchors.set('sess-A', 'msg-OLD');
+    sessionAnchors.set('sess-A', { msgId: 'msg-OLD', timestamp: Date.now() });
     // Meanwhile the chat-level entry has moved on to a newer message.
     setReplyMsgId(ch, 'test-chat', 'msg-NEW');
 
@@ -444,8 +464,9 @@ describe('idle-flush timer', () => {
       .onPromptEnd('test-chat', 'sess-A');
     expect(sessionAnchors.has('sess-A')).toBe(false);
 
-    // The next prompt on the same session must NOT inherit msg-OLD:
-    // onResponseChunk re-captures from the chat-level entry instead.
+    // The next prompt on the same session anchors from ITS OWN triggering
+    // message (onPromptStart) — the stale msg-OLD must not leak through.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-NEW');
     onResponseChunk(ch, 'test-chat', 'hello ', 'sess-A');
     vi.advanceTimersByTime(2000);
     await drain();
@@ -458,7 +479,10 @@ describe('idle-flush timer', () => {
   it('releasing a session anchor purges its orphaned msg_seq entry (but keeps live ones)', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
     const replyMap = chp['replyMsgId'] as Map<
       string,
@@ -473,7 +497,7 @@ describe('idle-flush timer', () => {
         .onPromptEnd(chatId, sessionId);
 
     // Session A streams under msg-A while the chat entry still references it.
-    sessionAnchors.set('sess-A', 'msg-A');
+    sessionAnchors.set('sess-A', { msgId: 'msg-A', timestamp: Date.now() });
     seqMap.set('msg-A', 3);
     replyMap.set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
 
@@ -483,7 +507,7 @@ describe('idle-flush timer', () => {
 
     // Chat entry moves to msg-B with no session anchored to msg-A anymore:
     // the next release must drop the orphaned seq counter.
-    sessionAnchors.set('sess-A', 'msg-A');
+    sessionAnchors.set('sess-A', { msgId: 'msg-A', timestamp: Date.now() });
     replyMap.set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
     promptEnd(ch, 'test-chat', 'sess-A');
     expect(seqMap.has('msg-A')).toBe(false);
@@ -492,14 +516,17 @@ describe('idle-flush timer', () => {
   it('onPromptEnd leaves a deferred (in-flight flush) session for its promise chain to finish', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
     const pendingDeletes = chp['pendingStreamDelete'] as Set<string>;
     const st = streamState(ch);
 
     // A chunk is buffered and a flush is in flight (deferred completion).
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    // onPromptStart sets the anchor; the first chunk snaps it into state.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'tail ', 'sess-A');
-    sessionAnchors.set('sess-A', 'msg-A');
     pendingDeletes.add('sess-A');
 
     // onPromptEnd must NOT clear state that the in-flight flush's .then()
@@ -511,6 +538,72 @@ describe('idle-flush timer', () => {
     expect(pendingDeletes.has('sess-A')).toBe(true);
     expect(sessionAnchors.has('sess-A')).toBe(true);
     expect(st.get('sess-A')!.buffer).toBe('tail ');
+  });
+
+  it('anchors a slow turn to its triggering msgId even after the chat entry expires or moves on', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+
+    // User A triggers a turn. The chat-level entry is already stale by the
+    // time the model's first chunk arrives (slow turn > 5-minute TTL), and a
+    // concurrent message from user B has since overwritten it.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
+    replyMap.set('test-chat', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - 10 * 60_000,
+    });
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+
+    onResponseChunk(ch, 'test-chat', 'slow reply ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    // Anchored to A's triggering message — the opportunistic capture would
+    // have picked up B's msgId here.
+    expect(body['msg_id']).toBe('msg-A');
+    expect(sessionAnchors.get('sess-A')!.msgId).toBe('msg-A');
+  });
+
+  it('drops the anchor past its TTL so chunks go out as active sends', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+
+    // Anchor set at prompt start, but the first chunk only arrives after the
+    // TTL elapsed (model thought for > 5 minutes) — and the chat-level entry
+    // is gone/expired too, so the send must be fully active (no msg_id).
+    sessionAnchors.set('sess-A', {
+      msgId: 'msg-STALE',
+      timestamp: Date.now() - (300_000 + 1000),
+    });
+    replyMap.delete('test-chat');
+
+    onResponseChunk(ch, 'test-chat', 'late ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // The stale anchor was dropped at read time.
+    expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect(body['msg_id']).toBeUndefined();
   });
 });
 
@@ -653,9 +746,9 @@ describe('onResponseComplete', () => {
   it('final segment keeps the captured per-session msgId even after replyMsgId is overwritten', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    (
-      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
-    ).set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    // onPromptStart anchors sess-A to msg-A; the chat-level entry also
+    // points at msg-A initially.
+    onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'final tail', 'sess-A');
     // A concurrent message overwrites the chat-level entry mid-stream.
     (

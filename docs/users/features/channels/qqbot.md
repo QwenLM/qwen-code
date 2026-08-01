@@ -60,7 +60,7 @@ export QQ_APP_SECRET=<your-app-secret>
       "appSecret": "$QQ_APP_SECRET",
       "sandbox": false,
       "senderPolicy": "open",
-      "sessionScope": "user",
+      "sessionScope": "thread",
       "cwd": "/path/to/your/project",
       "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
       "blockStreaming": "on",
@@ -72,6 +72,8 @@ export QQ_APP_SECRET=<your-app-secret>
   }
 }
 ```
+
+> `sessionScope` defaults to `"thread"`. With `groupPolicy: "disabled"` this is a DM-only setup, where both `"thread"` and `"user"` behave identically — each direct message gets its own context. `"thread"` is shown here for consistency with the [Session Isolation](#session-isolation) section below.
 
 ### QQ-Specific Options
 

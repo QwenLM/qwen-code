@@ -213,14 +213,21 @@ export class QQChannel extends ChannelBase {
   > = new Map();
   /**
    * Per-session reply msgId anchor, kept across idle-flush buffer windows.
-   * Captured when the session's stream first starts (from the chat-level
-   * replyMsgId entry) and released when the response completes, fails
-   * permanently, or the session dies. Because it outlives individual
-   * streamState entries, a concurrent message in the same chat that
-   * overwrites the chat-level replyMsgId entry mid-stream cannot re-parent
-   * this session's later chunks onto its own msg_id (see PR #6457 review).
+   * Set deterministically in onPromptStart from the triggering message's
+   * id (the same event.id setReplyMsgId stores) and released when the
+   * response completes, fails permanently, or the session dies. Entries
+   * carry a timestamp so readers (onResponseChunk / onResponseComplete)
+   * can drop anchors past the 5-minute TTL and fall back to the active
+   * send path — a slow turn must never keep sending chunks with an
+   * expired msg_id. Because it outlives individual streamState entries, a
+   * concurrent message in the same chat that overwrites the chat-level
+   * replyMsgId entry mid-stream cannot re-parent this session's later
+   * chunks onto its own msg_id (see PR #6457 review).
    */
-  private sessionReplyMsgId: Map<string, string> = new Map();
+  private sessionReplyMsgId: Map<
+    string,
+    { msgId: string; timestamp: number }
+  > = new Map();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
@@ -993,23 +1000,42 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * QQ Bot API V2 does not provide a typing indicator endpoint.
-   * ChannelBase calls these hooks to signal prompt start/end;
-   * onPromptStart is intentionally a no-op.
+   * Set the per-session reply anchor deterministically from the triggering
+   * message's id (ChannelBase passes envelope.messageId, which for QQ is
+   * event.id — the same value setReplyMsgId stores in the chat-level entry).
+   * This replaces the previous opportunistic capture on the first chunk,
+   * which had a blind spot: a slow model turn could pass the chat entry's
+   * 5-minute TTL before its first chunk, and the capture would then pick up
+   * the msgId of a NEWER message in the same chat (another user's turn).
+   * Anchoring at prompt start is immune — the anchor always refers to the
+   * message that actually triggered this session's turn.
+   *
+   * Proactive turns (loop/webhook/cron) have no triggering message; their
+   * replies must go out as active messages, so clear any stale anchor.
    */
   protected override onPromptStart(
     _chatId: string,
-    _sessionId: string,
-    _messageId?: string,
-  ): void {}
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId) {
+      this.sessionReplyMsgId.set(sessionId, {
+        msgId: messageId,
+        timestamp: Date.now(),
+      });
+    } else {
+      this.sessionReplyMsgId.delete(sessionId);
+    }
+  }
 
   /**
    * ChannelBase invokes this unconditionally in a finally block — including
    * when the prompt was cancelled, in which case onResponseComplete is
    * skipped. That makes it the one reliable release point for per-session
    * streaming state: without it a cancelled turn would leave its reply
-   * anchor in sessionReplyMsgId and the next prompt on the same session
-   * would inherit the stale anchor via onResponseChunk.
+   * anchor in sessionReplyMsgId (and the next prompt on the same session
+   * would overwrite it only at its own start, leaking the stale entry's
+   * msg_seq orphan meanwhile).
    *
    * Deferred completions are exempt: when onResponseComplete parked the
    * session in pendingStreamDelete, a final flush is still in flight and
@@ -1046,13 +1072,20 @@ export class QQChannel extends ChannelBase {
     let state = this.streamState.get(sessionId);
     if (!state) {
       // Reuse the session's reply anchor across buffer windows (a single
-      // response may flush several times, each creating a fresh state entry);
-      // capture from the chat-level entry only on the first window.
-      let anchor = this.sessionReplyMsgId.get(sessionId);
-      if (anchor === undefined) {
-        anchor = this.captureReplyMsgId(chatId);
-        if (anchor !== undefined) {
-          this.sessionReplyMsgId.set(sessionId, anchor);
+      // response may flush several times, each creating a fresh state entry).
+      // The anchor was set deterministically by onPromptStart from the
+      // triggering message's id; drop it when stale (past the 5-minute TTL)
+      // so a long stream's later windows fall back to the active send path
+      // instead of sending chunks with an expired msg_id.
+      let anchor: string | undefined;
+      const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+      if (anchorEntry) {
+        if (
+          Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+        ) {
+          anchor = anchorEntry.msgId;
+        } else {
+          this.sessionReplyMsgId.delete(sessionId);
         }
       }
       state = {
@@ -1345,7 +1378,15 @@ export class QQChannel extends ChannelBase {
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
     const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
-    const capturedMsgId = this.sessionReplyMsgId.get(sessionId);
+    // TTL-check the anchor like onResponseChunk does: a final segment sent
+    // after the anchor expired must go out as an active message instead of
+    // with a stale msg_id.
+    const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+    const capturedMsgId =
+      anchorEntry &&
+      Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+        ? anchorEntry.msgId
+        : undefined;
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
@@ -1752,25 +1793,18 @@ export class QQChannel extends ChannelBase {
     this.sessionReplyMsgId.delete(sessionId);
     if (anchor === undefined) return;
     // Another session is still streaming under this msgId — keep its seq.
-    if ([...this.sessionReplyMsgId.values()].includes(anchor)) return;
+    if (
+      [...this.sessionReplyMsgId.values()].some(
+        (a) => a.msgId === anchor.msgId,
+      )
+    ) {
+      return;
+    }
     // The chat-level entry still points at this msgId — seq is still in use.
     for (const [, entry] of this.replyMsgId) {
-      if (entry.msgId === anchor) return;
+      if (entry.msgId === anchor.msgId) return;
     }
-    this.msgSeqMap.delete(anchor);
-  }
-
-  /**
-   * Capture the current reply msgId for a chat (with TTL check), used to
-   * anchor a streaming response per session. Returns undefined when the entry
-   * is missing or expired — sendMessage then falls back to its own lookup.
-   */
-  private captureReplyMsgId(chatId: string): string | undefined {
-    const entry = this.replyMsgId.get(chatId);
-    return entry &&
-      Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
-      ? entry.msgId
-      : undefined;
+    this.msgSeqMap.delete(anchor.msgId);
   }
 
   /**
@@ -1785,8 +1819,8 @@ export class QQChannel extends ChannelBase {
       // overwrite by a newer message doesn't reset the sequence — the seq
       // bookkeeping is keyed by msgId, so only delete it when no live session
       // is still anchored to it.
-      const streamStillAnchored = [...this.sessionReplyMsgId.values()].includes(
-        oldEntry.msgId,
+      const streamStillAnchored = [...this.sessionReplyMsgId.values()].some(
+        (a) => a.msgId === oldEntry.msgId,
       );
       if (!streamStillAnchored) {
         this.msgSeqMap.delete(oldEntry.msgId);

@@ -1406,7 +1406,7 @@ describe('lifecycle status hooks', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+  it('sets the reply anchor at prompt start and releases it at prompt end', () => {
     const ch = makeChannel();
     const chp = ch as unknown as {
       onPromptStart: (
@@ -1420,11 +1420,26 @@ describe('lifecycle status hooks', () => {
         messageId?: string,
       ) => void;
     };
+    const sessionAnchors = (ch as unknown as Record<string, unknown>)[
+      'sessionReplyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
 
     expect(() => {
+      // Inbound turn: anchor to the triggering message's id.
       chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
-      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
     }).not.toThrow();
+    expect(sessionAnchors.get('session-1')!.msgId).toBe('msg-1');
+
+    // Proactive turn (loop/webhook/cron): no messageId → clear the anchor.
+    chp.onPromptStart('test-chat-id', 'session-1');
+    expect(sessionAnchors.has('session-1')).toBe(false);
+
+    expect(() => {
+      // onPromptEnd releases the anchor.
+      chp.onPromptStart('test-chat-id', 'session-2', 'msg-2');
+      chp.onPromptEnd('test-chat-id', 'session-2', 'msg-2');
+    }).not.toThrow();
+    expect(sessionAnchors.has('session-2')).toBe(false);
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
