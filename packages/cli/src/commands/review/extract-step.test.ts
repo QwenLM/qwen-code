@@ -535,6 +535,31 @@ describe('expressionsOf / invokedCommandsOf', () => {
     expect(invokedCommandsOf("cat <<'EOF'\ncurl evil\nEOF")).toEqual(['cat']);
   });
 
+  it('does not mistake a QUOTED `<<EOF` for a heredoc opener', () => {
+    // The failure this guards is not a missing entry but a missing REST: a
+    // false opener waits for a terminator that never comes, so every later
+    // line is skipped and the list comes back empty and plausible.
+    expect(
+      invokedCommandsOf('echo "write <<EOF for a heredoc"\ncurl x\njq .'),
+    ).toEqual(['curl', 'jq']);
+  });
+
+  it('reads a backslash-continued command as ONE command', () => {
+    // Scanning the continuation as its own line puts the next ARGUMENT in
+    // command position — measured on this repo as `libx11-dev` reported as a
+    // command from an `apt-get install -y \` continuation.
+    expect(
+      invokedCommandsOf(
+        'apt-get install -y \\\n  libx11-dev \\\n  libxext-dev',
+      ),
+    ).toEqual(['apt-get']);
+    // The continued line still contributes its own pipeline segments.
+    expect(invokedCommandsOf('gh api x \\\n  --paginate | jq .')).toEqual([
+      'gh',
+      'jq',
+    ]);
+  });
+
   it('does not read the inside of a quoted assignment as the command', () => {
     // Measured shape from qwen-triage.yml: the `name=` prefix is stepped over
     // and the next WORD taken as the command — but that word is inside the

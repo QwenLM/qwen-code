@@ -200,9 +200,10 @@ function maskExpressions(line: string): string {
 function stripQuoted(
   line: string,
   open: '"' | "'" | null,
-): { live: string; open: '"' | "'" | null } {
+): { live: string; open: '"' | "'" | null; heredoc: string | null } {
   let live = '';
   let quote = open;
+  let heredoc: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote !== null) {
@@ -210,6 +211,21 @@ function stripQuoted(
         i++; // \" does not close the span
       else if (c === quote) quote = null;
       continue;
+    }
+    // A heredoc opener is only an opener OUTSIDE quotes — this is why the
+    // detection lives in here rather than over the raw line. `echo "use <<EOF"`
+    // matched as one would start heredoc mode on a string, and every line to
+    // the end of the script would be swallowed waiting for a terminator that
+    // never comes. The quoted forms (`<<'EOF'`) are consumed by the match, so
+    // their quotes never open a span either.
+    if (c === '<' && line[i + 1] === '<' && heredoc === null) {
+      const m = HEREDOC_OPENER.exec(line.slice(i));
+      if (m) {
+        heredoc = m[1] ?? m[2] ?? m[3];
+        i += m[0].length - 1;
+        live += ' ';
+        continue;
+      }
     }
     if (c === '\\') {
       i++;
@@ -222,12 +238,15 @@ function stripQuoted(
       live += c;
     }
   }
-  return { live, open: quote };
+  return { live, open: quote, heredoc };
 }
 
 /** `<<WORD`, `<<-WORD`, `<<'WORD'` — the body that follows is data. */
-const HEREDOC =
-  /<<-?\s*(?:'([A-Za-z_][\w-]*)'|"([A-Za-z_][\w-]*)"|([A-Za-z_][\w-]*))/;
+const HEREDOC_OPENER =
+  /^<<-?\s*(?:'([A-Za-z_][\w-]*)'|"([A-Za-z_][\w-]*)"|([A-Za-z_][\w-]*))/;
+
+/** A line ending in an unescaped `\` continues into the next one. */
+const CONTINUES = /(?:^|[^\\])(?:\\\\)*\\$/;
 
 export function invokedCommandsOf(script: string): string[] {
   const seen = new Set<string>();
@@ -245,25 +264,41 @@ export function invokedCommandsOf(script: string): string[] {
       break; // only the command position; arguments are not invocations
     }
   };
+  const scanLogicalLine = (rawLine: string, openQuote: '"' | "'" | null) => {
+    const masked = maskExpressions(rawLine);
+    // Command substitutions first, on the unstripped text — `body="$(sanitize
+    // < f)"` is an assignment whose real invocation lives inside the `$()`.
+    for (const m of masked.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
+    const stripped = stripQuoted(masked, openQuote);
+    const line = stripped.live.trim();
+    if (line && !line.startsWith('#')) {
+      for (const seg of line.split(/(?:\|\||&&|\||;)/)) scanSegment(seg);
+    }
+    return stripped;
+  };
+
   let heredocTerminator: string | null = null;
   let openQuote: '"' | "'" | null = null;
+  // A backslash-continued command is ONE command: scanning the continuation
+  // as its own line puts the next argument in command position, which is how
+  // `apt-get install -y \` / `  libx11-dev` reported the package as a command.
+  let pending: string | null = null;
   for (const rawLine of script.split('\n')) {
     if (heredocTerminator !== null) {
       if (rawLine.trim() === heredocTerminator) heredocTerminator = null;
       continue; // a heredoc body is input to a command, not a list of them
     }
-    const masked = maskExpressions(rawLine);
-    // Command substitutions first, on the unstripped text — `body="$(sanitize
-    // < f)"` is an assignment whose real invocation lives inside the `$()`.
-    for (const m of masked.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
-    const { live, open } = stripQuoted(masked, openQuote);
+    const joined = pending === null ? rawLine : pending + rawLine;
+    if (CONTINUES.test(joined)) {
+      pending = `${joined.slice(0, -1)} `;
+      continue;
+    }
+    pending = null;
+    const { open, heredoc } = scanLogicalLine(joined, openQuote);
     openQuote = open;
-    const line = live.trim();
-    if (!line || line.startsWith('#')) continue;
-    const heredoc = HEREDOC.exec(masked);
-    if (heredoc) heredocTerminator = heredoc[1] ?? heredoc[2] ?? heredoc[3];
-    for (const seg of line.split(/(?:\|\||&&|\||;)/)) scanSegment(seg);
+    heredocTerminator = heredoc;
   }
+  if (pending !== null) scanLogicalLine(pending, openQuote);
   return [...seen].sort();
 }
 
