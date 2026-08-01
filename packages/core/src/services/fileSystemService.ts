@@ -118,6 +118,10 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
 export interface FileSystemService {
   readTextFile(params: CoreReadTextFileRequest): Promise<ReadTextFileResponse>;
 
+  readTextFileFromHandle?(
+    params: CoreReadTextFileHandleRequest,
+  ): Promise<ReadTextFileResponse>;
+
   writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse>;

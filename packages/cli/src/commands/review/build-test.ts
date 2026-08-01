@@ -109,10 +109,46 @@ export interface BuildTestReport {
 const KEEP_HEAD = 2_000;
 const KEEP_TAIL = 6_000;
 
+/**
+ * Did this spawn die on its deadline?
+ *
+ * Exported so `test-delta`'s rerun asks the SAME question rather than
+ * re-deriving it — a copy there used `error.message.includes('ETIMEDOUT')`,
+ * which misses an external SIGTERM and fed a silent "base is green".
+ */
+export function spawnTimedOut(r: {
+  error?: Error;
+  signal?: NodeJS.Signals | null;
+  status?: number | null;
+}): boolean {
+  return (
+    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
+    (r.signal === 'SIGTERM' && r.status === null)
+  );
+}
+
 /** The module-resolution errors the widening loop reads to grow the build set. */
 const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
 
-function trimOutput(s: string): string {
+/**
+ * Runner summary lines, rescued from a trimmed middle like module errors are.
+ *
+ * On a FAILING suite the failure details land in the tail and push the
+ * `Tests  3 failed | 1132 passed` summary into the omitted middle — measured on
+ * a live review of PR #8176, where `test-plan`'s count check found no summary
+ * anywhere in an 8 000-char report of a 3-failure run. The summary is the one
+ * line that says what the whole run amounted to; keep it.
+ */
+const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
+
+/** SGR color sequences — stripped per line before the summary test, because a
+ *  real runner interleaves them BETWEEN tokens (`Tests\x1b[2m  \x1b[22m3 failed`),
+ *  where no anchored pattern can step over them. The rescued line itself keeps
+ *  its original bytes. */
+// eslint-disable-next-line no-control-regex -- ESC is the character under test
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+export function trimOutput(s: string): string {
   if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
   const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);
   // Rescue module-resolution errors from the omitted middle. The widening loop
@@ -120,10 +156,22 @@ function trimOutput(s: string): string {
   // find module` line lost to trimming (a long TypeScript log can push one past the
   // head and before the tail) would end the widening early and surface a real
   // graph gap as a false build error. Report stays bounded; the signal survives.
-  const rescued = middle.split('\n').filter((l) => MODULE_ERROR_RE.test(l));
+  // CAPPED: the rescue exists to save a handful of summary/module-error lines,
+  // and an uncapped predicate made the whole trim a no-op on 40k lines of
+  // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
+  // cap the trim's bounded-output contract wins and the rest stays omitted.
+  const RESCUE_MAX = 40;
+  const rescued = middle
+    .split('\n')
+    .filter(
+      (l) =>
+        MODULE_ERROR_RE.test(l) ||
+        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
+    )
+    .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
@@ -202,9 +250,7 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
-  const timedOut =
-    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
-    (r.signal === 'SIGTERM' && r.status === null);
+  const timedOut = spawnTimedOut(r);
   return {
     command,
     exitCode: r.status,
@@ -249,6 +295,17 @@ interface BuildTestArgs {
   out?: string;
   timeout: number;
   install: boolean;
+  /**
+   * Build, then stop — do not run the changed workspaces' tests.
+   *
+   * For the merge-base tree an A/B probe compares against. Base's tests were
+   * green before this PR existed and running them measures nothing about it;
+   * what the probe needs from that tree is a compiled `dist/` to run against,
+   * and paying for the suite twice is the difference between an A/B a reviewer
+   * will use and one they will skip. Defaults false, so the PR-side call is
+   * unchanged.
+   */
+  buildOnly?: boolean;
   /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
@@ -626,7 +683,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // parallel and does not finish; the packages the diff did not touch cannot have
   // been broken by it, and their tests were green before this PR and will be green
   // after it.
-  for (const dir of affected) {
+  for (const dir of args.buildOnly ? [] : affected) {
     const pkg = byDir.get(dir);
     if (!pkg?.scripts.includes('test')) continue;
     const r = exec(testCommand(dir), root, perCommandMs);
@@ -653,7 +710,11 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           widened.size
             ? `, plus ${[...widened].join(', ')} the compiler asked for`
             : ''
-        }) and ran the tests of the changed ones. Everything passed.`;
+        })${
+          args.buildOnly
+            ? '. Tests were not run (build-only).'
+            : ' and ran the tests of the changed ones. Everything passed.'
+        }`;
     } else if (realFailures.length === 0) {
       results.note =
         `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
@@ -721,6 +782,14 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe: 'Run `npm ci` first when node_modules is absent',
+      })
+      .option('build-only', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "Build, then stop — skip the changed workspaces' tests. For the " +
+          'merge-base tree an A/B probe compares against, whose suite says ' +
+          'nothing about this PR.',
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;

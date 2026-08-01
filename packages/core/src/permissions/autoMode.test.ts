@@ -155,6 +155,7 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/.qwen/agents/reviewer.md',
       '/repo/.qwen/skills/skill-a/SKILL.md',
       '/repo/.qwen/hooks/pre-tool-use.json',
+      '/repo/.qwen/fork-profiles/ro-research.md',
       '/repo/.qwen/QWEN.local.md',
       '/repo/.qwen/rules/backend.md',
       '/repo/.mcp.json',
@@ -240,6 +241,7 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/agents/reviewer.md',
         '/tmp/custom-qwen-home/skills/review/SKILL.md',
         '/tmp/custom-qwen-home/hooks/pre-tool-use.json',
+        '/tmp/custom-qwen-home/fork-profiles/ro-research.md',
         '/tmp/custom-qwen-home/rules/backend.md',
         '/tmp/custom-qwen-home/.mcp.json',
       ];
@@ -360,18 +362,18 @@ describe('passesAcceptEditsFastPath', () => {
       `${cwd}/.qwen/agents/reviewer.md`,
       `${cwd}/.qwen/skills/review/SKILL.md`,
       `${cwd}/.qwen/hooks/pre-tool-use.json`,
+      `${cwd}/.qwen/fork-profiles/ro-research.md`,
       `${cwd}/.qwen/QWEN.local.md`,
       `${cwd}/.qwen/rules/backend.md`,
       `${cwd}/.mcp.json`,
     ];
 
-    for (const filePath of protectedPaths) {
-      expect(
-        passesAcceptEditsFastPath(
-          ctx({ toolName: ToolNames.WRITE_FILE, filePath }),
-          config,
-        ),
-      ).toBe(false);
+    for (const toolName of [ToolNames.EDIT, ToolNames.WRITE_FILE]) {
+      for (const filePath of protectedPaths) {
+        expect(
+          passesAcceptEditsFastPath(ctx({ toolName, filePath }), config),
+        ).toBe(false);
+      }
     }
   });
 
