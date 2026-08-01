@@ -71,23 +71,23 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History), screen reader mode is off, and Qwen Code is running in a compatible interactive terminal (`stdout` is a TTY, CI is inactive, and `TERM` is not `dumb`), which is the default for ordinary non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
-| Shortcut        | Description                                          |
-| --------------- | ---------------------------------------------------- |
-| `Shift+Up`      | Scroll history up one line.                          |
-| `Shift+Down`    | Scroll history down one line.                        |
-| `PgUp`          | Scroll history up one page (viewport height).        |
-| `PgDn`          | Scroll history down one page (viewport height).      |
-| `Ctrl+Home`     | Jump to the top of the conversation.                 |
-| `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow). |
-| **Mouse wheel** | Scroll history (3 lines per tick).                   |
+| Shortcut        | Description                                                                     |
+| --------------- | ------------------------------------------------------------------------------- |
+| `Shift+Up`      | Scroll history up one line.                                                     |
+| `Shift+Down`    | Scroll history down one line.                                                   |
+| `PgUp`          | Scroll history up one page (viewport height).                                   |
+| `PgDn`          | Scroll history down one page (viewport height).                                 |
+| `Ctrl+Home`     | Jump to the top of the conversation.                                            |
+| `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow).                            |
+| **Mouse wheel** | Scroll history (3 lines per tick). Requires `ui.mouseTracking` (on by default). |
 
-When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging.
+When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default), the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging. Set `ui.mouseTracking` to `false` to stop qwen-code from capturing the mouse entirely; that restores the terminal's native right-click menu, OSC 8 hyperlink clicks, and click-and-drag selection, but the in-app viewport no longer responds to the mouse, so use the keyboard shortcuts above to scroll.
 
 ### tmux trackpad scrolling
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
 
-If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 
