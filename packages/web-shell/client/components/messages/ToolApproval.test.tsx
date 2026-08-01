@@ -458,6 +458,7 @@ describe('ToolApproval accessibility', () => {
             { id: 'reject', label: 'Reject', kind: 'reject_once' },
           ],
         },
+        undefined,
         language,
       );
       const opts = optionButtons();
