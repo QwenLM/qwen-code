@@ -507,6 +507,23 @@ describe('expressionsOf / invokedCommandsOf', () => {
     expect(expressionsOf('${{ a }} ${{ unterminated')).toEqual(['${{ a }}']);
   });
 
+  it.each([
+    [
+      'adjacent sites with nothing between them',
+      '${{ a }}${{ b }}',
+      ['${{ a }}', '${{ b }}'],
+    ],
+    [
+      'a JSON literal inside the expression',
+      '${{ fromJSON(\'{"k":1}\').k }}',
+      ['${{ fromJSON(\'{"k":1}\').k }}'],
+    ],
+    ['an empty expression', '${{}}', ['${{}}']],
+    ['a repeated site, deduped', 'x ${{ a }} y ${{ a }}', ['${{ a }}']],
+  ])('handles %s', (_name, input, expected) => {
+    expect(expressionsOf(input as string)).toEqual(expected);
+  });
+
   it('reads pipeline segments and skips keywords, builtins, and VAR= prefixes', () => {
     expect(
       invokedCommandsOf(
@@ -542,6 +559,40 @@ describe('expressionsOf / invokedCommandsOf', () => {
     expect(
       invokedCommandsOf('echo "write <<EOF for a heredoc"\ncurl x\njq .'),
     ).toEqual(['curl', 'jq']);
+  });
+
+  // Adversarial shapes, each with the answer bash would give. The two that
+  // matter most are UNDER-reports: a command missing from the list is a stub
+  // the verifier never writes, so the extraction reaches the real network.
+  it.each([
+    ['nested $( ) inside quotes', 'x="$(a)" && b', ['a', 'b']],
+    [
+      'case labels, whose command follows on the same line',
+      'case "$v" in\n  blocked) gh x ;;\n  ok) jq . ;;\nesac',
+      ['gh', 'jq'],
+    ],
+    ['subshell', '( cd /tmp && tar cf x ) | gzip', ['gzip', 'tar']],
+    [
+      'function definition and its call',
+      'foo() {\n  curl x\n}\nfoo',
+      ['curl', 'foo'],
+    ],
+    [
+      'a second heredoc on the same line',
+      'cat <<A <<B\nx\nA\ny\nB\njq .',
+      ['cat', 'jq'],
+    ],
+    [
+      'an indented heredoc terminator',
+      "cat <<-'EOF'\n\tcurl evil\n\tEOF\njq .",
+      ['cat', 'jq'],
+    ],
+    ['an expression in command position', '${{ steps.a.outputs.cmd }} arg', []],
+    ['an expression beside a real pipe', 'x="${{ a || b }}" | jq .', ['jq']],
+    ['a backtick substitution', 'x=`date`\ncurl y', ['curl']],
+    ['a bare redirect', '> f\ncurl x', ['curl']],
+  ])('reads %s', (_name, script, expected) => {
+    expect(invokedCommandsOf(script as string)).toEqual(expected);
   });
 
   it('reads a backslash-continued command as ONE command', () => {
