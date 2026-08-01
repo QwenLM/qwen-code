@@ -37,6 +37,14 @@ const PasswordInput = ({
 }) => {
   useKeypress(
     (key: Key) => {
+      if (key.paste) {
+        const pastedValue = key.sequence.replace(/[^\x20-\x7e]/g, '');
+        if (pastedValue) {
+          onChange(value + pastedValue);
+        }
+        return;
+      }
+
       // Handle submit
       if (key.name === 'return') {
         onSubmit();
