@@ -9486,13 +9486,23 @@ describe('useGeminiStream', () => {
   });
 
   describe('handleFinishedEvent', () => {
-    it('should add info message for MAX_TOKENS finish reason', async () => {
+    it('commits mixed assistant output before a MAX_TOKENS warning', async () => {
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'truncated.png',
+      };
       // Setup mock to return a stream with MAX_TOKENS finish reason
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
             type: ServerGeminiEventType.Content,
             value: 'This is a truncated response...',
+            parts: [
+              { text: 'This is ' },
+              { inlineData: image },
+              { text: 'a truncated response...' },
+            ],
           };
           yield {
             type: ServerGeminiEventType.Finished,
@@ -9530,16 +9540,92 @@ describe('useGeminiStream', () => {
         await result.current.submitQuery('Generate long text');
       });
 
-      // Check that the info message was added
-      await waitFor(() => {
-        expect(mockAddItem).toHaveBeenCalledWith(
-          {
-            type: 'info',
-            text: '⚠  Response truncated due to token limits.',
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) =>
+              item.type === 'gemini' ||
+              item.type === 'gemini_content' ||
+              item.type === 'info',
+          ),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'This is ' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'a truncated response...' },
+        {
+          type: 'info',
+          text: '⚠  Response truncated due to token limits.',
+        },
+      ]);
+    });
+
+    it.each([
+      {
+        name: 'maximum-turns notice',
+        event: { type: ServerGeminiEventType.MaxSessionTurns },
+        expected: {
+          type: 'info',
+          text: expect.stringContaining('maximum number of turns'),
+        },
+      },
+      {
+        name: 'session-token-limit error',
+        event: {
+          type: ServerGeminiEventType.SessionTokenLimitExceeded,
+          value: {
+            currentTokens: 200,
+            limit: 100,
+            message: 'limit reached',
           },
-          expect.any(Number),
-        );
+        },
+        expected: {
+          type: 'error',
+          text: expect.stringContaining('Session token limit exceeded'),
+        },
+      },
+    ])('commits mixed assistant output before a $name', async (testCase) => {
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'boundary.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          yield testCase.event;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test terminal boundary');
       });
+
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) =>
+              item.type === 'gemini' ||
+              item.type === 'gemini_content' ||
+              item.type === 'info' ||
+              item.type === 'error',
+          ),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+        testCase.expected,
+      ]);
     });
 
     it('should not add message for STOP finish reason', async () => {
@@ -12308,6 +12394,14 @@ describe('useGeminiStream', () => {
               },
             },
           };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: ' continued',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
         })(),
       );
       const { result } = renderTestHook();
@@ -12328,6 +12422,7 @@ describe('useGeminiStream', () => {
         { type: 'gemini_content', text: '', images: [image] },
         { type: 'gemini_content', text: 'Goal output' },
         expect.objectContaining({ type: 'goal_state', cause: 'complete' }),
+        { type: 'gemini_content', text: ' continued' },
       ]);
     });
 

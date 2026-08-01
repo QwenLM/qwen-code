@@ -4,34 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import {
-  buildKittyPlaceholder,
-  createKittyImageId,
-  detectTerminalImageProtocol as detectSharedTerminalImageProtocol,
-  encodeITerm2InlineImage,
-  encodeKittyVirtualImage,
-  readPngSize,
-  type ImageDimensions as PngSize,
-  type KittyImagePlaceholder,
-  type TerminalImageProtocol,
-} from './terminal-image.js';
 
-export {
-  buildKittyPlaceholder,
-  encodeITerm2InlineImage,
-  encodeKittyImage,
-  encodeKittyVirtualImage,
-  readPngSize,
-} from './terminal-image.js';
-export type {
-  KittyImagePlaceholder,
-  TerminalImageProtocol,
-} from './terminal-image.js';
+export type TerminalImageProtocol = 'kitty' | 'iterm2';
 
 export interface MermaidImageRenderOptions {
   source: string;
@@ -67,6 +46,17 @@ export type MermaidImageRenderResult =
   | MermaidAnsiImageResult
   | MermaidImageUnavailableResult;
 
+interface PngSize {
+  width: number;
+  height: number;
+}
+
+export interface KittyImagePlaceholder {
+  color: string;
+  imageId: number;
+  lines: string[];
+}
+
 const CACHE_LIMIT = 40;
 const PNG_CACHE_LIMIT = 20;
 const CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
@@ -78,6 +68,8 @@ const MAX_RENDERER_OUTPUT_CHARS = 16 * 1024;
 const MAX_RENDER_TIMEOUT_MS = 60_000;
 const OUTPUT_TRUNCATION_MARKER = '\n... renderer output truncated ...';
 const NPX_MERMAID_CLI = 'npx:@mermaid-js/mermaid-cli@11.12.0';
+const PNG_SIGNATURE = '89504e470d0a1a0a';
+const KITTY_PLACEHOLDER = '\u{10EEEE}';
 const RENDERER_ENV_ALLOWLIST = [
   'PATH',
   'PATHEXT',
@@ -96,6 +88,136 @@ const RENDERER_ENV_ALLOWLIST = [
   'PUPPETEER_CACHE_DIR',
   'PLAYWRIGHT_BROWSERS_PATH',
 ] as const;
+const KITTY_PLACEHOLDER_DIACRITICS = [
+  '\u{305}',
+  '\u{30D}',
+  '\u{30E}',
+  '\u{310}',
+  '\u{312}',
+  '\u{33D}',
+  '\u{33E}',
+  '\u{33F}',
+  '\u{346}',
+  '\u{34A}',
+  '\u{34B}',
+  '\u{34C}',
+  '\u{350}',
+  '\u{351}',
+  '\u{352}',
+  '\u{357}',
+  '\u{35B}',
+  '\u{363}',
+  '\u{364}',
+  '\u{365}',
+  '\u{366}',
+  '\u{367}',
+  '\u{368}',
+  '\u{369}',
+  '\u{36A}',
+  '\u{36B}',
+  '\u{36C}',
+  '\u{36D}',
+  '\u{36E}',
+  '\u{36F}',
+  '\u{483}',
+  '\u{484}',
+  '\u{485}',
+  '\u{486}',
+  '\u{487}',
+  '\u{592}',
+  '\u{593}',
+  '\u{594}',
+  '\u{595}',
+  '\u{597}',
+  '\u{598}',
+  '\u{599}',
+  '\u{59C}',
+  '\u{59D}',
+  '\u{59E}',
+  '\u{59F}',
+  '\u{5A0}',
+  '\u{5A1}',
+  '\u{5A8}',
+  '\u{5A9}',
+  '\u{5AB}',
+  '\u{5AC}',
+  '\u{5AF}',
+  '\u{5C4}',
+  '\u{610}',
+  '\u{611}',
+  '\u{612}',
+  '\u{613}',
+  '\u{614}',
+  '\u{615}',
+  '\u{616}',
+  '\u{617}',
+  '\u{657}',
+  '\u{658}',
+  '\u{659}',
+  '\u{65A}',
+  '\u{65B}',
+  '\u{65D}',
+  '\u{65E}',
+  '\u{6D6}',
+  '\u{6D7}',
+  '\u{6D8}',
+  '\u{6D9}',
+  '\u{6DA}',
+  '\u{6DB}',
+  '\u{6DC}',
+  '\u{6DF}',
+  '\u{6E0}',
+  '\u{6E1}',
+  '\u{6E2}',
+  '\u{6E4}',
+  '\u{6E7}',
+  '\u{6E8}',
+  '\u{6EB}',
+  '\u{6EC}',
+  '\u{730}',
+  '\u{732}',
+  '\u{733}',
+  '\u{735}',
+  '\u{736}',
+  '\u{73A}',
+  '\u{73D}',
+  '\u{73F}',
+  '\u{740}',
+  '\u{741}',
+  '\u{743}',
+  '\u{745}',
+  '\u{747}',
+  '\u{749}',
+  '\u{74A}',
+  '\u{7EB}',
+  '\u{7EC}',
+  '\u{7ED}',
+  '\u{7EE}',
+  '\u{7EF}',
+  '\u{7F0}',
+  '\u{7F1}',
+  '\u{7F3}',
+  '\u{816}',
+  '\u{817}',
+  '\u{818}',
+  '\u{819}',
+  '\u{81B}',
+  '\u{81C}',
+  '\u{81D}',
+  '\u{81E}',
+  '\u{81F}',
+  '\u{820}',
+  '\u{821}',
+  '\u{822}',
+  '\u{823}',
+  '\u{825}',
+  '\u{826}',
+  '\u{827}',
+  '\u{829}',
+  '\u{82A}',
+  '\u{82B}',
+  '\u{82C}',
+];
 const cachedResults = new Map<string, MermaidImageRenderResult>();
 const cachedPngResults = new Map<
   string,
@@ -107,10 +229,130 @@ let cachedPngResultsBytes = 0;
 export function detectTerminalImageProtocol(
   env: NodeJS.ProcessEnv = process.env,
 ): TerminalImageProtocol | null {
-  return detectSharedTerminalImageProtocol(env, {
-    disabled: env['QWEN_CODE_DISABLE_MERMAID_IMAGES'] === '1',
-    forceProtocol: env['QWEN_CODE_MERMAID_IMAGE_PROTOCOL'],
+  if (env['QWEN_CODE_DISABLE_MERMAID_IMAGES'] === '1') {
+    return null;
+  }
+
+  const forced = env['QWEN_CODE_MERMAID_IMAGE_PROTOCOL']?.toLowerCase();
+  if (forced === 'off' || forced === 'none' || forced === '0') {
+    return null;
+  }
+
+  if (
+    !process.stdout.isTTY ||
+    env['TMUX'] ||
+    env['SSH_TTY'] ||
+    env['SSH_CLIENT']
+  ) {
+    return null;
+  }
+
+  if (forced) {
+    if (forced === 'kitty') return 'kitty';
+    if (forced === 'iterm' || forced === 'iterm2') return 'iterm2';
+  }
+
+  const term = env['TERM']?.toLowerCase() ?? '';
+  const termProgram = env['TERM_PROGRAM']?.toLowerCase() ?? '';
+
+  if (
+    env['KITTY_WINDOW_ID'] ||
+    term.includes('kitty') ||
+    termProgram.includes('ghostty')
+  ) {
+    return 'kitty';
+  }
+
+  if (termProgram === 'iterm.app' || termProgram.includes('wezterm')) {
+    return 'iterm2';
+  }
+
+  return null;
+}
+
+export function encodeITerm2InlineImage(
+  png: Buffer,
+  widthCells: number,
+  rows: number,
+): string {
+  return `\u001b]1337;File=inline=1;width=${widthCells};height=${rows};preserveAspectRatio=1:${png.toString(
+    'base64',
+  )}\u0007`;
+}
+
+export function encodeKittyImage(
+  png: Buffer,
+  widthCells: number,
+  rows: number,
+): string {
+  return encodeKittyImageCommand(png, `a=T,f=100,c=${widthCells},r=${rows}`);
+}
+
+export function encodeKittyVirtualImage(
+  png: Buffer,
+  imageId: number,
+  widthCells: number,
+  rows: number,
+): string {
+  return encodeKittyImageCommand(
+    png,
+    `a=T,f=100,i=${imageId},q=2,U=1,c=${widthCells},r=${rows}`,
+  );
+}
+
+function encodeKittyImageCommand(png: Buffer, firstControl: string): string {
+  const encoded = png.toString('base64');
+  const chunkSize = 4096;
+  const chunks: string[] = [];
+
+  for (let offset = 0; offset < encoded.length; offset += chunkSize) {
+    const chunk = encoded.slice(offset, offset + chunkSize);
+    const hasMore = offset + chunkSize < encoded.length;
+    const control =
+      offset === 0
+        ? `${firstControl},m=${hasMore ? 1 : 0}`
+        : `m=${hasMore ? 1 : 0}`;
+    chunks.push(`\u001b_G${control};${chunk}\u001b\\`);
+  }
+
+  return chunks.join('');
+}
+
+export function buildKittyPlaceholder(
+  imageId: number,
+  widthCells: number,
+  rows: number,
+): KittyImagePlaceholder {
+  const clampedRows = Math.min(rows, KITTY_PLACEHOLDER_DIACRITICS.length);
+  const clampedWidth = Math.min(
+    widthCells,
+    KITTY_PLACEHOLDER_DIACRITICS.length,
+  );
+  const lines = Array.from({ length: clampedRows }, (_, row) => {
+    const rowDiacritic = KITTY_PLACEHOLDER_DIACRITICS[row];
+    const cells = Array.from({ length: clampedWidth }, (_, column) => {
+      const columnDiacritic = KITTY_PLACEHOLDER_DIACRITICS[column];
+      return `${KITTY_PLACEHOLDER}${rowDiacritic}${columnDiacritic}`;
+    });
+    return cells.join('');
   });
+
+  return {
+    color: `#${imageId.toString(16).padStart(6, '0')}`,
+    imageId,
+    lines,
+  };
+}
+
+export function readPngSize(png: Buffer): PngSize | null {
+  if (png.length < 24 || png.subarray(0, 8).toString('hex') !== PNG_SIGNATURE) {
+    return null;
+  }
+
+  return {
+    width: png.readUInt32BE(16),
+    height: png.readUInt32BE(20),
+  };
 }
 
 function isMermaidImageRenderingDisabled(env: NodeJS.ProcessEnv): boolean {
@@ -434,6 +676,22 @@ export async function renderMermaidImageAsync({
   });
 }
 
+function createKittyImageId(
+  png: Buffer,
+  imageShape: { widthCells: number; rows: number },
+): number {
+  const hash = crypto
+    .createHash('sha256')
+    .update(png)
+    .update('\0')
+    .update(String(imageShape.widthCells))
+    .update('\0')
+    .update(String(imageShape.rows))
+    .digest();
+  const id = hash.readUIntBE(0, 3);
+  return id === 0 ? 1 : id;
+}
+
 function getResultCache(key: string): MermaidImageRenderResult | undefined {
   const cached = cachedResults.get(key);
   if (cached) {
@@ -459,7 +717,8 @@ function createPngCacheKey(
   mmdc: string,
   env: NodeJS.ProcessEnv,
 ): string {
-  return createHash('sha256')
+  return crypto
+    .createHash('sha256')
     .update(source)
     .update('\0')
     .update(mmdc)
@@ -476,7 +735,8 @@ function createCacheKey(
   mmdc: string,
   env: NodeJS.ProcessEnv,
 ): string {
-  return createHash('sha256')
+  return crypto
+    .createHash('sha256')
     .update(source)
     .update('\0')
     .update(String(contentWidth))
@@ -599,7 +859,7 @@ function findMmdc(env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
-function findExecutable(
+export function findExecutable(
   command: string,
   env: NodeJS.ProcessEnv,
 ): string | null {
@@ -789,7 +1049,7 @@ async function renderPngWithMmdcAsync(
   }
 }
 
-function shouldRunThroughShell(command: string): boolean {
+export function shouldRunThroughShell(command: string): boolean {
   return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
 }
 
@@ -809,7 +1069,9 @@ function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
   return DEFAULT_RENDER_TIMEOUT_MS;
 }
 
-function createRendererChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function createRendererChildEnv(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
   const sourceEnv = { ...process.env, ...env };
   const childEnv: NodeJS.ProcessEnv = {};
 

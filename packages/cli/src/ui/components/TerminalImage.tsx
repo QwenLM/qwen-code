@@ -4,252 +4,184 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
-import {
-  memo,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-import { Box, Text, type DOMElement, useIsScreenReaderEnabled } from 'ink';
+import path from 'node:path';
+import React from 'react';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
+import type { Config, TerminalImageDisplay } from '@qwen-code/qwen-code-core';
 import type { InlineImageData } from '../types.js';
-import { theme } from '../semantic-colors.js';
+import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useTerminalOutput } from '../contexts/TerminalOutputContext.js';
-import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import {
-  measureElementPosition,
-  measureFrameHeight,
-} from '../utils/measure-element-position.js';
-import { prepareTerminalImage } from '../utils/terminal-image.js';
+  markKittyImageWritten,
+  prepareInlineTerminalImage,
+  renderTerminalImage,
+  wasKittyImageWritten,
+  type TerminalImageRenderResult,
+} from '../utils/terminal-image-renderer.js';
+import { theme } from '../semantic-colors.js';
+import {
+  sanitizeMultilineForDisplay,
+  sanitizeTerminalText,
+} from '../utils/textUtils.js';
 
-interface TerminalImageProps {
-  image: InlineImageData;
+interface SharedTerminalImageProps {
   contentWidth: number;
   availableTerminalHeight?: number;
 }
 
-interface ITerm2Placement {
-  column: number;
-  row: number;
+interface FileTerminalImageProps extends SharedTerminalImageProps {
+  data: TerminalImageDisplay;
+  config: Config;
 }
 
-interface ITerm2Emission extends ITerm2Placement {
-  imageSequence: string;
+interface InlineTerminalImageProps extends SharedTerminalImageProps {
+  image: InlineImageData;
 }
 
-export function calculateITerm2Placement(
-  node: DOMElement,
-  terminalHeight: number,
-  requiredRows?: number,
-  terminalWidth?: number,
-  requiredColumns?: number,
-): ITerm2Placement | null {
-  const metrics = measureElementPosition(node);
-  const imageRows = requiredRows ?? metrics.height;
-  const frameHeight = measureFrameHeight(node);
-  const renderedHeight = frameHeight - metrics.height + imageRows;
-  const frameTop = Math.min(0, terminalHeight - renderedHeight);
-  const row = frameTop + metrics.y;
-  const column = metrics.x;
-  const imageColumns = requiredColumns ?? metrics.width;
+type TerminalImageProps = FileTerminalImageProps | InlineTerminalImageProps;
 
-  if (
-    metrics.width <= 0 ||
-    imageRows <= 0 ||
-    imageColumns <= 0 ||
-    column < 0 ||
-    row < 0 ||
-    row + imageRows > terminalHeight ||
-    (terminalWidth !== undefined && column + imageColumns > terminalWidth)
-  ) {
-    return null;
+const RenderedTerminalImage: React.FC<
+  SharedTerminalImageProps & {
+    result: TerminalImageRenderResult;
+    unavailableText: string;
   }
+> = ({ result, unavailableText, contentWidth, availableTerminalHeight }) => {
+  const writeRaw = useTerminalOutput();
 
-  return {
-    column,
-    row,
-  };
-}
+  React.useEffect(() => {
+    if (result.kind !== 'kitty') return;
+    if (wasKittyImageWritten(result.key)) return;
+    markKittyImageWritten(result.key);
+    const sequence = result.sequence;
+    process.nextTick(() => writeRaw(sequence));
+  }, [result, writeRaw]);
 
-export function buildITerm2PlacementSequence(
-  imageSequence: string,
-  placement: ITerm2Placement,
-): string {
-  return `\u001b7\u001b[${placement.row + 1};${placement.column + 1}H${imageSequence}\u001b8`;
-}
+  if (result.kind === 'unavailable') {
+    return (
+      <Text color={theme.text.secondary} wrap="wrap">
+        {unavailableText}
+      </Text>
+    );
+  }
+  if (result.kind === 'ansi') {
+    return (
+      <MaxSizedBox
+        maxHeight={availableTerminalHeight}
+        maxWidth={contentWidth}
+        overflowDirection="bottom"
+      >
+        {result.lines.map((line, index) => (
+          <Box key={index}>
+            <Text>{line || ' '}</Text>
+          </Box>
+        ))}
+      </MaxSizedBox>
+    );
+  }
+  return (
+    <MaxSizedBox
+      maxHeight={availableTerminalHeight}
+      maxWidth={contentWidth}
+      overflowDirection="bottom"
+    >
+      {result.placeholder.lines.map((line, index) => (
+        <Box key={index}>
+          <Text color={result.placeholder.color} wrap="truncate-end">
+            {line}
+          </Text>
+        </Box>
+      ))}
+    </MaxSizedBox>
+  );
+};
 
-const TerminalImageInternal: React.FC<TerminalImageProps> = ({
+const FileTerminalImage: React.FC<FileTerminalImageProps> = ({
+  data,
+  config,
+  contentWidth,
+  availableTerminalHeight,
+}) => {
+  const filePath = path.resolve(data.filePath);
+  const safePath = config.getWorkspaceContext().isPathWithinWorkspace(filePath);
+  const result = React.useMemo<TerminalImageRenderResult | null>(
+    () =>
+      safePath
+        ? renderTerminalImage({
+            display: {
+              type: 'terminal_image',
+              filePath,
+              mimeType: data.mimeType,
+            },
+            contentWidth,
+            availableTerminalHeight,
+          })
+        : null,
+    [availableTerminalHeight, contentWidth, data.mimeType, filePath, safePath],
+  );
+
+  if (!safePath) {
+    return (
+      <Text color={theme.status.error}>
+        Refusing to display an image outside the current workspace.
+      </Text>
+    );
+  }
+  if (!result) return null;
+  const unavailableText =
+    result.kind === 'unavailable'
+      ? `${sanitizeMultilineForDisplay(path.basename(filePath))}: ${sanitizeTerminalText(result.reason)}`
+      : '';
+
+  return (
+    <RenderedTerminalImage
+      result={result}
+      unavailableText={unavailableText}
+      contentWidth={contentWidth}
+      availableTerminalHeight={availableTerminalHeight}
+    />
+  );
+};
+
+const InlineTerminalImage: React.FC<InlineTerminalImageProps> = ({
   image,
   contentWidth,
   availableTerminalHeight,
 }) => {
-  const writeRaw = useTerminalOutput();
-  const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
-  const useAbsoluteTerminalCoordinates = useVirtualViewport();
-  const containerRef = useRef<DOMElement>(null);
-  const emittedKittySequenceRef = useRef<string | null>(null);
-  const emittedITerm2PlacementRef = useRef<ITerm2Emission | null>(null);
-  const [iterm2PlacementAvailable, setITerm2PlacementAvailable] =
-    useState(true);
-  const prepared = useMemo(
+  const prepared = React.useMemo(
     () =>
-      prepareTerminalImage({
+      prepareInlineTerminalImage({
         data: image.data,
         mimeType: image.mimeType,
         contentWidth,
         availableTerminalHeight,
+        disabled: isScreenReaderEnabled,
       }),
-    [availableTerminalHeight, contentWidth, image.data, image.mimeType],
+    [
+      availableTerminalHeight,
+      contentWidth,
+      image.data,
+      image.mimeType,
+      isScreenReaderEnabled,
+    ],
   );
 
-  useEffect(() => {
-    if (
-      isScreenReaderEnabled ||
-      prepared.kind !== 'terminal-image' ||
-      prepared.protocol !== 'kitty' ||
-      !prepared.placeholder ||
-      emittedKittySequenceRef.current === prepared.sequence
-    ) {
-      return;
-    }
-    emittedKittySequenceRef.current = prepared.sequence;
-    let cancelled = false;
-    let written = false;
-    process.nextTick(() => {
-      if (cancelled) {
-        return;
-      }
-      written = true;
-      writeRaw(prepared.sequence);
-    });
-    return () => {
-      cancelled = true;
-      if (!written && emittedKittySequenceRef.current === prepared.sequence) {
-        emittedKittySequenceRef.current = null;
-      }
-    };
-  }, [isScreenReaderEnabled, prepared, writeRaw]);
-
-  // Parent layout and virtual scrolling can move a history item without
-  // changing this component's props, so placement must be measured after every
-  // render rather than from a dependency list.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useLayoutEffect(() => {
-    if (
-      isScreenReaderEnabled ||
-      prepared.kind !== 'terminal-image' ||
-      prepared.protocol !== 'iterm2' ||
-      !useAbsoluteTerminalCoordinates ||
-      !containerRef.current
-    ) {
-      emittedITerm2PlacementRef.current = null;
-      return;
-    }
-
-    const placement = calculateITerm2Placement(
-      containerRef.current,
-      terminalHeight,
-      prepared.rows,
-      terminalWidth,
-      prepared.widthCells,
-    );
-    const isAvailable = placement !== null;
-    if (!placement) {
-      // Ink rewrites the reserved rows with fallback text while the image is
-      // outside the viewport. Forget the old placement so returning to the
-      // same coordinates emits the OSC image again instead of leaving only
-      // the fallback behind.
-      emittedITerm2PlacementRef.current = null;
-    }
-    if (isAvailable !== iterm2PlacementAvailable) {
-      setITerm2PlacementAvailable(isAvailable);
-      return;
-    }
-    if (!placement) {
-      return;
-    }
-
-    const previousEmission = emittedITerm2PlacementRef.current;
-    if (
-      previousEmission?.imageSequence === prepared.sequence &&
-      previousEmission.column === placement.column &&
-      previousEmission.row === placement.row
-    ) {
-      return;
-    }
-    const emission: ITerm2Emission = {
-      imageSequence: prepared.sequence,
-      ...placement,
-    };
-    emittedITerm2PlacementRef.current = emission;
-    const sequence = buildITerm2PlacementSequence(prepared.sequence, placement);
-    let cancelled = false;
-    let written = false;
-    process.nextTick(() => {
-      if (cancelled) {
-        return;
-      }
-      written = true;
-      writeRaw(sequence);
-    });
-    return () => {
-      cancelled = true;
-      if (!written && emittedITerm2PlacementRef.current === emission) {
-        emittedITerm2PlacementRef.current = null;
-      }
-    };
-  });
-
-  const fallbackText =
-    prepared.kind === 'terminal-image' ? prepared.fallbackText : prepared.text;
-  if (
-    isScreenReaderEnabled ||
-    prepared.kind === 'fallback' ||
-    (prepared.protocol === 'iterm2' && !useAbsoluteTerminalCoordinates)
-  ) {
-    return <Text color={theme.text.secondary}>{fallbackText}</Text>;
+  if (!prepared.result) {
+    return <Text color={theme.text.secondary}>{prepared.fallbackText}</Text>;
   }
-
-  if (prepared.protocol === 'kitty' && prepared.placeholder) {
-    return (
-      <Box flexDirection="column" flexShrink={0}>
-        {prepared.placeholder.lines.map((line, index) => (
-          <Box key={index}>
-            <Text
-              color={prepared.placeholder!.color}
-              wrap="truncate-end"
-              selectable={false}
-            >
-              {line}
-            </Text>
-          </Box>
-        ))}
-      </Box>
-    );
-  }
-
   return (
-    <Box
-      ref={containerRef}
-      flexDirection="column"
-      flexShrink={0}
-      width={prepared.widthCells}
-    >
-      {iterm2PlacementAvailable ? (
-        Array.from({ length: prepared.rows }, (_, index) => (
-          <Text key={index} selectable={false}>
-            {' '}
-          </Text>
-        ))
-      ) : (
-        <Text color={theme.text.secondary}>{fallbackText}</Text>
-      )}
-    </Box>
+    <RenderedTerminalImage
+      result={prepared.result}
+      unavailableText={prepared.fallbackText}
+      contentWidth={contentWidth}
+      availableTerminalHeight={availableTerminalHeight}
+    />
   );
 };
 
-export const TerminalImage = memo(TerminalImageInternal);
+export const TerminalImage: React.FC<TerminalImageProps> = (props) =>
+  'image' in props ? (
+    <InlineTerminalImage {...props} />
+  ) : (
+    <FileTerminalImage {...props} />
+  );

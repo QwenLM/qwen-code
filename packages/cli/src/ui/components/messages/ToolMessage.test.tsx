@@ -71,8 +71,18 @@ vi.mock('../AnsiOutput.js', () => ({
 }));
 
 vi.mock('../TerminalImage.js', () => ({
-  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
-    <Text>MockTerminalImage:{image.mimeType}</Text>
+  TerminalImage: ({
+    data,
+    image,
+  }: {
+    data?: { filePath: string; mimeType: string };
+    image?: { mimeType: string };
+  }) => (
+    <Text>
+      {image
+        ? `MockTerminalImage:${image.mimeType}`
+        : `MockTerminalImage:${data?.filePath}:${data?.mimeType}`}
+    </Text>
   ),
 }));
 
@@ -343,6 +353,25 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('test-tool');
     expect(output).toContain('MockMarkdown:Test result'); // not collapsed
+  });
+
+  it('renders structured terminal image results through TerminalImage', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="DisplayImage"
+        resultDisplay={{
+          type: 'terminal_image',
+          filePath: '/workspace/chart.png',
+          mimeType: 'image/png',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain(
+      'MockTerminalImage:/workspace/chart.png:image/png',
+    );
   });
 
   it('renders tool results directly below the header row when forced', () => {

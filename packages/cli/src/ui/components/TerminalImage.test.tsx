@@ -4,13 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DOMElement } from 'ink';
-import { useIsScreenReaderEnabled } from 'ink';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Static, useIsScreenReaderEnabled } from 'ink';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
-import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
-import { calculateITerm2Placement, TerminalImage } from './TerminalImage.js';
+import {
+  prepareInlineTerminalImage,
+  renderTerminalImage,
+  type TerminalImageRenderResult,
+} from '../utils/terminal-image-renderer.js';
+import { TerminalImage } from './TerminalImage.js';
+
+const { writtenKeys } = vi.hoisted(() => ({ writtenKeys: new Set<string>() }));
+
+vi.mock('../utils/terminal-image-renderer.js', () => ({
+  prepareInlineTerminalImage: vi.fn(),
+  renderTerminalImage: vi.fn(),
+  wasKittyImageWritten: vi.fn((key: string) => writtenKeys.has(key)),
+  markKittyImageWritten: vi.fn((key: string) => {
+    writtenKeys.add(key);
+  }),
+}));
 
 vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
@@ -20,241 +35,212 @@ vi.mock('ink', async (importOriginal) => {
   };
 });
 
-const PNG_1X1_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
-const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
-const originalRows = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
-const TERMINAL_ENV_KEYS = [
-  'QWEN_CODE_DISABLE_TERMINAL_IMAGES',
-  'QWEN_CODE_TERMINAL_IMAGE_PROTOCOL',
-  'TMUX',
-  'STY',
-  'SSH_TTY',
-  'SSH_CLIENT',
-  'SSH_CONNECTION',
-] as const;
-const originalTerminalEnv = new Map(
-  TERMINAL_ENV_KEYS.map((key) => [key, process.env[key]]),
-);
+const mockedRenderTerminalImage = vi.mocked(renderTerminalImage);
+const mockedPrepareInlineTerminalImage = vi.mocked(prepareInlineTerminalImage);
 
-function setStdoutIsTTY(value: boolean): void {
-  Object.defineProperty(process.stdout, 'isTTY', {
-    configurable: true,
-    value,
-  });
+function configWithWorkspaceResult(isWithinWorkspace: boolean): Config {
+  return {
+    getWorkspaceContext: () => ({
+      isPathWithinWorkspace: () => isWithinWorkspace,
+    }),
+  } as unknown as Config;
 }
 
-function setStdoutRows(value: number): void {
-  Object.defineProperty(process.stdout, 'rows', {
-    configurable: true,
-    value,
-  });
-  process.stdout.emit('resize');
+const IMAGE = {
+  type: 'terminal_image' as const,
+  filePath: '/workspace/chart.png',
+  mimeType: 'image/png' as const,
+};
+
+const INLINE_IMAGE = {
+  data: 'iVBORw0KGgo=',
+  mimeType: 'image/png',
+};
+
+const KITTY_RESULT: TerminalImageRenderResult = {
+  kind: 'kitty',
+  key: 'kitty-payload',
+  sequence: '\x1b_Gpayload\x1b\\',
+  placeholder: {
+    color: '#00002a',
+    imageId: 42,
+    lines: ['placeholder'],
+  },
+};
+
+function renderImage(
+  result: TerminalImageRenderResult,
+  writeRaw: (...args: unknown[]) => void = vi.fn(),
+) {
+  mockedRenderTerminalImage.mockReturnValueOnce(result);
+  return render(
+    <TerminalOutputProvider value={writeRaw}>
+      <Static items={[IMAGE]}>
+        {(item) => (
+          <TerminalImage
+            data={item}
+            config={configWithWorkspaceResult(true)}
+            contentWidth={80}
+            availableTerminalHeight={20}
+          />
+        )}
+      </Static>
+    </TerminalOutputProvider>,
+  );
 }
 
-beforeEach(() => {
-  for (const key of TERMINAL_ENV_KEYS) {
-    delete process.env[key];
-  }
-  setStdoutIsTTY(true);
-  setStdoutRows(24);
-  vi.mocked(useIsScreenReaderEnabled).mockReturnValue(false);
-});
+describe('TerminalImage', () => {
+  beforeEach(() => {
+    writtenKeys.clear();
+    vi.clearAllMocks();
+    vi.mocked(useIsScreenReaderEnabled).mockReturnValue(false);
+  });
 
-afterEach(() => {
-  if (originalIsTTY) {
-    Object.defineProperty(process.stdout, 'isTTY', originalIsTTY);
-  } else {
-    delete (process.stdout as { isTTY?: boolean }).isTTY;
-  }
-  if (originalRows) {
-    Object.defineProperty(process.stdout, 'rows', originalRows);
-  } else {
-    delete (process.stdout as { rows?: number }).rows;
-  }
-  for (const key of TERMINAL_ENV_KEYS) {
-    const originalValue = originalTerminalEnv.get(key);
-    if (originalValue === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = originalValue;
-    }
-  }
-});
-
-describe('<TerminalImage />', () => {
-  it('writes Kitty image data through raw output and renders its placeholder', async () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'kitty';
+  it('writes trusted Kitty data and renders its placeholder', async () => {
     const writeRaw = vi.fn();
+    const { lastFrame } = renderImage(KITTY_RESULT, writeRaw);
+
+    await vi.waitFor(() => {
+      expect(writeRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
+    });
+    expect(lastFrame()).toContain('placeholder');
+  });
+
+  it('renders chafa ansi output', () => {
+    const { lastFrame } = renderImage({ kind: 'ansi', lines: ['▀▀', '▄▄'] });
+
+    expect(lastFrame()).toContain('▀▀');
+    expect(lastFrame()).toContain('▄▄');
+  });
+
+  it('shows a readable fallback when no renderer is available', () => {
+    const { lastFrame } = renderImage({
+      kind: 'unavailable',
+      reason: 'chafa is not installed',
+    });
+
+    expect(lastFrame()).toContain('chafa is not installed');
+    expect(lastFrame()).toContain('chart.png');
+  });
+
+  it('refuses restored paths outside the current workspace', () => {
+    const { lastFrame } = render(
+      <TerminalImage
+        data={{
+          type: 'terminal_image',
+          filePath: '/outside/chart.png',
+          mimeType: 'image/png',
+        }}
+        config={configWithWorkspaceResult(false)}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('outside the current workspace');
+    expect(mockedRenderTerminalImage).not.toHaveBeenCalled();
+  });
+
+  it('does not re-emit the Kitty sequence when the emit effect re-runs', async () => {
+    mockedRenderTerminalImage.mockReturnValue(KITTY_RESULT);
+
+    const renderWith = (writer: (...args: unknown[]) => void) => (
+      <TerminalOutputProvider value={writer}>
+        <TerminalImage
+          data={IMAGE}
+          config={configWithWorkspaceResult(true)}
+          contentWidth={80}
+          availableTerminalHeight={20}
+        />
+      </TerminalOutputProvider>
+    );
+
+    const firstWriteRaw = vi.fn();
+    const { rerender } = render(renderWith(firstWriteRaw));
+
+    await vi.waitFor(() => {
+      expect(firstWriteRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
+    });
+    expect(firstWriteRaw).toHaveBeenCalledTimes(1);
+
+    const secondWriteRaw = vi.fn();
+    rerender(renderWith(secondWriteRaw));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(secondWriteRaw).not.toHaveBeenCalled();
+    expect(firstWriteRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-transmit the Kitty payload when the image remounts', async () => {
+    mockedRenderTerminalImage.mockReturnValue(KITTY_RESULT);
+
+    const renderWith = (writer: (...args: unknown[]) => void) => (
+      <TerminalOutputProvider value={writer}>
+        <TerminalImage
+          data={IMAGE}
+          config={configWithWorkspaceResult(true)}
+          contentWidth={80}
+          availableTerminalHeight={20}
+        />
+      </TerminalOutputProvider>
+    );
+
+    const firstWriteRaw = vi.fn();
+    const first = render(renderWith(firstWriteRaw));
+    await vi.waitFor(() => {
+      expect(firstWriteRaw).toHaveBeenCalledWith('\x1b_Gpayload\x1b\\');
+    });
+    first.unmount();
+
+    // A fresh mount (live row -> Static row, or a resize) previously
+    // re-transmitted the whole payload even though the terminal still holds it.
+    const secondWriteRaw = vi.fn();
+    const second = render(renderWith(secondWriteRaw));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(secondWriteRaw).not.toHaveBeenCalled();
+    second.unmount();
+  });
+
+  it('renders inline image data through the shared renderer', async () => {
+    const writeRaw = vi.fn();
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: KITTY_RESULT,
+    });
+
     const { lastFrame } = render(
       <TerminalOutputProvider value={writeRaw}>
-        <TerminalImage
-          image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-          contentWidth={20}
-          availableTerminalHeight={4}
-        />
+        <TerminalImage image={INLINE_IMAGE} contentWidth={80} />
       </TerminalOutputProvider>,
     );
 
-    await vi.waitFor(() => expect(writeRaw).toHaveBeenCalledOnce());
-    expect(writeRaw.mock.calls[0]?.[0]).toContain('\u001b_Ga=T,f=100');
-    expect(lastFrame()?.split('\n')).toHaveLength(4);
-  });
-
-  it('cancels a delayed Kitty write when the image unmounts', async () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'kitty';
-    const writeRaw = vi.fn();
-    const view = render(
-      <TerminalOutputProvider value={writeRaw}>
-        <TerminalImage
-          image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-          contentWidth={20}
-        />
-      </TerminalOutputProvider>,
+    await vi.waitFor(() => {
+      expect(writeRaw).toHaveBeenCalledWith(KITTY_RESULT.sequence);
+    });
+    expect(lastFrame()).toContain('placeholder');
+    expect(mockedPrepareInlineTerminalImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: INLINE_IMAGE.data,
+        mimeType: INLINE_IMAGE.mimeType,
+        disabled: false,
+      }),
     );
-
-    view.unmount();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(writeRaw).not.toHaveBeenCalled();
   });
 
-  it('writes iTerm2 data at the measured cursor location', async () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'iterm2';
-    const writeRaw = vi.fn();
-    render(
-      <VirtualViewportContext.Provider value={true}>
-        <TerminalOutputProvider value={writeRaw}>
-          <TerminalImage
-            image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-            contentWidth={10}
-            availableTerminalHeight={4}
-          />
-        </TerminalOutputProvider>
-      </VirtualViewportContext.Provider>,
-    );
-
-    await vi.waitFor(() => expect(writeRaw).toHaveBeenCalledOnce());
-    const sequence = writeRaw.mock.calls[0]?.[0] as string;
-    expect(sequence.startsWith('\u001b7\u001b[')).toBe(true);
-    expect(sequence).toContain('\u001b]1337;File=inline=1');
-    expect(sequence.endsWith('\u001b8')).toBe(true);
-  });
-
-  it('re-emits an iTerm2 image after it leaves and re-enters the viewport', async () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'iterm2';
-    const writeRaw = vi.fn();
-    const view = render(
-      <VirtualViewportContext.Provider value={true}>
-        <TerminalOutputProvider value={writeRaw}>
-          <TerminalImage
-            image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-            contentWidth={10}
-            availableTerminalHeight={4}
-          />
-        </TerminalOutputProvider>
-      </VirtualViewportContext.Provider>,
-    );
-
-    await vi.waitFor(() => expect(writeRaw).toHaveBeenCalledOnce());
-    setStdoutRows(2);
-    await vi.waitFor(() => expect(view.lastFrame()).toContain('1x1 png]'));
-    setStdoutRows(24);
-    await vi.waitFor(() => expect(writeRaw).toHaveBeenCalledTimes(2));
-  });
-
-  it('does not use absolute iTerm2 placement in the main-screen buffer', () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'iterm2';
-    const writeRaw = vi.fn();
-    const { lastFrame } = render(
-      <VirtualViewportContext.Provider value={false}>
-        <TerminalOutputProvider value={writeRaw}>
-          <TerminalImage
-            image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-            contentWidth={10}
-            availableTerminalHeight={4}
-          />
-        </TerminalOutputProvider>
-      </VirtualViewportContext.Provider>,
-    );
-
-    expect(lastFrame()).toContain('[image: 1x1 png]');
-    expect(writeRaw).not.toHaveBeenCalled();
-  });
-
-  it('uses descriptive text without protocol output for screen readers', async () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'kitty';
+  it('uses the deterministic inline placeholder for screen readers', () => {
     vi.mocked(useIsScreenReaderEnabled).mockReturnValue(true);
-    const writeRaw = vi.fn();
-    const { lastFrame } = render(
-      <TerminalOutputProvider value={writeRaw}>
-        <TerminalImage
-          image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-          contentWidth={20}
-        />
-      </TerminalOutputProvider>,
-    );
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: null,
+    });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('[image: 1x1 png]'));
-    expect(writeRaw).not.toHaveBeenCalled();
-  });
-
-  it('renders a readable placeholder when image protocols are unavailable', () => {
-    process.env['QWEN_CODE_TERMINAL_IMAGE_PROTOCOL'] = 'off';
-    const writeRaw = vi.fn();
     const { lastFrame } = render(
-      <TerminalOutputProvider value={writeRaw}>
-        <TerminalImage
-          image={{ data: PNG_1X1_BASE64, mimeType: 'image/png' }}
-          contentWidth={20}
-        />
-      </TerminalOutputProvider>,
+      <TerminalImage image={INLINE_IMAGE} contentWidth={80} />,
     );
 
     expect(lastFrame()).toContain('[image: 1x1 png]');
-    expect(writeRaw).not.toHaveBeenCalled();
-  });
-});
-
-describe('calculateITerm2Placement', () => {
-  it('rejects image rows that would be scrolled above the viewport', () => {
-    const root = {
-      yogaNode: {
-        getComputedHeight: () => 30,
-        getComputedLeft: () => 0,
-        getComputedTop: () => 0,
-      },
-    } as unknown as DOMElement;
-    const node = {
-      parentNode: root,
-      yogaNode: {
-        getComputedHeight: () => 2,
-        getComputedWidth: () => 10,
-        getComputedLeft: () => 0,
-        getComputedTop: () => 0,
-      },
-    } as unknown as DOMElement;
-
-    expect(calculateITerm2Placement(node, 24, 2)).toBeNull();
-  });
-
-  it('rejects images that would extend past the right viewport edge', () => {
-    const root = {
-      yogaNode: {
-        getComputedHeight: () => 10,
-        getComputedLeft: () => 0,
-        getComputedTop: () => 0,
-      },
-    } as unknown as DOMElement;
-    const node = {
-      parentNode: root,
-      yogaNode: {
-        getComputedHeight: () => 2,
-        getComputedWidth: () => 10,
-        getComputedLeft: () => 75,
-        getComputedTop: () => 0,
-      },
-    } as unknown as DOMElement;
-
-    expect(calculateITerm2Placement(node, 24, 2, 80, 10)).toBeNull();
+    expect(mockedPrepareInlineTerminalImage).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: true }),
+    );
   });
 });

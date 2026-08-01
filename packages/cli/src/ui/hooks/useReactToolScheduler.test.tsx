@@ -10,12 +10,13 @@ import { mapToDisplay, type TrackedToolCall } from './useReactToolScheduler.js';
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
 // success branch reads. `displayName` drives the collapsible gate.
-const makeSuccess = (
+const makeCompleted = (
+  status: 'success' | 'error' | 'cancelled',
   displayName: string,
   responseMedia: Part[] = [],
 ): TrackedToolCall =>
   ({
-    status: 'success',
+    status,
     request: { callId: 'call-1', name: 'read_file', args: {} },
     tool: { displayName, isOutputMarkdown: false },
     invocation: { getDescription: () => 'reading' },
@@ -34,6 +35,11 @@ const makeSuccess = (
     },
   }) as unknown as TrackedToolCall;
 
+const makeSuccess = (
+  displayName: string,
+  responseMedia: Part[] = [],
+): TrackedToolCall => makeCompleted('success', displayName, responseMedia);
+
 describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
   it('extracts detailedDisplay for a collapsible (read/search/list) tool', () => {
     const group = mapToDisplay(makeSuccess('Read File'));
@@ -51,25 +57,28 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
     expect(group.tools[0].detailedDisplay).toBeUndefined();
   });
 
-  it('extracts nested inline images from tool response parts', () => {
-    const group = mapToDisplay(
-      makeSuccess('Read File', [
-        {
-          inlineData: {
-            data: 'dG9vbC1pbWFnZQ==',
-            mimeType: 'image/png',
-            displayName: 'result.png',
+  it.each(['success', 'error', 'cancelled'] as const)(
+    'extracts nested inline images from %s tool response parts',
+    (status) => {
+      const group = mapToDisplay(
+        makeCompleted(status, 'Read File', [
+          {
+            inlineData: {
+              data: 'dG9vbC1pbWFnZQ==',
+              mimeType: 'image/png',
+              displayName: 'result.png',
+            },
           },
-        },
-      ]),
-    );
+        ]),
+      );
 
-    expect(group.tools[0].images).toEqual([
-      {
-        data: 'dG9vbC1pbWFnZQ==',
-        mimeType: 'image/png',
-        displayName: 'result.png',
-      },
-    ]);
-  });
+      expect(group.tools[0].images).toEqual([
+        {
+          data: 'dG9vbC1pbWFnZQ==',
+          mimeType: 'image/png',
+          displayName: 'result.png',
+        },
+      ]);
+    },
+  );
 });

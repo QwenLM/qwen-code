@@ -2,138 +2,107 @@
 
 ## Problem
 
-The interactive CLI discards model `inlineData` image parts at the
-`Turn`-to-TUI boundary. Tool images survive in nested
-`functionResponse.parts`, but the tool display reduces them to text
-placeholders. As a result, image-generating models and screenshot-producing
-tools cannot show their output in the conversation even when the terminal has
-an image protocol.
+The interactive CLI drops model `inlineData` image parts at the
+`Turn`-to-TUI boundary. Images nested in tool `functionResponse.parts`
+survive in model history, but the tool display reduces them to text. As a
+result, image-generating models and screenshot-producing tools cannot show
+their output in the conversation.
 
-Mermaid rendering already contains Kitty and iTerm2 protocol primitives, but
-they are coupled to Mermaid process execution and cannot be reused by normal
-messages.
+PR #8217 introduced the path-based `display_image` tool and established the
+project's terminal image infrastructure: `TerminalImage`,
+`terminal-image-renderer`, native Kitty/Ghostty placement, and `chafa`
+symbol output. This change extends that infrastructure to in-memory model and
+tool image parts instead of adding another renderer.
 
 ## Scope
 
-This change provides the first, render-and-forget slice of issue #8090:
+This is the render-and-forget slice requested by issue #8090:
 
-- extract terminal capability detection, protocol encoding, image sizing, and
-  Kitty placeholder generation into a shared utility;
-- render inline model images without changing the existing text stream
-  contract;
-- render images nested in successful, failed, or cancelled tool responses;
-- restore both model and tool images from recorded sessions;
+- preserve ordered text and image parts on content events without changing the
+  existing concatenated `value` contract;
+- render live and restored assistant PNGs through the #8217 component and
+  renderer;
+- render PNGs nested in successful, failed, or cancelled tool responses;
+- keep text/image ordering across retry, model fallback, cancellation, stream
+  boundaries, and goal-state events;
+- bound retained image payloads during UI history compaction;
 - show a deterministic text placeholder when an image cannot be rendered.
 
-Kitty image deletion, resize-driven replacement, scroll lifecycle management,
-and terminal cell pixel queries are intentionally deferred. They require a
-separate lifecycle owner above individual history items.
+Kitty deletion, resize-driven replacement, terminal cell pixel queries, and
+global scroll lifecycle ownership remain out of scope.
 
 ## Data Flow
 
 ### Model output
 
-`ServerGeminiContentEvent.value` remains the concatenated text string consumed
-by all existing clients. When a response chunk also contains image
-`inlineData`, the event gains an optional ordered `parts` field containing only
-displayable non-thought text and image parts.
+`ServerGeminiContentEvent.value` remains the concatenated text consumed by
+existing clients. When a response chunk contains image `inlineData`, the
+event also carries an optional ordered `parts` field containing displayable
+non-thought text and image parts.
 
-Only the interactive TUI reads `parts`. It buffers text and image entries in
-their original order and represents an image as an otherwise normal `gemini` or
-`gemini_content` history item. Runs normally remain in the dynamic region until
-a response boundary, allowing a fresh retry or model fallback to discard the
-uncommitted failed attempt. Existing size- and height-driven incremental commit
-boundaries still apply to very long output. Text-only events keep their exact
-runtime shape, so existing consumers are unaffected.
-
-The unchanged `value` contract continues to serve core client aggregation, loop
-detection, non-interactive output, daemon/channel bridges, ACP, SDK, Web UI,
-VS Code, and desktop consumers. The optional field is additive and does not add
-a new event discriminant that those consumers would need to handle.
+Only the interactive TUI reads `parts`. It stages text and image history
+items in their original order. A fresh retry or model fallback discards the
+failed attempt's staged output, while a normal response boundary commits it.
+Text-only events keep their existing runtime shape, so non-interactive output,
+SDK, ACP, daemon, channel, Web UI, and VS Code consumers continue using
+`value` unchanged.
 
 Recorded assistant messages already retain their original parts. Resume logic
-reconstructs ordered text/image runs from those parts instead of flattening the
-images away.
-
-Because encoded images are much larger than ordinary history text, UI memory
-compaction drops payloads from old assistant image items while retaining the 20
-most recent items. Cleared images leave a visible marker instead of becoming a
-blank history row. Tool image payloads participate in the existing tool-result
-compaction limit as well.
+reconstructs ordered text/image runs instead of flattening images away.
 
 ### Tool output
 
-Tool media is stored in `functionResponse.parts`. A CLI-only extractor reads
-image `inlineData` from both top-level and nested response parts. Live scheduler
-mapping and resume mapping attach the extracted images to the existing
+Tool media is stored in `functionResponse.parts`. A CLI extractor reads image
+`inlineData` from top-level and nested response parts. Live scheduler mapping
+and resume mapping attach the images to the existing
 `IndividualToolCallDisplay`.
 
-Tools carrying images are rendered individually even when their text-only form
-would normally be collapsed into a read/search summary. `ToolMessage` then
-routes each image through the same `TerminalImage` component used for assistant
-messages.
+Tools carrying images render individually even when their text-only form would
+normally collapse into a read/search summary. `ToolMessage` routes the images
+through the same `TerminalImage` component used by assistant messages.
 
 ## Rendering
 
-The shared renderer:
+The existing #8217 file-path entry point is unchanged. The shared renderer
+adds an in-memory PNG entry point that:
 
-1. validates bounded base64 input before decoding;
-2. verifies a supported image header and reads its pixel dimensions;
-3. calculates a cell bounding box from the available width and a conservative
-   default cell aspect ratio;
-4. selects Kitty or iTerm2 only for a positively identified local TTY;
-5. returns either a protocol render result or a text placeholder.
+1. validates bounded base64 before decoding;
+2. verifies the PNG signature and IHDR dimensions;
+3. rejects payloads above 8 MiB or dimensions above 1,000,000 pixels;
+4. reuses the existing terminal sizing and bounded render cache;
+5. uses native Kitty placement in direct Kitty/Ghostty sessions;
+6. passes PNG bytes to `chafa` over stdin in other supported environments;
+7. returns a text placeholder when rendering is unavailable.
 
-Kitty-capable terminals use virtual placement plus Unicode placeholders. The
-PNG transfer is written through the raw terminal output context, while the
-placeholder cells give Ink a stable layout anchor.
+No temporary file is created. The inline payload is never used as a command
+argument, and `chafa` receives the same allowlisted environment as the
+path-based renderer.
 
-iTerm2 OSC 1337 sequences cannot be embedded in Ink text because Ink strips
-terminal control tokens. In the default alternate-screen viewport,
-`TerminalImage` therefore reserves the calculated rows, measures its
-post-layout cell position, and writes the OSC sequence at that visible screen
-position while preserving and restoring the user's cursor. If the measured
-position is outside the visible viewport, it leaves the text placeholder in
-place instead of writing at an unrelated cursor location. Main-screen
-scrollback has no reliable absolute origin, so iTerm2 rendering also uses the
-placeholder when terminal-buffer mode is disabled.
+The fallback format is `[image: <width>x<height> png]`. Invalid PNG data
+becomes `[image: png]`; unsupported image MIME types retain their sanitized
+format label, such as `[image: jpeg]`. Screen-reader mode always uses the text
+placeholder and emits no raw image sequence.
 
-Detection is disabled under tmux, screen, and SSH because protocol forwarding
-cannot be assumed. Kitty and Ghostty use Kitty virtual placements; iTerm2,
-WezTerm, and Warp use OSC 1337. Each terminal is selected from its documented
-environment markers. Tests can force a protocol through the shared detection
-options without changing production detection.
+The first slice renders validated PNG data only. Other image MIME types remain
+visible as deterministic placeholders rather than entering a second protocol
+or decoding path.
 
-Kitty transfers these images as PNG (`f=100`). Other validated formats render
-through iTerm2 where supported and otherwise use the text placeholder.
+## Memory
 
-## Fallback and Accessibility
-
-The fallback format is:
-
-```text
-[image: 1024x768 png]
-```
-
-When dimensions cannot be verified it becomes `[image: png]`. MIME labels are
-derived only from validated `image/*` media types; arbitrary response strings
-are never emitted as terminal control data.
-
-Screen-reader mode always uses the text placeholder. Unsupported terminals,
-invalid base64, oversized payloads, unsupported formats, and unsafe/off-screen
-iTerm2 placement also use the placeholder.
+Encoded images are much larger than ordinary history text. UI compaction drops
+payloads from old assistant image items while retaining the 20 most recent
+items. Cleared images leave a visible marker instead of becoming blank rows.
+Tool image payloads participate in the existing tool-result compaction limit.
 
 ## Test Plan
 
-- Unit-test terminal detection, multiplexers, encoders, base64 bounds, image
-  metadata, sizing, and fallback labels.
-- Unit-test Kitty raw transfer and iTerm2 measured placement in the React
-  component.
-- Verify `Turn` preserves mixed text/image/text ordering while keeping `value`.
-- Verify the live TUI commits mixed content in order.
-- Verify live and resumed tool responses expose nested images.
-- Verify resumed assistant history preserves text/image ordering.
+- Keep every #8217 renderer and `display_image` test green.
+- Verify inline PNG validation, Kitty rendering, `chafa` stdin rendering,
+  screen-reader output, and unavailable-renderer placeholders.
+- Verify `Turn` preserves mixed `text -> image -> text` ordering while
+  retaining the old `value` and text-only event shape.
+- Verify live TUI ordering across retry, fallback, cancellation, stream
+  boundaries, and goal-state events.
+- Verify live and restored tool responses expose nested images.
+- Verify restored assistant history preserves text/image ordering.
 - Verify memory compaction clears old assistant and tool image payloads.
-- Re-run existing Mermaid renderer and component tests after extraction.
-- Manually exercise supported and unsupported terminal paths using a generated
-  PNG fixture.

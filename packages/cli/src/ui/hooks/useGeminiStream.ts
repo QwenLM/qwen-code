@@ -2412,6 +2412,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ChatCompressed:
               flushBufferedStreamEvents();
               handleChatCompressionEvent(event.value, userMessageTimestamp);
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.ToolCallConfirmation:
             case ServerGeminiEventType.ToolCallResponse:
@@ -2419,21 +2420,33 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.MaxSessionTurns:
               flushBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                commitItemInOrder(
+                  pendingHistoryItemRef.current,
+                  userMessageTimestamp,
+                );
+                setPendingHistoryItem(null);
+              }
               handleMaxSessionTurnsEvent();
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.SessionTokenLimitExceeded:
               flushBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                commitItemInOrder(
+                  pendingHistoryItemRef.current,
+                  userMessageTimestamp,
+                );
+                setPendingHistoryItem(null);
+              }
               handleSessionTokenLimitExceededEvent(event.value);
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.Finished:
               flushBufferedStreamEvents();
               // A thinking-only turn (no content/tool) still commits its
               // reasoning so it persists collapsed in history.
               commitPendingThought(userMessageTimestamp);
-              handleFinishedEvent(
-                event as ServerGeminiFinishedEvent,
-                userMessageTimestamp,
-              );
               // Seal off this turn's UI state before the parent re-enters
               // sendMessageStream for a continuation (Stop-hook block at
               // client.ts:1378 or next-speaker auto-continue at 1444). Both
@@ -2453,10 +2466,15 @@ export const useGeminiStream = (
               thoughtBuffer = '';
               assistantOutputStarted = false;
               setThought(null);
+              handleFinishedEvent(
+                event as ServerGeminiFinishedEvent,
+                userMessageTimestamp,
+              );
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
               handleCitationEvent(event.value, userMessageTimestamp);
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.LoopDetected:
               flushBufferedStreamEvents();
@@ -2547,6 +2565,7 @@ export const useGeminiStream = (
                 } as HistoryItemWithoutId,
                 userMessageTimestamp,
               );
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
@@ -2554,10 +2573,12 @@ export const useGeminiStream = (
                 event.value,
                 userMessageTimestamp,
               );
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.StopHookLoop:
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
+              geminiMessageBuffer = '';
               break;
             case ServerGeminiEventType.ActiveGoal:
               break;
@@ -2579,6 +2600,7 @@ export const useGeminiStream = (
                   },
                   userMessageTimestamp,
                 );
+                geminiMessageBuffer = '';
               }
               break;
             default: {

@@ -23,9 +23,11 @@ import type {
   Config,
   McpToolProgressData,
   FileDiff,
+  TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
+  isTerminalImageDisplay,
   isVisionBridgeNoticeDisplay,
   ToolNames,
   ToolNamesMigration,
@@ -173,6 +175,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
+  | { type: 'image'; data: TerminalImageDisplay }
   | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
@@ -184,6 +187,10 @@ const useResultDisplayRenderer = (
   React.useMemo(() => {
     if (!resultDisplay) {
       return { type: 'none' };
+    }
+
+    if (isTerminalImageDisplay(resultDisplay)) {
+      return { type: 'image', data: resultDisplay };
     }
 
     // Check for TodoResultDisplay
@@ -947,6 +954,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                   />
                 )}
               </>
+            )}
+            {effectiveDisplayRenderer.type === 'image' && config && (
+              <TerminalImage
+                data={effectiveDisplayRenderer.data}
+                config={config}
+                contentWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+              />
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
