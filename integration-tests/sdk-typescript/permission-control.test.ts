@@ -28,7 +28,7 @@ import {
 import {
   SDKTestHelper,
   createSharedTestOptions,
-  hasAnyToolResults,
+  findAllToolResultBlocks,
   hasSuccessfulToolResults,
   hasErrorToolResults,
   findSystemMessage,
@@ -64,6 +64,7 @@ function startFakeTextServer() {
   );
 }
 
+/** Returns a tool call on request 0, then plain text for all subsequent requests. */
 function startFakeToolServer(toolName: string, input: Record<string, unknown>) {
   return startFakeOpenAIServer(({ requestIndex }) => {
     if (requestIndex === 0) {
@@ -412,12 +413,25 @@ describe('Permission Control (E2E)', () => {
       }
     });
 
-    it('should continue after changing permission mode from yolo to plan', async () => {
-      const fakeServer = await startFakeTextServer();
+    it('should block write tools after changing permission mode from yolo to plan', async () => {
+      const fileName = 'plan-after-switch.txt';
+      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: helper.getPath(fileName),
+                content: 'should be blocked',
+              }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      }, FAKE_SERVER_OPTIONS);
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
-        'What is 3 + 3?',
-        'What is 4 + 4?',
+        'Hello',
+        `Create ${fileName}.`,
         resultWaiter,
       );
 
@@ -428,10 +442,16 @@ describe('Permission Control (E2E)', () => {
           ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'yolo',
+          coreTools: ['write_file'],
+          canUseTool: async (_toolName, input) => ({
+            behavior: 'allow',
+            updatedInput: input,
+          }),
         },
       });
 
       try {
+        const messages: SDKMessage[] = [];
         const resolvers: {
           first?: () => void;
           second?: () => void;
@@ -448,6 +468,7 @@ describe('Permission Control (E2E)', () => {
 
         (async () => {
           for await (const message of q) {
+            messages.push(message);
             if (isSDKResultMessage(message)) {
               // Resolve on result (one per turn), not assistant message
               // (which may fire multiple times per turn: thinking + text)
@@ -490,18 +511,34 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(secondResponseReceived).toBe(true);
+        expect(hasErrorToolResults(messages)).toBe(true);
+        expect(helper.fileExists(fileName)).toBe(false);
       } finally {
         await q.close();
         await fakeServer.close();
       }
     });
 
-    it('should continue after changing permission mode to auto-edit', async () => {
-      const fakeServer = await startFakeTextServer();
+    it('should auto-approve write tools after changing permission mode to auto-edit', async () => {
+      let callbackInvoked = false;
+      const fileName = 'auto-edit-after-switch.txt';
+      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: helper.getPath(fileName),
+                content: 'auto-edit works',
+              }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      }, FAKE_SERVER_OPTIONS);
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
-        'What is 5 + 5?',
-        'What is 6 + 6?',
+        'Hello',
+        `Create ${fileName}.`,
         resultWaiter,
       );
 
@@ -512,10 +549,19 @@ describe('Permission Control (E2E)', () => {
           ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
+          coreTools: ['write_file'],
+          canUseTool: async (_toolName, input) => {
+            callbackInvoked = true;
+            return {
+              behavior: 'allow',
+              updatedInput: input,
+            };
+          },
         },
       });
 
       try {
+        const messages: SDKMessage[] = [];
         const resolvers: {
           first?: () => void;
           second?: () => void;
@@ -532,6 +578,7 @@ describe('Permission Control (E2E)', () => {
 
         (async () => {
           for await (const message of q) {
+            messages.push(message);
             if (isSDKResultMessage(message)) {
               // Resolve on result (one per turn), not assistant message
               // (which may fire multiple times per turn: thinking + text)
@@ -574,6 +621,11 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(secondResponseReceived).toBe(true);
+        expect(hasSuccessfulToolResults(messages)).toBe(true);
+        expect(callbackInvoked).toBe(false);
+        await expect(helper.readFile(fileName)).resolves.toBe(
+          'auto-edit works',
+        );
       } finally {
         await q.close();
         await fakeServer.close();
@@ -729,6 +781,7 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(secondResponseReceived).toBe(true);
+        expect(fakeServer.requests).toHaveLength(4);
         expect(toolCalls).toHaveLength(1);
         await expect(helper.readFile(secondFile)).resolves.toBe('second');
       } finally {
@@ -766,6 +819,10 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
+            const errorResults = findAllToolResultBlocks(messages).filter(
+              (r) => r.isError,
+            );
+            expect(errorResults[0].content.toLowerCase()).toContain('denied');
             expect(helper.fileExists(fileName)).toBe(false);
           } finally {
             await q.close();
@@ -857,15 +914,21 @@ describe('Permission Control (E2E)', () => {
         TEST_TIMEOUT,
       );
 
-      it.skip(
-        'should execute dangerous commands without confirmation',
+      it(
+        'should execute shell commands without confirmation in yolo mode',
         async () => {
+          const fakeServer = await startFakeToolServer('run_shell_command', {
+            command: 'echo "dangerous operation"',
+          });
+
           const q = query({
             prompt: 'Run command: echo "dangerous operation"',
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'yolo',
               cwd: testDir,
+              coreTools: ['run_shell_command'],
             },
           });
 
@@ -875,9 +938,10 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            expect(hasAnyToolResults(messages)).toBe(true);
+            expect(hasSuccessfulToolResults(messages)).toBe(true);
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
@@ -947,7 +1011,94 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
+            const errorResults = findAllToolResultBlocks(messages).filter(
+              (r) => r.isError,
+            );
+            expect(errorResults[0].content.toLowerCase()).toContain(
+              'plan mode',
+            );
             expect(helper.fileExists(fileName)).toBe(false);
+          } finally {
+            await q.close();
+            await fakeServer.close();
+          }
+        },
+        TEST_TIMEOUT,
+      );
+
+      it(
+        'should block edit tool in plan mode',
+        async () => {
+          const fileName = 'test-plan-edit.txt';
+          await helper.createFile(fileName, 'old content');
+          const fakeServer = await startFakeToolServer('edit', {
+            file_path: helper.getPath(fileName),
+            old_string: 'old',
+            new_string: 'new',
+          });
+
+          const q = query({
+            prompt: `Edit ${fileName}.`,
+            options: {
+              ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
+              permissionMode: 'plan',
+              cwd: testDir,
+              coreTools: ['edit'],
+              canUseTool: async (_toolName, input) => ({
+                behavior: 'allow',
+                updatedInput: input,
+              }),
+            },
+          });
+
+          try {
+            const messages: SDKMessage[] = [];
+            for await (const message of q) {
+              messages.push(message);
+            }
+
+            expect(hasErrorToolResults(messages)).toBe(true);
+            await expect(helper.readFile(fileName)).resolves.toBe(
+              'old content',
+            );
+          } finally {
+            await q.close();
+            await fakeServer.close();
+          }
+        },
+        TEST_TIMEOUT,
+      );
+
+      it(
+        'should block run_shell_command in plan mode',
+        async () => {
+          const fakeServer = await startFakeToolServer('run_shell_command', {
+            command: 'echo hello',
+          });
+
+          const q = query({
+            prompt: 'Run echo hello.',
+            options: {
+              ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
+              permissionMode: 'plan',
+              cwd: testDir,
+              coreTools: ['run_shell_command'],
+              canUseTool: async (_toolName, input) => ({
+                behavior: 'allow',
+                updatedInput: input,
+              }),
+            },
+          });
+
+          try {
+            const messages: SDKMessage[] = [];
+            for await (const message of q) {
+              messages.push(message);
+            }
+
+            expect(hasErrorToolResults(messages)).toBe(true);
           } finally {
             await q.close();
             await fakeServer.close();
