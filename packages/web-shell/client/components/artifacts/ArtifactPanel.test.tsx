@@ -9,10 +9,14 @@ import type {
 import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
-const { mockActions } = vi.hoisted(() => ({
+const { mockActions, mockWorkspaceActions } = vi.hoisted(() => ({
   mockActions: {
     cancelTask: vi.fn(),
     getTasks: vi.fn(),
+  },
+  mockWorkspaceActions: {
+    readFileBytes: vi.fn(),
+    stat: vi.fn(),
   },
 }));
 
@@ -21,7 +25,7 @@ vi.mock(
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,
-    useWorkspaceActions: () => ({}),
+    useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
 
@@ -95,6 +99,8 @@ afterEach(() => {
   mounted.length = 0;
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
+  mockWorkspaceActions.readFileBytes.mockReset();
+  mockWorkspaceActions.stat.mockReset();
 });
 
 function openAddMenu(container: HTMLElement) {
@@ -459,6 +465,198 @@ describe('ArtifactPanel add menu', () => {
     expect(menuText).toContain('Review');
     expect(menuText).toContain('New side task');
     expect(menuText).not.toContain('Existing side task');
+  });
+});
+
+describe('ArtifactPanel review downloads', () => {
+  it('shows the requested actions and reports download failures through toast', async () => {
+    const changes = ['report.html', 'notes.md', 'image.png'].map((path) => ({
+      path,
+      status: 'modified' as const,
+      toolCallId: `tool-${path}`,
+      isArtifact: false,
+      diffs: [],
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onError = vi.fn();
+    let rejectStat: ((error: Error) => void) | undefined;
+    mockWorkspaceActions.stat.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectStat = reject;
+      }),
+    );
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onError={onError}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const actionLabels = Array.from(container.querySelectorAll('button')).map(
+      (button) => button.textContent?.trim(),
+    );
+    expect(actionLabels.filter((label) => label === 'Preview')).toHaveLength(3);
+    expect(actionLabels.filter((label) => label === 'Download')).toHaveLength(
+      2,
+    );
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    expect(download?.disabled).toBe(true);
+    expect(download?.textContent).toContain('Downloading');
+    act(() => download?.click());
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectStat?.(new Error('read denied'));
+      await Promise.resolve();
+    });
+    expect(download?.disabled).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Download failed: read denied' }),
+      'Download failed: read denied',
+    );
+  });
+
+  it('keeps other rows downloadable while one review file downloads', () => {
+    const changes = ['a.html', 'b.md'].map((path) => ({
+      path,
+      status: 'modified' as const,
+      toolCallId: `tool-${path}`,
+      isArtifact: false,
+      diffs: [],
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const downloads = Array.from(container.querySelectorAll('button')).filter(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(downloads).toHaveLength(2);
+
+    act(() => downloads[0]?.click());
+    expect(downloads[0]?.disabled).toBe(true);
+    expect(downloads[0]?.textContent).toContain('Downloading');
+    expect(downloads[1]?.disabled).toBe(false);
+    expect(downloads[1]?.textContent?.trim()).toBe('Download');
+  });
+
+  it('cancels the download and skips the error toast when the panel unmounts mid-download', async () => {
+    const changes = [
+      {
+        path: 'report.html',
+        status: 'modified' as const,
+        toolCallId: 'tool-report',
+        isArtifact: false,
+        diffs: [],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onError = vi.fn();
+    let resolveStat: ((value: unknown) => void) | undefined;
+    mockWorkspaceActions.stat.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onError={onError}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    act(() => download?.click());
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+
+    await act(async () => {
+      resolveStat?.({ sizeBytes: 3, modifiedMs: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onError).not.toHaveBeenCalled();
   });
 });
 

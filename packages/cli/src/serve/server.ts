@@ -250,7 +250,7 @@ import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   parseChannelWebhookConfigLenient,
