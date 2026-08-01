@@ -5410,6 +5410,7 @@ export function App({
       store.dispatch([{ type: 'status', text: t('clear.blocked') }]);
       return;
     }
+    autoRecapVersionRef.current += 1;
     store.reset();
   }, [store, t]);
 
@@ -6394,6 +6395,7 @@ export function App({
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
+        autoRecapVersionRef.current += 1;
         await sessionActions.loadSession(sessionId, { workspaceCwd });
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
@@ -7490,6 +7492,7 @@ export function App({
               // close any open Settings/Status panel (no-op when already closed),
               // consistent with createNewSession / loadSidebarSession.
               closePanel();
+              autoRecapVersionRef.current += 1;
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
@@ -8698,6 +8701,7 @@ export function App({
                 onSelect={(sessionId) => {
                   closeMobileDrawer();
                   closePanel();
+                  autoRecapVersionRef.current += 1;
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {

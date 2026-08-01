@@ -2061,6 +2061,33 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+async function triggerAutoRecap(): Promise<{
+  recap: ReturnType<
+    typeof deferred<{ sessionId: string; recap: string | null }>
+  >;
+  container: HTMLElement;
+}> {
+  const recap = deferred<{ sessionId: string; recap: string | null }>();
+  mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+  testState.blocks = [{}, {}, {}, {}];
+  let hidden = true;
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    get: () => hidden,
+  });
+  let now = 1;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+  const { container } = renderApp();
+  await flush();
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  now += 3 * 60 * 1000;
+  hidden = false;
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  return { recap, container };
+}
+
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
 // a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
 // 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
@@ -6518,25 +6545,7 @@ describe('App session callbacks', () => {
   );
 
   it('dispatches an automatic recap when the session remains active', async () => {
-    const recap = deferred<{ sessionId: string; recap: string | null }>();
-    mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
-    testState.blocks = [{}, {}, {}, {}];
-    let hidden = true;
-    Object.defineProperty(document, 'hidden', {
-      configurable: true,
-      get: () => hidden,
-    });
-    let now = 1;
-    vi.spyOn(Date, 'now').mockImplementation(() => now);
-
-    renderApp();
-    await flush();
-    act(() => document.dispatchEvent(new Event('visibilitychange')));
-    now += 3 * 60 * 1000;
-    hidden = false;
-    act(() => document.dispatchEvent(new Event('visibilitychange')));
-
-    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+    const { recap } = await triggerAutoRecap();
     await act(async () => {
       recap.resolve({ sessionId: 'session-1', recap: 'Current session recap' });
       await recap.promise;
@@ -6551,25 +6560,7 @@ describe('App session callbacks', () => {
   });
 
   it('discards an automatic recap after starting a new session', async () => {
-    const recap = deferred<{ sessionId: string; recap: string | null }>();
-    mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
-    testState.blocks = [{}, {}, {}, {}];
-    let hidden = true;
-    Object.defineProperty(document, 'hidden', {
-      configurable: true,
-      get: () => hidden,
-    });
-    let now = 1;
-    vi.spyOn(Date, 'now').mockImplementation(() => now);
-
-    const { container } = renderApp();
-    await flush();
-    act(() => document.dispatchEvent(new Event('visibilitychange')));
-    now += 3 * 60 * 1000;
-    hidden = false;
-    act(() => document.dispatchEvent(new Event('visibilitychange')));
-    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
-
+    const { recap, container } = await triggerAutoRecap();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
@@ -6582,6 +6573,39 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap tagged for a different session', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-2', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap after switching to an existing session', async () => {
+    const { recap, container } = await triggerAutoRecap();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      recap.resolve({
+        sessionId: 'session-1',
+        recap: 'Previous session recap',
+      });
+      await recap.promise;
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ source: 'recap' }),
     ]);
