@@ -16,12 +16,11 @@
  * Transitions out of running are one-shot — complete / fail / cancel
  * become no-ops once the entry has settled.
  *
- * Unlike `BackgroundTaskRegistry`, the workflow registry does NOT emit
- * any `<task-notification>` XML or model-facing prose — `WorkflowTool`
- * already returns its own llmContent + returnDisplay payload to the
- * model when the run terminates, so a second envelope would duplicate
- * the signal. The registry is UI-only: its callbacks drive the pill
- * counts, the dialog roster, and the per-phase detail body.
+ * Foreground runs return through the normal tool-result channel. Background
+ * runs additionally emit one terminal `<task-notification>` through a
+ * dedicated model-completion callback. That slot is separate from the
+ * terminal-bell callback so the CLI can subscribe to both without either
+ * consumer replacing the other.
  */
 
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
@@ -38,6 +37,10 @@ import {
   type ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { escapeXml } from '../utils/xml.js';
+import { runOutsideAgentContext } from './runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
 
@@ -83,6 +86,8 @@ export interface WorkflowTask extends TaskBase {
    */
   meta: WorkflowMeta | null;
   status: WorkflowStatus;
+  /** Whether the tool returned before this run reached a terminal state. */
+  isBackgrounded?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
   currentPhase: string | null;
   /**
@@ -167,6 +172,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'script'
   | 'description'
   | 'pendingApprovals'
+  | 'isBackgrounded'
 > & {
   // Allow the caller to omit `description` — we synthesize it from
   // `meta?.name ?? runId` for symmetry with shell registry's `command`
@@ -183,6 +189,8 @@ export type WorkflowTaskRegistration = Omit<
    * callers / tests). Needed for run snapshots + the save-to-disk dialog.
    */
   script?: string;
+  /** Defaults to false for legacy and foreground callers. */
+  isBackgrounded?: boolean;
 };
 
 /** Fires when a new entry is registered. */
@@ -204,6 +212,16 @@ export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
  * `useBackgroundTaskView` owns), so the two never clobber each other.
  */
 export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
+export interface WorkflowRunCompletionMeta {
+  runId: string;
+  status: Extract<WorkflowStatus, 'completed' | 'failed'>;
+  todoWorkChainId?: string;
+}
+export type WorkflowRunCompletionCallback = (
+  displayText: string,
+  modelText: string,
+  meta: WorkflowRunCompletionMeta,
+) => void;
 export type WorkflowApprovalChangeCallback = (entry: WorkflowTask) => void;
 export type WorkflowApprovalRequestCallback = (
   entry: WorkflowTask,
@@ -224,6 +242,7 @@ export class WorkflowRunRegistry {
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
   private notificationCallback: WorkflowRunNotificationCallback | undefined;
+  private completionCallback: WorkflowRunCompletionCallback | undefined;
   private approvalChangeCallback: WorkflowApprovalChangeCallback | undefined;
   private approvalRequestCallback: WorkflowApprovalRequestCallback | undefined;
   private readonly approvalRuntimes = new Map<
@@ -271,6 +290,14 @@ export class WorkflowRunRegistry {
     this.notificationCallback = cb;
   }
 
+  setCompletionCallback(cb: WorkflowRunCompletionCallback | undefined): void {
+    this.completionCallback = cb;
+  }
+
+  hasCompletionCallback(): boolean {
+    return this.completionCallback !== undefined;
+  }
+
   setApprovalChangeCallback(
     cb: WorkflowApprovalChangeCallback | undefined,
   ): void {
@@ -293,6 +320,46 @@ export class WorkflowRunRegistry {
     }
   }
 
+  private emitCompletion(entry: WorkflowTask): void {
+    if (!entry.isBackgrounded || !this.completionCallback) return;
+    if (entry.status !== 'completed' && entry.status !== 'failed') return;
+
+    const statusText = entry.status === 'completed' ? 'completed' : 'failed';
+    const label = stripAnsiAndControl(entry.description) || entry.runId;
+    const displayText = `Background workflow "${label}" ${statusText}.`;
+    const modelParts = [
+      '<task-notification>',
+      '<kind>workflow</kind>',
+      `<task-id>${escapeXml(entry.runId)}</task-id>`,
+      `<status>${entry.status}</status>`,
+      `<summary>Background workflow "${escapeXml(label)}" ${statusText}.</summary>`,
+    ];
+    if (entry.status === 'completed' && entry.result !== undefined) {
+      modelParts.push(
+        `<result>${escapeXml(stringifyCompletionResult(entry.result))}</result>`,
+      );
+    }
+    if (entry.status === 'failed') {
+      modelParts.push(
+        `<result>Error: ${escapeXml(entry.error ?? '')}</result>`,
+      );
+    }
+    modelParts.push('</task-notification>');
+
+    const meta: WorkflowRunCompletionMeta = {
+      runId: entry.runId,
+      status: entry.status,
+      todoWorkChainId: entry.todoWorkChainId,
+    };
+    try {
+      runOutsideAgentContext(() =>
+        this.completionCallback!(displayText, modelParts.join('\n'), meta),
+      );
+    } catch (error) {
+      debugLogger.error('Failed to emit workflow completion:', error);
+    }
+  }
+
   /**
    * Register a new run. Mutates the registration in place to graduate
    * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
@@ -300,11 +367,20 @@ export class WorkflowRunRegistry {
    * observers see updates without an extra `get()`.
    */
   register(registration: WorkflowTaskRegistration): WorkflowTask {
+    const existing = this.entries.get(registration.runId);
+    if (
+      existing?.status === 'running' ||
+      this.handles.has(registration.runId)
+    ) {
+      throw new Error(`Workflow run ${registration.runId} is already active.`);
+    }
     const entry = registration as WorkflowTask;
     entry.id = registration.runId;
     entry.kind = 'workflow';
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.isBackgrounded = registration.isBackgrounded ?? false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     entry.currentPhase = null;
     entry.phases = [];
     entry.agentsDispatched = 0;
@@ -655,6 +731,7 @@ export class WorkflowRunRegistry {
     entry.notified = true;
     this.emitStatusChange(entry);
     this.emitNotification(entry);
+    this.emitCompletion(entry);
     this.evictTerminal();
   }
 
@@ -668,6 +745,7 @@ export class WorkflowRunRegistry {
     entry.notified = true;
     this.emitStatusChange(entry);
     this.emitNotification(entry);
+    this.emitCompletion(entry);
     this.evictTerminal();
   }
 
@@ -846,6 +924,15 @@ export class WorkflowRunRegistry {
     } catch (error) {
       debugLogger.error('Failed to emit workflow approval change:', error);
     }
+  }
+}
+
+function stringifyCompletionResult(result: unknown): string {
+  if (typeof result === 'string') return result;
+  try {
+    return JSON.stringify(result) ?? String(result);
+  } catch {
+    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
   }
 }
 
