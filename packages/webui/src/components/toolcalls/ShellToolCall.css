@@ -65,6 +65,10 @@
   overflow: hidden;
 }
 
+.bash-toolcall-row-content.bash-toolcall-full {
+  min-width: 0;
+}
+
 .bash-toolcall-pre {
   margin-block: 0;
   overflow: hidden;
@@ -159,6 +163,10 @@
     transparent 60px
   );
   overflow: hidden;
+}
+
+.execute-toolcall-row-content.execute-toolcall-full {
+  min-width: 0;
 }
 
 .execute-toolcall-pre {

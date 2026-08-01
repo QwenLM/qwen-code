@@ -213,6 +213,11 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
   if (textOutputs.length > 0) {
     const output = textOutputs.join('\n');
     const isCollapsible = output.length > 500;
+    const outputContent = (
+      <div className={`${classPrefix}-toolcall-output-subtle`}>
+        <pre className={`${classPrefix}-toolcall-pre`}>{output}</pre>
+      </div>
+    );
 
     return (
       <Container
@@ -261,18 +266,10 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
                     collapsedHeight={60}
                     fadeStart={40}
                   >
-                    <div className={`${classPrefix}-toolcall-output-subtle`}>
-                      <pre className={`${classPrefix}-toolcall-pre`}>
-                        {output}
-                      </pre>
-                    </div>
+                    {outputContent}
                   </CollapsibleOutput>
                 ) : (
-                  <div className={`${classPrefix}-toolcall-output-subtle`}>
-                    <pre className={`${classPrefix}-toolcall-pre`}>
-                      {output}
-                    </pre>
-                  </div>
+                  outputContent
                 )}
               </div>
             </div>

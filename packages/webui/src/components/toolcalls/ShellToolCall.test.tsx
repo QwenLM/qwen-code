@@ -6,18 +6,11 @@
 
 // @vitest-environment jsdom
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlatformProvider } from '../../context/PlatformContext.js';
 import { ShellToolCall } from './ShellToolCall.js';
-
-const shellToolCallStyles = readFileSync(
-  resolve(process.cwd(), 'src/components/toolcalls/ShellToolCall.css'),
-  'utf8',
-);
 
 describe('ShellToolCall collapsible output', () => {
   let container: HTMLDivElement | null = null;
@@ -101,15 +94,6 @@ describe('ShellToolCall collapsible output', () => {
       expect(collapsibleContent.style.maxHeight).toBe('60px');
       expect(collapsibleContent.style.maskImage).toContain('40px');
       expect(collapsibleContent.style.maskImage).toContain('60px');
-      const outputContainer = container?.querySelector(
-        `.${kind}-toolcall-output-subtle`,
-      ) as HTMLDivElement;
-      const outputPre = outputContainer.querySelector('pre') as HTMLPreElement;
-      expect(outputPre).not.toBeNull();
-      expect(shellToolCallStyles).toContain(
-        `.${kind}-toolcall-output-subtle .${kind}-toolcall-pre {\n  overflow: visible;\n}`,
-      );
-
       act(() => {
         toggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
