@@ -12,7 +12,7 @@ import {
   CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
   MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 
 const TEST_HEARTBEAT_TIMEOUT_MS = CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS + 5;
 

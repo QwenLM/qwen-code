@@ -59,6 +59,49 @@
   overflow: hidden;
 }
 
+.contextShell {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatHeaderRow {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+
+.customChatHeader {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.contextBody {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.contextBodyWithEnvironmentPanel .chatPane,
+.contextBodyWithEnvironmentPanel .content {
+  overflow: visible;
+}
+
+.contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
+  box-sizing: border-box;
+  width: calc(100% + 332px);
+  padding-right: 356px;
+}
+
 .chatPane {
   flex: 1 1 auto;
   min-width: 0;
@@ -648,8 +691,14 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
+}
+
+.appChatEmpty .chatPane {
+  position: relative;
 }
 
 .footer {
@@ -758,10 +807,6 @@
 
 .composerHeader {
   margin-bottom: 8px;
-}
-
-.chatHeader {
-  flex-shrink: 0;
 }
 
 .customFooter {
@@ -918,6 +963,7 @@
 }
 
 .queuedPrompts {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -983,8 +1029,10 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   margin-left: 8px;
   color: var(--secondary-foreground);
+  white-space: nowrap;
 }
 
 .queuedPromptSpinner {
@@ -1033,7 +1081,17 @@
   height: 14px;
 }
 
-.queuedPromptAction:hover {
+@container (max-width: 699px) {
+  .queuedPromptStateLabel {
+    display: none;
+  }
+
+  .queuedPromptState:not(.queuedPromptStateLoading) {
+    display: none;
+  }
+}
+
+.queuedPromptAction:not(:disabled):hover {
   background: var(--accent);
   color: var(--foreground);
 }

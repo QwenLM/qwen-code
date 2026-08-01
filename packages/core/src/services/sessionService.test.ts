@@ -225,6 +225,9 @@ describe('SessionService', () => {
 
     it('should list archived sessions from archive directory only', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        // path.join is mocked above to join with '/', so production paths
+        // always use '/' here regardless of host platform — match that, not
+        // path.sep (which stays the real host separator under the automock).
         if (dir.toString().endsWith('/chats/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
@@ -249,7 +252,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts aggregates active and archived membership', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
-        if (dir.toString().endsWith(`${path.sep}archive`)) {
+        if (dir.toString().endsWith('/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
         return [
@@ -282,7 +285,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );
@@ -320,7 +323,7 @@ describe('SessionService', () => {
 
     it('marks counts truncated when a candidate session cannot be read', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
               fs.Dirent<Buffer>
@@ -3091,6 +3094,69 @@ describe('SessionService', () => {
         .map((l) => JSON.parse(l));
       expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('writes source metadata and drops the inherited title for sourced forks', async () => {
+      const oldId = '10101010-1010-1010-1010-101010101010';
+      const newId = '20202020-2020-2020-2020-202020202020';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'title-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'custom_title',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              customTitle: 'Parent title',
+              titleSource: 'manual',
+            },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        source: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written[0]).toMatchObject({
+        parentUuid: null,
+        sessionId: newId,
+        type: 'system',
+        subtype: 'session_source',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      expect(written.some((record) => record.subtype === 'custom_title')).toBe(
+        false,
+      );
+      expect(written[1]).toMatchObject({
+        parentUuid: written[0].uuid,
+        forkedFrom: {
+          sessionId: oldId,
+          messageUuid: 'u1',
+        },
+      });
     });
 
     it('copies artifact side records from the active branch', async () => {

@@ -1,6 +1,10 @@
-export { getGlobalQwenDir, resolvePath } from './paths.js';
+export {
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
+  resolvePath,
+} from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
-export { AcpBridge } from './AcpBridge.js';
+export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
@@ -80,6 +84,7 @@ export {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {

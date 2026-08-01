@@ -50,6 +50,7 @@ import {
 } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
+import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
@@ -2270,6 +2271,11 @@ export class GeminiClient {
       // content's own pairing.
     }
 
+    // Set when the UserPromptSubmit hook injects additional context: the
+    // pre-injection prompt projection. Telemetry, memory recall, and chat
+    // recording must see the user's own text, not the augmented request.
+    let preInjectionPromptText: string | undefined;
+
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
@@ -2351,11 +2357,21 @@ export class GeminiClient {
           return new Turn(this.getChat(), prompt_id);
         }
 
-        // Add additional context from hooks to the request
+        // Add additional context from hooks to the request. The context is
+        // appended as its own part, wrapped in a reserved tag so it stays
+        // distinguishable from user-authored text in model history, resume,
+        // and offline transcript analysis. `getAdditionalContext()` escapes
+        // `<`/`>`, so hook output cannot forge the closing tag.
+        // `promptText` is declared above this block so assignment here cannot
+        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
         const additionalContext = hookOutput?.getAdditionalContext();
         if (additionalContext) {
           const requestArray = Array.isArray(request) ? request : [request];
-          request = [...requestArray, { text: additionalContext }];
+          request = [
+            ...requestArray,
+            { text: wrapUserPromptSubmitContext(additionalContext) },
+          ];
+          preInjectionPromptText = promptText;
         }
       }
     } catch (error) {
@@ -2502,7 +2518,7 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          partToString(request),
+          preInjectionPromptText ?? partToString(request),
         );
       }
     }
@@ -2557,12 +2573,16 @@ export class GeminiClient {
           }
           const promise = this.config
             .getMemoryManager()
-            .recall(this.config.getProjectRoot(), partToString(request), {
-              config: this.config,
-              excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              recentTools: [...this.recentCompletedToolNames],
-              abortSignal: controller.signal,
-            })
+            .recall(
+              this.config.getProjectRoot(),
+              preInjectionPromptText ?? partToString(request),
+              {
+                config: this.config,
+                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+                recentTools: [...this.recentCompletedToolNames],
+                abortSignal: controller.signal,
+              },
+            )
             .catch((error: unknown) => {
               // Abort sources are now numerous (caller signal, new UserQuery,
               // cleanup paths, safety-net timeout). Keep a debug trace so
@@ -2627,9 +2647,17 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          this.config
-            .getChatRecordingService()
-            ?.recordUserMessage(request, goalPermit);
+          // Only pass the payload when a hook actually injected; omitting
+          // the third argument keeps existing two-arg spies/call sites
+          // exact (passing `undefined` would still count as a third arg).
+          const recordingService = this.config.getChatRecordingService();
+          if (recordingService && preInjectionPromptText !== undefined) {
+            recordingService.recordUserMessage(request, goalPermit, {
+              displayText: preInjectionPromptText,
+            });
+          } else if (recordingService) {
+            recordingService.recordUserMessage(request, goalPermit);
+          }
         }
       }
 
@@ -3917,12 +3945,10 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    const model = this.config.getModel();
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
-      model,
       force,
       signal,
       customInstructions ? { customInstructions } : undefined,

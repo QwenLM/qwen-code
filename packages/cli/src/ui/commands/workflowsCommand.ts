@@ -33,6 +33,7 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     tokensSpent: s.tokensSpent ?? 0,
     tokenBudgetTotal: s.tokenBudgetTotal ?? null,
     perPhaseTokens: new Map(s.perPhaseTokens ?? []),
+    pendingApprovals: [],
     script: s.script ?? '',
     scriptPath: s.scriptPath,
     result: s.result,
