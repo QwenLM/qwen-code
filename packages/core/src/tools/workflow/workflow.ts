@@ -27,7 +27,10 @@ import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
-import { WorkflowRunner } from '../../agents/runtime/workflow-runner.js';
+import {
+  WorkflowRunner,
+  type WorkflowRunHandle,
+} from '../../agents/runtime/workflow-runner.js';
 import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
@@ -55,6 +58,8 @@ export interface WorkflowParams {
    * runs live and the run goes live for the remainder.
    */
   resumeFromRunId?: string;
+  /** Return after registration and continue the run under session ownership. */
+  run_in_background?: boolean;
 }
 
 export interface WorkflowToolOptions {
@@ -139,6 +144,12 @@ const WORKFLOW_PARAM_SCHEMA = {
         'first changed/missing call onward runs live. Pass the same script ' +
         'and args as the original run for the cache to apply.',
     },
+    run_in_background: {
+      type: 'boolean',
+      default: false,
+      description:
+        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
+    },
   },
   // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
   // expressed as a plain `required` list, so it's enforced in
@@ -178,18 +189,50 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    const handle = await WorkflowRunner.start({
-      config: this.config,
-      signal,
-      script: this.params.script,
-      scriptPath: this.params.scriptPath,
-      args: this.params.args,
-      resumeFromRunId: this.params.resumeFromRunId,
-      dispatch: this.toolOptions.dispatch,
-      onUpdate: updateOutput
-        ? (entry) => safeEmitUpdate(updateOutput, entry)
-        : undefined,
-    });
+    const runInBackground = this.params.run_in_background === true;
+    if (runInBackground && signal.aborted) {
+      return backgroundStartCancelledResult();
+    }
+    let handle: WorkflowRunHandle;
+    try {
+      handle = await WorkflowRunner.start({
+        config: this.config,
+        signal,
+        script: this.params.script,
+        scriptPath: this.params.scriptPath,
+        args: this.params.args,
+        resumeFromRunId: this.params.resumeFromRunId,
+        dispatch: this.toolOptions.dispatch,
+        runInBackground,
+        onUpdate:
+          !runInBackground && updateOutput
+            ? (entry) => safeEmitUpdate(updateOutput, entry)
+            : undefined,
+      });
+    } catch (error) {
+      if (runInBackground && signal.aborted) {
+        return backgroundStartCancelledResult();
+      }
+      throw error;
+    }
+    if (runInBackground) {
+      const status = handle.registry?.get(handle.runId)?.status ?? 'running';
+      const usageBanner = resolveUsageBanner(
+        this.config,
+        handle.registry,
+        handle.budget.total,
+      );
+      return {
+        llmContent: [
+          {
+            text: `Workflow started in background.\nRun ID: ${handle.runId}\nStatus: ${status}`,
+          },
+        ],
+        returnDisplay:
+          usageBanner +
+          `Workflow ${handle.runId} started in the background (status: ${status}). Use Background Tasks to observe or stop it.`,
+      };
+    }
     const settlement = await handle.completion;
     if (settlement.ok) {
       const { outcome } = settlement;
@@ -290,6 +333,13 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       };
     }
   }
+}
+
+function backgroundStartCancelledResult(): ToolResult {
+  return {
+    llmContent: 'Workflow was cancelled before it could start.',
+    returnDisplay: 'Workflow cancelled.',
+  };
 }
 
 /**
@@ -481,7 +531,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'run — agent() calls whose rolling prefix-hash matches the journal are ' +
         'served from cache for the longest unchanged prefix. Runs are tracked ' +
         'in the background-tasks view and the `/workflows` dialog (live phase ' +
-        'tree, token usage, cancel). Scripts run in a node:vm sandbox without ' +
+        'tree, token usage, cancel). Set `run_in_background: true` to return a ' +
+        'run handle immediately in the interactive TUI and receive completion ' +
+        'through the conversation. Scripts run in a node:vm sandbox without ' +
         'access to the filesystem or shell; all I/O happens through the ' +
         'spawned agents.',
       Kind.Other,
@@ -516,6 +568,17 @@ export class WorkflowTool extends BaseDeclarativeTool<
       !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
+    }
+    if (params.run_in_background === true) {
+      if (
+        !this.config.isInteractive() ||
+        this.config.getExperimentalZedIntegration?.() === true
+      ) {
+        return 'WorkflowTool: `run_in_background` is available only in the interactive TUI.';
+      }
+      if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+        return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
+      }
     }
     return null;
   }

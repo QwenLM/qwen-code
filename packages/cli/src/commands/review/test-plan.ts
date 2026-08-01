@@ -209,8 +209,51 @@ const COUNT_RES = [
   // command exists to check went unextracted.
   /\b(\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
   /\btests?:?\s+(\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(?<!Files\s{1,20})(\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(\d+)\s+pass(?:ed|ing)\b/gi,
 ];
+
+/**
+ * Labels after which every number on the line counts FILES, not tests.
+ *
+ * `Test Files  45 passed (45)` filing its 45 as a differing TEST count was
+ * measured on this command's own PR body. The first fix was a lookbehind on
+ * the bare-count pattern, which only ever rejected the all-green shape: the
+ * moment any file fails the runner prints `Test Files  1 failed | 44 passed`,
+ * and the label is no longer adjacent to the number. That mixed shape is the
+ * COMMON one — a summary gets pasted into a Test Plan precisely when there is
+ * something to show — so the narrow fix left the false note in place for the
+ * case that produces it. Masking the rest of the line is label-distance
+ * independent, and covers jest's `Test Suites: 1 failed, 44 passed, 45 total`
+ * for free.
+ *
+ * Both runner labels carry the `Test` word, and the pattern requires it: a
+ * bare `files` is ordinary prose, and blanking its line ate the future-tense
+ * claim in "expect all four files and 471 tests to pass" — an existing test
+ * caught it. A rule that silences claims is worth exactly as much as its
+ * narrowness.
+ */
+const FILE_COUNT_LABEL_RE = /\btest\s+(?:files|suites)\b/gi;
+
+/**
+ * Blank out file-count segments, preserving length so match offsets still
+ * index into the original section.
+ */
+function maskFileCounts(section: string): string {
+  let out = '';
+  let cursor = 0;
+  FILE_COUNT_LABEL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FILE_COUNT_LABEL_RE.exec(section))) {
+    const eol = section.indexOf('\n', m.index);
+    const stop = eol === -1 ? section.length : eol;
+    out += section.slice(cursor, m.index) + ' '.repeat(stop - m.index);
+    cursor = stop;
+    // Resume past the blanked run: the label matches again inside it
+    // (`Test Files ... 3 files`), and stop > m.index keeps this terminating.
+    FILE_COUNT_LABEL_RE.lastIndex = stop;
+  }
+  return out + section.slice(cursor);
+}
 
 /** Extract every backticked span, including fenced-block bodies. */
 function codeSpans(section: string): string[] {
@@ -347,10 +390,13 @@ export function extractClaims(section: string): Array<{
   // spans are claimed so the more specific pattern (listed first) wins, and one
   // statement produces one claim instead of two near-identical ones.
   const taken: Array<[number, number]> = [];
+  // Length-preserving and byte-identical outside the blanked spans, so a match
+  // found here carries the original text and indexes the original section.
+  const forCounts = maskFileCounts(section);
   for (const re of COUNT_RES) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(section))) {
+    while ((m = re.exec(forCounts))) {
       const start = m.index;
       const end = start + m[0].length;
       if (taken.some(([s, e]) => start < e && end > s)) continue;
