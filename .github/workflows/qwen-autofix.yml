@@ -2586,7 +2586,11 @@ jobs:
       # 7th PR waited 81 minutes for a slot it could have had immediately.
       # 5 halves that tail while staying a real bound — the point of the cap
       # is that a backlog cannot open an unbounded number of agent runs at
-      # once, not the specific number.
+      # once, not the specific number. The 300-minute job cap raises the
+      # worst-case hold to 5 runner-hours per slot (25 across the fleet) and
+      # holds the per-PR head-write concurrency group for the same window; in
+      # practice the 120-minute agent budget ends rounds well before the cap,
+      # so the queueing tail above is unchanged.
       max-parallel: 5
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
@@ -3443,6 +3447,14 @@ jobs:
           # buys rounds that were close to finishing, not rounds that were
           # never going to. QWEN_AUTOFIX_TIMEOUT_MS overrides it without a
           # code change; a malformed value falls back to the runner default.
+          #
+          # CEILING: the override MUST stay below 7,800,000 ms — the 130-minute
+          # step backstop above. A non-empty repo variable wins over the
+          # fallback, so a round "give it more time" value such as 9,000,000
+          # (150m) arms run-agent.mjs's timer PAST the step cap; the cap then
+          # kills the process first, `agent-timeout` is never written, and the
+          # report step misclassifies the round as a crash — the exact
+          # misreport the margin above exists to prevent. Keep it <= 120m.
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
@@ -3751,8 +3763,10 @@ jobs:
             # Salvage a race-lost push instead of discarding the run. The
             # per-PR head-write concurrency group serialises THIS repo's
             # workflows, but it cannot stop the PR author (or anything on the
-            # fork side) pushing during the agent's ~50-minute window —
-            # observed twice in one day (#7983, #7985): a one-shot push died
+            # fork side) pushing during the agent's ~120-minute window. The
+            # stated budget widened it from ~50m, so a race-lost push is that
+            # much likelier and the retry loop below stays bounded at 3 merges.
+            # Observed twice in one day (#7983, #7985): a one-shot push died
             # `fetch first` and a full verified agent run was thrown away.
             # On rejection, fetch the moved head and MERGE it into the local
             # line (merge, not rebase: the agent's own conflict-resolution

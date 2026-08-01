@@ -5829,7 +5829,7 @@ describe('qwen-autofix workflow', () => {
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
-    // head during the agent's ~50-minute window (observed twice in one day,
+    // head during the agent's ~120-minute window (observed twice in one day,
     // #7983/#7985 — a full verified agent run thrown away each time). The
     // per-PR head-write concurrency group cannot prevent this: it only
     // serialises THIS repo's workflows, not the PR author or the fork side.
@@ -6564,7 +6564,7 @@ describe('qwen-autofix workflow', () => {
 
   it('announces a working round up front and closes the same status comment', () => {
     // The whole point: the live run link reaches the thread BEFORE the
-    // 80-minute agent step, not after it. Without this the PR is silent from
+    // 130-minute agent step, not after it. Without this the PR is silent from
     // takeover until "Push and report", so a working round and a stuck one
     // look identical.
     expect(postStatusCommentStep.length).toBeGreaterThan(0);
@@ -8344,34 +8344,52 @@ describe('qwen-autofix workflow', () => {
     );
     expect(Number.isFinite(jobCapMin)).toBe(true);
 
-    // Sum every bounded step in the job. `always()` steps all run, so the
-    // worst case is the sum, not the max.
-    const stepCaps = [
-      ...jobBlock.matchAll(/\n {8}timeout-minutes: (\d+)/g),
-    ].map((m) => Number(m[1]));
-    // Primary, first verification, repair, repair verification. A step that
-    // loses its bound drops out of this list and shrinks the sum, so the
-    // count is asserted too.
-    expect(stepCaps).toHaveLength(4);
-    // Measured on run 30646547838: setup 5-7m in earlier steps, reporting 3-4s.
-    const SETUP_AND_REPORT_MIN = 10;
+    // The bug this PR closes was a long step with NO bound: the verification
+    // gate ran unbounded (measured 22m48s), so the worst case was
+    // 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job while every
+    // per-number assertion still passed. So identify the long steps by what
+    // they EXECUTE, not by whether they already carry a bound — summing only
+    // bounded steps stays silent when a new long step is added without one,
+    // which is exactly how the gate drifted in the first place. Cheap
+    // setup/report steps are allowlisted implicitly by not matching.
+    const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
+    const longSteps = stepBlocks.filter((b) =>
+      /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
+        b,
+      ),
+    );
+    // Primary + repair agent steps and their two verification gates. A new
+    // long step shows up here and must carry its own bound; an existing one
+    // that loses its bound fails the per-step check below.
+    expect(longSteps).toHaveLength(4);
+    // Every long step must be bounded, and `always()` runs them all, so the
+    // worst case is the SUM of those bounds.
+    const stepCaps = longSteps.map((b) =>
+      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
+    );
+    for (const cap of stepCaps) {
+      expect(Number.isFinite(cap)).toBe(true);
+    }
+    // Measured on run 30646547838: setup 5-7m in earlier steps, reporting 3-4s,
+    // but none of the 12 setup steps nor the reporters is bounded — so hold a
+    // real reserve, not the measured floor. 25 still fits today
+    // (270 + 25 = 295 <= 300) and keeps the headroom a property, not a guess.
+    const SETUP_AND_REPORT_MIN = 25;
     const worstCaseMin =
       stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
     expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
     // ubuntu-latest cannot run a job longer than 6 hours whatever we write.
     expect(jobCapMin).toBeLessThanOrEqual(360);
 
-    // Both verification gates must stay bounded: unbounded, the larger one
-    // consumed the job budget and took the always() reporters down with it.
+    // continue-on-error is what makes bounding the verification gates a
+    // graceful degrade rather than a new way to kill the job: a timed-out
+    // gate must fall through to the report step, not cancel it.
     for (const name of ['Verification gate', 'Repair verification gate']) {
       const gate =
         jobBlock.match(
           new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {6}- name: )`),
         )?.[0] ?? '';
       expect(gate, `${name} is missing from review-address`).toBeTruthy();
-      expect(gate).toMatch(/\n {8}timeout-minutes: \d+/);
-      // continue-on-error is what makes bounding them a graceful degrade
-      // rather than a new way to kill the job.
       expect(gate).toContain('continue-on-error: true');
     }
 
@@ -8394,11 +8412,11 @@ describe('qwen-autofix workflow', () => {
     const marginMin = stepCapMin - budgetMs / 60000;
     // Under the cap, or the cap fires first and the internal kill path never
     // writes `agent-timeout` — the file the report step reads to tell a
-    // timeout apart from a crash.
-    expect(marginMin).toBeGreaterThan(0);
-    // ...and far enough under it that the kill path (which only writes that
-    // file and exits — measured at 3s on run 30646547838) always completes.
-    expect(marginMin).toBeGreaterThanOrEqual(5);
+    // timeout apart from a crash. That path is SIGTERM, a 10s grace, SIGKILL,
+    // then the marker write, so a one-minute floor clears it several times
+    // over; the primary (10m) and repair (2m) margins both do, so one floor
+    // fits both instead of an asymmetric pair.
+    expect(marginMin).toBeGreaterThanOrEqual(1);
     // The repair attempt stays inside its own smaller step the same way.
     const repairCapMin = Number(
       repairDeterministicRejectionStep.match(/timeout-minutes: (\d+)/)?.[1],
@@ -8406,7 +8424,7 @@ describe('qwen-autofix workflow', () => {
     const repairMs = Number(
       repairDeterministicRejectionStep.match(/QWEN_TIMEOUT_MS: '(\d+)'/)?.[1],
     );
-    expect(repairCapMin - repairMs / 60000).toBeGreaterThan(0);
+    expect(repairCapMin - repairMs / 60000).toBeGreaterThanOrEqual(1);
 
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.
