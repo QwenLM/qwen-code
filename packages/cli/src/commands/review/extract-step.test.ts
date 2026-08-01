@@ -268,6 +268,12 @@ describe('runExtractStep', () => {
     expect(meta.workingDirectory).toBe('packages/cli');
     const script = readFileSync(meta.scriptPath, 'utf8');
     expect(script).toContain('#!/usr/bin/env sh');
+    // GitHub runs a `shell: sh` step as `sh -e {0}` — `-e`, and only `-e`.
+    // Both halves are load-bearing: dropping the line makes an extracted `sh`
+    // step run past a failure the runner would have stopped on, and adding
+    // pipefail claims a bash feature `sh` does not have.
+    expect(script).toContain('\nset -e\n');
+    expect(script).not.toContain('pipefail');
     expect(script).toContain('# env [job] NODE_ENV=production');
     expect(script).not.toContain('NODE_ENV=development');
   });
