@@ -2434,17 +2434,37 @@ const EN: Messages = {
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': 'Personal Access Token',
+  'channels.editor.field.github.token.description':
+    'Classic PAT with "notifications" scope',
   'channels.editor.field.github.baseUrl': 'API Base URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
+  'channels.editor.field.github.groupPolicy.description':
+    'Must be "Open" for notifications to flow',
   'channels.editor.field.github.senderPolicy': 'Sender Policy',
+  'channels.editor.field.github.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public repos',
   'channels.editor.field.github.allowedUsers':
     'Allowed Users (comma-separated)',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub usernames, used by Allowlist and Pairing policies',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
+  'channels.editor.field.gitlab.token.description':
+    'PAT with "read_api" + "api" scopes',
   'channels.editor.field.gitlab.baseUrl': 'Instance URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    'Must be "Open" or "Allowlist" for todos to be processed',
   'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public projects',
   'channels.editor.field.gitlab.allowedUsers':
     'Allowed Users (comma-separated)',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab usernames, used by Allowlist and Pairing policies',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -4893,15 +4913,35 @@ const ZH: Messages = {
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': '个人访问令牌',
+  'channels.editor.field.github.token.description':
+    '需要 "notifications" 权限的经典 PAT',
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.groupPolicy': '群组策略',
+  'channels.editor.field.github.groupPolicy.description':
+    '必须设为 "Open" 才能接收通知',
   'channels.editor.field.github.senderPolicy': '发送者策略',
+  'channels.editor.field.github.senderPolicy.description':
+    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
   'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.gitlab.token': '个人访问令牌',
+  'channels.editor.field.gitlab.token.description':
+    '需要 "read_api" + "api" 权限的 PAT',
   'channels.editor.field.gitlab.baseUrl': '实例 URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
   'channels.editor.field.gitlab.senderPolicy': '发送者策略',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    '公开项目建议使用 "Allowlist" 并指定允许的用户',
   'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',

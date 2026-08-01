@@ -17,18 +17,22 @@ export const plugin: ChannelPlugin = {
         kind: 'secret',
         required: true,
         envResolvable: true,
+        description: 'Classic PAT with "notifications" scope',
       },
       {
         key: 'baseUrl',
         label: 'Base URL',
         kind: 'string',
         envResolvable: true,
+        description:
+          'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
       },
       {
         key: 'groupPolicy',
         label: 'Group Policy',
         kind: 'enum',
         required: true,
+        description: 'Must be "Open" for notifications to flow',
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },
@@ -40,6 +44,7 @@ export const plugin: ChannelPlugin = {
         label: 'Sender Policy',
         kind: 'enum',
         required: true,
+        description: 'Use "Allowlist" with allowed users on public repos',
         options: [
           { value: 'allowlist', label: 'Allowlist' },
           { value: 'pairing', label: 'Pairing' },
@@ -50,6 +55,7 @@ export const plugin: ChannelPlugin = {
         key: 'allowedUsers',
         label: 'Allowed Users',
         kind: 'string-list',
+        description: 'GitHub usernames, used by Allowlist and Pairing policies',
       },
     ],
   },

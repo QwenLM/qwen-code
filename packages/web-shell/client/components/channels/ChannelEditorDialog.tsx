@@ -127,6 +127,7 @@ function FieldShell({
   label,
   required,
   hint,
+  description,
   error,
   children,
 }: {
@@ -134,6 +135,7 @@ function FieldShell({
   label: string;
   required?: boolean;
   hint?: string;
+  description?: string;
   error?: string;
   children: ReactNode;
 }) {
@@ -151,6 +153,9 @@ function FieldShell({
         {hint ? <span className={styles.hint}>{hint}</span> : null}
       </div>
       {children}
+      {description ? (
+        <p className={styles.fieldDescription}>{description}</p>
+      ) : null}
       {error ? (
         <p role="alert" className="text-xs text-destructive">
           {error}
@@ -194,6 +199,16 @@ export function ChannelEditorDialog({
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
     const key = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
     return key ? t(key) : field.label;
+  };
+
+  const fieldDescription = (field: DaemonChannelConfigFieldDescriptor) => {
+    const labelKey = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    if (labelKey) {
+      const descKey = `${labelKey}.description`;
+      const translated = t(descKey);
+      if (translated !== descKey) return translated;
+    }
+    return field.description;
   };
 
   const validationMessage = (
@@ -280,6 +295,7 @@ export function ChannelEditorDialog({
         id={id}
         label={fieldLabel(field)}
         required={field.required}
+        description={fieldDescription(field)}
         hint={
           field.envResolvable
             ? t('channels.editor.environmentReference')
@@ -373,6 +389,7 @@ export function ChannelEditorDialog({
           id={id}
           label={fieldLabel(field)}
           required={field.required}
+          description={fieldDescription(field)}
           error={error}
         >
           <Switch
@@ -391,6 +408,7 @@ export function ChannelEditorDialog({
           id={id}
           label={fieldLabel(field)}
           required={field.required}
+          description={fieldDescription(field)}
           error={error}
         >
           <Select value={String(value ?? '')} onValueChange={update}>
@@ -418,6 +436,7 @@ export function ChannelEditorDialog({
         id={id}
         label={fieldLabel(field)}
         required={field.required}
+        description={fieldDescription(field)}
         hint={
           field.envResolvable
             ? t('channels.editor.environmentReference')
