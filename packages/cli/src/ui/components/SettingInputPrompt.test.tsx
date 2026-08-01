@@ -108,7 +108,8 @@ describe('SettingInputPrompt', () => {
     expect(lastFrame()).toContain('Enter your password');
   });
 
-  it('sanitizes pasted sensitive values', () => {
+  it('sanitizes and appends pasted sensitive values', () => {
+    const prefix = 'X';
     const secret = 'AIza-test-key';
     const { lastFrame } = render(
       <SettingInputPrompt
@@ -122,13 +123,17 @@ describe('SettingInputPrompt', () => {
     );
 
     act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](makeKey({ sequence: prefix }));
+    });
+
+    act(() => {
       mockedUseKeypress.mock.calls.at(-1)?.[0](
         makeKey({ paste: true, sequence: `${secret}\r\n\x1b` }),
       );
     });
 
     expect(lastFrame()).not.toContain(secret);
-    expect(lastFrame()).toContain('*'.repeat(secret.length));
+    expect(lastFrame()).toContain('*'.repeat(prefix.length + secret.length));
 
     act(() => {
       mockedUseKeypress.mock.calls.at(-1)?.[0](
@@ -136,7 +141,7 @@ describe('SettingInputPrompt', () => {
       );
     });
 
-    expect(onSubmit).toHaveBeenCalledWith(secret);
+    expect(onSubmit).toHaveBeenCalledWith(prefix + secret);
   });
 
   it('displays help text for submit and cancel', () => {
