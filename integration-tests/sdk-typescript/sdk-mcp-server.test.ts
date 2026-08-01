@@ -67,7 +67,9 @@ function advertisedToolNames(
   fakeServer: FakeOpenAIServer,
   requestIndex: number,
 ): string[] {
-  const tools = fakeServer.requests[requestIndex]?.body['tools'];
+  const tools = fakeServer.requests.filter(
+    ({ body }) => body['stream'] === true,
+  )[requestIndex]?.body['tools'];
   if (!Array.isArray(tools)) return [];
   return tools.flatMap((entry): string[] => {
     const name = (entry as { function?: { name?: unknown } }).function?.name;
@@ -133,7 +135,12 @@ describe('SDK MCP Server Integration (E2E)', () => {
         version: '1.0.0',
         tools: [calculatorTool, stringTool],
       });
-      fakeResponse = ({ requestIndex }) => {
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
         if (requestIndex === 0) {
           return {
             toolCalls: [
@@ -224,8 +231,13 @@ describe('SDK MCP Server Integration (E2E)', () => {
         version: '1.0.0',
         tools: [errorTool],
       });
-      fakeResponse = ({ requestIndex }) =>
-        requestIndex === 0
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        return requestIndex === 0
           ? {
               toolCalls: [
                 fakeToolCall('tool_search', {
@@ -238,6 +250,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
                 toolCalls: [fakeToolCall(MCP_MAYBE_FAIL, { shouldFail: true })],
               }
             : { content: 'Done.' };
+      };
 
       const q = query({
         prompt: 'Run the failing operation.',
@@ -296,8 +309,13 @@ describe('SDK MCP Server Integration (E2E)', () => {
         version: '1.0.0',
         tools: [delayedTool],
       });
-      fakeResponse = ({ requestIndex }) =>
-        requestIndex === 0
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        return requestIndex === 0
           ? {
               toolCalls: [
                 fakeToolCall('tool_search', {
@@ -315,6 +333,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
                 ],
               }
             : { content: 'Done.' };
+      };
 
       const q = query({
         prompt: 'Run the delayed operation.',
