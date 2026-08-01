@@ -8,7 +8,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js';
 import {
   BackgroundTaskViewProvider,
@@ -16,6 +21,8 @@ import {
   useBackgroundTaskViewState,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 import {
   type AgentDialogEntry,
   type DreamDialogEntry,
@@ -105,6 +112,7 @@ interface Harness {
   abandon: ReturnType<typeof vi.fn>;
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
+  workflowResolvePendingApproval: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
   pressKeyBroadcast: (key: {
@@ -132,6 +140,7 @@ function setup(
   const abandon = vi.fn();
   const monitorCancel = vi.fn();
   const dreamCancelTask = vi.fn();
+  const workflowResolvePendingApproval = vi.fn();
   // Stub registry that resolves `.get(agentId)` against the current entries
   // snapshot — the dialog now re-reads agent entries via `.get()` to pick up
   // live activity/stats mutations the snapshot misses.
@@ -166,6 +175,11 @@ function setup(
     getMemoryManager: () => ({
       cancelTask: dreamCancelTask,
     }),
+    getWorkflowRunRegistry: () => ({
+      resolvePendingApproval: workflowResolvePendingApproval,
+    }),
+    getIdeMode: () => false,
+    isTrustedFolder: () => true,
     resumeBackgroundAgent: resume,
     abandonBackgroundAgent: abandon,
   } as unknown as Config;
@@ -203,7 +217,13 @@ function setup(
     return null;
   }
 
-  const { lastFrame } = render(<Harness />);
+  const { lastFrame } = render(
+    <SettingsContext.Provider
+      value={{ merged: { general: {} } } as LoadedSettings}
+    >
+      <Harness />
+    </SettingsContext.Provider>,
+  );
 
   return {
     cancel,
@@ -211,6 +231,7 @@ function setup(
     abandon,
     monitorCancel,
     dreamCancelTask,
+    workflowResolvePendingApproval,
     setEntries(next) {
       handlers.length = 0;
       currentEntries = next;
@@ -851,7 +872,7 @@ describe('BackgroundTasksDialog', () => {
 
   // ── R2 #15: WorkflowDetailBody budget chip rendering ────────────────
 
-  function workflowEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+  function workflowEntry(overrides: Partial<WorkflowTask> = {}): DialogEntry {
     const base = {
       id: 'wf_test1234',
       kind: 'workflow' as const,
@@ -873,6 +894,7 @@ describe('BackgroundTasksDialog', () => {
       tokensSpent: 0,
       tokenBudgetTotal: null,
       perPhaseTokens: new Map<string | null, number>(),
+      pendingApprovals: [] as WorkflowApproval[],
     };
     return { ...base, ...overrides } as unknown as DialogEntry;
   }
@@ -944,6 +966,69 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('(no phase)');
       expect(f).toContain('420t');
     });
+  });
+
+  it('marks a workflow row when it needs approval', () => {
+    const wf = workflowEntry({
+      status: 'running',
+      pendingApprovals: [
+        {
+          approvalId: 'wfap-1',
+          subagentId: 'sub-1',
+          callId: 'call-1',
+          name: 'Shell',
+          description: 'run',
+          confirmationDetails: {
+            type: 'exec',
+          } as WorkflowApproval['confirmationDetails'],
+          at: Date.now(),
+        },
+      ],
+    });
+    const h = setup([wf]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    expect(h.lastFrame()).toContain('[workflow] wf_test1234 ⚠ needs approval');
+  });
+
+  it('routes a workflow approval response by approvalId from detail mode', () => {
+    const wf = workflowEntry({
+      status: 'running',
+      pendingApprovals: [
+        {
+          approvalId: 'wfap-42',
+          subagentId: 'sub-1',
+          callId: 'shared-call-id',
+          name: 'Shell',
+          description: 'run',
+          confirmationDetails: {
+            type: 'exec',
+            title: 'Confirm workflow command',
+            command: 'echo workflow',
+            rootCommand: 'echo',
+          } as WorkflowApproval['confirmationDetails'],
+          at: Date.now(),
+        },
+      ],
+    });
+    const h = setup([wf]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.lastFrame()).toContain('[workflow] needs approval');
+    expect(h.lastFrame()).toContain('echo workflow');
+
+    h.pressKeyBroadcast({ name: 'escape' });
+
+    expect(h.workflowResolvePendingApproval).toHaveBeenCalledTimes(1);
+    expect(h.workflowResolvePendingApproval).toHaveBeenCalledWith(
+      'wf_test1234',
+      'wfap-42',
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
   });
 
   describe('nested sub-agent display', () => {

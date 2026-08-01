@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { unescapeShellSpecials } from '@qwen-code/qwen-code-core';
+
 export const SESSION_MENTION_PREFIX = 'session:';
 
 const UUID_RE =
@@ -20,7 +22,14 @@ export function isSessionId(value: string): boolean {
 
 export function parseSessionRef(pathName: string): SessionRef | null {
   if (!pathName.startsWith(SESSION_MENTION_PREFIX)) return null;
-  const remainder = pathName.slice(SESSION_MENTION_PREFIX.length).trim();
+  // parseAllAtCommands has already unescaped POSIX tokens. On Windows,
+  // unescapePath preserves backslashes because they are path separators, so
+  // session mentions need the shared shell-special unescaper here instead.
+  const rawRemainder = pathName.slice(SESSION_MENTION_PREFIX.length).trim();
+  const remainder =
+    process.platform === 'win32'
+      ? unescapeShellSpecials(rawRemainder)
+      : rawRemainder;
   if (remainder.length === 0) return null;
   return isSessionId(remainder) ? { id: remainder } : { title: remainder };
 }

@@ -9810,6 +9810,7 @@ export function App({
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
+                                onError={reportError}
                                 generateContent={
                                   connection.capabilities?.features.includes(
                                     'session_generation',
@@ -10149,6 +10150,7 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
+                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter
@@ -10324,7 +10326,7 @@ export function App({
                     onSideTaskTitleChange={handleSideTaskTitleChange}
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onSideTaskError={reportError}
+                    onError={reportError}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
@@ -10378,7 +10380,7 @@ export function App({
                     onSideTaskTitleChange={handleSideTaskTitleChange}
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onSideTaskError={reportError}
+                    onError={reportError}
                     onClose={closeArtifactPanel}
                   />
                 </div>

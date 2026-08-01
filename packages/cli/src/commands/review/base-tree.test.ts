@@ -30,7 +30,12 @@ import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
 import type { BuildTestReport } from './build-test.js';
 
-const okBuild = { ok: true, note: 'built' } as BuildTestReport;
+const okBuild = {
+  ok: true,
+  toolchain: 'npm',
+  build: [{ command: 'npm run build', exitCode: 0 }],
+  note: 'built',
+} as unknown as BuildTestReport;
 const failedBuild = {
   ok: false,
   note: 'TS2307',
@@ -188,6 +193,35 @@ describe('runBaseTree', () => {
     expect(r.build).toBe(failedBuild);
     expect(r.note).toMatch(/did not build/);
     expect(r.note).toMatch(/never a finding against the PR/);
+  });
+
+  it('is NOT available when the build handed off without building anything', () => {
+    // A PR that adds a workspace package maps to no package at the merge base,
+    // so runBuildTest hands off `unsupported` (ok: true, build: []). Stamping that
+    // tree available would let an A/B read the missing build as a behavioural diff.
+    const handoff = {
+      ok: true,
+      toolchain: 'unsupported',
+      build: [],
+      note: 'handoff',
+    } as unknown as BuildTestReport;
+    const r = run({}, () => handoff);
+    expect(r.available).toBe(false);
+    expect(
+      existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-ok')),
+    ).toBe(false);
+  });
+
+  it('is NOT available when npm scoped nothing to compile', () => {
+    // A docs-only diff (or a package with no build script) runs zero build commands
+    // and returns ok: true with an empty build[]; that is not a built tree.
+    const empty = {
+      ok: true,
+      toolchain: 'npm',
+      build: [],
+      note: 'nothing to build',
+    } as unknown as BuildTestReport;
+    expect(run({}, () => empty).available).toBe(false);
   });
 
   it('refuses when the plan carries no mergeBaseSha', () => {

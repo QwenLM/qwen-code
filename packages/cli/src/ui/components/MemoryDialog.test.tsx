@@ -114,6 +114,7 @@ describe('MemoryDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(os, 'homedir').mockReturnValue(path.resolve('/home/qwen'));
     vi.stubEnv('DISPLAY', ':99');
     vi.stubEnv('QWEN_HOME', path.join(os.homedir(), '.qwen'));
     vi.stubEnv(
@@ -163,8 +164,8 @@ describe('MemoryDialog', () => {
 
     expect(lastFrame()).toContain('› 1. User memory');
     expect(lastFrame()).toContain('2. Project memory');
-    expect(lastFrame()).toContain('/memories');
-    expect(lastFrame()).toContain('/memory');
+    expect(lastFrame()).toContain(`${path.sep}memories`);
+    expect(lastFrame()).toContain(`${path.sep}memory`);
     expect(lastFrame()).not.toContain('QWEN.md');
     expect(lastFrame()).not.toContain('Open auto-memory folder');
   });
@@ -536,7 +537,9 @@ describe('MemoryDialog', () => {
     const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
 
     expect(lastFrame()).toContain('› 1. User memory');
-    expect(lastFrame()).toContain('Saved in ~/.qwen/QWEN.md');
+    expect(lastFrame()).toContain(
+      `Saved in ~${path.sep}.qwen${path.sep}QWEN.md`,
+    );
     expect(lastFrame()).toContain('2. Project memory');
     expect(lastFrame()).toContain('Saved in QWEN.md');
 
@@ -548,7 +551,7 @@ describe('MemoryDialog', () => {
     });
 
     expect(launchEditor).toHaveBeenCalledWith(
-      expect.stringMatching(/\/\.qwen\/QWEN\.md$/),
+      expect.stringMatching(/[/\\]\.qwen[/\\]QWEN\.md$/),
     );
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
@@ -576,7 +579,9 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(launchEditor).toHaveBeenCalledWith('/tmp/project/QWEN.md');
+    expect(launchEditor).toHaveBeenCalledWith(
+      path.join('/tmp/project', 'QWEN.md'),
+    );
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 

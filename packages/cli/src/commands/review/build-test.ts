@@ -121,7 +121,7 @@ const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
  * anywhere in an 8 000-char report of a 3-failure run. The summary is the one
  * line that says what the whole run amounted to; keep it.
  */
-const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s/;
+const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
 
 /** SGR color sequences — stripped per line before the summary test, because a
  *  real runner interleaves them BETWEEN tokens (`Tests\x1b[2m  \x1b[22m3 failed`),
