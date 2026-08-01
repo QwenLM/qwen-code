@@ -61,3 +61,36 @@ export function getSessionProjectDir(sessionId: string): string | undefined {
 export function unregisterSessionProjectDir(sessionId: string): void {
   projectDirBySession.delete(sessionId);
 }
+
+/**
+ * Each session's active model id, keyed by its session id.
+ *
+ * A subprocess that reports which model ran (the /review compose step) needs
+ * the model that is ACTIVE in this session, and settings files are not a
+ * substitute: they miss /model switches and, under QWEN_HOME isolation,
+ * describe a different home entirely. So the live model is passed down through
+ * the environment.
+ *
+ * Keyed on the session for the same reason the project dir is: a single
+ * process-global slot holds whichever session booted first, and in daemon mode
+ * every later session would then hand its subprocesses another session's model
+ * — a confidently-wrong id, worse than an absent one.
+ */
+const modelBySession = new Map<string, string>();
+
+export function registerSessionModel(sessionId: string, model: string): void {
+  if (sessionId && model) modelBySession.set(sessionId, model);
+}
+
+export function getSessionModel(sessionId: string): string | undefined {
+  return modelBySession.get(sessionId);
+}
+
+/**
+ * Drop a session's entry when it ends, for the same reason as
+ * {@link unregisterSessionProjectDir}: the map would otherwise grow one entry
+ * per session for the life of a daemon process.
+ */
+export function unregisterSessionModel(sessionId: string): void {
+  modelBySession.delete(sessionId);
+}

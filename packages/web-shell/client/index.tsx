@@ -195,6 +195,12 @@ export type {
   WelcomeHeaderRenderer,
   ChatHeaderRenderer,
   ChatHeaderRenderInfo,
+  WebShellChatHeaderItem,
+  WebShellChatHeaderOptions,
+  WebShellRightPanelItem,
+  WebShellRightPanelOptions,
+  WebShellEnvironmentPanelItem,
+  WebShellEnvironmentPanelOptions,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
@@ -217,6 +223,10 @@ export type {
   WebShellSkillInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export type {
+  PaneHeaderActionsInfo,
+  PaneHeaderActionsRenderer,
+} from './components/ChatPane';
 export type {
   TurnOutputKind,
   TurnOutputOpenRequest,

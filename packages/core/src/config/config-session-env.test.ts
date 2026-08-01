@@ -7,14 +7,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /**
- * Tests for the module-level `sessionEnvClaimed` guard in Config.
+ * Tests for the module-level `sessionEnvClaimed` and `modelEnvClaimed`
+ * guards in Config.
  *
- * The guard ensures that only the first Config instance in a process sets
- * `process.env['QWEN_CODE_SESSION_ID']`, preventing throwaway instances
- * (e.g. telemetry-only) from overwriting the real session's ID.
+ * The guards ensure that only the first Config instance in a process sets
+ * `process.env['QWEN_CODE_SESSION_ID']` / `process.env['QWEN_CODE_MODEL']`,
+ * preventing throwaway instances (e.g. telemetry-only) from overwriting the
+ * real session's values.
  *
  * We use `vi.isolateModules` to get a fresh module scope (resetting the
- * module-level flag) for each test.
+ * module-level flags) for each test.
  */
 
 // Shared mocks needed by Config constructor
@@ -41,7 +43,7 @@ vi.mock('../core/contentGenerator.js', () => ({
   }),
   createContentGeneratorConfig: vi.fn().mockReturnValue({}),
   createContentGenerator: vi.fn().mockReturnValue({}),
-  AuthType: { API_KEY: 'apiKey' },
+  AuthType: { USE_GEMINI: 'gemini', QWEN_OAUTH: 'qwen-oauth' },
 }));
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -92,6 +94,7 @@ vi.mock('../memory/const.js', () => ({
 import * as fs from 'node:fs';
 import type { Mock } from 'vitest';
 import type { ConfigParameters } from './config.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 const baseParams: ConfigParameters = {
   cwd: '/tmp',
@@ -110,36 +113,44 @@ const baseParams: ConfigParameters = {
 // The reset is load-bearing for what these tests check, so give them headroom.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-describe('Config sessionEnvClaimed guard', () => {
-  let originalEnv: string | undefined;
+let originalEnv: string | undefined;
+let originalModelEnv: string | undefined;
 
-  beforeEach(() => {
-    originalEnv = process.env['QWEN_CODE_SESSION_ID'];
+beforeEach(() => {
+  originalEnv = process.env['QWEN_CODE_SESSION_ID'];
+  delete process.env['QWEN_CODE_SESSION_ID'];
+  originalModelEnv = process.env['QWEN_CODE_MODEL'];
+  delete process.env['QWEN_CODE_MODEL'];
+
+  (fs.existsSync as Mock).mockReturnValue(true);
+  (fs.readdirSync as Mock).mockReturnValue([]);
+  (fs.statSync as Mock).mockReturnValue({
+    isDirectory: vi.fn().mockReturnValue(true),
+  });
+  vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
+  (fs.mkdirSync as Mock).mockImplementation(() => undefined);
+  (fs.writeFileSync as Mock).mockImplementation(() => undefined);
+  (fs.renameSync as Mock).mockImplementation(() => undefined);
+  (fs.copyFileSync as Mock).mockImplementation(() => undefined);
+  (fs.unlinkSync as Mock).mockImplementation(() => undefined);
+  (fs.readFileSync as Mock).mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  if (originalEnv !== undefined) {
+    process.env['QWEN_CODE_SESSION_ID'] = originalEnv;
+  } else {
     delete process.env['QWEN_CODE_SESSION_ID'];
+  }
+  if (originalModelEnv !== undefined) {
+    process.env['QWEN_CODE_MODEL'] = originalModelEnv;
+  } else {
+    delete process.env['QWEN_CODE_MODEL'];
+  }
+  vi.resetModules();
+});
 
-    (fs.existsSync as Mock).mockReturnValue(true);
-    (fs.readdirSync as Mock).mockReturnValue([]);
-    (fs.statSync as Mock).mockReturnValue({
-      isDirectory: vi.fn().mockReturnValue(true),
-    });
-    vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
-    (fs.mkdirSync as Mock).mockImplementation(() => undefined);
-    (fs.writeFileSync as Mock).mockImplementation(() => undefined);
-    (fs.renameSync as Mock).mockImplementation(() => undefined);
-    (fs.copyFileSync as Mock).mockImplementation(() => undefined);
-    (fs.unlinkSync as Mock).mockImplementation(() => undefined);
-    (fs.readFileSync as Mock).mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env['QWEN_CODE_SESSION_ID'] = originalEnv;
-    } else {
-      delete process.env['QWEN_CODE_SESSION_ID'];
-    }
-    vi.resetModules();
-  });
-
+describe('Config sessionEnvClaimed guard', () => {
   it('first Config sets process.env QWEN_CODE_SESSION_ID to its sessionId', async () => {
     const { Config } = await import('./config.js');
     const config = new Config({ ...baseParams });
@@ -177,5 +188,100 @@ describe('Config sessionEnvClaimed guard', () => {
 
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
+  });
+});
+
+describe('Config modelEnvClaimed guard', () => {
+  it('first Config publishes its model to QWEN_CODE_MODEL', async () => {
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+  });
+
+  it('a later Config does not overwrite the claimed slot', async () => {
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+
+    // Second Config (daemon side-session or telemetry-only throwaway)
+    new Config({ ...baseParams, model: 'other-model' });
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+  });
+
+  it('only the claiming Config republishes on setModel', async () => {
+    const { Config } = await import('./config.js');
+    const owner = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    // Simulate /model on the live session
+    await owner.setModel('switched-model');
+    expect(process.env['QWEN_CODE_MODEL']).toBe('switched-model');
+
+    // A non-owner's switch must not touch the process-global slot
+    await later.setModel('hijacked-model');
+    expect(process.env['QWEN_CODE_MODEL']).toBe('switched-model');
+  });
+
+  it('republishes on refreshAuth when the resolved model changes', async () => {
+    const { Config } = await import('./config.js');
+    // Import from the same (mocked) module instance the cold config.js import
+    // above binds to, so the re-mock below is what refreshAuth actually calls.
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    const config = new Config({ ...baseParams });
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+
+    // Auth flows call refreshAuth directly — no model-change listener fires —
+    // and the resolved model can differ from the pre-auth one; the slot must
+    // follow it so subprocesses report the model that is actually active.
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'auth-resolved-model',
+        apiKey: 'k',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('auth-resolved-model');
+  });
+
+  it("registers each Config's model per session, so a daemon side-session reads its own", async () => {
+    const { Config } = await import('./config.js');
+    // Import from the same cold module graph the Config above bound to, so this
+    // reads the registry the constructor actually wrote.
+    const { getSessionModel } = await import('../utils/sessionIdContext.js');
+    const first = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    // The process-global slot is first-writer-wins (covered above), but the
+    // per-session registry holds EACH session's model — this is what daemon
+    // mode reads at spawn time, so a later session is not stuck reporting the
+    // first session's model.
+    expect(getSessionModel(first.getSessionId())).toBe('test-model');
+    expect(getSessionModel(later.getSessionId())).toBe('other-model');
+  });
+
+  it('re-keys the per-session model registry on startNewSession', async () => {
+    const { Config } = await import('./config.js');
+    const { getSessionModel } = await import('../utils/sessionIdContext.js');
+    // Owner boots first and claims the process-global slot; the side-session
+    // is the non-owner Config whose subprocesses read the per-session registry.
+    new Config({ ...baseParams });
+    const side = new Config({ ...baseParams, model: 'other-model' });
+    const oldSessionId = side.getSessionId();
+    expect(getSessionModel(oldSessionId)).toBe('other-model');
+
+    // /clear (and /reset, /new, /resume) flow through startNewSession, which
+    // mints a new session id. The registry entry must move with it — leaving
+    // it keyed on the old id would make the side-session's subprocesses miss
+    // and fall back to the owner's model.
+    const newSessionId = side.startNewSession();
+
+    expect(newSessionId).not.toBe(oldSessionId);
+    expect(getSessionModel(newSessionId)).toBe('other-model');
+    expect(getSessionModel(oldSessionId)).toBeUndefined();
   });
 });

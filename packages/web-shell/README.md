@@ -344,7 +344,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/approval-mode` | 本地实现            | 打开审批模式弹窗或直接切换审批模式。                                                                                    |
 | `/mode`          | 本地实现            | web-shell 本地别名，用于切换审批模式。                                                                                  |
 | `/mcp`           | 本地实现            | 打开 MCP 管理弹窗。                                                                                                     |
-| `/skills`        | 本地实现 + ACP 透传 | 无参数打开 skills 弹窗；带参数时透传给 daemon 执行。                                                                    |
+| `/skills`        | 本地实现 + ACP 透传 | 无参数或 `detail`/`details` 打开 skills 弹窗；其他参数转换为直接 skill 命令（`/skills review` → `/review`）。           |
 | `/tools`         | 本地实现            | 打开 tools 弹窗，列表展示工具名称、启用状态和 `description`。                                                           |
 | `/memory`        | 本地实现            | 打开 memory 弹窗，支持 `show`、`refresh`、`add user`、`add project` 等分支。                                            |
 | `/agents`        | 本地实现            | 打开 agents 弹窗，支持 `manage`、`create user`、`create project` 等分支。                                               |
@@ -368,5 +368,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/init`          | ACP 透传            | 分析项目并创建定制的 `QWEN.md`。                                                                                        |
 | `/stats`         | ACP 透传            | 显示统计信息，包含 `model`、`tools` 子命令。                                                                            |
 | `/summary`       | ACP 透传            | 生成当前会话摘要。                                                                                                      |
-| `/tasks`         | ACP 透传            | 列出后台任务。                                                                                                          |
+| `/tasks`         | 本地实现            | 打开环境信息面板并刷新后台任务。                                                                                        |
+| `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
+| `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |

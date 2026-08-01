@@ -39,6 +39,7 @@ describe('reviewCommand', () => {
 
   it('registers exactly the expected internal helper subcommands', () => {
     expect(registeredSubcommands()).toEqual([
+      'run',
       'parse-args',
       'fetch-pr',
       'capture-local',

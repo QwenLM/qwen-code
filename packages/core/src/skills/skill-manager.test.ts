@@ -744,6 +744,23 @@ Skill 3 content`);
       ]);
     });
 
+    it('reads the committed cache without triggering discovery', async () => {
+      expect(manager.getCachedSkills()).toBeNull();
+      expect(fs.readdir).not.toHaveBeenCalled();
+
+      await manager.listSkills();
+      vi.mocked(fs.readdir).mockClear();
+      vi.mocked(fs.readFile).mockClear();
+
+      expect(manager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+        'skill1',
+        'skill2',
+        'skill3',
+      ]);
+      expect(fs.readdir).not.toHaveBeenCalled();
+      expect(fs.readFile).not.toHaveBeenCalled();
+    });
+
     it('should prioritize project level over user level', async () => {
       const skills = await manager.listSkills();
       const skill1 = skills.find((s) => s.name === 'skill1');
@@ -1128,6 +1145,51 @@ Review content`;
       const simplifySkill = skills.find((s) => s.name === 'simplify');
       expect(reviewSkill!.level).toBe('bundled');
       expect(simplifySkill!.level).toBe('bundled');
+    });
+
+    it('should skip disabled skill levels without scanning them', async () => {
+      const disabledConfig = makeFakeConfig({
+        disabledSkillLevels: ['bundled'],
+      });
+      vi.spyOn(disabledConfig, 'getProjectRoot').mockReturnValue(
+        '/test/project',
+      );
+      const disabledManager = new SkillManager(disabledConfig);
+      mockReaddirForLevels(new Set(['project', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await disabledManager.listSkills({ force: true });
+
+      expect(skills.map((skill) => [skill.name, skill.level])).toEqual([
+        ['review', 'project'],
+      ]);
+      expect(await disabledManager.loadSkill('simplify')).toBeNull();
+      expect(
+        vi
+          .mocked(fs.readdir)
+          .mock.calls.some(([dirPath]) =>
+            String(dirPath).endsWith(bundledDirSegment),
+          ),
+      ).toBe(false);
+    });
+
+    it('should keep discovery working when config lacks getDisabledSkillLevels', async () => {
+      const partialConfig = {
+        isSafeMode: () => false,
+        getProjectRoot: () => '/test/project',
+        getBareMode: () => false,
+      } as Config;
+      const partialManager = new SkillManager(partialConfig);
+      mockReaddirForLevels(new Set(['bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await partialManager.listSkills({ force: true });
+
+      expect(
+        skills
+          .filter((skill) => skill.level === 'bundled')
+          .map((skill) => skill.name),
+      ).toEqual(['review', 'simplify']);
     });
 
     it('should prioritize project-level over bundled skills with same name', async () => {

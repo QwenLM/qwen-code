@@ -6,7 +6,29 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { normalizeForkTurns, selectForkHistory } from './fork-subagent.js';
+import {
+  normalizeForkTurns,
+  selectForkHistory,
+  validateForkToolList,
+} from './fork-subagent.js';
+
+describe('validateForkToolList', () => {
+  it('accepts the inline fork tool contract, including deny-all', () => {
+    expect(validateForkToolList([])).toBeUndefined();
+    expect(
+      validateForkToolList(['read_file', 'mcp__*', 'mcp__github__read_*']),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { tools: null, expected: /array of non-empty tool names/ },
+    { tools: [' read_file'], expected: /array of non-empty tool names/ },
+    { tools: ['*'], expected: /does not accept/ },
+    { tools: ['mcp__github__*__read'], expected: /wildcard entries/ },
+  ])('rejects an invalid tool list $tools', ({ tools, expected }) => {
+    expect(validateForkToolList(tools)).toMatch(expected);
+  });
+});
 
 describe('selectForkHistory', () => {
   const startup: Content = {

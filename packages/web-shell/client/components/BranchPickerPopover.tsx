@@ -34,6 +34,7 @@ interface BranchPickerPopoverProps {
   onOpenChange: (open: boolean) => void;
   workspaceCwd: string;
   gitCwd?: string;
+  side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
@@ -47,6 +48,7 @@ export function BranchPickerPopover({
   onOpenChange,
   workspaceCwd,
   gitCwd,
+  side = 'bottom',
   onBranchChanged,
   onOpenDiff,
   onOpenCommit,
@@ -280,7 +282,7 @@ export function BranchPickerPopover({
       <PopoverContent
         ref={contentRef}
         className={styles.picker}
-        side="bottom"
+        side={side}
         align="start"
         sideOffset={4}
         // The content is portaled out of the composer, but React synthetic

@@ -560,6 +560,28 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses valid memory project scopes and falls back for invalid values', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope', 'workspace']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'workspace' },
+    });
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope=git-root']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'git-root' },
+    });
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--memory-project-scope',
+        'unsupported',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -655,6 +677,7 @@ describe('serve fast path argument parsing', () => {
       ['max-journal-events', ['--max-journal-events', '10000']],
       ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
       ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],

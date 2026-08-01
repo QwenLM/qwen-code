@@ -2440,6 +2440,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       Number.POSITIVE_INFINITY,
       /compactedReplayMaxBytes/,
     ],
+    ['memoryProjectScope', 'unsupported', /memoryProjectScope/],
   ] as const)(
     'rejects invalid %s=%s before printing the listening line',
     async (optionName, value, message) => {
@@ -3056,10 +3057,85 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('applies memoryProjectScope to every runtime without mutating process.env', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-memory-project-scope-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    let workspaceRegistry:
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspaceRegistry = deps?.workspaceRegistry;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        memoryProjectScope: 'git-root',
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workspaceRegistry?.list()).toHaveLength(2);
+      for (const runtime of workspaceRegistry?.list() ?? []) {
+        expect(
+          runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'],
+        ).toBe('git-root');
+      }
+      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe('workspace');
+    } finally {
+      if (originalScope === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = originalScope;
+      }
+      await handle.close();
+    }
+  });
+
   it('rebuilds runtime env from the immutable daemon base after workspace reload', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),
     );
+    const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_RUNTIME_DIR'];
     const originalBase = process.env['QWEN_TEST_BOOT_BASE'];
     const originalLeak = process.env['QWEN_TEST_RELOAD_LEAK'];
     const originalRemoved = process.env['QWEN_TEST_REMOVED_FROM_DOTENV'];
@@ -3076,6 +3152,11 @@ describe('runQwenServe runtime startup failures', () => {
       () =>
         ({
           merged: {
+            advanced: {
+              runtimeOutputDir: runtimeMounted
+                ? '.runtime-reloaded'
+                : '.runtime-boot',
+            },
             env: {
               QWEN_TEST_RUNTIME_VALUE: runtimeMounted ? 'reloaded' : 'boot',
             },
@@ -3110,11 +3191,15 @@ describe('runQwenServe runtime startup failures', () => {
           effectiveEnv?: NodeJS.ProcessEnv;
         }
       | undefined;
+    let primaryRuntime:
+      | import('./workspace-registry.js').WorkspaceRuntime
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
         workspace = deps?.workspace as typeof workspace;
         primaryRuntimeEnv = deps?.primaryRuntimeEnv as typeof primaryRuntimeEnv;
+        primaryRuntime = deps?.workspaceRegistry?.primary;
         return express();
       },
     );
@@ -3142,6 +3227,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntimeEnv?.effectiveEnv).toBeDefined();
       const capturedRuntimeEnv = primaryRuntimeEnv!.effectiveEnv!;
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
+      const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -3156,6 +3244,8 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
       expect(capturedRuntimeEnv['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -3171,6 +3261,11 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_TEST_REMOVED_FROM_DOTENV'];
       } else {
         process.env['QWEN_TEST_REMOVED_FROM_DOTENV'] = originalRemoved;
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
       }
       await handle.close();
     }
@@ -3305,6 +3400,8 @@ describe('runQwenServe runtime startup failures', () => {
     );
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
+    const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_RUNTIME_DIR'];
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
@@ -3318,6 +3415,13 @@ describe('runQwenServe runtime startup failures', () => {
         const isSecondary = workspace === secondary;
         return {
           merged: {
+            advanced: {
+              runtimeOutputDir: isSecondary
+                ? runtimeMounted
+                  ? '.secondary-runtime-reloaded'
+                  : '.secondary-runtime-boot'
+                : '.primary-runtime',
+            },
             env: {
               [isSecondary
                 ? 'QWEN_TEST_SECONDARY_ENV'
@@ -3381,6 +3485,14 @@ describe('runQwenServe runtime startup failures', () => {
       const envFilePaths = env.envFilePaths;
       const envFileReadFailures = env.envFileReadFailures;
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('boot');
+      const pinnedRuntimeBaseDir = path.join(
+        secondary,
+        '.secondary-runtime-boot',
+      );
+      expect(secondaryRuntime!.sessionRuntimeBaseDir).toBe(
+        pinnedRuntimeBaseDir,
+      );
+      expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
 
       await secondaryRuntime!.workspaceService.reload({
         route: 'POST /workspace/reload',
@@ -3391,8 +3503,17 @@ describe('runQwenServe runtime startup failures', () => {
       expect(env.envFilePaths).toBe(envFilePaths);
       expect(env.envFileReadFailures).toBe(envFileReadFailures);
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+      expect(secondaryRuntime!.sessionRuntimeBaseDir).toBe(
+        pinnedRuntimeBaseDir,
+      );
+      expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
     } finally {
       await handle.close();
+      if (originalRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+      }
     }
   });
 
@@ -5294,6 +5415,54 @@ describe('runQwenServe runtime startup failures', () => {
     expect(
       stopExtensionGenerationReconciler.mock.invocationCallOrder[0],
     ).toBeLessThan(vi.mocked(bridge.shutdown).mock.invocationCallOrder[0]!);
+  });
+
+  it('seals and drains admitted session maintenance before bridge shutdown', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-maintenance-drain-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    let finishMaintenance!: () => void;
+    const maintenanceGate = new Promise<void>((resolve) => {
+      finishMaintenance = resolve;
+    });
+    const sealMaintenanceAndWait = vi.fn(() => maintenanceGate);
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['sessionArchiveCoordinator'] = {
+        sealMaintenanceAndWait,
+      };
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+    await handle.runtimeReady;
+
+    const close = handle.close();
+    expect(sealMaintenanceAndWait).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(bridge.shutdown).not.toHaveBeenCalled();
+
+    finishMaintenance();
+    await close;
+    expect(bridge.shutdown).toHaveBeenCalledOnce();
   });
 
   it('does not cancel deferred runtime once startup is already running', async () => {

@@ -93,7 +93,10 @@ vi.mock('../../../utils/stdioHelpers.js', () => ({
 
 const { createDaemonWorkspaceService } = await import('../index.js');
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import { BridgeChannelClosedError } from '@qwen-code/acp-bridge/status';
+import {
+  BridgeChannelClosedError,
+  type ServeWorkspaceSkillsStatus,
+} from '@qwen-code/acp-bridge/status';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -112,6 +115,8 @@ import {
 } from '../types.js';
 import type {
   DaemonWorkspaceServiceDeps,
+  InvokeWorkspaceCommandFn,
+  QueryWorkspaceStatusFn,
   WorkspaceRequestContext,
 } from '../types.js';
 
@@ -793,7 +798,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(second.skills.map((s) => s.name)).toEqual(['review']);
     });
 
-    it('getWorkspaceSkillsStatus refreshes the cached status on a newer live answer', async () => {
+    it('getWorkspaceSkillsStatus reuses the snapshot until it is invalidated', async () => {
       const statuses = [
         {
           v: 1,
@@ -820,8 +825,227 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       await svc.getWorkspaceSkillsStatus(makeCtx());
+      const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(cached.skills.map((s) => s.name)).toEqual(['review']);
+      expect(queryWorkspaceStatus).toHaveBeenCalledOnce();
+
+      svc.invalidateWorkspaceSkillsStatus();
       const refreshed = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(refreshed.skills.map((s) => s.name)).toEqual(['review', 'plan']);
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('revalidates the workspace skills snapshot after its freshness window', async () => {
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'review',
+              description: 'Review code',
+              level: 'bundled',
+              modelInvocable: true,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'plan',
+              description: 'Plan changes',
+              level: 'bundled',
+              modelInvocable: true,
+            },
+          ],
+        });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      try {
+        const initial = await svc.getWorkspaceSkillsStatus(makeCtx());
+        now += 4_999;
+        const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+        now += 1;
+        const refreshed = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+        expect(initial.skills.map((skill) => skill.name)).toEqual(['review']);
+        expect(cached).toEqual(initial);
+        expect(refreshed.skills.map((skill) => skill.name)).toEqual(['plan']);
+        expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('does not let a superseded read extend the freshness window', async () => {
+      // A read that started before an invalidation still serves the snapshot a
+      // later read committed, but must not push that snapshot's TTL out —
+      // otherwise a post-mutation snapshot goes unrevalidated for longer than
+      // the window.
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const stale = deferred<ServeWorkspaceSkillsStatus>();
+      const skill = (name: string) =>
+        ({
+          kind: 'skill',
+          status: 'ok',
+          name,
+          description: name,
+          level: 'bundled',
+          modelInvocable: true,
+        }) as ServeWorkspaceSkillsStatus['skills'][number];
+      const fresh: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('review')],
+      };
+      const later: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('plan')],
+      };
+      const query = vi
+        .fn()
+        .mockImplementationOnce(() => stale.promise)
+        .mockResolvedValueOnce(fresh)
+        .mockResolvedValueOnce(later);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      try {
+        const supersededRead = svc.getWorkspaceSkillsStatus(makeCtx());
+        svc.invalidateWorkspaceSkillsStatus();
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          fresh,
+        );
+
+        now += 4_000;
+        // The superseded read answers late and uninitialized, so it falls back
+        // to the committed snapshot.
+        stale.resolve({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+        });
+        await expect(supersededRead).resolves.toEqual(fresh);
+
+        // 5_001ms after `fresh` was committed: the window is over regardless of
+        // when the superseded read happened to finish.
+        now += 1_001;
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          later,
+        );
+        expect(query).toHaveBeenCalledTimes(3);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('shares one workspace skills query between concurrent readers', async () => {
+      const pending = deferred<ServeWorkspaceSkillsStatus>();
+      const query = vi.fn(() => pending.promise);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      const first = svc.getWorkspaceSkillsStatus(makeCtx());
+      const second = svc.getWorkspaceSkillsStatus(makeCtx());
+      pending.resolve({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        expect.objectContaining({ initialized: true }),
+        expect.objectContaining({ initialized: true }),
+      ]);
+      expect(query).toHaveBeenCalledOnce();
+    });
+
+    it('does not cache a workspace skills query invalidated while in flight', async () => {
+      const stale = deferred<ServeWorkspaceSkillsStatus>();
+      const freshStatus: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'plan',
+            description: 'Plan changes',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const query = vi
+        .fn()
+        .mockImplementationOnce(() => stale.promise)
+        .mockResolvedValueOnce(freshStatus);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      const staleRead = svc.getWorkspaceSkillsStatus(makeCtx());
+      svc.invalidateWorkspaceSkillsStatus();
+      const freshRead = svc.getWorkspaceSkillsStatus(makeCtx());
+
+      await expect(freshRead).resolves.toEqual(freshStatus);
+      stale.resolve({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+      await expect(staleRead).resolves.toEqual(freshStatus);
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        freshStatus,
+      );
+      expect(query).toHaveBeenCalledTimes(2);
     });
 
     it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {
@@ -903,10 +1127,13 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+      const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
 
       expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledOnce();
       expect(result.initialized).toBe(true);
       expect(result.skills.map((s) => s.name)).toEqual(['review']);
+      expect(cached).toEqual(result);
     });
 
     it('getWorkspaceSkillsStatus prefers the cached child answer over the daemon-local provider', async () => {
@@ -1405,7 +1632,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/skills/refresh',
-        { cwd: '/workspace' },
+        { cwd: '/workspace', reason: 'settings' },
       );
       expect(result).toEqual({
         skillName: 'review',
@@ -1424,6 +1651,72 @@ describe('createDaemonWorkspaceService', () => {
         },
         originatorClientId: 'client-1',
       });
+    });
+
+    it('does not retain a status snapshot read while a settings refresh is in flight', async () => {
+      const refresh = deferred<{
+        sessionsRefreshed: number;
+        sessionsFailed: number;
+      }>();
+      const oldSkill: ServeWorkspaceSkillsStatus['skills'][number] = {
+        kind: 'skill',
+        status: 'ok',
+        name: 'review',
+        description: 'Review changed code',
+        level: 'bundled',
+        modelInvocable: true,
+      };
+      const oldStatus: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [oldSkill],
+      };
+      const newStatus: ServeWorkspaceSkillsStatus = {
+        ...oldStatus,
+        skills: [
+          {
+            ...oldSkill,
+            status: 'disabled',
+            disabledReason: 'hard',
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(oldStatus)
+        .mockResolvedValueOnce(oldStatus)
+        .mockResolvedValueOnce(newStatus);
+      const invokeWorkspaceCommand = vi.fn(
+        () => refresh.promise,
+      ) as unknown as InvokeWorkspaceCommandFn;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const toggle = svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false);
+      await vi.waitFor(() =>
+        expect(invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+      );
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        oldStatus,
+      );
+      refresh.resolve({ sessionsRefreshed: 1, sessionsFailed: 0 });
+      await toggle;
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        newStatus,
+      );
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(3);
     });
 
     it('publishes an explicit enabled override for a default-disabled skill', async () => {

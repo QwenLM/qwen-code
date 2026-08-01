@@ -3319,7 +3319,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 ============================================================
-@modelcontextprotocol/sdk@1.29.0
+@modelcontextprotocol/sdk@1.30.0
 (git+https://github.com/modelcontextprotocol/typescript-sdk.git)
 
 MIT License
@@ -3346,8 +3346,8 @@ SOFTWARE.
 
 
 ============================================================
-@hono/node-server@1.19.14
-(https://github.com/honojs/node-server.git)
+@hono/node-server@2.0.12
+(git+https://github.com/honojs/node-server.git)
 
 MIT License
 
@@ -3428,7 +3428,7 @@ SOFTWARE.
 
 
 ============================================================
-fast-uri@3.1.3
+fast-uri@3.1.4
 (git+https://github.com/fastify/fast-uri.git)
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -3913,7 +3913,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ============================================================
-body-parser@2.2.2
+body-parser@2.3.0
 (No repository found)
 
 (The MIT License)

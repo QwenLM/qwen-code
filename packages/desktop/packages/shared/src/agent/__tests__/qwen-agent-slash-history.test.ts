@@ -2114,6 +2114,74 @@ describe('QwenAgent slash command history', () => {
     });
   });
 
+  it('restores cancelled Qwen transcript tool telemetry as interrupted', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    const commandArgs = { command: 'sleep 10' };
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'assistant-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:02.868Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-sleep',
+                name: 'run_shell_command',
+                args: commandArgs,
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'tool-telemetry-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:06.203Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            function_name: 'run_shell_command',
+            function_args: commandArgs,
+            status: 'cancelled',
+            success: false,
+          },
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({ updates: [] }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    expect(result.messages.filter((message) => message.role === 'tool')).toEqual([
+      expect.objectContaining({
+        toolUseId: 'call-sleep',
+        toolName: 'Bash',
+        toolStatus: 'error',
+        toolResult: 'Interrupted',
+        isError: true,
+      }),
+    ]);
+  });
+
   it('closes dangling Qwen transcript tool calls as terminal errors', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));

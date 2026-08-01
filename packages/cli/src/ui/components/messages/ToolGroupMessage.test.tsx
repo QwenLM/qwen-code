@@ -523,7 +523,7 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
-  // Transcript full-detail mode must NOT be short-circuited by the
+  // Full-detail mode must NOT be short-circuited by the
   // memory-only / pure-parallel-agent early returns (which run before the
   // forceExpandAll computation). Each tool must render in full.
   describe('fullDetail bypasses compact early returns', () => {
