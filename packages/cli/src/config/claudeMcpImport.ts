@@ -7,7 +7,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  type MCPServerConfig,
+  normalizeClaudeMcpServer,
+} from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { SettingScope, type LoadedSettings } from './settings.js';
 
@@ -139,7 +142,10 @@ function copyMcpServers(
       errors.push(`${sourcePath}: server "${name}" is not an object - skipped`);
       continue;
     }
-    servers[name] = serverConfig as MCPServerConfig;
+    // Claude keys transport off a `type` field; Qwen keys off which URL field is
+    // set. Normalize so a Claude `type: 'http'` server connects over streamable
+    // HTTP instead of being mistaken for SSE.
+    servers[name] = normalizeClaudeMcpServer(serverConfig as MCPServerConfig);
   }
 }
 

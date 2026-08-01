@@ -34,12 +34,21 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { QWEN_SERVER_TOKEN_ENV } from '../channel-worker-env.js';
+import { snapshotProcessEnv } from '../env-snapshot.js';
+import {
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 
 const A2UI_MIME = 'application/a2ui+json';
 // Standard action-tool name from the official A2UI-over-MCP guide
 // (a2ui.org/guides/a2ui_over_mcp).
 const ACTION_TOOL = 'action';
 const CALL_TIMEOUT_MS = 15_000;
+const SCRUBBED_STDIO_ENV_KEYS: ReadonlySet<string> = new Set([
+  QWEN_SERVER_TOKEN_ENV,
+]);
 
 export interface McpServerConfigLike {
   command?: string;
@@ -80,12 +89,15 @@ interface RegisterA2uiActionRoutesOptions {
   mutate: () => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   /** Workspace MCP status from the daemon (includes runtime-registered servers). */
-  getMcpServers: (req: Request) => Promise<McpServerCell[]>;
+  getMcpServers: () => Promise<McpServerCell[]>;
   /** Injectable for unit tests; defaults to the real one-shot MCP call. */
   callAction?: (
     cfg: McpServerConfigLike,
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
+  env?: Readonly<Record<string, string | undefined>>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /** Exported for unit testing. */
@@ -129,22 +141,43 @@ export async function findFromSettingsFile(
 }
 
 /** Build a one-shot transport from the config shape: stdio (command) or streamable HTTP (httpUrl). */
-export function buildTransport(cfg: McpServerConfigLike): Transport {
+export function buildTransport(
+  cfg: McpServerConfigLike,
+  baseEnv: Readonly<Record<string, string | undefined>> = snapshotProcessEnv(),
+): Transport {
   if (typeof cfg.httpUrl === 'string') {
     return new StreamableHTTPClientTransport(new URL(cfg.httpUrl));
   }
   return new StdioClientTransport({
     command: cfg.command!,
     args: cfg.args ?? [],
-    // spawn() treats `env` as a complete replacement, not a merge — a partial
-    // env (e.g. {API_KEY}) would strip PATH/HOME and break the child. Merge
-    // over process.env like packages/core/src/tools/mcp-client.ts does; when
-    // unset, let the SDK apply its safe default environment.
-    ...(cfg.env
-      ? { env: { ...process.env, ...cfg.env } as Record<string, string> }
-      : {}),
+    // Passing `env` prevents the SDK from reading live process.env while
+    // keeping daemon MCP stdio behavior aligned with the core CLI client.
+    env: buildStdioServerEnv(baseEnv, cfg.env),
     cwd: cfg.cwd,
   });
+}
+
+function buildStdioServerEnv(
+  baseEnv: Readonly<Record<string, string | undefined>>,
+  serverEnv: Record<string, string> | undefined,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (
+      value !== undefined &&
+      !key.startsWith('BASH_FUNC_') &&
+      !value.startsWith('()') &&
+      !SCRUBBED_STDIO_ENV_KEYS.has(key)
+    ) {
+      env[key] = value;
+    }
+  }
+  const merged = { ...env, ...(serverEnv ?? {}) };
+  for (const key of SCRUBBED_STDIO_ENV_KEYS) {
+    delete merged[key];
+  }
+  return merged;
 }
 
 /** Exported for unit testing the MCP content normalization rules. */
@@ -192,8 +225,9 @@ export function extractA2uiActionResult(
 export async function callA2uiAction(
   cfg: McpServerConfigLike,
   args: A2uiActionArgs,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<A2uiActionResult> {
-  const transport = buildTransport(cfg);
+  const transport = buildTransport(cfg, env);
   const client = new Client({ name: 'qwen-serve-a2ui', version: '0.0.1' });
   try {
     await client.connect(transport, { timeout: CALL_TIMEOUT_MS });
@@ -216,12 +250,26 @@ export function registerA2uiActionRoutes(
   opts: RegisterA2uiActionRoutesOptions,
 ): void {
   const { boundWorkspace, mutate, safeBody, getMcpServers } = opts;
-  const callAction = opts.callAction ?? callA2uiAction;
+  const callAction =
+    opts.callAction ??
+    ((cfg: McpServerConfigLike, args: A2uiActionArgs) =>
+      callA2uiAction(cfg, args, opts.env));
 
   app.post(
     '/session/:id/a2ui-action',
     mutate(),
     async (req: Request, res: Response) => {
+      if (opts.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      const assertGenerationOpen = opts.captureGenerationAssertion?.();
+      try {
+        assertGenerationOpen?.();
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        throw error;
+      }
       const body = safeBody(req);
       const name = body['name'];
       if (typeof name !== 'string' || name.trim().length === 0) {
@@ -241,17 +289,27 @@ export function registerA2uiActionRoutes(
       // registration), settings file as fallback.
       let cfg: McpServerConfigLike | null = null;
       try {
-        const servers = (await getMcpServers(req)).filter(
+        const servers = (await getMcpServers()).filter(
           (s) =>
             s.name.toLowerCase().includes('a2ui') &&
             usableServerConfig(s.config),
         );
+        assertGenerationOpen?.();
         const live = servers.find((s) => s.mcpStatus === 'connected');
         cfg = (live ?? servers[0])?.config ?? null;
-      } catch {
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
         /* Status unavailable -> fall through to the settings fallback. */
       }
-      if (!cfg) cfg = await findFromSettingsFile(boundWorkspace);
+      if (!cfg) {
+        cfg = await findFromSettingsFile(boundWorkspace);
+        try {
+          assertGenerationOpen?.();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       if (!cfg) {
         res.status(503).json({
           error:
@@ -260,13 +318,16 @@ export function registerA2uiActionRoutes(
         return;
       }
       try {
+        assertGenerationOpen?.();
         const { commands, fallback } = await callAction(cfg, {
           name: name.trim(),
           surfaceId,
           context,
         });
+        assertGenerationOpen?.();
         res.status(200).json({ commands, fallback });
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         // Log the detail server-side; keep the client-facing message generic
         // so internal paths/commands/URLs never leak.
         writeStderrLine(

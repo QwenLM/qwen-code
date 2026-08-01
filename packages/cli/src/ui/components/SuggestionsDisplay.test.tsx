@@ -143,6 +143,92 @@ describe('SuggestionsDisplay', () => {
     expect(output).toContain('First line of the skill description.');
     expect(output).toContain('- bullet one - bullet two');
   });
+
+  it('renders a visible marker for the active suggestion', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          { label: 'pr', value: 'pr', description: 'Pull request helper' },
+          {
+            label: 'issue-to-pr',
+            value: 'issue-to-pr',
+            description: 'Issue helper',
+          },
+        ]}
+        activeIndex={1}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput="/pr"
+        mode="slash"
+      />,
+    );
+
+    const lines = (lastFrame() ?? '').split('\n');
+
+    expect(lines[0]).toMatch(/^ {2}pr/);
+    expect(lines[1]).toMatch(/^> issue-to-pr/);
+  });
+});
+
+describe('SuggestionsDisplay tabs', () => {
+  const mixed = [
+    { label: 'a.ts', value: 'a.ts', category: 'file' as const },
+    { label: 'Fix bug', value: 'session:id-1', category: 'session' as const },
+  ];
+
+  it('shows a tab bar when multiple categories are present', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Files');
+    expect(lastFrame()).toContain('Sessions');
+  });
+
+  it('filters rows to the active category', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="session"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Fix bug');
+    expect(lastFrame()).not.toContain('a.ts');
+  });
+
+  it('hides the tab bar for single-category (file-only) completion', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[mixed[0]]}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file']}
+      />,
+    );
+    expect(lastFrame()).not.toContain('Files');
+  });
 });
 
 describe('normalizeDescription', () => {

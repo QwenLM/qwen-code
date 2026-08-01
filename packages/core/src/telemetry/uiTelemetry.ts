@@ -18,6 +18,7 @@ import type {
   ToolCallEvent,
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -43,6 +44,34 @@ export interface ToolCallStats {
     [ToolCallDecision.MODIFY]: number;
     [ToolCallDecision.AUTO_ACCEPT]: number;
   };
+}
+
+export interface SkillCallStats {
+  count: number;
+  success: number;
+  fail: number;
+}
+
+export interface SkillMetrics {
+  totalCalls: number;
+  totalSuccess: number;
+  totalFail: number;
+  byName: Record<string, SkillCallStats>;
+}
+
+export interface GenerationTimingSample {
+  model: string;
+  ttftMs: number;
+  generationDurationMs: number;
+  outputTokens: number;
+}
+
+export interface GenerationMetrics {
+  timedRequests: number;
+  totalTtftMs: number;
+  totalGenerationDurationMs: number;
+  totalThroughputOutputTokens: number;
+  last?: GenerationTimingSample;
 }
 
 /**
@@ -77,6 +106,7 @@ export interface ModelMetrics extends ModelMetricsCore {
 
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
+  generation?: GenerationMetrics;
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -94,6 +124,7 @@ export interface SessionMetrics {
     totalLinesAdded: number;
     totalLinesRemoved: number;
   };
+  skills?: SkillMetrics;
 }
 
 const createInitialModelMetricsCore = (): ModelMetricsCore => ({
@@ -121,6 +152,20 @@ const createInitialModelMetrics = (): ModelMetrics => ({
   bySource: Object.create(null) as Record<string, ModelMetricsCore>,
 });
 
+const createInitialSkillMetrics = (): SkillMetrics => ({
+  totalCalls: 0,
+  totalSuccess: 0,
+  totalFail: 0,
+  byName: {},
+});
+
+const createInitialGenerationMetrics = (): GenerationMetrics => ({
+  timedRequests: 0,
+  totalTtftMs: 0,
+  totalGenerationDurationMs: 0,
+  totalThroughputOutputTokens: 0,
+});
+
 const createInitialMetrics = (): SessionMetrics => ({
   models: {},
   tools: {
@@ -140,6 +185,7 @@ const createInitialMetrics = (): SessionMetrics => ({
     totalLinesAdded: 0,
     totalLinesRemoved: 0,
   },
+  skills: createInitialSkillMetrics(),
 });
 
 export class UiTelemetryService extends EventEmitter {
@@ -173,6 +219,30 @@ export class UiTelemetryService extends EventEmitter {
 
   getMetricsForSession(sessionId: string): SessionMetrics {
     return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+  }
+
+  recordSkillInvocation(
+    skillName: string,
+    success: boolean,
+    sessionId?: string,
+  ): void {
+    this.#accumulateSkillInvocation(this.#metrics, skillName, success);
+
+    if (sessionId && !this.#closedSessions.has(sessionId)) {
+      if (!this.#sessionMetrics.has(sessionId)) {
+        this.#sessionMetrics.set(sessionId, createInitialMetrics());
+      }
+      this.#accumulateSkillInvocation(
+        this.#sessionMetrics.get(sessionId)!,
+        skillName,
+        success,
+      );
+    }
+
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
   }
 
   getLastPromptTokenCount(): number {
@@ -265,6 +335,33 @@ export class UiTelemetryService extends EventEmitter {
       bucket.tokens.cached += event.cached_content_token_count;
       bucket.tokens.thoughts += event.thoughts_token_count;
     }
+
+    if (
+      event.ttft_ms === undefined ||
+      !Number.isFinite(event.ttft_ms) ||
+      event.ttft_ms < 0 ||
+      isInternalPromptId(event.prompt_id)
+    ) {
+      return;
+    }
+
+    const generation =
+      metrics.generation ??
+      (metrics.generation = createInitialGenerationMetrics());
+    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+
+    generation.timedRequests++;
+    generation.totalTtftMs += event.ttft_ms;
+    if (generationDurationMs > 0) {
+      generation.totalGenerationDurationMs += generationDurationMs;
+      generation.totalThroughputOutputTokens += event.output_token_count;
+    }
+    generation.last = {
+      model: event.model,
+      ttftMs: event.ttft_ms,
+      generationDurationMs,
+      outputTokens: event.output_token_count,
+    };
   }
 
   #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {
@@ -328,6 +425,46 @@ export class UiTelemetryService extends EventEmitter {
       if (event.metadata['model_removed_lines'] !== undefined) {
         files.totalLinesRemoved += event.metadata['model_removed_lines'];
       }
+    }
+  }
+
+  #accumulateSkillInvocation(
+    metrics: SessionMetrics,
+    skillName: string,
+    success: boolean,
+  ): void {
+    const skills = metrics.skills ?? createInitialSkillMetrics();
+    metrics.skills = skills;
+
+    skills.totalCalls++;
+    if (success) {
+      skills.totalSuccess++;
+    } else {
+      skills.totalFail++;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(skills.byName, skillName)) {
+      Object.defineProperty(skills.byName, skillName, {
+        value: {
+          count: 0,
+          success: 0,
+          fail: 0,
+        },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
+    const skillStats = skills.byName[skillName];
+    if (!skillStats) {
+      return;
+    }
+    skillStats.count++;
+    if (success) {
+      skillStats.success++;
+    } else {
+      skillStats.fail++;
     }
   }
 

@@ -1,137 +1,43 @@
 .header {
-  padding: 12px 0 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.banner {
-  display: flex;
   align-items: center;
-  gap: 2ch;
-  min-width: 0;
-}
-
-.logo {
-  margin: 0;
-  flex-shrink: 0;
-  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
-  font-size: 20px;
-  line-height: 1;
-  white-space: pre;
-  color: var(--accent-color);
-  background: var(--welcome-logo-gradient);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.panel {
-  min-width: 280px;
-  max-width: 60ch;
-  padding: 7px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
-  color: var(--text-secondary);
+  gap: 8px;
+  padding: 12px 0 16px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  text-align: center;
 }
 
 .titleRow {
   display: flex;
-  align-items: baseline;
-  gap: 1ch;
-  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  color: var(--foreground);
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 36px;
 }
 
 .title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--accent-color);
-}
-
-.version {
-  font-size: 13px;
-  color: var(--text-dimmed);
+  background: var(--agent-logo-gradient);
+  background-clip: text;
+  color: var(--primary, var(--agent-blue-500));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .subtitle {
-  height: 1em;
-}
-
-.metaLine {
-  display: flex;
-  align-items: baseline;
-  gap: 1ch;
-  font-size: 13px;
-  min-width: 0;
-}
-
-.mode {
-  color: var(--accent-color);
-  font-weight: 600;
-}
-
-.sep {
-  color: var(--text-dimmed);
-}
-
-.shellLabel {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.model {
-  color: var(--text-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.modelHint {
-  color: var(--text-dimmed);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.cwd {
-  font-size: 13px;
-  color: var(--text-dimmed);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tip {
-  font-size: 13px;
-  color: var(--text-dimmed);
-  display: flex;
-  gap: 1ch;
-  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
-}
-
-.tipLabel {
-  color: var(--text-dimmed);
-}
-
-.tipText {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24px;
 }
 
 @media (max-width: 760px) {
-  .banner {
-    align-items: stretch;
-  }
-
-  .logo {
-    display: none;
-  }
-
-  .panel {
-    width: 100%;
-    max-width: none;
-    min-width: 0;
+  .titleRow {
+    font-size: 24px;
+    line-height: 32px;
   }
 }

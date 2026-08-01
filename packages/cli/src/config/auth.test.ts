@@ -77,6 +77,21 @@ describe('validateAuthMethod', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
   });
 
+  it('uses providerProtocol mappings to find custom provider env keys', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'qwen3' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3', envKey: 'IDEALAB_KEY' }],
+        },
+        providerProtocol: { idealab: 'openai' },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+    process.env['IDEALAB_KEY'] = 'idealab-key';
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+  });
+
   it('disambiguates by settings.model.baseUrl when providers share a model id', () => {
     // Two providers with the same id; the persisted baseUrl selects the second.
     // Only the second provider's env key is set, so validation passes only if

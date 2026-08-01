@@ -324,6 +324,10 @@ export const CHANNEL_MAP = {
   setAutoCapitalisation: invoke(RPC_CHANNELS.input.SET_AUTO_CAPITALISATION),
   getSendMessageKey: invoke(RPC_CHANNELS.input.GET_SEND_MESSAGE_KEY),
   setSendMessageKey: invoke(RPC_CHANNELS.input.SET_SEND_MESSAGE_KEY),
+  getVoiceModel: invoke(RPC_CHANNELS.input.GET_VOICE_MODEL),
+  setVoiceModel: invoke(RPC_CHANNELS.input.SET_VOICE_MODEL),
+  getVoiceEnabled: invoke(RPC_CHANNELS.input.GET_VOICE_ENABLED),
+  setVoiceEnabled: invoke(RPC_CHANNELS.input.SET_VOICE_ENABLED),
   getSpellCheck: invoke(RPC_CHANNELS.input.GET_SPELL_CHECK),
   setSpellCheck: invoke(RPC_CHANNELS.input.SET_SPELL_CHECK),
 

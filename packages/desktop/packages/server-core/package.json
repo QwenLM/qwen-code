@@ -18,7 +18,8 @@
     "./handlers/rpc": "./src/handlers/rpc/index.ts",
     "./handlers/rpc/*": "./src/handlers/rpc/*.ts",
     "./sessions": "./src/sessions/index.ts",
-    "./webui": "./src/webui/index.ts"
+    "./webui": "./src/webui/index.ts",
+    "./voice": "./src/voice/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

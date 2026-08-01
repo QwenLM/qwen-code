@@ -21,7 +21,7 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
   transition:
     background 0.15s,
@@ -30,12 +30,12 @@
 }
 
 .iconBtn:hover:not(:disabled) {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--foreground);
 }
 
 .iconBtn:focus-visible {
-  outline: 2px solid var(--accent-color, #4a9eff);
+  outline: 2px solid var(--agent-blue-500, #4a9eff);
   outline-offset: 1px;
 }
 
@@ -61,8 +61,8 @@
   padding: 0 10px 0 9px;
   border: none;
   border-radius: 14px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   cursor: pointer;
   transition: filter 0.15s;
@@ -96,7 +96,7 @@
   width: 2px;
   min-height: 2px;
   border-radius: 1px;
-  background: var(--accent-color, #4a9eff);
+  background: var(--agent-blue-500, #4a9eff);
   transition: height 0.1s linear;
 }
 
@@ -104,7 +104,7 @@
   min-width: 30px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   text-align: right;
 }
 
@@ -112,14 +112,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid var(--border-color, rgba(127, 127, 127, 0.4));
-  border-top-color: var(--accent-color, #4a9eff);
+  border: 2px solid var(--border, rgba(127, 127, 127, 0.4));
+  border-top-color: var(--agent-blue-500, #4a9eff);
   border-radius: 50%;
   animation: voiceSpin 0.8s linear infinite;
 }
@@ -133,10 +133,10 @@
   width: max-content;
   max-width: 280px;
   padding: 4px 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--foreground);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
   font-size: 12px;
   line-height: 1.4;

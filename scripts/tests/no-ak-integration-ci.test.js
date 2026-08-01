@@ -37,6 +37,7 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/daemon-invocation-context.test.ts',
       ].join(' '),
     );
   });
@@ -47,7 +48,8 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
@@ -59,7 +61,8 @@ describe('no-AK integration CI wiring', () => {
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
 
-    expect(platformJob).not.toContain(NO_AK_SCRIPT);
+    expect(macosJob).not.toContain(NO_AK_SCRIPT);
+    expect(windowsJob).not.toContain(NO_AK_SCRIPT);
   });
 
   it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
@@ -68,12 +71,14 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
-    // On PRs both gates check out refs/pull/N/head, which is published the
+    // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
     // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, platformJob]) {
+    for (const job of [ubuntuJob, macosJob, windowsJob]) {
       expect(job).toContain(
         "format('refs/pull/{0}/head', github.event.pull_request.number)",
       );
@@ -91,11 +96,40 @@ describe('no-AK integration CI wiring', () => {
       "name: 'Back off for stale merge ref to refresh'",
     );
 
-    // The cheap sanity guard stays: fail loud if HEAD lacks the PR head.
+    // The cheap sanity guard stays: fail loud if HEAD lacks the expected head
+    // (PR head, or the merge-queue head once this job also runs on merge_group).
     expect(ubuntuJob).toContain(
-      "name: 'Verify PR checkout includes head commit'",
+      "name: 'Verify checkout includes expected head commit'",
     );
     expect(ubuntuJob).toContain('git merge-base --is-ancestor');
     expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
+    expect(webShellJob).toContain(
+      "name: 'Verify checkout includes expected head commit'",
+    );
+    expect(webShellJob).toContain('git merge-base --is-ancestor');
+    expect(webShellJob).toContain('github.event.pull_request.head.sha');
+  });
+
+  it('keeps the lightweight coverage comment job on the hosted runner', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
+
+    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(coverageJob).not.toContain('ubuntu_runner');
+  });
+
+  it('does not install Linux packages on self-hosted Playwright runners', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+
+    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
+    expect(webShellJob).toContain('--with-deps chromium');
   });
 });

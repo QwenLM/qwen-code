@@ -1,7 +1,10 @@
 export interface QwenMemorySettings {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
+  enableTeamMemory: boolean;
+  enableTeamMemorySync: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 }
 
 export interface QwenMemoryPaths {
@@ -15,7 +18,10 @@ export type QwenMemoryPathTarget = 'user' | 'project' | 'auto';
 export const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: false,
+  enableTeamMemory: false,
+  enableTeamMemorySync: false,
   enableAutoSkill: false,
+  autoSkillConfirm: true,
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -37,9 +43,21 @@ export function normalizeQwenMemorySettings(
       typeof memoryRecord.enableManagedAutoDream === 'boolean'
         ? memoryRecord.enableManagedAutoDream
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableManagedAutoDream,
+    enableTeamMemory:
+      typeof memoryRecord.enableTeamMemory === 'boolean'
+        ? memoryRecord.enableTeamMemory
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemory,
+    enableTeamMemorySync:
+      typeof memoryRecord.enableTeamMemorySync === 'boolean'
+        ? memoryRecord.enableTeamMemorySync
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemorySync,
     enableAutoSkill:
       typeof memoryRecord.enableAutoSkill === 'boolean'
         ? memoryRecord.enableAutoSkill
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof memoryRecord.autoSkillConfirm === 'boolean'
+        ? memoryRecord.autoSkillConfirm
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }

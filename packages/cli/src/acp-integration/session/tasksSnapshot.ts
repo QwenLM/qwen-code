@@ -18,7 +18,7 @@ import {
   type ServeSessionShellTaskStatus,
   type ServeSessionTaskStatus,
   type ServeSessionTasksStatus,
-} from '../../serve/status.js';
+} from '@qwen-code/acp-bridge/status';
 
 function runtimeMs(
   entry: { startTime: number; endTime?: number },
@@ -53,6 +53,11 @@ function serializeAgentTask(
     ...optionalField('endTime', entry.endTime),
     ...optionalField('subagentType', entry.subagentType),
     isBackgrounded: entry.isBackgrounded,
+    // Nested-agent lineage for client-side tree rendering. AgentTask uses
+    // `null` parentAgentId for top-level launches — normalize to absent.
+    ...optionalField('parentAgentId', entry.parentAgentId ?? undefined),
+    ...optionalField('parentName', entry.parentName),
+    ...optionalField('depth', entry.depth),
     ...optionalField('error', entry.error),
     ...optionalField('resumeBlockedReason', entry.resumeBlockedReason),
     ...optionalField('stats', entry.stats),
@@ -66,6 +71,7 @@ function serializeAgentTask(
         }
       : {}),
     ...optionalField('prompt', entry.prompt),
+    ...optionalField('toolUseId', entry.toolUseId),
   };
 }
 
@@ -112,6 +118,7 @@ function serializeMonitorTask(
     ...optionalField('exitCode', entry.exitCode),
     ...optionalField('error', entry.error),
     ...optionalField('ownerAgentId', entry.ownerAgentId),
+    ...optionalField('toolUseId', entry.toolUseId),
   };
 }
 

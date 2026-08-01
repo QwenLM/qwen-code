@@ -4,7 +4,7 @@
   flex-direction: column;
   gap: 12px;
   padding-bottom: 8px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 12px;
 }
@@ -15,7 +15,7 @@
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .tabs {
@@ -30,15 +30,15 @@
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
 }
 
 .tab:hover,
 .tabActive {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--foreground);
 }
 
 .tabActive {
@@ -49,10 +49,10 @@
   width: min(240px, 42vw);
   min-height: 30px;
   padding: 5px 9px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--foreground);
   font: inherit;
   outline: none;
 }
@@ -81,12 +81,12 @@
 }
 
 .shortcut:hover {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .shortcutKey {
   min-width: 0;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   text-align: right;
   overflow-wrap: anywhere;
   white-space: nowrap;
@@ -94,7 +94,7 @@
 
 .shortcutDesc {
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--foreground);
   overflow-wrap: anywhere;
 }
 
@@ -113,7 +113,7 @@
 
 .commandCard:hover,
 .commandCardExpanded {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .commandRow {
@@ -135,7 +135,7 @@
 .commandName {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   overflow-wrap: anywhere;
 }
 
@@ -143,8 +143,8 @@
   flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: 999px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--background);
+  color: var(--muted-foreground);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -153,7 +153,7 @@
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   transition: transform 120ms ease;
 }
 
@@ -168,19 +168,19 @@
   margin: 0 8px 8px;
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .commandDescription,
 .commandSubcommands {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .empty {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   padding: 16px 0;
 }
 

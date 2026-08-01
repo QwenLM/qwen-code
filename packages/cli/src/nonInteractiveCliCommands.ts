@@ -5,12 +5,16 @@
  */
 
 import type { PartListUnion } from '@google/genai';
-import { parseSlashCommand } from './utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+} from './utils/commands.js';
 import {
   Logger,
   uiTelemetryService,
   type Config,
   createDebugLogger,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -18,9 +22,13 @@ import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
-import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
+  CommandKind,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -40,6 +48,10 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
 type CommandServiceInstance = Awaited<ReturnType<typeof CommandService.create>>;
 
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
+
 /**
  * Result of handling a slash command in non-interactive mode.
  *
@@ -55,6 +67,8 @@ export type NonInteractiveSlashCommandResult =
       type: 'submit_prompt';
       content: PartListUnion;
       outputHistoryItems?: HistoryItemWithoutId[];
+      /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
+      modelOverride?: string;
     }
   | {
       type: 'message';
@@ -101,6 +115,9 @@ function handleCommandResult(
       return {
         type: 'submit_prompt',
         content: result.content,
+        ...(result.modelOverride
+          ? { modelOverride: result.modelOverride }
+          : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
@@ -168,6 +185,13 @@ function handleCommandResult(
         reason:
           'Action confirmation is not supported in non-interactive mode. Commands requiring confirmation cannot be executed.',
         originalType: 'confirm_action',
+      };
+
+    case 'goal_control':
+      return {
+        type: 'unsupported',
+        reason: 'Goal control is not supported in non-interactive mode yet.',
+        originalType: 'goal_control',
       };
 
     default: {
@@ -386,6 +410,79 @@ export const handleSlashCommand = async (
     filteredCommands,
   );
 
+  // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+  const stackedResult = parseStackedSlashCommands(rawQuery, filteredCommands);
+  if (stackedResult.skills.length >= 2) {
+    const combinedContent: PartListUnion[] = [];
+    let firstModelOverride: string | undefined;
+    const onCompleteCallbacks: Array<() => Promise<void>> = [];
+    const successfulSkillCommands: SlashCommand[] = [];
+
+    for (const skill of stackedResult.skills) {
+      if (!skill.action) continue;
+      const skillContext = {
+        executionMode,
+        invocation: {
+          raw: `/${skill.name}`,
+          name: skill.name,
+          args: '',
+        },
+        services: { config, settings, logger: null },
+      } as unknown as CommandContext;
+
+      const skillResult = await skill.action(skillContext, '');
+      if (skillResult?.type === 'submit_prompt') {
+        combinedContent.push(skillResult.content);
+        firstModelOverride ??= skillResult.modelOverride;
+        if (skillResult.onComplete) {
+          onCompleteCallbacks.push(skillResult.onComplete);
+        }
+      }
+
+      const succeeded = skillResult?.type === 'submit_prompt';
+      recordSkillInvocation(config, {
+        skillName: getSkillCommandName(skill),
+        success: succeeded,
+      });
+      if (succeeded) {
+        successfulSkillCommands.push(skill);
+      }
+    }
+
+    if (stackedResult.remainingText) {
+      combinedContent.push([{ text: stackedResult.remainingText }]);
+    }
+
+    const mergedContent: PartListUnion = combinedContent.flat();
+
+    const hookResult = await fireUserPromptExpansionHook(
+      config,
+      stackedResult.skills.map((s) => s.name).join(' '),
+      stackedResult.remainingText,
+      mergedContent,
+      abortController.signal,
+    );
+    if (hookResult.blockedResult) {
+      return hookResult.blockedResult;
+    }
+    for (const skill of successfulSkillCommands) {
+      void recordAutoSkillCommandUsage(config, skill);
+    }
+
+    return {
+      type: 'submit_prompt',
+      content: hookResult.content,
+      ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(onCompleteCallbacks.length
+        ? {
+            onComplete: async () => {
+              for (const cb of onCompleteCallbacks) await cb();
+            },
+          }
+        : {}),
+    };
+  }
+
   if (!commandToExecute) {
     // Check if this is a known command that's just not allowed
     const { commandToExecute: knownCommand } = parseSlashCommand(
@@ -465,7 +562,26 @@ export const handleSlashCommand = async (
     },
   };
 
-  const result = await commandToExecute.action(context, args);
+  const isSkillCommand = commandToExecute.kind === CommandKind.SKILL;
+  let skillInvocationRecorded = false;
+  const recordSkillCommandInvocation = (success: boolean) => {
+    if (!isSkillCommand || skillInvocationRecorded) {
+      return;
+    }
+    recordSkillInvocation(config, {
+      skillName: getSkillCommandName(commandToExecute),
+      success,
+    });
+    skillInvocationRecorded = true;
+  };
+
+  let result: SlashCommandActionReturn | void;
+  try {
+    result = await commandToExecute.action(context, args);
+  } catch (error) {
+    recordSkillCommandInvocation(false);
+    throw error;
+  }
 
   if (!result) {
     // Command executed but returned no result (e.g., void return)
@@ -477,16 +593,25 @@ export const handleSlashCommand = async (
   }
 
   if (result.type === 'submit_prompt') {
-    const hookResult = await fireUserPromptExpansionHook(
-      config,
-      commandToExecute.name,
-      args,
-      result.content,
-      abortController.signal,
-    );
+    let hookResult: Awaited<ReturnType<typeof fireUserPromptExpansionHook>>;
+    try {
+      hookResult = await fireUserPromptExpansionHook(
+        config,
+        commandToExecute.name,
+        args,
+        result.content,
+        abortController.signal,
+      );
+    } catch (error) {
+      recordSkillCommandInvocation(false);
+      throw error;
+    }
     if (hookResult.blockedResult) {
+      recordSkillCommandInvocation(false);
       return hookResult.blockedResult;
     }
+    recordSkillCommandInvocation(true);
+    void recordAutoSkillCommandUsage(config, commandToExecute);
     return handleCommandResult(
       { ...result, content: hookResult.content },
       outputHistoryItems,

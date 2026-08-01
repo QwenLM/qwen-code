@@ -32,6 +32,14 @@ describe('resolveStallMs', () => {
       resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: '0' }),
     ).toBe(0);
   });
+  it.each(['0x10', '1e3', '1.0', '2.5', '0x0'])(
+    'ignores malformed env seconds %j',
+    (value) => {
+      expect(
+        resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: value }),
+      ).toBe(DEFAULT_STALL_MS);
+    },
+  );
   it('falls back to default when nothing set', () => {
     expect(resolveStallMs(undefined, {})).toBe(DEFAULT_STALL_MS);
   });
@@ -156,7 +164,9 @@ describe('runStallResilient', () => {
         if (signal.aborted) return resolve();
         signal.addEventListener('abort', () => resolve(), { once: true });
       });
-      throw new Error('Workflow subagent did not complete (terminate mode: CANCELLED).');
+      throw new Error(
+        'Workflow subagent did not complete (terminate mode: CANCELLED).',
+      );
     };
     // Use a tiny stallMs with real timers so the watchdog fires fast.
     let caught: unknown;
@@ -197,7 +207,9 @@ describe('runStallResilient', () => {
     let calls = 0;
     const attemptFn = async (): Promise<string> => {
       calls += 1;
-      throw new Error('Workflow subagent did not complete (terminate mode: MAX_TURNS).');
+      throw new Error(
+        'Workflow subagent did not complete (terminate mode: MAX_TURNS).',
+      );
     };
     let caught: unknown;
     try {

@@ -1,24 +1,23 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useState } from 'react';
-import {
-  DaemonWorkspaceProvider,
-  DaemonSessionProvider,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { App } from './App';
+import { useCallback, useEffect, useState } from 'react';
+import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { RootErrorFallback } from './components/RootErrorFallback';
+import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
   getDaemonBaseUrl,
   getDaemonToken,
   removeDaemonTokenFromUrl,
+  waitForDaemonTokenMessage,
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
-const DAEMON_TOKEN = getDaemonToken();
-removeDaemonTokenFromUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -80,18 +79,31 @@ function getInitialLanguage(): WebShellLanguage {
 }
 
 function getSessionIdFromUrl(): string | undefined {
-  const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
+  return parseSessionId(window.location.pathname);
 }
 
-function replaceSessionUrl(sessionId: string): void {
+function getWorkspaceIdFromUrl(): string | undefined {
+  return (
+    new URLSearchParams(window.location.search).get('workspace') || undefined
+  );
+}
+
+function replaceStandaloneSessionUrl(
+  sessionId: string | undefined,
+  workspaceId?: string,
+): void {
   const url = new URL(window.location.href);
-  url.pathname = `/session/${encodeURIComponent(sessionId)}`;
+  url.pathname = buildSessionPathname(url.pathname, sessionId);
+  if (sessionId && workspaceId) {
+    url.searchParams.set('workspace', workspaceId);
+  } else {
+    url.searchParams.delete('workspace');
+  }
+  // Strip one-shot query params so bookmarked / shared URLs do not
+  // permanently override stored preferences on every page load.
+  url.searchParams.delete('theme');
+  url.searchParams.delete('language');
+  url.searchParams.delete('lang');
   if (!import.meta.env.DEV) {
     url.searchParams.delete('token');
     url.searchParams.delete('daemon');
@@ -99,15 +111,29 @@ function replaceSessionUrl(sessionId: string): void {
   window.history.replaceState(null, '', url);
 }
 
-function StandaloneApp() {
+function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
-  const [sessionId, setSessionId] = useState<string | undefined>(() =>
-    getSessionIdFromUrl(),
+  const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
+  const [workspaceId] = useState<string | undefined>(() =>
+    getWorkspaceIdFromUrl(),
   );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  // Keep the <html> theme class and <meta name="theme-color"> in sync with
+  // the React theme so mobile status bars / overscroll backgrounds stay
+  // consistent when the user toggles or when ?theme= lands via URL.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.remove('theme-dark', 'theme-light', 'dark');
+    root.classList.add(`theme-${theme}`);
+    root.classList.toggle('dark', theme === WebShellThemeId.Dark);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d0d0d');
+    }
+  }, [theme]);
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
     storeTheme(nextTheme);
@@ -116,33 +142,58 @@ function StandaloneApp() {
     setLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
-  const handleSessionIdChange = useCallback((sessionId: string) => {
-    setSessionId(sessionId);
-    replaceSessionUrl(sessionId);
-  }, []);
+  const handleSessionIdChange = useCallback(
+    (nextSessionId?: string, nextWorkspaceId?: string) => {
+      replaceStandaloneSessionUrl(nextSessionId, nextWorkspaceId);
+    },
+    [],
+  );
 
   return (
-    <DaemonWorkspaceProvider baseUrl={baseUrl} token={DAEMON_TOKEN}>
-      <DaemonSessionProvider
-        key={sessionId ?? 'new'}
-        initialSessionId={sessionId}
-        suppressOwnUserEcho
-      >
-        <App
-          theme={theme}
-          onThemeChange={handleThemeChange}
-          language={language}
-          onLanguageChange={handleLanguageChange}
-          onSessionIdChange={handleSessionIdChange}
-          compactThinking
+    <ErrorBoundary
+      label="web-shell-root"
+      fallback={(error, reset) => (
+        <RootErrorFallback error={error} onRetry={reset} language={language} />
+      )}
+    >
+      <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+        <WorkspaceSessionProvider
+          sessionId={sessionId}
+          workspaceId={workspaceId}
+          webShellProps={{
+            theme,
+            onThemeChange: handleThemeChange,
+            language,
+            onLanguageChange: handleLanguageChange,
+            onSessionIdChange: handleSessionIdChange,
+            sidebar: true,
+            header: {
+              items: ['title', 'environment', 'rightPanel'],
+            },
+            rightPanel: {
+              items: ['review', 'sideTask'],
+            },
+            environmentPanel: {
+              items: ['environment', 'subagents', 'backgroundTasks'],
+            },
+            compactThinking: true,
+            markdownTableMode: 'advanced',
+          }}
         />
-      </DaemonSessionProvider>
-    </DaemonWorkspaceProvider>
+      </DaemonWorkspaceProvider>
+    </ErrorBoundary>
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <StandaloneApp />
-  </React.StrictMode>,
-);
+async function main() {
+  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  removeDaemonTokenFromUrl();
+
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <StandaloneApp daemonToken={daemonToken} />
+    </React.StrictMode>,
+  );
+}
+
+void main();

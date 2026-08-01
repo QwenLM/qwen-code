@@ -131,7 +131,7 @@ describe('BuiltinCommandLoader', () => {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
       getDisableAllHooks: vi.fn().mockReturnValue(false),
-      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       isLspEnabled: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
@@ -201,6 +201,9 @@ describe('BuiltinCommandLoader', () => {
 
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
+
+    const curatorCmd = commands.find((c) => c.name === 'curator');
+    expect(curatorCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {
@@ -291,5 +294,15 @@ describe('BuiltinCommandLoader', () => {
     const commands2 = await loader2.loadCommands(new AbortController().signal);
     const hooksCmd2 = commands2.find((c) => c.name === 'hooks');
     expect(hooksCmd2).toBeDefined();
+  });
+
+  it('should register the /reload-plugins command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    const command = commands.find((c) => c.name === 'reload-plugins');
+
+    expect(command).toBeDefined();
+    expect(command?.kind).toBe(CommandKind.BUILT_IN);
   });
 });

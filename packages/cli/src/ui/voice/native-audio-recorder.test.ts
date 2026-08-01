@@ -158,6 +158,77 @@ describe('createNativeAudioRecorder', () => {
     expect(backend.startRecording).toHaveBeenCalledTimes(1);
   });
 
+  it('explains mirror registry installs when the native package is missing', async () => {
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => {
+        throw new Error(
+          "Cannot find package '@qwen-code/audio-capture' imported from /qwen/dist/cli.js",
+        );
+      },
+    });
+
+    await expect(recorder.start()).rejects.toThrow(
+      /mirror or private registry/,
+    );
+    await expect(recorder.start()).rejects.toThrow(/@qwen-code\/audio-capture/);
+  });
+
+  it.each(['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND'])(
+    'explains mirror registry installs for %s native package errors',
+    async (code) => {
+      const error = Object.assign(
+        new Error('missing @qwen-code/audio-capture dependency'),
+        { code },
+      );
+      const recorder = createNativeAudioRecorder({
+        loadBackend: () => {
+          throw error;
+        },
+      });
+
+      await expect(recorder.start()).rejects.toThrow(
+        /mirror or private registry/,
+      );
+      await expect(recorder.start()).rejects.toThrow(
+        /@qwen-code\/audio-capture/,
+      );
+    },
+  );
+
+  it('does not rewrite wrapped native addon load failures as missing packages', async () => {
+    const loadError = new Error(
+      "Native audio capture addon could not be loaded. Reinstall @qwen-code/audio-capture, or use the SoX fallback. (Cannot find module 'node-gyp-build')",
+    );
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => {
+        throw loadError;
+      },
+    });
+
+    await expect(recorder.start()).rejects.toBe(loadError);
+  });
+
+  it('does not explain native start failures as missing packages', async () => {
+    const startError = new Error(
+      "Cannot find package '@qwen-code/audio-capture' while starting",
+    );
+    const backend = {
+      startRecording: vi.fn(() => {
+        throw startError;
+      }),
+      stopRecording: vi.fn(() => new Uint8Array([1])),
+      isRecording: vi.fn(() => false),
+      microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+    };
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => backend,
+    });
+
+    await expect(recorder.start()).rejects.toBe(startError);
+
+    expect(backend.startRecording).toHaveBeenCalledTimes(1);
+  });
+
   it('allows retry after native stop throws', async () => {
     const backend = {
       startRecording: vi.fn(),

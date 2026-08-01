@@ -17,7 +17,7 @@ import type {
   LoadedSource,
   CreateSourceInput,
 } from './types.ts';
-import { validateSourceConfig } from '../config/validators.ts';
+import { assertValidSourceSlug, validateSourceConfig } from '../config/validators.ts';
 import { debug } from '../utils/debug.ts';
 import { readJsonFileSync } from '../utils/files.ts';
 import { getBuiltinSources, isBuiltinSource, getDocsSource } from './builtin-sources.ts';
@@ -39,6 +39,7 @@ import {
  * Get path to a source folder within a workspace
  */
 export function getSourcePath(workspaceRootPath: string, sourceSlug: string): string {
+  assertValidSourceSlug(sourceSlug);
   return join(getWorkspaceSourcesPath(workspaceRootPath), sourceSlug);
 }
 
@@ -63,10 +64,10 @@ export function loadSourceConfig(
   workspaceRootPath: string,
   sourceSlug: string
 ): FolderSourceConfig | null {
-  const configPath = join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json');
-  if (!existsSync(configPath)) return null;
-
   try {
+    const configPath = join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json');
+    if (!existsSync(configPath)) return null;
+
     const config = readJsonFileSync<FolderSourceConfig>(configPath);
 
     // Expand path variables in local source paths for portability
@@ -190,10 +191,10 @@ function parseGuideMarkdown(raw: string): SourceGuide {
  * Load and parse guide.md with frontmatter cache
  */
 export function loadSourceGuide(workspaceRootPath: string, sourceSlug: string): SourceGuide | null {
-  const guidePath = join(getSourcePath(workspaceRootPath, sourceSlug), 'guide.md');
-  if (!existsSync(guidePath)) return null;
-
   try {
+    const guidePath = join(getSourcePath(workspaceRootPath, sourceSlug), 'guide.md');
+    if (!existsSync(guidePath)) return null;
+
     const raw = readFileSync(guidePath, 'utf-8');
     return parseGuideMarkdown(raw);
   } catch {
@@ -300,9 +301,9 @@ export { isIconUrl } from '../utils/icon.ts';
  * @param sourceSlug - Source folder name
  */
 export function loadSource(workspaceRootPath: string, sourceSlug: string): LoadedSource | null {
-  const folderPath = getSourcePath(workspaceRootPath, sourceSlug);
   const config = loadSourceConfig(workspaceRootPath, sourceSlug);
   if (!config) return null;
+  const folderPath = getSourcePath(workspaceRootPath, sourceSlug);
 
   // Extract workspace folder name for credential lookup
   // Credentials are keyed by folder name (e.g., "046a02d0-..."), not full path
@@ -339,6 +340,8 @@ export function loadWorkspaceSources(workspaceRootPath: string): LoadedSource[] 
       const source = loadSource(workspaceRootPath, entry.name);
       if (source) {
         sources.push(source);
+      } else {
+        debug(`[loadWorkspaceSources] Skipping invalid or unreadable source directory: ${entry.name}`);
       }
     }
   }
@@ -425,8 +428,8 @@ export function generateSourceSlug(workspaceRootPath: string, name: string): str
   let slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .substring(0, 50);
+    .substring(0, 50)
+    .replace(/^-|-$/g, '');
 
   // Ensure slug is not empty
   if (!slug) {
@@ -568,7 +571,11 @@ export function deleteSource(workspaceRootPath: string, sourceSlug: string): voi
  * Check if a source exists in a workspace
  */
 export function sourceExists(workspaceRootPath: string, sourceSlug: string): boolean {
-  return existsSync(join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json'));
+  try {
+    return existsSync(join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json'));
+  } catch {
+    return false;
+  }
 }
 
 // ============================================================
@@ -583,4 +590,3 @@ export function sourceExists(workspaceRootPath: string, sourceSlug: string): boo
 // ============================================================
 
 export { parseGuideMarkdown };
-

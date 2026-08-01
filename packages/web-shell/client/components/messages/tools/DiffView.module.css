@@ -1,8 +1,6 @@
 .view {
-  margin-top: 6px;
-  border-radius: 4px;
+  margin: 0;
   overflow: hidden;
-  border: 1px solid var(--border-color);
   font-size: 12px;
 }
 
@@ -11,7 +9,7 @@
   gap: 8px;
   padding: 3px 8px;
   background: var(--subtle-bg);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
   font-size: 11px;
 }
 
@@ -44,8 +42,8 @@
 }
 
 .lineHeader {
-  background: var(--info-bg);
-  color: var(--text-dimmed);
+  background: var(--agent-blue-100);
+  color: var(--muted-foreground);
   font-style: italic;
 }
 
@@ -59,7 +57,7 @@
   text-align: right;
   padding-right: 6px;
   user-select: none;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   opacity: 0.6;
 }
 
@@ -67,7 +65,7 @@
   width: 14px;
   flex-shrink: 0;
   user-select: none;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .lineAdd .marker {

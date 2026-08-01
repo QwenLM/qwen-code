@@ -9,7 +9,8 @@ import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
-import { createTask } from '../tasks.js';
+import type { FakeAgent } from './fake-agent.js';
+import { createTask, listTasks } from '../tasks.js';
 import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
 
 // Mock Storage so all file I/O uses the harness's temp dir.
@@ -416,7 +417,7 @@ describe('TeamCoordinationHarness', () => {
       const h = await createHarness();
 
       // Spawn 5 workers that stay running on message.
-      const workers = [];
+      const workers: FakeAgent[] = [];
       for (let i = 0; i < 5; i++) {
         const w = await h.spawnTeammate(`worker-${i}`, {
           onMessage: () => 'stay_running',
@@ -446,10 +447,20 @@ describe('TeamCoordinationHarness', () => {
         w.goIdle();
       }
 
-      // Wait for the dust to settle.
-      await new Promise((r) => setTimeout(r, 200));
+      await vi.waitFor(() => {
+        const claimers = workers.filter(
+          (w) => w.getReceivedMessages().length > 1,
+        );
+        expect(claimers.length).toBe(1);
+      });
+      await vi.waitFor(async () => {
+        const claimedTasks = await listTasks(h.teamName, {
+          status: 'in_progress',
+        });
+        expect(claimedTasks).toHaveLength(1);
+        expect(claimedTasks[0]!.owner).toMatch(/^worker-\d$/);
+      });
 
-      // Exactly one worker should have received the task.
       const claimers = workers.filter(
         (w) => w.getReceivedMessages().length > 1,
       );

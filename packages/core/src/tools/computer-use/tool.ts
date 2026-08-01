@@ -221,6 +221,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
     client.setMaxImageDimension(
       resolveMaxImageDimension(this.config?.getComputerUseMaxImageDimension()),
     );
+    client.setIdleTimeoutMs(this.config?.getComputerUseIdleTimeoutMs());
 
     // If the user confirmed through the pre-execution dialog, the install state
     // was already written by onConfirm — runBootstrap will skip promptInstallApproval.

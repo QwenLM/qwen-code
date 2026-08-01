@@ -59,12 +59,19 @@ export function resolveOwnsModel(
 }
 
 function buildGenerationConfig(
-  spec: Pick<ModelSpec, 'enableThinking' | 'contextWindowSize' | 'modalities'>,
+  spec: Pick<
+    ModelSpec,
+    'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
+  >,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (spec.enableThinking) {
     parts.extra_body = { enable_thinking: true };
+    hasAny = true;
+  }
+  if (spec.thinkingMandatory) {
+    parts.thinkingMandatory = true;
     hasAny = true;
   }
   if (spec.contextWindowSize) {
@@ -115,6 +122,7 @@ function specToModelConfig(
     ...(spec.description ? { description: spec.description } : {}),
     baseUrl,
     envKey,
+    ...(spec.imageOnly ? { imageOnly: true } : {}),
     ...(genConfig ? { generationConfig: genConfig } : {}),
   };
 }
@@ -385,8 +393,7 @@ export function findExistingProviderModels(
     const raw = modelProviders[protocol];
     if (!Array.isArray(raw)) continue;
     const models = raw.filter(
-      (m): m is ProviderModelConfig =>
-        isProviderModelConfig(m) && ownsModel(m),
+      (m): m is ProviderModelConfig => isProviderModelConfig(m) && ownsModel(m),
     );
     if (models.length > 0) return { protocol, models };
   }

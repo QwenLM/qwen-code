@@ -11,6 +11,7 @@ import {
   hasImageParts,
   isImagePart,
   normalizeParts,
+  replaceImagesWithText,
   splitImageParts,
   isUsableImagePart,
 } from './image-part-utils.js';
@@ -110,5 +111,35 @@ describe('collectText', () => {
 
   it('returns empty string when there is no text', () => {
     expect(collectText([imagePart])).toBe('');
+  });
+});
+
+describe('replaceImagesWithText', () => {
+  it('replaces the image in place, keeping surrounding parts in order', () => {
+    // Mirrors the real shape: a "Content from <file>:" prefix, the image, then
+    // trailing text. The transcript must land between them, not at the end.
+    expect(
+      replaceImagesWithText(
+        [{ text: 'Content from a.png:' }, imagePart, { text: 'trailer' }],
+        'TRANSCRIPT',
+      ),
+    ).toEqual([
+      { text: 'Content from a.png:' },
+      { text: 'TRANSCRIPT' },
+      { text: 'trailer' },
+    ]);
+  });
+
+  it('collapses multiple images into the first slot and drops the rest', () => {
+    expect(
+      replaceImagesWithText(['p', imagePart, 'q', imagePart], 'T'),
+    ).toEqual([{ text: 'p' }, { text: 'T' }, { text: 'q' }]);
+  });
+
+  it('appends the text when there is no image part', () => {
+    expect(replaceImagesWithText(['just text'], 'T')).toEqual([
+      { text: 'just text' },
+      { text: 'T' },
+    ]);
   });
 });

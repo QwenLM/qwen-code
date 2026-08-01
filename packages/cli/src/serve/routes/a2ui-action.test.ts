@@ -60,6 +60,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: sdkMocks.MockClient,
 }));
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  DEFAULT_INHERITED_ENV_VARS: ['HOME', 'PATH'],
   StdioClientTransport: sdkMocks.MockStdioClientTransport,
 }));
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
@@ -87,6 +88,8 @@ function makeApp(opts: {
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
   workspace?: string;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }) {
   const app = express();
   app.use(express.json());
@@ -101,6 +104,12 @@ function makeApp(opts: {
       if (opts.serversError) throw new Error('status unavailable');
       return opts.servers ?? [];
     },
+    ...(opts.isWorkspaceTrusted
+      ? { isWorkspaceTrusted: opts.isWorkspaceTrusted }
+      : {}),
+    ...(opts.captureGenerationAssertion
+      ? { captureGenerationAssertion: opts.captureGenerationAssertion }
+      : {}),
     callAction:
       opts.callAction ??
       (async (cfg, args) => {
@@ -137,6 +146,70 @@ describe('POST /session/:id/a2ui-action', () => {
       .send({ name: 'go' })
       .expect(503);
     expect(res.body.error).toMatch(/no a2ui MCP server/);
+  });
+
+  it('does not discover or invoke workspace MCP servers when untrusted', async () => {
+    const callAction = vi.fn(async () => ({ commands: [], fallback: '' }));
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction,
+      isWorkspaceTrusted: () => false,
+    });
+
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(callAction).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 (not 503) when untrusted even if the generation is also closed', async () => {
+    const callAction = vi.fn(async () => ({ commands: [], fallback: '' }));
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction,
+      isWorkspaceTrusted: () => false,
+      captureGenerationAssertion: () => () => {
+        throw Object.assign(new Error('closed'), {
+          code: 'workspace_generation_closed',
+        });
+      },
+    });
+
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(callAction).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when the runtime generation closes during discovery', async () => {
+    let open = true;
+    const callAction = vi.fn(async () => ({ commands: [], fallback: '' }));
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction,
+      captureGenerationAssertion: () => () => {
+        if (!open) {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+        open = false;
+      },
+    });
+
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(callAction).not.toHaveBeenCalled();
   });
 
   it('proxies to the action tool and returns its continuation', async () => {
@@ -411,14 +484,30 @@ describe('helpers', () => {
     expect(sdkMocks.state.stdioTransports).toHaveLength(0);
   });
 
-  it('buildTransport merges stdio env only when provided', () => {
-    buildTransport({
-      command: 'node',
-      args: ['server.mjs'],
-      env: { A2UI_TOKEN: 'secret' },
-      cwd: '/workspace',
-    });
-    buildTransport({ command: 'node' });
+  it('buildTransport uses the scrubbed runtime env for stdio transports', () => {
+    const runtimeEnv = {
+      HOME: '/runtime/home',
+      PATH: '/runtime/bin',
+      RUNTIME_ONLY: 'yes',
+      A2UI_TOKEN: 'base',
+      OPENAI_API_KEY: 'runtime-key',
+      QWEN_SERVER_TOKEN: 'daemon-secret',
+      BASH_FUNC_bad: '() { ignored; }',
+      SHELL_FUNC: '() { ignored; }',
+    };
+    buildTransport(
+      {
+        command: 'node',
+        args: ['server.mjs'],
+        env: {
+          A2UI_TOKEN: 'secret',
+          QWEN_SERVER_TOKEN: 'explicit-secret',
+        },
+        cwd: '/workspace',
+      },
+      runtimeEnv,
+    );
+    buildTransport({ command: 'node' }, runtimeEnv);
 
     const withEnv = sdkMocks.state.stdioTransports[0] as {
       options: {
@@ -436,9 +525,19 @@ describe('helpers', () => {
       args: ['server.mjs'],
       cwd: '/workspace',
     });
-    expect(withEnv.options.env?.['A2UI_TOKEN']).toBe('secret');
-    expect(withEnv.options.env?.['PATH']).toBe(process.env['PATH']);
-    expect(withoutEnv.options).not.toHaveProperty('env');
+    expect(withEnv.options.env).toMatchObject({
+      HOME: '/runtime/home',
+      PATH: '/runtime/bin',
+      RUNTIME_ONLY: 'yes',
+      A2UI_TOKEN: 'secret',
+      OPENAI_API_KEY: 'runtime-key',
+    });
+    expect(withEnv.options.env?.['BASH_FUNC_bad']).toBeUndefined();
+    expect(withEnv.options.env?.['SHELL_FUNC']).toBeUndefined();
+    expect(withEnv.options.env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(withoutEnv.options.env?.['PATH']).toBe('/runtime/bin');
+    expect(withoutEnv.options.env?.['A2UI_TOKEN']).toBe('base');
+    expect(withoutEnv.options.env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('callA2uiAction connects, calls the action tool, and closes resources', async () => {

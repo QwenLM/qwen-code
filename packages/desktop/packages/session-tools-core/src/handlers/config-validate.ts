@@ -17,7 +17,7 @@ import {
   validateJsonFileHasFields,
   mergeResults,
 } from '../validation.ts';
-import { getSourceConfigPath } from '../source-helpers.ts';
+import { assertValidSourceSlug, getSourceConfigPath } from '../source-helpers.ts';
 
 export interface ConfigValidateArgs {
   target: 'config' | 'sources' | 'statuses' | 'preferences' | 'permissions' | 'automations' | 'tool-icons' | 'all';
@@ -93,6 +93,19 @@ export async function handleConfigValidate(
 
     case 'sources': {
       if (sourceSlug) {
+        try {
+          assertValidSourceSlug(sourceSlug);
+        } catch (error) {
+          return successResponse(formatValidationResult({
+            valid: false,
+            errors: [{
+              path: 'sourceSlug',
+              message: error instanceof Error ? error.message : 'Invalid source slug',
+            }],
+            warnings: [],
+          }));
+        }
+
         const sourcePath = getSourceConfigPath(ctx.workspacePath, sourceSlug);
         const result = validateJsonFileHasFields(sourcePath, ['slug', 'name', 'type']);
         return successResponse(formatValidationResult(result));
@@ -108,6 +121,20 @@ export async function handleConfigValidate(
         for (const entry of entries) {
           const entryPath = join(sourcesDir, entry);
           if (ctx.fs.isDirectory(entryPath)) {
+            try {
+              assertValidSourceSlug(entry);
+            } catch {
+              results.push({
+                valid: true,
+                errors: [],
+                warnings: [{
+                  path: `sources/${entry}/config.json`,
+                  message: `Source '${entry}' has invalid slug format, skipping source validation`,
+                }],
+              });
+              continue;
+            }
+
             const sourceResult = validateJsonFileHasFields(
               join(entryPath, 'config.json'),
               ['slug', 'name', 'type']

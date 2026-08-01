@@ -48,6 +48,21 @@ export function synthesizeResponse(status: number, body: unknown): Response {
  * Map a JSON-RPC error code to an HTTP status code.
  */
 export function jsonRpcErrorToHttpStatus(code: number): number {
+  return jsonRpcErrorToHttpStatusWithData(code);
+}
+
+export function jsonRpcErrorToHttpStatusWithData(
+  code: number,
+  data?: unknown,
+): number {
+  if (
+    isRecord(data) &&
+    (data['errorKind'] === 'session_archived' ||
+      data['errorKind'] === 'session_conflict' ||
+      data['errorKind'] === 'session_archiving')
+  ) {
+    return 409;
+  }
   // JSON-RPC error code → HTTP status mapping.
   // -32600 = invalid request → 400
   // -32601 = method not found → 404

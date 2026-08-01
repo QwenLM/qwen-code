@@ -7,6 +7,7 @@
 import { useState, useCallback } from 'react';
 import {
   SessionService,
+  buildSessionRecoveryPlan,
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -14,7 +15,6 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
@@ -22,6 +22,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -106,6 +107,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
         const cwd = config.getTargetDir();
@@ -120,14 +122,34 @@ export function useResumeCommand(
         const customTitle = sessionService.getSessionTitle(sessionId);
 
         // Build UI history items.
+        const recoveryPlan = buildSessionRecoveryPlan({
+          sessionId,
+          conversation: sessionData.conversation,
+          historyGaps: sessionData.historyGaps,
+        });
         const rawItems = buildResumedHistoryItems(sessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
 
         const uiHistoryItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
+        if (
+          recoveryPlan.kind !== 'clean' &&
+          recoveryPlan.kind !== 'degraded_history' &&
+          recoveryPlan.visibleNotice
+        ) {
+          const nextId = (uiHistoryItems.at(-1)?.id ?? 0) + 1;
+          uiHistoryItems.push({
+            id: nextId,
+            type: MessageType.INFO,
+            text: recoveryPlan.visibleNotice,
+          });
+        }
 
         // 1. Swap core first. Matches useBranchCommand's core-before-UI
         //    pattern: if anything fails between core swap and UI swap,
@@ -136,20 +158,7 @@ export function useResumeCommand(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
-
-        // Re-arm /goal: the in-memory activeGoalStore entry (if any) is stale
-        // after `config.startNewSession` rebuilds the hook system — its
-        // `setAt` was captured before /new, and its `hookId` points to a
-        // hook that no longer exists. The cold-boot path runs this same
-        // call in AppContainer; the runtime /resume path needs it too,
-        // otherwise the footer pill keeps ticking from the original setAt
-        // (visible as "几十秒" elapsed immediately after /new + /resume) and
-        // the Stop hook is silently dead until the user re-issues /goal.
-        try {
-          restoreGoalFromHistory(uiHistoryItems, config, addItem);
-        } catch {
-          // Best-effort — never block resume on goal restoration.
-        }
+        await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config
           .getChatRecordingService()
@@ -158,13 +167,9 @@ export function useResumeCommand(
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
-          const recoveredMessage: HistoryItemWithoutId = {
-            type: MessageType.INFO,
-            text: config
-              .getBackgroundAgentResumeService()
-              .buildRecoveredBackgroundAgentsNotice(recovered.length),
-          };
-          addItem(recoveredMessage, Date.now());
+          recoveredBackgroundAgentsNotice = config
+            .getBackgroundAgentResumeService()
+            .buildRecoveredBackgroundAgentsNotice(recovered.length);
         }
 
         // 2. Swap UI. Once this commits, rolling core back is unsafe —
@@ -174,6 +179,15 @@ export function useResumeCommand(
         setSessionName?.(customTitle ?? null);
         clearItems();
         loadHistory(uiHistoryItems);
+        if (recoveredBackgroundAgentsNotice) {
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: recoveredBackgroundAgentsNotice,
+            },
+            Date.now(),
+          );
+        }
         uiSwapped = true;
 
         // SessionStart hook is handled during chat initialization so its
@@ -188,7 +202,20 @@ export function useResumeCommand(
           // recorder would keep writing new user messages into the
           // orphaned session JSONL while UI still shows the old session.
           try {
+            resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
+            // The forward path cleared the old session's in-memory
+            // background agents (resetBackgroundStateForSessionSwitch above,
+            // ~L158) before swapping core. After rolling core back to the old
+            // session, reload them so `list_agents` reflects the old session's
+            // still-on-disk sidecars again; otherwise the user lands back on
+            // the old session with an empty roster until the next process
+            // start or successful /resume. Best-effort — the guard inside
+            // loadPausedBackgroundAgents requires the session to already be
+            // current, which the startNewSession above satisfies.
+            await config
+              .loadPausedBackgroundAgents(oldSessionId)
+              .catch(() => {});
           } catch (rollbackErr) {
             config
               .getDebugLogger()
@@ -218,6 +245,7 @@ export function useResumeCommand(
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,
+      settings.merged.ui?.history?.collapsePreviewCount,
     ],
   );
 

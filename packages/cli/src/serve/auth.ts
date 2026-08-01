@@ -90,14 +90,23 @@ export function parseAllowOriginPatterns(
     } catch {
       throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
     }
-    if (parsed.origin !== entry) {
+    // Browser-extension schemes (`chrome-extension:`, `moz-extension:`) get an
+    // opaque `null` origin from the URL spec, so they can't round-trip through
+    // `.origin`. Rebuild their canonical origin from scheme+host; the equality
+    // check below still rejects a trailing slash / path / userinfo / query
+    // because each of those makes `entry` differ from `<scheme>//<host>`.
+    const canonical =
+      parsed.origin === 'null'
+        ? `${parsed.protocol}//${parsed.host}`
+        : parsed.origin;
+    if (canonical !== entry) {
       throw new InvalidAllowOriginPatternError(
         entry,
-        `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+        `expected the canonical origin ${JSON.stringify(canonical)} ` +
           'without trailing slash, path, userinfo, or query',
       );
     }
-    origins.add(parsed.origin.toLowerCase());
+    origins.add(canonical.toLowerCase());
   }
   return { allowAny, origins };
 }
@@ -127,10 +136,13 @@ export function allowOriginCors(
   patterns: ParsedAllowOriginPatterns,
 ): RequestHandler {
   const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+  // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
+  // (DAEMON-001): it must survive preflight AND be readable from the
+  // response, or cross-origin clients silently lose stale-cursor detection.
   const allowedHeaders =
-    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID';
+    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch';
   const maxAgeSeconds = '86400';
-  const exposedHeaders = 'Retry-After';
+  const exposedHeaders = 'Retry-After, X-Qwen-Event-Epoch';
   return (req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers.origin;
     if (!origin) {
@@ -221,11 +233,11 @@ export function hostAllowlist(
       `host.docker.internal:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
-    // the URI scheme's default. http → 80, https → 443. The qwen
-    // serve daemon is plain HTTP, so accept the no-port forms when
-    // we're listening on port 80 (uncommon but valid for an operator
-    // who points at a privileged port for clean URLs).
-    if (port === 80) {
+    // the URI scheme's default. http → 80, https → 443. Accept the
+    // no-port forms when we're listening on either default port
+    // (uncommon but valid for an operator who points at a privileged
+    // port for clean URLs, or who enables TLS on 443).
+    if (port === 80 || port === 443) {
       cachedAllowed.add('localhost');
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');

@@ -2,7 +2,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 12px;
 }
@@ -12,7 +12,7 @@
   flex-wrap: wrap;
   gap: 6px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .stepPill {
@@ -21,18 +21,18 @@
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .stepPillActive {
-  border-color: var(--accent-color);
-  color: var(--accent-color);
+  border-color: var(--agent-blue-500);
+  color: var(--agent-blue-500);
 }
 
 .stepPillDone {
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .stepNumber {
@@ -42,7 +42,7 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--bg-secondary);
+  background: var(--muted);
   font-size: 11px;
 }
 
@@ -58,11 +58,11 @@
 
 .text {
   margin: 0 0 8px;
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .muted {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .options {
@@ -79,7 +79,7 @@
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 6px;
-  color: var(--text-primary);
+  color: var(--foreground);
   background: transparent;
   font: inherit;
   text-align: left;
@@ -88,11 +88,11 @@
 
 .option:hover,
 .optionActive {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .optionActive .label {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .optionText {
@@ -105,13 +105,13 @@
   min-width: 0;
   align-items: center;
   gap: 8px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 500;
 }
 
 .description {
   margin-top: 3px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -120,15 +120,15 @@
   width: 100%;
   margin-top: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
+  color: var(--foreground);
+  background: var(--background);
   font: inherit;
 }
 
 .input:focus {
-  border-color: var(--accent-color);
+  border-color: var(--agent-blue-500);
   outline: none;
 }
 
@@ -138,8 +138,8 @@
   margin-top: 8px;
   padding: 8px;
   border-radius: 6px;
-  color: var(--text-secondary);
-  background: var(--bg-primary);
+  color: var(--muted-foreground);
+  background: var(--background);
   white-space: pre-wrap;
 }
 
@@ -150,7 +150,7 @@
 .link {
   display: inline-block;
   margin-top: 8px;
-  color: var(--link-color, var(--accent-color));
+  color: var(--link-color, var(--agent-blue-500));
   text-decoration: none;
 }
 
@@ -162,8 +162,8 @@
   margin-top: 10px;
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--background);
+  color: var(--muted-foreground);
 }
 
 .actions {
@@ -171,21 +171,21 @@
   justify-content: flex-end;
   gap: 8px;
   padding-top: 10px;
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border);
 }
 
 .actionButton {
   padding: 5px 10px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
+  color: var(--foreground);
+  background: var(--background);
   font: inherit;
   cursor: pointer;
 }
 
 .actionButton:hover:not(:disabled) {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .actionButton:disabled {

@@ -14,14 +14,16 @@ import type {
   ToolResultDisplay,
   AgentStatus,
   ArenaDiffSummary,
+  GoalSnapshotV2,
+  GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
-import { type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 export type { ThoughtSummary };
 
 export enum AuthState {
-  // Attemtping to authenticate or re-authenticate
+  // Attempting to authenticate or re-authenticate
   Unauthenticated = 'unauthenticated',
   // Auth dialog is open for user to select auth method
   Updating = 'updating',
@@ -67,6 +69,16 @@ export interface IndividualToolCallDisplay {
   name: string;
   description: string;
   resultDisplay: ToolResultDisplay | string | undefined;
+  visionBridgeNotice?: string;
+  /**
+   * Full tool-result text for the Ctrl+O full-detail transcript (§4.9).
+   * Derived (NOT persisted) — extracted via `getToolResponseDisplayText` from
+   * the already-persisted `functionResponse` parts at live/resume/replay time.
+   * Used only when `fullDetail && isCollapsibleTool(name)` to replace the
+   * summary `resultDisplay` for read/search/list tools whose `returnDisplay`
+   * is only a count. Undefined → fall back to the summary.
+   */
+  detailedDisplay?: string;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -173,6 +185,13 @@ export type HistoryItemRetryCountdown = HistoryItemBase & {
   text: string;
 };
 
+// Dim, tip-style disclosure shown when the vision bridge runs (success or
+// cancellation). Failures use the prominent ERROR variant instead.
+export type HistoryItemVisionNotice = HistoryItemBase & {
+  type: 'vision_notice';
+  text: string;
+};
+
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
   systemInfo: {
@@ -211,6 +230,9 @@ export type HistoryItemStats = HistoryItemBase & {
  */
 export interface DiffRenderRow {
   filename: string;
+  /** Pre-rename path when this row is a rename; absent otherwise. `filename`
+   *  is the current (post-rename) path used to address the file. */
+  oldPath?: string;
   /** `undefined` for binary files; a line count (lower bound if `truncated`)
    *  otherwise. */
   added?: number;
@@ -245,6 +267,10 @@ export type HistoryItemModelStats = HistoryItemBase & {
 
 export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
+};
+
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
 };
 
 export type HistoryItemQuit = HistoryItemBase & {
@@ -319,6 +345,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {
@@ -558,7 +586,26 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
+
+export const GOAL_STATUS_KINDS = [
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'paused',
+  'checking',
+] as const satisfies readonly GoalStatusKind[];
+
+/** Narrows an untrusted value (e.g. a persisted transcript field). */
+export function isGoalStatusKind(value: unknown): value is GoalStatusKind {
+  return (
+    typeof value === 'string' &&
+    (GOAL_STATUS_KINDS as readonly string[]).includes(value)
+  );
+}
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
@@ -585,6 +632,12 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   lastReason?: string;
 };
 
+export type HistoryItemGoalState = HistoryItemBase & {
+  type: 'goal_state';
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -602,6 +655,7 @@ export type HistoryItemWithoutId =
   | HistoryItemWarning
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
+  | HistoryItemVisionNotice
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -609,6 +663,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -629,9 +684,22 @@ export type HistoryItemWithoutId =
   | HistoryItemStopHookSystemMessage
   | HistoryItemDoctor
   | HistoryItemDiffStats
-  | HistoryItemGoalStatus;
+  | HistoryItemGoalStatus
+  | HistoryItemGoalState;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
+
+/**
+ * Shared visibility predicate: an item collapsed on session resume
+ * (`ui.history.collapseOnResume`) sets `display.suppressOnRestore` and is
+ * represented only by its collapse-summary row. Both the main view
+ * (MainContent) and the Ctrl+O transcript (AppContainer's freeze snapshot)
+ * filter on this, so keep the single source of truth here to prevent the two
+ * surfaces from diverging.
+ */
+export const isHistoryItemVisibleAfterRestore = (
+  item: Pick<HistoryItem, 'display'>,
+): boolean => !item.display?.suppressOnRestore;
 
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
@@ -645,6 +713,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -661,6 +730,8 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  GOAL_STATE = 'goal_state',
+  VISION_NOTICE = 'vision_notice',
 }
 
 export interface InsightProgressProps {
@@ -726,6 +797,11 @@ export type Message =
       content?: string;
     }
   | {
+      type: MessageType.SKILL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
       type: MessageType.QUIT;
       timestamp: Date;
       duration: string;
@@ -762,6 +838,11 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. Applies to this submitted prompt (and its
+   * tool-call continuations) only — no session change, no persistence.
+   */
+  modelOverride?: string;
 }
 
 /**

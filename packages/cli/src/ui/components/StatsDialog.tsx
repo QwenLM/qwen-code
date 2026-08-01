@@ -27,7 +27,29 @@ import { SessionTab } from './StatsSessionTab.js';
 import { ActivityTab } from './StatsActivityTab.js';
 import { EfficiencyTab } from './StatsEfficiencyTab.js';
 
-const StatsTabs: React.FC<{ activeTab: StatsTab }> = ({ activeTab }) => (
+// Fixed rows of chrome the embedded Efficiency tab renders around the model
+// table, subtracted from the host's availableHeight when capping the model
+// list. Itemized: dialog border (2) + padding (2) + tab bar (1) + performance
+// cards (3) + cards marginBottom (1) + range indicator (2) + hint row (2) +
+// inter-section spacing + "Models" header (2). A height-based estimate,
+// deliberately left with headroom.
+const EFFICIENCY_CHROME_ROWS = 24;
+// The tool leaderboard, when present, adds its data rows plus 3 fixed rows
+// (title + column header + marginBottom); when empty it renders nothing.
+const TOOL_LEADERBOARD_FIXED_ROWS = 3;
+// In embedded (height-limited) mode the tool leaderboard is itself capped so a
+// long tool list can't eat the entire height budget and force the model table
+// to overflow. Mirrors how the model table is capped via maxModelRows.
+const MAX_EMBEDDED_TOOL_ROWS = 5;
+// The Code Impact section, rendered only when there are line changes, occupies
+// one row below the model table. Subtract it when present so the model list
+// can't overestimate its available space and overflow the host view.
+const CODE_IMPACT_ROWS = 1;
+
+const StatsTabs: React.FC<{ activeTab: StatsTab; hint?: string }> = ({
+  activeTab,
+  hint,
+}) => (
   <Box flexDirection="row">
     {TAB_DEFS.map(({ tab, label }) => {
       const active = tab === activeTab;
@@ -42,6 +64,11 @@ const StatsTabs: React.FC<{ activeTab: StatsTab }> = ({ activeTab }) => (
         </Box>
       );
     })}
+    {hint && (
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>{hint}</Text>
+      </Box>
+    )}
   </Box>
 );
 
@@ -86,9 +113,25 @@ function buildCurrentSessionRecord(
 interface StatsDialogProps {
   onClose: () => void;
   width?: number;
+  /**
+   * When false, the dialog stops consuming keyboard input. Used when the dialog
+   * is embedded inside another view (e.g. the Settings dialog's Stats tab) so it
+   * only reacts to keys while that tab's content is focused.
+   */
+  isFocused?: boolean;
+  /**
+   * Rows available for the dialog content. When set (embedded mode), the
+   * Efficiency tab's model table is capped so it cannot overflow the host view.
+   */
+  availableHeight?: number;
 }
 
-export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
+export const StatsDialog: React.FC<StatsDialogProps> = ({
+  onClose,
+  width,
+  isFocused = true,
+  availableHeight,
+}) => {
   const [activeTab, setActiveTab] = useState<StatsTab>('session');
   const [rangeIndex, setRangeIndex] = useState(0);
   const [chartMonthOffset, setChartMonthOffset] = useState(0);
@@ -176,11 +219,12 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
         return;
       }
     },
-    { isActive: true },
+    { isActive: isFocused },
   );
 
-  const hintText =
-    activeTab === 'session'
+  const hintText = !isFocused
+    ? ''
+    : activeTab === 'session'
       ? 'tab \xB7 esc'
       : activeTab === 'activity' && range === 'all'
         ? 'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc'
@@ -199,7 +243,14 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
           paddingY={1}
           width={safeWidth - 2}
         >
-          <StatsTabs activeTab={activeTab} />
+          <StatsTabs
+            activeTab={activeTab}
+            hint={
+              availableHeight != null && isFocused
+                ? t('(Tab to switch)')
+                : undefined
+            }
+          />
 
           <Box marginTop={1}>
             {activeTab === 'session' && <SessionTab />}
@@ -220,7 +271,40 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
               />
             )}
             {activeTab === 'efficiency' && !loading && data && (
-              <EfficiencyTab data={data} bodyWidth={bodyWidth} />
+              <EfficiencyTab
+                data={data}
+                bodyWidth={bodyWidth}
+                maxToolRows={
+                  availableHeight != null ? MAX_EMBEDDED_TOOL_ROWS : undefined
+                }
+                maxModelRows={
+                  availableHeight != null
+                    ? Math.max(
+                        3,
+                        availableHeight -
+                          EFFICIENCY_CHROME_ROWS -
+                          (data.toolLeaderboard.length > 0
+                            ? // The tool leaderboard is capped in embedded mode,
+                              // so only the visible rows (plus a "+N more" line
+                              // when truncated) consume height here.
+                              Math.min(
+                                data.toolLeaderboard.length,
+                                MAX_EMBEDDED_TOOL_ROWS,
+                              ) +
+                              TOOL_LEADERBOARD_FIXED_ROWS +
+                              (data.toolLeaderboard.length >
+                              MAX_EMBEDDED_TOOL_ROWS
+                                ? 1
+                                : 0)
+                            : 0) -
+                          (data.report.files.linesAdded > 0 ||
+                          data.report.files.linesRemoved > 0
+                            ? CODE_IMPACT_ROWS
+                            : 0),
+                      )
+                    : undefined
+                }
+              />
             )}
           </Box>
 

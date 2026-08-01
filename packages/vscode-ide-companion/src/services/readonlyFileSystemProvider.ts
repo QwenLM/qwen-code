@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import * as vscode from 'vscode';
 
 /**
@@ -27,7 +28,7 @@ export class ReadonlyFileSystemProvider
   constructor() {
     // Ensure only one instance exists
     if (ReadonlyFileSystemProvider.instance !== null) {
-      console.warn(
+      logger.warn(
         '[ReadonlyFileSystemProvider] Instance already exists, replacing with new instance',
       );
     }

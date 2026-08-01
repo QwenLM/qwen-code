@@ -7,7 +7,10 @@
 import { useEffect, useRef } from 'react';
 import { describe, it, expect } from 'vitest';
 import { render, Box, Text, type DOMElement } from 'ink';
-import { measureElementPosition } from './measure-element-position.js';
+import {
+  measureElementPosition,
+  layoutRowForEvent,
+} from './measure-element-position.js';
 
 function createTestStdout() {
   const stdout = Object.create(process.stdout, {
@@ -128,5 +131,28 @@ describe('measureElementPosition', () => {
     } as unknown as DOMElement;
     const result = measureElementPosition(fakeNode);
     expect(result).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+  });
+});
+
+describe('layoutRowForEvent', () => {
+  // A root node whose frame is `frameHeight` rows tall.
+  const rootNode = (frameHeight: number): DOMElement =>
+    ({
+      yogaNode: { getComputedHeight: () => frameHeight },
+      parentNode: undefined,
+    }) as unknown as DOMElement;
+
+  it('maps a 1-based terminal row to a 0-based layout row when the frame fits', () => {
+    // Frame fits the terminal → anchor 0 → layout row = terminalRow - 1.
+    const node = rootNode(40);
+    expect(layoutRowForEvent(node, 1, 40)).toBe(0);
+    expect(layoutRowForEvent(node, 6, 40)).toBe(5);
+  });
+
+  it('applies the negative anchor correction when the frame overflows', () => {
+    // Frame 12 rows, terminal 8 → anchor -4 → +4-row correction.
+    const node = rootNode(12);
+    // terminalRow 7 → 7 - 1 - (-4) = 10.
+    expect(layoutRowForEvent(node, 7, 8)).toBe(10);
   });
 });

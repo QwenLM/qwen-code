@@ -10,7 +10,11 @@ import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
-import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  type EditorType,
+  type ApprovalMode,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
@@ -24,6 +28,10 @@ export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
+  dismissSkillReviewDialog: () => void;
+  closeSkillReviewDialog: () => void;
+  acceptPendingSkill: (skillName: string) => void;
+  rejectPendingSkill: (skillName: string) => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -33,6 +41,7 @@ export interface UIActions {
     mode: ApprovalMode | undefined,
     scope: SettingScope,
   ) => void;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
   auth: AuthController['actions'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -47,6 +56,9 @@ export interface UIActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+    compactionModelMode?: boolean;
+    imageModelMode?: boolean;
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
@@ -64,10 +76,17 @@ export interface UIActions {
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
-  handleFinalSubmit: (value: string) => void;
+  handleFinalSubmit: (
+    value: string,
+    options?: {
+      deferUntilIdle?: boolean;
+      submittedPrompt?: string;
+    },
+  ) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   popAllQueuedMessages: () => string | null;
+  invalidateSubmittedPromptProvenance: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

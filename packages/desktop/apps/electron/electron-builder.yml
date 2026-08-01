@@ -72,6 +72,8 @@ mac:
   # The value must match --app-icon used in actool (see afterPack.js)
   extendInfo:
     CFBundleIconName: AppIcon
+    # Voice dictation: shown in the macOS microphone permission prompt.
+    NSMicrophoneUsageDescription: Qwen Code uses the microphone for voice dictation in the prompt composer.
   target:
     - target: dmg
       arch:

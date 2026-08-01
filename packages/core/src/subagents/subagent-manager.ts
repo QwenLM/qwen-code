@@ -40,7 +40,10 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
-import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
+import {
+  createRuntimeContentGeneratorView,
+  type AuthOverrides,
+} from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import {
@@ -59,7 +62,7 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -122,6 +125,85 @@ export class SubagentManager {
     }
   }
 
+  private applyBuiltinSettings(config: SubagentConfig): SubagentConfig {
+    if (config.name !== 'Explore') {
+      return config;
+    }
+
+    const configuredModel =
+      this.config.getAgentsSettings().builtin?.exploreModel;
+    if (typeof configuredModel !== 'string') {
+      return config;
+    }
+
+    const exploreModel = configuredModel.trim();
+    if (!exploreModel) {
+      return config;
+    }
+
+    return { ...config, model: exploreModel };
+  }
+
+  resolveModelGrade(
+    grade: string | undefined,
+    agentConfig: SubagentConfig,
+  ): string | undefined {
+    const configuredModel = agentConfig.model?.trim();
+    if (
+      !agentConfig.isBuiltin &&
+      configuredModel &&
+      configuredModel !== 'inherit'
+    ) {
+      return undefined;
+    }
+
+    if (!grade) {
+      return undefined;
+    }
+
+    return this.getAvailableModelGrades().get(grade);
+  }
+
+  getAvailableModelGrades(): Map<string, string> {
+    const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
+    if (
+      !modelGrades ||
+      typeof modelGrades !== 'object' ||
+      Array.isArray(modelGrades) ||
+      (allowedGrades !== undefined && !Array.isArray(allowedGrades))
+    ) {
+      return new Map();
+    }
+
+    return new Map(
+      Object.entries(modelGrades).flatMap(([grade, model]) => {
+        const normalizedGrade = grade.trim();
+        return normalizedGrade !== '' &&
+          typeof model === 'string' &&
+          model.trim() !== '' &&
+          (allowedGrades === undefined ||
+            allowedGrades.some(
+              (allowedGrade) =>
+                typeof allowedGrade === 'string' &&
+                allowedGrade.trim() === normalizedGrade,
+            ))
+          ? [[normalizedGrade, model.trim()] as const]
+          : [];
+      }),
+    );
+  }
+
+  private getBuiltinAgent(name: string): SubagentConfig | null {
+    const config = BuiltinAgentRegistry.getBuiltinAgent(name);
+    return config ? this.applyBuiltinSettings(config) : null;
+  }
+
+  private getBuiltinAgents(): SubagentConfig[] {
+    return BuiltinAgentRegistry.getBuiltinAgents().map((config) =>
+      this.applyBuiltinSettings(config),
+    );
+  }
+
   /**
    * Creates a new subagent configuration.
    *
@@ -165,6 +247,7 @@ export class SubagentManager {
 
     // Ensure directory exists
     const dir = path.dirname(filePath);
+    options.assertCanCommit?.();
     await fs.mkdir(dir, { recursive: true });
 
     // Update config with actual file path and level
@@ -177,6 +260,7 @@ export class SubagentManager {
     // Serialize and write the file
     const content = this.serializeSubagent(finalConfig);
 
+    options.assertCanCommit?.();
     try {
       await fs.writeFile(filePath, content, 'utf8');
       // Refresh cache after successful creation
@@ -208,7 +292,7 @@ export class SubagentManager {
     if (level) {
       // Search only the specified level
       if (level === 'builtin') {
-        return BuiltinAgentRegistry.getBuiltinAgent(name);
+        return this.getBuiltinAgent(name);
       }
 
       if (level === 'session') {
@@ -254,7 +338,7 @@ export class SubagentManager {
     }
 
     // Try built-in agents as fallback
-    return BuiltinAgentRegistry.getBuiltinAgent(name);
+    return this.getBuiltinAgent(name);
   }
 
   /**
@@ -268,6 +352,7 @@ export class SubagentManager {
     name: string,
     updates: Partial<SubagentConfig>,
     level?: SubagentLevel,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     const existing = await this.loadSubagent(name, level);
     if (!existing) {
@@ -296,6 +381,14 @@ export class SubagentManager {
       );
     }
 
+    if (existing.level === 'extension') {
+      throw new SubagentError(
+        `Cannot update extension-provided subagent "${name}"`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
+      );
+    }
+
     // Merge updates with existing configuration
     const updatedConfig = this.mergeConfigurations(existing, updates);
 
@@ -314,6 +407,7 @@ export class SubagentManager {
     // Write the updated configuration
     const content = this.serializeSubagent(updatedConfig);
 
+    options?.assertCanCommit?.();
     try {
       await fs.writeFile(existing.filePath, content, 'utf8');
       // Refresh cache after successful update
@@ -338,6 +432,7 @@ export class SubagentManager {
     name: string,
     level?: SubagentLevel,
     extensionName?: string,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     // Check if it's a built-in agent first
     if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
@@ -360,6 +455,9 @@ export class SubagentManager {
       : ['project', 'user'];
     let deleted = false;
 
+    // Assert once before any deletion so a closed generation fails atomically
+    // instead of unlinking some level files and then throwing mid-loop.
+    options?.assertCanCommit?.();
     for (const currentLevel of levelsToCheck) {
       // Skip builtin and session levels for deletion
       if (currentLevel === 'builtin' || currentLevel === 'session') {
@@ -429,9 +527,24 @@ export class SubagentManager {
     }
 
     // Normal mode: load from project, user, and builtin levels
-    const levelsToCheck: SubagentLevel[] = options.level
-      ? [options.level]
+    // Safe mode: only builtin subagents are available
+    const defaultLevels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
       : ['project', 'user', 'builtin', 'extension'];
+    if (
+      this.config.isSafeMode() &&
+      options.level &&
+      options.level !== 'builtin'
+    ) {
+      debugLogger.debug(
+        `Safe mode: overriding requested level '${options.level}' to 'builtin'`,
+      );
+    }
+    const levelsToCheck: SubagentLevel[] = options.level
+      ? this.config.isSafeMode() && options.level !== 'builtin'
+        ? ['builtin']
+        : [options.level]
+      : defaultLevels;
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.subagentsCache !== null;
@@ -529,7 +642,10 @@ export class SubagentManager {
   async refreshCache(): Promise<void> {
     const subagentsCache = new Map();
 
-    const levels: SubagentLevel[] = ['project', 'user', 'builtin', 'extension'];
+    // Safe mode: only load builtin subagents
+    const levels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
+      : ['project', 'user', 'builtin', 'extension'];
 
     for (const level of levels) {
       const levelSubagents = await this.listSubagentsAtLevel(level);
@@ -660,7 +776,7 @@ export class SubagentManager {
     }
 
     // Nested CC fields. Safe to round-trip with the eemeli/yaml parser; the
-    // previous skip-list carve-out is gone (see docs/yaml-parser-replacement.md).
+    // previous skip-list carve-out is gone (see docs/design/yaml-parser-replacement.md).
     if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
       frontmatter['mcpServers'] = config.mcpServers;
     }
@@ -712,6 +828,7 @@ export class SubagentManager {
       hooks?: AgentHooks;
       promptConfigOverrides?: Partial<PromptConfig>;
       modelConfigOverrides?: Partial<ModelConfig>;
+      runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
     },
@@ -764,8 +881,24 @@ export class SubagentManager {
         ...runtimeConfig.runConfig,
         ...options?.runConfigOverrides,
       };
-      const toolConfig =
+      const configuredToolConfig =
         options?.toolConfigOverride ?? runtimeConfig.toolConfig;
+      const toolConfig: ToolConfig = {
+        tools: configuredToolConfig?.tools ?? ['*'],
+        ...(configuredToolConfig?.executionAllowedTools !== undefined
+          ? {
+              executionAllowedTools: [
+                ...configuredToolConfig.executionAllowedTools,
+              ],
+            }
+          : {}),
+        disallowedTools: Array.from(
+          new Set([
+            ...(configuredToolConfig?.disallowedTools ?? []),
+            ToolNames.ASK_USER_QUESTION,
+          ]),
+        ),
+      };
 
       // When the model selector specifies a different provider, build a
       // dedicated ContentGenerator + view so the subagent talks to the
@@ -774,6 +907,8 @@ export class SubagentManager {
       const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
+        modelConfig.model,
+        options?.runtimeAuthOverrides,
       );
 
       const { context: subagentContext, cleanup } =
@@ -970,22 +1105,30 @@ export class SubagentManager {
   private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
+    fallbackModelId?: string,
+    runtimeAuthOverrides?: AuthOverrides,
   ): Promise<RuntimeContentGeneratorView | undefined> {
     const resolvedModel = this.resolveModelOverride(config.model, base);
-    if (!resolvedModel) {
+    const modelId = resolvedModel?.modelId ?? fallbackModelId;
+    if (!modelId) {
       return undefined;
     }
 
     const authType =
-      resolvedModel.authType ?? base.getContentGeneratorConfig().authType;
-    const authOverrides = {
-      authType: authType as string,
-    };
+      resolvedModel?.authType ??
+      runtimeAuthOverrides?.authType ??
+      base.getContentGeneratorConfig().authType;
+    const authOverrides: AuthOverrides = resolvedModel
+      ? { authType: authType as string }
+      : {
+          ...runtimeAuthOverrides,
+          authType: authType as string,
+        };
 
     const view = await createRuntimeContentGeneratorView(
       base,
       base,
-      resolvedModel.modelId,
+      modelId,
       authOverrides,
     );
 
@@ -1043,6 +1186,13 @@ export class SubagentManager {
       (config.tools && config.tools.length > 0) ||
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
+      // Unresolved names (e.g. `WebSearch` while the opt-in web_search tool
+      // is unregistered) stay in the list as dead, restrictive entries: an
+      // explicit allow-list must never be widened on resolution failure, so
+      // an agent whose every tool is unavailable runs tool-less (fail
+      // closed) rather than inheriting shell/write it was not configured
+      // for. Deliberate: this supersedes the earlier compatibility fallback
+      // for converted Claude agents.
       const toolNames = config.tools
         ? await this.transformToToolNames(config.tools)
         : ['*'];
@@ -1176,7 +1326,7 @@ export class SubagentManager {
   ): Promise<SubagentConfig[]> {
     // Handle built-in agents
     if (level === 'builtin') {
-      return BuiltinAgentRegistry.getBuiltinAgents();
+      return this.getBuiltinAgents();
     }
 
     if (level === 'extension') {

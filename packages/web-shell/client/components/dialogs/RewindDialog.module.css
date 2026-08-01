@@ -12,7 +12,14 @@
   padding: 4px 0;
 }
 
+/* Focused programmatically for keyboard nav / aria-activedescendant; selection
+   is shown by the roving row highlight, so suppress the container outline. */
+.list:focus {
+  outline: none;
+}
+
 .item {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -23,18 +30,51 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
+/* Roving cursor (keyboard/hover position) — a plain gray highlight, matching
+   the other list dialogs. */
 .item:hover,
-.itemSelected {
-  background: var(--bg-tertiary);
+.itemCursor {
+  background: var(--secondary);
 }
 
-.item:disabled {
+/* Confirmed selection: stronger than the cursor — a left accent bar plus a blue
+   title, so the chosen row stays distinguishable from the row merely under the
+   cursor (which only gets the gray background). */
+.itemSelected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 60%;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--agent-blue-500, #4a9eff);
+}
+
+.itemSelected .prompt {
+  color: var(--agent-blue-500, #4a9eff);
+  font-weight: 600;
+}
+
+/* Keyboard mode: the pointer yields to the keyboard, so a cursor resting on a
+   row must not paint the hover highlight — only the keyboard cursor row does. */
+.keyboardOnly .item:hover {
+  background: transparent;
+}
+
+.keyboardOnly .itemCursor:hover,
+.keyboardOnly .itemCursor {
+  background: var(--secondary);
+}
+
+.itemDisabled {
   cursor: default;
   opacity: 0.6;
 }
@@ -44,17 +84,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 13px;
 }
 
 .turn {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 500;
 }
 
 .time {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -62,8 +102,17 @@
 .footer {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   padding: 10px 8px 0;
+}
+
+/* Inline failure text: toasts can be deduplicated by the app shell, so the
+   dialog must show the error itself (mirrors delete/release's message hint). */
+.footerMessage {
+  margin-right: auto;
+  color: var(--error-color);
+  font-size: 12px;
 }
 
 .dangerButton {

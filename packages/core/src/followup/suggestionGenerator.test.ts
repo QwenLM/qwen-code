@@ -99,6 +99,63 @@ describe('generatePromptSuggestion', () => {
       expect.objectContaining({ model: 'openai:fast-model' }),
     );
   });
+  it('passes preserveTools: true for Anthropic prompt-cache sharing', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+    });
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveTools: true }),
+    );
+  });
+
+  it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+    });
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'different-fast-model'),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveTools: false }),
+    );
+  });
 });
 
 describe('shouldFilterSuggestion', () => {
@@ -157,6 +214,38 @@ describe('shouldFilterSuggestion', () => {
 
   it('filters multiple sentences', () => {
     expect(shouldFilterSuggestion('Run the tests. Then commit.')).toBe(true);
+    expect(shouldFilterSuggestion('Hello! How are you?')).toBe(true);
+    expect(shouldFilterSuggestion('Do this. Then do that.')).toBe(true);
+    // Abbreviation skipped, then real sentence boundary detected
+    expect(shouldFilterSuggestion('Check Dr. Smith. Then commit.')).toBe(true);
+    // Non-word char before punctuation — still detected as sentence boundary
+    expect(shouldFilterSuggestion('Run (see docs). Then deploy')).toBe(true);
+  });
+
+  it('does not filter abbreviations as multiple sentences', () => {
+    // Issue #6077 — "vs." followed by a capitalized word should pass.
+    expect(
+      shouldFilterSuggestion(
+        "Let's start with the Weeds vs. Wildflowers audit.",
+      ),
+    ).toBe(false);
+    expect(shouldFilterSuggestion('Weeds vs. Wildflowers audit')).toBe(false);
+    // Common honorifics and abbreviations
+    expect(shouldFilterSuggestion('Check Dr. Smith notes')).toBe(false);
+    expect(shouldFilterSuggestion('Ask Mr. Jones for help')).toBe(false);
+    expect(shouldFilterSuggestion('Talk to Ms. Patel next')).toBe(false);
+    expect(shouldFilterSuggestion('See Prof. Lee today')).toBe(false);
+    expect(shouldFilterSuggestion('Visit St. Petersburg office')).toBe(false);
+    expect(shouldFilterSuggestion('Check etc. Tasks remaining')).toBe(false);
+    expect(shouldFilterSuggestion('Review options etc. Then commit')).toBe(
+      false,
+    );
+    // Latin shorthands with an internal period
+    expect(shouldFilterSuggestion('Use e.g. Docker to build')).toBe(false);
+    expect(shouldFilterSuggestion('Use i.e. Docker to build')).toBe(false);
+    // Capitalized variants still recognized as abbreviations
+    expect(shouldFilterSuggestion('Use E.g. Docker to build')).toBe(false);
+    expect(shouldFilterSuggestion('Use I.e. Docker to build')).toBe(false);
   });
 
   it('filters formatting', () => {

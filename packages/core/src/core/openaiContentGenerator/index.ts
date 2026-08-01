@@ -13,6 +13,7 @@ import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  ZaiOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
@@ -74,6 +75,10 @@ export function determineProvider(
       contentGeneratorConfig,
       cliConfig,
     );
+  }
+
+  if (ZaiOpenAICompatibleProvider.isZaiProvider(config)) {
+    return new ZaiOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {

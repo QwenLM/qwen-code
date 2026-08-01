@@ -2,11 +2,11 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  color: var(--foreground);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 14px;
-  background: var(--command-panel-bg);
+  background: var(--background);
 }
 
 .embeddedPanel {
@@ -18,7 +18,7 @@
 
 .title {
   font-weight: 700;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .sectionTitle {
@@ -26,7 +26,7 @@
 }
 
 .overflowHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   padding-left: 2ch;
 }
 
@@ -37,7 +37,7 @@
 }
 
 .secondary {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .row {
@@ -49,13 +49,13 @@
 }
 
 .selected {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .pointer {
   display: inline-block;
   width: 2ch;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .nameCell {
@@ -65,6 +65,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.treeMarker {
+  color: var(--muted-foreground);
+}
+
+.orphanNote {
+  color: var(--muted-foreground);
 }
 
 .status {
@@ -80,7 +88,7 @@
   justify-content: center;
   width: 18px;
   height: 18px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .chevron {
@@ -101,7 +109,7 @@
 }
 
 .separator {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .list {
@@ -117,7 +125,7 @@
 }
 
 .taskExpanded {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
   padding: 4px;
 }
 
@@ -149,6 +157,185 @@
   gap: 12px;
 }
 
+.monitorDetail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.monitorOverview {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+}
+
+.monitorHeadingRow {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.monitorDescription {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitorStatusActions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.monitorStatusTag {
+  border-color: transparent;
+  flex: 0 0 auto;
+}
+
+.monitorStatusTag::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: '';
+  height: 6px;
+  width: 6px;
+}
+
+.monitorStatusTag[data-status='running'] {
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
+  border-color: color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.monitorStatusTag[data-status='completed'] {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success-color) 35%, transparent);
+  color: var(--success-color);
+}
+
+.monitorStatusTag[data-status='failed'],
+.monitorStatusTag[data-status='cancelled'] {
+  background: color-mix(in srgb, var(--error-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--error-color) 35%, transparent);
+  color: var(--error-color);
+}
+
+.monitorStopButton {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--error-color) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--error-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 9px;
+}
+
+.monitorStopButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
+}
+
+.monitorStopButton:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.monitorActionError {
+  color: var(--error-color);
+  font-size: 12px;
+  text-align: right;
+}
+
+.monitorMetrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+}
+
+.monitorMetric {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.monitorMetricValue {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitorMetricLabel,
+.monitorSectionLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.monitorCommandSection,
+.monitorError {
+  display: grid;
+  gap: 6px;
+}
+
+.shellFields {
+  display: grid;
+  gap: 14px;
+}
+
+.shellFieldValue {
+  background: var(--muted);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.shellError {
+  background: color-mix(in srgb, var(--error-color) 7%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.monitorCommand {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.monitorError {
+  color: var(--error-color);
+  font-size: 12px;
+  margin-top: 12px;
+}
+
 .detailTopMain {
   display: flex;
   flex: 1 1 auto;
@@ -176,13 +363,13 @@
 }
 
 .embeddedPanel .row:hover {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  color: var(--foreground);
+  background: var(--secondary);
 }
 
 .embeddedPanel .selected {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  color: var(--foreground);
+  background: var(--secondary);
 }
 
 .embeddedPanel .pointer {
@@ -190,14 +377,20 @@
 }
 
 .embeddedPanel .inlineDetail {
-  padding: 0;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .embeddedPanel .detail {
-  margin: 8px;
-  border-radius: 6px;
-  background: var(--bg-primary);
-  padding: 8px;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .embeddedPanel .nameCell {
@@ -212,7 +405,7 @@
   height: 14px;
   border: 1.5px solid currentColor;
   border-radius: 4px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .taskIcon::before,
@@ -242,20 +435,20 @@
 }
 
 .detailFieldLabel {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
 }
 
 .detailContent {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .compactSummary {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -278,10 +471,10 @@
 }
 
 .actionButton {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--muted);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -289,7 +482,7 @@
 }
 
 .actionButton:hover:not(:disabled) {
-  border-color: var(--accent-color);
+  border-color: var(--agent-blue-500);
 }
 
 .actionButton:disabled {
@@ -302,8 +495,8 @@
 }
 
 .shortcuts {
-  color: var(--text-dimmed);
-  border-top: 1px solid var(--border-color);
+  color: var(--muted-foreground);
+  border-top: 1px solid var(--border);
   padding-top: 8px;
 }
 
@@ -318,21 +511,21 @@
 }
 
 .activityCurrent {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .activityPast {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .promptContent {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;

@@ -11,6 +11,7 @@ import {
   DefaultHookOutput,
   UserPromptExpansionHookOutput,
   HookEventName,
+  isToolArtifactLike,
 } from './types.js';
 
 describe('UserPromptSubmit getAdditionalContext', () => {
@@ -141,5 +142,42 @@ describe('terminalSequence on HookOutput', () => {
   it('terminalSequence defaults to undefined', () => {
     const output = new DefaultHookOutput({});
     expect(output.terminalSequence).toBeUndefined();
+  });
+});
+
+describe('isToolArtifactLike', () => {
+  it('accepts primitive metadata values', () => {
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { label: 'daily', score: 1, pinned: true, optional: null },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects nested and non-finite metadata values', () => {
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { hints: { display: 'card' } },
+      }),
+    ).toBe(false);
+    expect(
+      isToolArtifactLike({
+        title: 'Report',
+        metadata: { score: Number.NaN },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects artifact sizes the daemon store would drop', () => {
+    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        isToolArtifactLike({
+          title: 'Report',
+          sizeBytes,
+        }),
+      ).toBe(false);
+    }
   });
 });

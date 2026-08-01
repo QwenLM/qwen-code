@@ -8,9 +8,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
+const spawnMock = vi.hoisted(() => vi.fn());
+
 // AcpConnection imports AcpFileHandler which imports vscode.
 // Mock vscode so it can be resolved without the actual VS Code runtime.
 vi.mock('vscode', () => ({}));
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return { ...actual, spawn: spawnMock };
+});
 
 import { AcpConnection } from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
@@ -41,6 +47,31 @@ function createMockChild(overrides?: Record<string, unknown>) {
     ...overrides,
   } as unknown as AcpConnectionInternal['child'];
 }
+
+describe('AcpConnection process spawning', () => {
+  it('runs the managed ACP child in Electron Node mode', async () => {
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '');
+    vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '');
+    spawnMock.mockReturnValue(createMockChild());
+    const conn = new AcpConnection() as unknown as {
+      connect: (cliEntryPath: string) => Promise<void>;
+      setupChildProcessHandlers: () => Promise<void>;
+    };
+    conn.setupChildProcessHandlers = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await conn.connect(process.execPath);
+      const options = spawnMock.mock.calls[0]?.[2] as {
+        env?: NodeJS.ProcessEnv;
+      };
+
+      expect(options.env?.['ELECTRON_RUN_AS_NODE']).toBe('1');
+      expect(options.env?.['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe('1');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe('AcpConnection readTextFile error mapping', () => {
   it('maps ENOENT to RESOURCE_NOT_FOUND RequestError', () => {

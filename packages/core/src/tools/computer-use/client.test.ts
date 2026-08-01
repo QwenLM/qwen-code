@@ -1,5 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
-import { ComputerUseClient, isTransportClosedError } from './client.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import {
+  ComputerUseClient,
+  DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS,
+  isTransportClosedError,
+  MAX_COMPUTER_USE_IDLE_TIMEOUT_MS,
+} from './client.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 describe('ComputerUseClient', () => {
@@ -97,6 +102,201 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
     expect(progress).toHaveBeenCalledWith(
       expect.stringContaining('max_image_dimension=800'),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Idle shutdown
+// ---------------------------------------------------------------------------
+
+describe('idle shutdown', () => {
+  type FakeInner = {
+    callTool: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const installInner = (c: ComputerUseClient, inner: FakeInner): void => {
+    (c as unknown as { client: FakeInner }).client = inner;
+  };
+
+  const makeInner = (): FakeInner => ({
+    callTool: vi.fn().mockResolvedValue(successResult),
+    close: vi.fn().mockResolvedValue(undefined),
+  });
+
+  it('defaults to a 5 minute idle timeout', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS - 1);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+    expect(c.isStarted()).toBe(false);
+  });
+
+  it('treats negative idle timeouts as invalid and falls back to the default', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: -1,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS - 1);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the configured idle timeout after the last tool call', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('get_app_state', {});
+
+    await vi.advanceTimersByTimeAsync(24);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stop while another tool call is still active', async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: (result: CallToolResult) => void;
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner: FakeInner = {
+      callTool: vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<CallToolResult>((resolve) => {
+              releaseFirst = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(successResult),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    installInner(c, inner);
+
+    const first = c.callTool('get_window_state', {});
+    await Promise.resolve();
+    const second = c.callTool('click', {});
+    await second;
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(inner.close).not.toHaveBeenCalled();
+
+    releaseFirst(successResult);
+    await first;
+    await vi.advanceTimersByTimeAsync(25);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables idle shutdown when configured as 0', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 0,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+
+    expect(inner.close).not.toHaveBeenCalled();
+    expect(c.isStarted()).toBe(true);
+  });
+
+  it('reschedules the idle timer when setIdleTimeoutMs is called while pending', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+    await vi.advanceTimersByTimeAsync(20);
+    c.setIdleTimeoutMs(100);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(95);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels the pending idle timer when stop() is called explicitly', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+    await c.stop();
+    expect(inner.close).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([NaN, Infinity, -Infinity])(
+    'treats %p as invalid and falls back to the default',
+    async (value) => {
+      vi.useFakeTimers();
+      const c = new ComputerUseClient({
+        binary: '/fake/cua-driver',
+        idleTimeoutMs: value,
+      });
+      const inner = makeInner();
+      installInner(c, inner);
+
+      await c.callTool('list_windows', {});
+      await vi.advanceTimersByTimeAsync(
+        DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS - 1,
+      );
+      expect(inner.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(inner.close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('treats idle timeouts above the setTimeout safe range as invalid', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: MAX_COMPUTER_USE_IDLE_TIMEOUT_MS + 1,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('list_windows', {});
+    await vi.advanceTimersByTimeAsync(DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS - 1);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
   });
 });
 

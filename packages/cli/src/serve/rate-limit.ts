@@ -6,6 +6,10 @@
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { isLoopbackBind } from './loopback-binds.js';
+import {
+  CLIENT_ID_RE,
+  MAX_CLIENT_ID_LENGTH,
+} from './server/request-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -21,6 +25,7 @@ export interface RateLimitTierConfig {
 export interface RateLimitConfig {
   tiers: Record<RateLimitTier, RateLimitTierConfig>;
   hostname: string;
+  workspaceQualifiedAcpEnabled?: boolean;
   onLimitReached?: (
     tier: RateLimitTier,
     key: string,
@@ -51,12 +56,17 @@ interface TokenBucket {
 const MAX_BUCKETS = 10_000;
 const GC_REQUEST_INTERVAL = 1000;
 const GC_TIMER_INTERVAL_MS = 5 * 60 * 1000;
+const WORKSPACE_QUALIFIED_ACP_PATH = /^\/workspaces\/[^/]+\/acp$/i;
 
 // ---------------------------------------------------------------------------
 // Tier Resolution
 // ---------------------------------------------------------------------------
 
-function resolveTier(method: string, path: string): RateLimitTier | null {
+function resolveTier(
+  method: string,
+  path: string,
+  workspaceQualifiedAcpEnabled: boolean,
+): RateLimitTier | null {
   // Strip trailing slash for consistent matching
   const p = path.endsWith('/') && path.length > 1 ? path.slice(0, -1) : path;
 
@@ -76,6 +86,8 @@ function resolveTier(method: string, path: string): RateLimitTier | null {
   if (method === 'GET' && p.startsWith('/session/') && p.endsWith('/events'))
     return null;
   if (p === '/acp' || p.startsWith('/acp/')) return null;
+  if (workspaceQualifiedAcpEnabled && WORKSPACE_QUALIFIED_ACP_PATH.test(p))
+    return null;
 
   // Prompt tier
   if (method === 'POST' && p.startsWith('/session/') && p.endsWith('/prompt'))
@@ -91,10 +103,6 @@ function resolveTier(method: string, path: string): RateLimitTier | null {
 // ---------------------------------------------------------------------------
 // Key Extraction
 // ---------------------------------------------------------------------------
-
-// Keep in sync with server.ts CLIENT_ID_RE / MAX_CLIENT_ID_LENGTH.
-const MAX_CLIENT_ID_LENGTH = 128;
-const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 
 function normalizeIp(raw: string): string {
   // Normalize IPv6-mapped IPv4 (::ffff:127.0.0.1 -> 127.0.0.1)
@@ -241,7 +249,11 @@ export function createRateLimiter(
         return;
       }
 
-      const tier = resolveTier(req.method, req.path);
+      const tier = resolveTier(
+        req.method,
+        req.path,
+        config.workspaceQualifiedAcpEnabled === true,
+      );
       if (tier === null) {
         next();
         return;

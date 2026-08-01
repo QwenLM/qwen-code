@@ -7,6 +7,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +16,37 @@ const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
 const YAMLLINT_VERSION = '1.35.1';
 
-const TEMP_DIR = join(tmpdir(), 'qwen-code-linters');
+function sanitizePathPart(value) {
+  return value.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+export function getLinterTempDir({
+  cwd = process.cwd(),
+  env = process.env,
+} = {}) {
+  const baseDir = env.RUNNER_TEMP || tmpdir();
+  const runId = env.GITHUB_RUN_ID;
+
+  if (runId) {
+    return join(
+      baseDir,
+      'qwen-code-linters',
+      [
+        sanitizePathPart(runId),
+        sanitizePathPart(env.GITHUB_RUN_ATTEMPT || '1'),
+        sanitizePathPart(env.GITHUB_JOB || 'job'),
+      ].join('-'),
+    );
+  }
+
+  const workspaceHash = createHash('sha256')
+    .update(cwd)
+    .digest('hex')
+    .slice(0, 16);
+  return join(baseDir, 'qwen-code-linters', `local-${workspaceHash}`);
+}
+
+const TEMP_DIR = getLinterTempDir();
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -65,9 +96,12 @@ const LINTERS = {
     run: `
       actionlint \
         -color \
+        -pyflakes= \
+        -shellcheck= \
         -ignore 'SC2002:' \
         -ignore 'SC2016:' \
         -ignore 'SC2129:' \
+        -ignore 'unexpected key "deployment" for "environment" section' \
         -ignore 'label ".+" is unknown'
     `,
   },

@@ -1,22 +1,53 @@
-import { memo, useEffect, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useTheme } from '../../themeContext';
-import ReactMarkdown from 'react-markdown';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
+import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { codeToHtml, type BundledLanguage } from 'shiki';
+import {
+  getCachedHtml,
+  getCodeHighlighter,
+  highlightToHtmlSync,
+  isTooLargeToHighlight,
+} from './codeHighlighter';
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import {
+  DEFAULT_WEB_SHELL_MARKDOWN_CHART,
+  WebShellMarkdownChartProvider,
+  createWebShellMarkdownChartPre,
+} from './MarkdownChartRenderer';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
-  deferMermaid?: boolean;
+  /**
+   * True while the message is still streaming in. Used to defer expensive,
+   * per-chunk rendering (Mermaid diagrams and Shiki syntax highlighting) until
+   * the content settles, avoiding flicker and wasted re-tokenization.
+   */
+  isStreaming?: boolean;
+  tableMode?: MarkdownTableMode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -29,14 +60,15 @@ const SUPPORTED_LANGUAGES = new Set([
   'c',
   'cpp',
   'csharp',
+  'fsharp',
   'ruby',
   'php',
   'swift',
   'kotlin',
   'scala',
-  'shell',
+  // `shell` and `zsh` are intentionally absent: LANGUAGE_ALIASES maps them to
+  // `bash`, which resolveFenceLanguage applies before this membership check.
   'bash',
-  'zsh',
   'fish',
   'powershell',
   'sql',
@@ -67,6 +99,55 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
+// Common fence aliases → Shiki's canonical language id. This keeps shorthand
+// tags like ```ts and punctuation tags like ```c++ highlighted under the
+// language ids Shiki actually supports.
+const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
+  ts: 'typescript',
+  js: 'javascript',
+  py: 'python',
+  rb: 'ruby',
+  rs: 'rust',
+  kt: 'kotlin',
+  cs: 'csharp',
+  sh: 'bash',
+  zsh: 'bash',
+  shell: 'bash',
+  yml: 'yaml',
+  md: 'markdown',
+  golang: 'go',
+  ps1: 'powershell',
+  docker: 'dockerfile',
+};
+
+export interface ResolvedFenceLanguage {
+  /** What the user typed, in its original case, shown in the code-block header. */
+  label: string;
+  /** Canonical language id (aliases resolved); also used to detect mermaid. */
+  lang: string;
+  /** A supported Shiki language id, or 'text' when unsupported (no highlight). */
+  resolvedLang: string;
+}
+
+export function resolveFenceLanguage(
+  rawLang: string | undefined,
+): ResolvedFenceLanguage {
+  const normalized = (rawLang || '').toLowerCase();
+  // `Object.hasOwn` guard: a bracket read like `LANGUAGE_ALIASES['__proto__']`
+  // would otherwise return an inherited prototype value (an object/function),
+  // violating the `lang: string` contract.
+  const lang = Object.hasOwn(LANGUAGE_ALIASES, normalized)
+    ? LANGUAGE_ALIASES[normalized]
+    : normalized;
+  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
+  // Header label preserves the original case (` ```TypeScript ` shows
+  // "TypeScript", not "typescript"); alias resolution uses the lowercased form.
+  return { label: (rawLang || '').trim() || 'text', lang, resolvedLang };
+}
+
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
 const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
 
@@ -89,30 +170,6 @@ export function isSafeImageSrc(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-const SHIKI_CACHE_MAX = 128;
-const shikiCache = new Map<string, string>();
-
-function cachedCodeToHtml(
-  code: string,
-  lang: string,
-  theme: string,
-): Promise<string> {
-  const key = `${lang}\0${theme}\0${code}`;
-  const cached = shikiCache.get(key);
-  if (cached !== undefined) return Promise.resolve(cached);
-  return codeToHtml(code, {
-    lang: lang as BundledLanguage,
-    theme,
-  }).then((html) => {
-    if (shikiCache.size >= SHIKI_CACHE_MAX) {
-      const first = shikiCache.keys().next().value;
-      if (first !== undefined) shikiCache.delete(first);
-    }
-    shikiCache.set(key, html);
-    return html;
-  });
-}
-
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
@@ -126,7 +183,86 @@ function MermaidBlock({ code }: { code: string }) {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, setCopied] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
+
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3;
+  const ZOOM_STEP = 0.25;
+
+  const handleZoomIn = () => {
+    setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 100) / 100));
+  };
+  const handleZoomOut = () => {
+    setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
+  };
+  const resetZoomAndPan = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, []);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsDragging(true);
+      dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: offset.x,
+        origY: offset.y,
+      };
+    },
+    [offset],
+  );
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
+      // X is unclamped — overflow-x: auto provides native horizontal scroll.
+      const PAN_LIMIT = 1500;
+      setOffset({
+        x: dragRef.current.origX + dx,
+        y: Math.max(
+          -PAN_LIMIT,
+          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
+        ),
+      });
+    };
+
+    const onMouseUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onMouseUp);
+    };
+  }, [isDragging]);
+
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +278,10 @@ function MermaidBlock({ code }: { code: string }) {
             theme: mermaidTheme,
             securityLevel: 'strict',
             suppressErrorRendering: true,
+            flowchart: {
+              wrappingWidth: 300,
+              useMaxWidth: false,
+            },
           });
           lastMermaidTheme = mermaidTheme;
         }
@@ -182,7 +322,9 @@ function MermaidBlock({ code }: { code: string }) {
     return (
       <div className={styles.codeBlock}>
         <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
         <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
@@ -194,8 +336,36 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
+          {viewMode === 'diagram' && (
+            <>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomOut}
+                title={t('mermaid.zoomOut')}
+                disabled={zoom <= ZOOM_MIN}
+              >
+                {t('mermaid.zoomOut')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={resetZoomAndPan}
+                title={t('mermaid.zoomReset')}
+                disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
+              >
+                {t('mermaid.zoomReset')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomIn}
+                title={t('mermaid.zoomIn')}
+                disabled={zoom >= ZOOM_MAX}
+              >
+                {t('mermaid.zoomIn')}
+              </button>
+            </>
+          )}
           <button
             className={styles.codeBlockCopy}
             onClick={() =>
@@ -223,9 +393,19 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+          className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
+          onMouseDown={handleMouseDown}
+          onDoubleClick={resetZoomAndPan}
+        >
+          <div
+            className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+              transformOrigin: 'top center',
+            }}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        </div>
       )}
     </div>
   );
@@ -234,53 +414,80 @@ function MermaidBlock({ code }: { code: string }) {
 function CodeBlock({
   className,
   children,
-  deferMermaid,
+  isStreaming,
 }: {
   className?: string;
   children: string;
-  deferMermaid?: boolean;
+  isStreaming?: boolean;
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const match = className?.match(/language-(\w+)/);
-  const lang = match?.[1] || '';
+  const { label, lang, resolvedLang } = resolveFenceLanguage(
+    extractRawFenceLanguage(className),
+  );
   const code = String(children).replace(/\n$/, '');
-  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
-    if (lang === 'mermaid' || resolvedLang === 'text') {
+    // Stream code as plain text. Highlighting a growing fence on every chunk
+    // repeatedly tokenizes its entire contents and can dominate rendering for
+    // long responses; the settled render below highlights the final text once.
+    if (
+      isStreaming ||
+      lang === 'mermaid' ||
+      resolvedLang === 'text' ||
+      isTooLargeToHighlight(code)
+    ) {
       setHtml(null);
       return;
     }
 
-    const cacheKey = `${resolvedLang}\0${shikiTheme}\0${code}`;
-    if (shikiCache.has(cacheKey)) {
-      setHtml(shikiCache.get(cacheKey)!);
+    // Already-highlighted exact code/lang/theme (settled re-render, or a block
+    // that re-mounted): return it synchronously without needing the highlighter.
+    const cached = getCachedHtml(code, resolvedLang, shikiTheme);
+    if (cached !== null) {
+      setHtml(cached);
       return;
     }
 
-    let cancelled = false;
+    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
+    if (warmHtml !== null) {
+      setHtml(warmHtml);
+      return;
+    }
+
+    // Cold path: the grammar isn't loaded yet. Drop any HTML still held from a
+    // previous `code` (e.g. this reused CodeBlock instance just switched to a
+    // not-yet-loaded language on regeneration) so we render the current code as
+    // plain text — not the prior block's stale highlight — until the load
+    // resolves. Then re-check cancellation *before* the synchronous tokenization
+    // so a superseded settled block does not run codeToHtml.
     setHtml(null);
-    const timer = setTimeout(() => {
-      cachedCodeToHtml(code, resolvedLang, shikiTheme)
-        .then((result) => {
-          if (!cancelled) setHtml(result);
-        })
-        .catch(() => {
-          if (!cancelled) setHtml(null);
-        });
-    }, 120);
+    let cancelled = false;
+    getCodeHighlighter(resolvedLang)
+      .then(() => {
+        if (cancelled) return;
+        const cold = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
+        if (cold !== null) setHtml(cold);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn(
+          '[web-shell] highlight failed for lang=%s',
+          resolvedLang,
+          err,
+        );
+        setHtml(null);
+      });
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
-  }, [code, lang, resolvedLang, shikiTheme]);
+  }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(
@@ -292,19 +499,19 @@ function CodeBlock({
     );
   };
 
-  if (lang === 'mermaid' && !deferMermaid) {
+  if (lang === 'mermaid' && !isStreaming) {
     return <MermaidBlock code={code} />;
   }
 
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>{lang || 'text'}</span>
+        <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {html ? (
+      {!isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -318,85 +525,324 @@ function CodeBlock({
   );
 }
 
+function extractRawFenceLanguage(className: string | undefined): string {
+  const token = className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+  const match = token.match(/^([\w+.#-]+)/);
+  if (!match) return '';
+  const language = match[1] ?? '';
+  const nextChar = token[language.length];
+  return !nextChar || nextChar === '{' || nextChar === ':' ? language : '';
+}
+
 function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function createComponents(deferMermaid?: boolean): Components {
-  return {
-    code({
-      className,
-      children,
-    }: {
-      className?: string;
-      children?: ReactNode;
-    }) {
-      const isBlock =
-        className?.startsWith('language-') ||
-        (typeof children === 'string' && children.includes('\n'));
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
+  return (
+    <div className={styles.tableWrapper}>
+      <table className={styles.table}>{children}</table>
+    </div>
+  );
+}
 
-      if (isBlock) {
+// Carries the streaming flag to CodeBlock via context instead of a closure, so
+// the `code` renderer below can be a single stable reference. Toggling
+// isStreaming then no longer changes the `code` element type, so React reuses
+// the same CodeBlock instance across the streaming→settled transition
+// (preserving its highlighted `html` state) instead of remounting it.
+const IsStreamingContext = createContext(false);
+const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
+  undefined,
+);
+const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+
+interface PositionedCodeNode {
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
+}
+
+function isIncompleteTailFence(
+  document: string | undefined,
+  node: PositionedCodeNode | undefined,
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming || document === undefined) return false;
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
+  return (
+    !isMarkdownFenceClosed(document.slice(start, end)) &&
+    document.slice(end).trim().length === 0
+  );
+}
+
+function MarkdownCode({
+  className,
+  children,
+  node,
+}: {
+  className?: string;
+  children?: ReactNode;
+  node?: PositionedCodeNode;
+}) {
+  const isStreaming = useContext(IsStreamingContext);
+  const document = useContext(MarkdownDocumentContext);
+  const isBlock =
+    className?.startsWith('language-') ||
+    (typeof children === 'string' && children.includes('\n'));
+
+  if (isBlock) {
+    return (
+      <MarkdownFencedCode
+        className={className}
+        isStreaming={isStreaming}
+        isIncomplete={isIncompleteTailFence(document, node, isStreaming)}
+      >
+        {children}
+      </MarkdownFencedCode>
+    );
+  }
+  return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownFencedCode({
+  className,
+  children,
+  isStreaming,
+  isIncomplete,
+}: {
+  className?: string;
+  children?: ReactNode;
+  isStreaming?: boolean;
+  isIncomplete?: boolean;
+}) {
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
+  const rawCode = String(children);
+  const code = rawCode.replace(/\n$/, '');
+  const fallback = (
+    <CodeBlock className={className} isStreaming={isStreaming}>
+      {rawCode}
+    </CodeBlock>
+  );
+  const language = extractRawFenceLanguage(className);
+  const { resolvedLang: resolvedLanguage } = resolveFenceLanguage(language);
+  const canUseCustomRenderer = !!source && !!className && !!language;
+
+  if (canUseCustomRenderer) {
+    try {
+      const custom = markdown?.renderCodeBlock?.({
+        language,
+        resolvedLanguage,
+        className,
+        code,
+        isStreaming: !!isStreaming,
+        isIncomplete: !!isIncomplete,
+        source,
+        theme: appTheme,
+      });
+      if (custom != null && typeof custom !== 'boolean') {
         return (
-          <CodeBlock className={className} deferMermaid={deferMermaid}>
-            {String(children)}
-          </CodeBlock>
+          <ErrorBoundary
+            fallback={fallback}
+            label={`custom code block component render (lang=${language})`}
+            resetKeys={[
+              language,
+              source,
+              appTheme,
+              isStreaming ? 'streaming' : 'settled',
+              isIncomplete ? 'incomplete' : 'complete',
+              code,
+            ]}
+          >
+            {custom}
+          </ErrorBoundary>
         );
       }
-      return <InlineCode>{children}</InlineCode>;
-    },
-    pre({ children }: { children?: ReactNode }) {
-      return <>{children}</>;
-    },
-    a({ href, children }: { href?: string; children?: ReactNode }) {
-      const safeHref = isSafeHref(href) ? href : undefined;
-      return (
-        <a
-          href={safeHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={styles.link}
-        >
-          {children}
-        </a>
+    } catch (error) {
+      console.error(
+        '[web-shell] custom code block renderer call failed (lang=%s):',
+        language,
+        error,
       );
-    },
+    }
+  }
+
+  return fallback;
+}
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  return <>{children}</>;
+}
+
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
+/**
+ * react-markdown sanitizes every href through `defaultUrlTransform`, which
+ * allows only `http(s)`, `irc(s)`, `mailto` and `xmpp` and rewrites everything
+ * else to `''`. Without this, `qwen-session://<id>` never reaches
+ * {@link MarkdownLink} with its scheme intact, the interception below is dead
+ * code, and the link renders as an inert anchor.
+ *
+ * Letting the scheme through is safe: `MarkdownLink` never puts it in the DOM.
+ * It renders `href="#"` and dispatches the id as an event, so nothing navigates
+ * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
+ * Every other href keeps the default sanitizer.
+ */
+export function markdownUrlTransform(url: string): string {
+  return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
+}
+
+function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: ReactNode;
+}) {
+  const renderMode = useTranscriptRenderMode();
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    if (renderMode === 'readonly') {
+      return <span className={styles.link}>{children}</span>;
+    }
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+  const safeHref = isSafeHref(href) ? href : undefined;
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.link}
+    >
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const safeSrc = isSafeImageSrc(src) ? src : undefined;
+  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+// `code`/`pre`/`a`/`img` are stable references; only `table` is created per
+// call (it closes over tableMode/tableResetKey). Recreating the components
+// object for a table reset therefore never changes the `code` element type, so
+// code blocks are not remounted.
+function createComponents(
+  tableMode: MarkdownTableMode = 'basic',
+  tableResetKey = '',
+): Components {
+  return {
+    code: MarkdownCode,
+    pre: MarkdownPre,
+    a: MarkdownLink,
+    img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
-      return (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>{children}</table>
-        </div>
-      );
-    },
-    img({ src, alt }: { src?: string; alt?: string }) {
-      const safeSrc = isSafeImageSrc(src) ? src : undefined;
-      return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
+        return (
+          <ErrorBoundary
+            fallback={fallback}
+            label="enhanced markdown table"
+            resetKeys={[tableResetKey]}
+          >
+            <EnhancedMarkdownTable fallback={fallback}>
+              {children}
+            </EnhancedMarkdownTable>
+          </ErrorBoundary>
+        );
+      }
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     },
   };
 }
 
 const COMPONENTS_DEFAULT = createComponents();
-const COMPONENTS_DEFER_MERMAID = createComponents(true);
 
 export const Markdown = memo(function Markdown({
   content,
   source,
-  deferMermaid,
+  isStreaming,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
-
-  if (!content) return null;
-
+  const { markdown, markdownTableMode } = useWebShellCustomization();
+  const theme = useTheme();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
-    source && sourceMarkdown?.transformMarkdown
+    content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
-  const components = deferMermaid
-    ? COMPONENTS_DEFER_MERMAID
-    : COMPONENTS_DEFAULT;
-  const renderedComponents = sourceMarkdown?.components
-    ? { ...components, ...sourceMarkdown.components }
-    : components;
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
+  const components = useMemo(() => {
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
+    }
+    return COMPONENTS_DEFAULT;
+  }, [effectiveTableMode, renderedContent]);
+  const sourceComponents = sourceMarkdown?.components;
+  const renderedComponents = useMemo(() => {
+    if (!sourceComponents) return components;
+    return {
+      ...components,
+      ...sourceComponents,
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
+    };
+  }, [components, effectiveTableMode, sourceComponents]);
+  const chart =
+    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+      ? (sourceMarkdown?.chart ??
+        (sourceMarkdown?.renderCodeBlock
+          ? undefined
+          : DEFAULT_WEB_SHELL_MARKDOWN_CHART))
+      : undefined;
+  const chartPre = useMemo(
+    () =>
+      chart
+        ? createWebShellMarkdownChartPre(chart.registry, {
+            chartClassName: chart.chartClassName,
+            chartStyle: { minHeight: 360, ...chart.chartStyle },
+          })
+        : undefined,
+    [chart],
+  );
+  const componentsWithCharts = useMemo(
+    () =>
+      chartPre
+        ? {
+            ...renderedComponents,
+            pre: chartPre,
+          }
+        : renderedComponents,
+    [chartPre, renderedComponents],
+  );
+
+  if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
     ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
     : [remarkGfm, remarkMath];
@@ -404,18 +850,41 @@ export const Markdown = memo(function Markdown({
     ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
     : [rehypeKatex];
 
+  const renderedMarkdown = (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={componentsWithCharts}
+      urlTransform={markdownUrlTransform}
+    >
+      {renderedContent}
+    </ReactMarkdown>
+  );
+  const chartAwareMarkdown = chart ? (
+    <WebShellMarkdownChartProvider
+      customization={chart}
+      source={renderedContent}
+      streaming={!!isStreaming}
+      theme={theme}
+    >
+      {renderedMarkdown}
+    </WebShellMarkdownChartProvider>
+  ) : (
+    renderedMarkdown
+  );
+
   return (
     <div
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={renderedComponents}
-      >
-        {renderedContent}
-      </ReactMarkdown>
+      <IsStreamingContext.Provider value={!!isStreaming}>
+        <MarkdownSourceContext.Provider value={source}>
+          <MarkdownDocumentContext.Provider value={renderedContent}>
+            {chartAwareMarkdown}
+          </MarkdownDocumentContext.Provider>
+        </MarkdownSourceContext.Provider>
+      </IsStreamingContext.Provider>
     </div>
   );
 });

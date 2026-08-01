@@ -82,9 +82,16 @@ export type AgentExternalInput =
 export interface ToolConfig {
   /**
    * A list of tool names (from the tool registry) or full function declarations
-   * that the agent is permitted to use.
+   * exposed to the model.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional execution-layer allowlist. Tool declarations remain unchanged,
+   * but calls outside this list are rejected before scheduling or approval.
+   * Supports exact tool names and MCP server-level patterns.
+   */
+  executionAllowedTools?: string[];
 
   /**
    * Optional list of tool names to exclude from the agent's tool pool.
@@ -107,6 +114,8 @@ export enum AgentTerminateMode {
   GOAL = 'GOAL',
   /** The agent's execution terminated because it exceeded the maximum number of turns. */
   MAX_TURNS = 'MAX_TURNS',
+  /** The agent's execution terminated after detecting a tool-call loop. */
+  LOOP_DETECTED = 'LOOP_DETECTED',
   /** The agent's execution was cancelled via an abort signal. */
   CANCELLED = 'CANCELLED',
   /** The agent was gracefully shut down (e.g., arena/team session ended). */
@@ -184,6 +193,11 @@ export interface AgentInteractiveConfig {
    * agent's chat with prior context.
    */
   chatHistory?: Content[];
+  /**
+   * Optional async context wrapper for every agent processing loop.
+   * Used by team agents to preserve teammate identity across follow-up messages.
+   */
+  runInContext?: <T>(fn: () => T) => T;
 }
 
 /**

@@ -21,6 +21,26 @@ export class SenderGate {
     this.pairingStore = pairingStore || null;
   }
 
+  replaceAllowedUsers(users: string[]): void {
+    this.allowedUsers = new Set(users);
+  }
+
+  isAllowed(senderId: string): boolean {
+    switch (this.policy) {
+      case 'open':
+        return true;
+      case 'allowlist':
+        return this.allowedUsers.has(senderId);
+      case 'pairing':
+        return (
+          this.allowedUsers.has(senderId) ||
+          this.pairingStore?.isApproved(senderId) === true
+        );
+      default:
+        throw new Error(`Unknown sender policy: ${this.policy}`);
+    }
+  }
+
   check(senderId: string, senderName?: string): SenderCheckResult {
     switch (this.policy) {
       case 'open':

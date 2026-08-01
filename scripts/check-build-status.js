@@ -50,7 +50,12 @@ function findSourceFiles(dir, allFiles = []) {
   return allFiles;
 }
 
-console.log('Checking build status...');
+// stderr, not stdout: scripts/start.js runs this with `stdio: 'inherit'` in
+// front of EVERY spawn, and start.js is a QWEN_CODE_CLI entry — its stdout is
+// consumed by callers (`… review parse-args --stdin | tee plan.json` writes a
+// file whose first line must be JSON, not a status message). Status and
+// warnings are operator chatter; they belong on stderr with the rest.
+console.error('Checking build status...');
 
 // Clean up old warnings file before check
 try {
@@ -132,7 +137,7 @@ if (newerSourceFileFound) {
     // Proceed without writing, app won't show warnings
   }
 } else {
-  console.log('Build is up-to-date.');
+  console.error('Build is up-to-date.');
   // Ensure no stale warning file exists if build is ok
   try {
     if (fs.existsSync(warningsFilePath)) {

@@ -13,6 +13,7 @@ import {
   useLayoutEffect,
 } from 'react';
 import {
+  runOutsideAgentContext,
   type Config,
   type EditorType,
   type GeminiClient,
@@ -24,10 +25,10 @@ import {
   type ServerGeminiStreamEvent as GeminiEvent,
   type ThoughtSummary,
   type ToolCallRequestInfo,
+  type ToolCallResponseInfo,
   type GeminiErrorEventValue,
-  type StopFailureErrorType,
-  type ActiveGoal,
-  type VisionBridgeResult,
+  type GoalTurnPermit,
+  type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -48,23 +49,29 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  detectAutonomousSentinel,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   hasImageParts,
+  clampInlineMediaPart,
   splitImageParts,
   generateToolUseSummary,
-  getActiveGoal,
-  activeGoalEquals,
-  setActiveGoal,
-  clearActiveGoal,
+  goalRequiresExactPermit,
   createDuplicateProviderToolCallResponse,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
+  AutonomousLoopTickResolver,
+  refreshMemoryAfterManagedWrite,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
-  HistoryItemGoalStatus,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
   HistoryItemGemini,
@@ -76,14 +83,21 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import {
+  findLastSafeSplitPoint,
+  splitFencedMarkdown,
+  getEnclosingFenceInfo,
+} from '../utils/markdownUtilities.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -100,70 +114,96 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
-import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
+import {
+  GOAL_COMMAND_RE,
+  type DirectUserAdmission,
+  type QueuedGoalTurn,
+} from './useMessageQueue.js';
+import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+// The per-turn model override is held in two coupled refs: the model id and a
+// flag marking whether it came from an explicit inline `/model <id> <prompt>`
+// (which must win over skill-tool overrides for the rest of the turn). The two
+// always move together; these helpers are the single place that writes both so
+// the invariant (inline flag true => model id set) can't be broken by editing
+// one ref in isolation, and every set/clear is traceable via debug logs.
+function applyModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+  value: string | undefined,
+  isInline: boolean,
+): void {
+  modelOverrideRef.current = value;
+  inlineActiveRef.current = isInline;
+  debugLogger.debug(
+    `model override ${
+      value === undefined ? 'cleared' : `set to ${value}`
+    } (inline=${isInline})`,
+  );
+}
+
+function clearModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+): void {
+  applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+}
+
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
-const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
-// Untrusted vision-model output is shown in the terminal; strip ANSI/C0+C1
-// control escapes (keep \t, \n) so a crafted image can't inject sequences.
-// eslint-disable-next-line no-control-regex
-const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
-  responseParts: Part[];
+  callOrder: string[];
+  duplicateResponses: Array<{
+    request: ToolCallRequestInfo;
+    response: ToolCallResponseInfo;
+  }>;
 }
 
-function truncateVisionBridgeTranscript(transcript: string): string {
-  const safe = transcript.replace(TERMINAL_CONTROL_CHARS, '');
-  if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
-    return safe;
-  }
-  return `${safe
-    .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
-    .trimEnd()}\n[Transcript truncated]`;
+interface ResolvedSteerMessages {
+  parts: Part[];
+  accept: () => void;
+  restoreMessages: string[];
 }
 
-/**
- * Build the user-facing notice shown when the vision bridge runs. On success it
- * states which model was used, how many images were converted (and omitted),
- * discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model), and includes the generated
- * transcription so the user can catch misreads. On failure it surfaces the
- * reason.
- *
- * @param result The structured result returned by the vision bridge.
- * @returns A multi-line notice string for the message history.
- */
-function formatVisionBridgeNotice(result: VisionBridgeResult): string {
-  const modelName = result.modelId ?? 'vision model';
-  const target = result.modelEndpoint
-    ? `${modelName} (${result.modelEndpoint})`
-    : modelName;
-  const egressNote = result.egressOccurred
-    ? ` Your image and prompt/context were sent to ${target}.`
-    : '';
-  if (result.status === 'failed') {
-    const reason = result.egressOccurred
-      ? 'the vision model request failed'
-      : 'the vision bridge could not run';
-    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+interface GoalTurnBinding {
+  permit: GoalTurnPermit;
+  turnKey: string;
+  controller: AbortController;
+  origin: 'runtime' | 'user';
+}
+
+type GoalTurnAdmission = Omit<GoalTurnBinding, 'permit'>;
+
+function sameGoalPermit(left: GoalTurnPermit, right: GoalTurnPermit): boolean {
+  return (
+    left.goalId === right.goalId &&
+    left.revision === right.revision &&
+    left.turnId === right.turnId
+  );
+}
+
+function sharedGoalPermit(
+  contexts: Array<GoalTurnPermit | undefined>,
+): GoalTurnPermit | undefined {
+  const first = contexts[0];
+  if (contexts.every((context) => context === undefined)) return undefined;
+  if (
+    !first ||
+    contexts.some((context) => !context || !sameGoalPermit(first, context))
+  ) {
+    throw new Error('ToolResult batch has mixed Goal contexts');
   }
-  if (result.status === 'skipped') {
-    return `🔎 Vision bridge cancelled.${egressNote}`;
-  }
-  // On success the image was always sent, so disclose egress unconditionally.
-  const omitted =
-    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return result.transcript
-    ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
-    : header;
+  return { ...first };
 }
 
 /**
@@ -242,43 +282,6 @@ function extractToolResultText(parts: Part[] | Part | undefined): unknown {
 }
 
 /**
- * Classify API error to StopFailureErrorType
- * @internal Exported for testing purposes
- */
-export function classifyApiError(error: {
-  message: string;
-  status?: number;
-}): StopFailureErrorType {
-  const status = error.status;
-  const message = error.message?.toLowerCase() ?? '';
-
-  if (status === 429 || message.includes('rate limit')) {
-    return 'rate_limit';
-  }
-  if (status === 401 || message.includes('unauthorized')) {
-    return 'authentication_failed';
-  }
-  if (
-    status === 402 ||
-    status === 403 ||
-    message.includes('billing') ||
-    message.includes('quota')
-  ) {
-    return 'billing_error';
-  }
-  if (status === 400 || message.includes('invalid')) {
-    return 'invalid_request';
-  }
-  if (status !== undefined && status >= 500) {
-    return 'server_error';
-  }
-  if (message.includes('max_tokens') || message.includes('token limit')) {
-    return 'max_output_tokens';
-  }
-  return 'unknown';
-}
-
-/**
  * Checks if image parts have supported formats and returns unsupported ones
  */
 function checkImageFormatsSupport(parts: PartListUnion): {
@@ -338,6 +341,11 @@ enum StreamProcessingStatus {
   Error,
 }
 
+interface StreamProcessingResult {
+  status: StreamProcessingStatus;
+  scheduledToolContinuation: boolean;
+}
+
 const EDIT_TOOL_NAMES = new Set([
   ToolNames.EDIT,
   'replace', // legacy alias, may still arrive from older providers
@@ -346,6 +354,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and hiding a table (or slicing the tail) in step with the commit
+// cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -369,6 +386,24 @@ function clampLoadingThoughtDescription(description: string): string {
 }
 
 /**
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
+ */
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * Synchronous snapshot passed to `onCancelSubmit` so the cancel handler can
  * decide whether the model produced meaningful in-flight content WITHOUT
  * waiting for React state to flush. Closes the race where
@@ -386,7 +421,18 @@ export interface CancelSubmitInfo {
    * consecutive-duplicate user message (text alone would wrongly match
    * the older row).
    */
-  lastTurnUserItem: { id: number; text: string } | null;
+  lastTurnUserItem: {
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null;
+  /**
+   * Whether removing the Logger's latest USER entry can only target
+   * `lastTurnUserItem`. A concurrent BTW command writes a newer USER entry,
+   * so the cancel handler must keep the log intact rather than remove the
+   * side-question by mistake.
+   */
+  canUndoLastLoggedUserMessage: boolean;
   /**
    * True if a content event landed during this turn, including during
    * the pre-cancel flush of throttle-buffered events. Lets the
@@ -394,6 +440,14 @@ export interface CancelSubmitInfo {
    * when the consumer's React history snapshot is still stale.
    */
   turnProducedMeaningfulContent: boolean;
+  /**
+   * True when the cancelled turn was a Goal continuation turn. Such a turn
+   * appends a synthetic continuation prompt to the chat history but, unlike a
+   * UserQuery, adds no UI user item, so the cancel handler's auto-restore
+   * branch bails before its orphan strip runs. The handler uses this flag to
+   * strip that prompt so it can't merge into the user's next real message.
+   */
+  wasGoalTurn: boolean;
 }
 
 /**
@@ -422,14 +476,157 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
+  midTurnDrainRef?: React.RefObject<
+    ((includeDeferred?: boolean, goalTurnActive?: boolean) => string[]) | null
+  >,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
+  // Live terminal width, paired with the height ref so the commit loop reads
+  // both dimensions consistently across a mid-stream resize.
+  terminalWidthRef?: React.RefObject<number>,
+  midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
+  goalQueueRef?: React.RefObject<{
+    peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
+    claimDirectUserAdmission?: () => DirectUserAdmission;
+    claimGoalTurn?: () => QueuedGoalTurn | undefined;
+    hasQueuedUserMessages?: () => boolean;
+    getPendingSubmissionCount?: () => number;
+    waitForReservationSettlement?: () => Promise<void>;
+    submissionInFlightRef?: React.RefObject<boolean>;
+    onSubmissionSettled?: () => void;
+  } | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeGoalTurnRef = useRef<GoalTurnBinding | null>(null);
+  const activeGoalAdmissionRef = useRef<GoalTurnAdmission | null>(null);
+  const goalTurnBindingsRef = useRef(new Map<string, GoalTurnBinding>());
+  const bindGoalTurn = useCallback(
+    (
+      permit: GoalTurnPermit,
+      turnKey: string,
+      origin: GoalTurnBinding['origin'],
+      controller = new AbortController(),
+    ): GoalTurnBinding => {
+      const existing = goalTurnBindingsRef.current.get(permit.turnId);
+      if (
+        existing &&
+        existing.turnKey === turnKey &&
+        sameGoalPermit(existing.permit, permit) &&
+        !existing.controller.signal.aborted
+      ) {
+        activeGoalTurnRef.current = existing;
+        activeGoalAdmissionRef.current = existing;
+        return existing;
+      }
+      const binding: GoalTurnBinding = {
+        permit: { ...permit },
+        turnKey,
+        controller,
+        origin,
+      };
+      goalTurnBindingsRef.current.set(permit.turnId, binding);
+      activeGoalTurnRef.current = binding;
+      activeGoalAdmissionRef.current = binding;
+      return binding;
+    },
+    [],
+  );
+  const releaseGoalTurn = useCallback((binding: GoalTurnBinding) => {
+    if (goalTurnBindingsRef.current.get(binding.permit.turnId) === binding) {
+      goalTurnBindingsRef.current.delete(binding.permit.turnId);
+    }
+    if (activeGoalTurnRef.current === binding) {
+      activeGoalTurnRef.current = null;
+    }
+    if (
+      activeGoalAdmissionRef.current?.controller === binding.controller &&
+      activeGoalAdmissionRef.current.turnKey === binding.turnKey
+    ) {
+      activeGoalAdmissionRef.current = null;
+    }
+  }, []);
+  const failClosedGoalTurn = useCallback(
+    async (binding: GoalTurnBinding, reason: string): Promise<void> => {
+      if (!binding.controller.signal.aborted) {
+        binding.controller.abort(reason);
+      }
+
+      try {
+        const runtime = await config.getGoalRuntimeReady();
+        const admittedPermit = runtime.permitForTurn(binding.turnKey);
+        if (
+          !admittedPermit ||
+          !sameGoalPermit(admittedPermit, binding.permit)
+        ) {
+          return;
+        }
+
+        if (runtime.getSnapshot().goal?.status === 'active') {
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: binding.permit.goalId,
+              expectedRevision: binding.permit.revision,
+            });
+          } catch (error) {
+            debugLogger.warn('Failed to pause invalid Goal tool batch', error);
+          }
+        }
+
+        try {
+          await config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn('Failed to flush invalid Goal tool batch', error);
+        }
+
+        const currentPermit = runtime.permitForTurn(binding.turnKey);
+        if (currentPermit && sameGoalPermit(currentPermit, binding.permit)) {
+          await runtime.finishTurn(binding.permit);
+        }
+      } catch (error) {
+        debugLogger.warn('Failed to close invalid Goal tool batch', error);
+      } finally {
+        releaseGoalTurn(binding);
+      }
+    },
+    [config, releaseGoalTurn],
+  );
+  const releaseUndeliveredGoalTurn = useCallback(
+    async (turnKey: string | undefined): Promise<void> => {
+      if (!turnKey) return;
+      try {
+        const runtime = await config.getGoalRuntimeReady();
+        await runtime.releaseTurn(turnKey);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to release undelivered Goal turn ${turnKey}`,
+          error,
+        );
+      }
+    },
+    [config],
+  );
   const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
+  const submissionLeaseGenerationRef = useRef(0);
+  const setSubmissionInFlight = useCallback(
+    (inFlight: boolean) => {
+      const changed = isSubmittingQueryRef.current !== inFlight;
+      isSubmittingQueryRef.current = inFlight;
+      const sharedRef = goalQueueRef?.current?.submissionInFlightRef;
+      if (sharedRef) sharedRef.current = inFlight;
+      if (changed && !inFlight) {
+        goalQueueRef?.current?.onSubmissionSettled?.();
+      }
+    },
+    [goalQueueRef],
+  );
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForGemini
   // added (if any). Reset to null at the start of every turn (including
@@ -446,7 +643,12 @@ export const useGeminiStream = (
   // messages while still returning a freshly-generated id — text alone
   // would let the auto-restore guard wrongly match an older USER row
   // when the user re-submits the same prompt.
-  const lastTurnUserItemRef = useRef<{ id: number; text: string } | null>(null);
+  const lastTurnUserItemRef = useRef<{
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null>(null);
+  const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
   // during the pre-cancel flush. AppContainer's auto-restore guard
   // can't otherwise see content that was just addItem'd inside flush
@@ -455,6 +657,7 @@ export const useGeminiStream = (
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
+  const goalTerminalErrorRef = useRef(false);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -512,13 +715,32 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // True when the current turn's model override came from an explicit inline
+  // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
+  // explicit choice mid-turn, so this takes precedence until the next user turn.
+  const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  const canUseToolResultFullTurnModel = useCallback((model: string) => {
+    const current = modelOverrideRef.current;
+    return (
+      !inlineModelOverrideActiveRef.current &&
+      (!current?.endsWith('\0') || current === model)
+    );
+  }, []);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  // Scoped to a top-level submit and cleared below before a new user prompt.
+  // Repeated duplicate provider ids within that submit are terminal/drop-only.
+  const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
+    new Set(),
+  );
   const pendingDuplicateToolResponsesRef = useRef<
     PendingDuplicateToolResponses[]
   >([]);
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
-    responseParts: Part[];
+    responses: Array<{
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    }>;
   } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -555,6 +777,7 @@ export const useGeminiStream = (
       config,
       getPreferredEditor,
       onEditorClose,
+      canUseToolResultFullTurnModel,
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -732,9 +955,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
@@ -773,8 +994,15 @@ export const useGeminiStream = (
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
-    isSubmittingQueryRef.current = false;
+    submissionLeaseGenerationRef.current += 1;
+    setSubmissionInFlight(false);
     abortControllerRef.current?.abort();
+    // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
+    // wakeups so the loop doesn't resume after the cancelled tick. Only clears
+    // session wakeups (never cron jobs); lazily-creating an empty scheduler
+    // here is inert.
+    const loopWakeupsCancelled =
+      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -791,9 +1019,10 @@ export const useGeminiStream = (
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
+      modelOverrideRef.current ?? config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
+      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
 
@@ -807,6 +1036,17 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    if (loopWakeupsCancelled > 0) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Stopped the self-paced loop: cancelled ${loopWakeupsCancelled} pending wakeup${
+            loopWakeupsCancelled === 1 ? '' : 's'
+          }.`,
+        },
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
@@ -827,7 +1067,9 @@ export const useGeminiStream = (
       onCancelSubmit({
         pendingItem: pendingItemAtCancel,
         lastTurnUserItem: lastTurnUserItemRef.current,
+        canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
+        wasGoalTurn: activeGoalTurnRef.current !== null,
       });
     } finally {
       setIsResponding(false);
@@ -844,6 +1086,7 @@ export const useGeminiStream = (
     clearRetryCountdown,
     config,
     getPromptCount,
+    setSubmissionInFlight,
   ]);
 
   const applyVisionBridgeIfNeeded = useCallback(
@@ -852,15 +1095,50 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (
-        parts === null ||
-        !hasImageParts(parts) ||
-        !shouldRunVisionBridge(config)
-      ) {
+      if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
+      }
+      if (modelOverrideRef.current?.endsWith('\0')) {
+        return { parts, shouldProceed: true };
+      }
+      if (inlineModelOverrideActiveRef.current) {
+        return { parts, shouldProceed: true };
+      }
+      if (!shouldRunVisionBridge(config)) {
+        return { parts, shouldProceed: true };
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
+      const fullTurnModel = config.getDefaultVisionBridgeModel();
+      if (fullTurnModel?.agentCapable) {
+        const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
+          (part) =>
+            typeof part === 'string'
+              ? { text: part }
+              : clampInlineMediaPart(part),
+        );
+        if (!hasImageParts(fullTurnParts)) {
+          return { parts: fullTurnParts, shouldProceed: true };
+        }
+        applyModelOverride(
+          modelOverrideRef,
+          inlineModelOverrideActiveRef,
+          getFullTurnVisionModelSelector(fullTurnModel),
+          false,
+        );
+        addItem(
+          {
+            type: MessageType.VISION_NOTICE,
+            text: formatFullTurnVisionNotice(fullTurnModel),
+          },
+          timestamp,
+        );
+        return { parts: fullTurnParts, shouldProceed: true };
+      }
+
       const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -873,7 +1151,7 @@ export const useGeminiStream = (
             type:
               bridgeResult.status === 'failed'
                 ? MessageType.ERROR
-                : MessageType.INFO,
+                : MessageType.VISION_NOTICE,
             text: formatVisionBridgeNotice(bridgeResult),
           },
           timestamp,
@@ -903,6 +1181,8 @@ export const useGeminiStream = (
       abortSignal: AbortSignal,
       prompt_id: string,
       submitType: SendMessageType,
+      submittedPrompt: string | undefined,
+      preserveTurnOwnership: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -918,7 +1198,9 @@ export const useGeminiStream = (
       // this — paths that don't add a USER history item (Cron /
       // Notification / slash submit_prompt) leave it null so cancel
       // never wrongly targets an older user item.
-      lastTurnUserItemRef.current = null;
+      if (!preserveTurnOwnership) {
+        lastTurnUserItemRef.current = null;
+      }
 
       let localQueryToSendToGemini: PartListUnion | null = null;
 
@@ -953,6 +1235,8 @@ export const useGeminiStream = (
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        canUndoLastLoggedUserMessageRef.current =
+          !preserveTurnOwnership && logger != null;
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
@@ -977,6 +1261,43 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              // Per-turn model override (e.g. inline `/model <id> <prompt>`).
+              // Runs after the new-user-turn reset above and before the stream
+              // is sent, so it applies to this turn and — because the reset is
+              // skipped for ToolResult/Retry — persists across the tool loop,
+              // then clears on the next user turn. Re-validate provider identity
+              // here rather than trust the producer: any slash command can set
+              // `modelOverride`, so the consumer enforces that it names a model
+              // on the active provider before redirecting API calls to it.
+              if (slashCommandResult.modelOverride) {
+                if (
+                  isInlineModelOverrideAllowed(
+                    config,
+                    slashCommandResult.modelOverride,
+                  )
+                ) {
+                  applyModelOverride(
+                    modelOverrideRef,
+                    inlineModelOverrideActiveRef,
+                    slashCommandResult.modelOverride,
+                    true,
+                  );
+                } else {
+                  debugLogger.warn(
+                    `ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                  );
+                }
+              }
+
+              const bridgeResult = await applyVisionBridgeIfNeeded(
+                localQueryToSendToGemini,
+                userMessageTimestamp,
+                abortSignal,
+              );
+              if (!bridgeResult.shouldProceed) {
+                return { queryToSend: null, shouldProceed: false };
+              }
+              localQueryToSendToGemini = bridgeResult.parts;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -1020,10 +1341,25 @@ export const useGeminiStream = (
           // skipped insertion (consecutive-duplicate user); the older
           // matching USER in history carries a DIFFERENT id, so the
           // mismatch makes auto-restore bail correctly in that case.
-          lastTurnUserItemRef.current = {
-            id: insertedId,
-            text: trimmedQuery,
-          };
+          if (!preserveTurnOwnership) {
+            lastTurnUserItemRef.current = {
+              id: insertedId,
+              text: trimmedQuery,
+              ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            };
+          }
+
+          // Yield via macrotask to let Ink/React flush the user message
+          // render before continuing with @-command processing and API
+          // call. React 19.2.4 (Ink 7.0.3) schedules renders via
+          // MessageChannel.postMessage (a macrotask), so a microtask yield
+          // (await Promise.resolve()) does NOT give React a chance to
+          // render — the continuation runs first. setImmediate fires in
+          // the check phase after I/O events (where MessageChannel
+          // delivers its postMessage), guaranteeing React renders first
+          // without the ~1ms timer overhead of setTimeout(0).
+          // Only needed for non-Cron submissions since Cron skips addItem().
+          await new Promise((r) => setImmediate(r));
         }
 
         // Handle @-commands (which might involve tool calls)
@@ -1139,8 +1475,126 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
-        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          safeSplitPoint,
+        );
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - Commit ONLY at a blank-line block boundary so a table / list / code
+      //    block is never cut into a headerless continuation (which would render
+      //    as raw "| ... |" text). A table that is still streaming (no trailing
+      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
+      //    clamp — until it is complete, then commits whole.
+      //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      // Read width from the same live ref as the height so a mid-stream resize
+      // is handled consistently; fall back to the render-time width.
+      const commitWidth =
+        (terminalWidthRef?.current ?? 0) > 0
+          ? terminalWidthRef!.current
+          : terminalWidth;
+      const commitRowBudget = Math.max(
+        4,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
+          commitWidth,
+          commitRowBudget,
+          tableClampRows,
+        );
+        if (!clipped) break;
+        // Back up to the last blank line at or before the kept prefix — the only
+        // place it is safe to end a committed chunk without orphaning a block.
+        // Start AT keptLines (not keptLines - 1): when a single block is taller
+        // than the budget, fitPendingSlice charges the whole block and returns
+        // kept = the block's trailing blank line, so the boundary sits exactly at
+        // keptLines. Searching from keptLines - 1 misses it, finds no earlier
+        // blank (the block has none, and the blank before it was already
+        // committed), and stalls — every later block then appends past keptLines,
+        // so nothing ever commits until the stream finalizes and dumps it all at
+        // once. Committing an over-tall completed block to <Static> is fine; only
+        // the live pending frame must stay within the viewport.
+        let boundaryLine = -1;
+        for (let k = Math.min(keptLines, bufferLines.length - 1); k >= 0; k--) {
+          if (bufferLines[k]!.trim() === '') {
+            boundaryLine = k;
+            break;
+          }
+        }
+        let target: number;
+        if (boundaryLine < 0) {
+          // No blank-line boundary at/before the kept prefix. A fenced code
+          // block taller than the viewport never provides one mid-block, so the
+          // whole block would stay pending — frozen on its head — and only land
+          // in scrollback when it finally closes (the "stall then dump" seen on
+          // a 100-line code block). Hard-splitting inside a fence is now safe
+          // (splitFencedMarkdown closes/re-opens the fence and continues the
+          // gutter), so commit the budget-fit prefix and keep streaming. Restrict
+          // this to code blocks: other tall blocks (tables/lists) must stay whole
+          // and are still kept pending.
+          const capIndex = charIndexAfterLine(
+            newGeminiMessageBuffer,
+            keptLines,
+          );
+          const fenceInfo =
+            capIndex > 0
+              ? getEnclosingFenceInfo(newGeminiMessageBuffer, capIndex)
+              : null;
+          // Only hard-split a real code block. Other tall blocks (tables/lists)
+          // must stay whole, and mermaid needs its whole source to render a
+          // diagram — splitting it mid-block would break the render — so both
+          // stay pending until they complete.
+          if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
+            break; // no safe boundary yet → keep pending
+          }
+          target = capIndex;
+        } else {
+          target = charIndexAfterLine(newGeminiMessageBuffer, boundaryLine + 1);
+          if (target <= 0) break;
+        }
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          splitPoint,
+        );
         commitItem(
           {
             type: nextPendingType,
@@ -1166,7 +1620,15 @@ export const useGeminiStream = (
       });
       return newGeminiMessageBuffer;
     },
-    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+      terminalWidthRef,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -1226,6 +1688,7 @@ export const useGeminiStream = (
         return newThoughtBuffer;
       }
 
+      streamingResponseLengthRef.current += thoughtText.length;
       const startingNewThought = currentThoughtBuffer.trim().length === 0;
       const description = startingNewThought
         ? stripLeadingBlankLines(newThoughtBuffer)
@@ -1279,8 +1742,12 @@ export const useGeminiStream = (
           splitPoint > 0 && splitPoint < newThoughtBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
-        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
-        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newThoughtBuffer,
+          safeSplitPoint,
+        );
         addItem(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
@@ -1368,8 +1835,16 @@ export const useGeminiStream = (
   );
 
   const handleErrorEvent = useCallback(
-    (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
-      lastPromptErroredRef.current = true;
+    (
+      eventValue: GeminiErrorEventValue,
+      userMessageTimestamp: number,
+      submitType: SendMessageType,
+    ) => {
+      if (submitType !== SendMessageType.Goal) {
+        lastPromptErroredRef.current = true;
+      } else {
+        goalTerminalErrorRef.current = true;
+      }
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
@@ -1387,7 +1862,10 @@ export const useGeminiStream = (
       );
 
       if (!isShowingAutoRetry) {
-        const retryHint = t('Press Ctrl+Y to retry');
+        const retryHint =
+          submitType !== SendMessageType.Goal
+            ? t('Press Ctrl+Y to retry')
+            : undefined;
         // Store error with hint as a pending item (not in history).
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
@@ -1486,7 +1964,7 @@ export const useGeminiStream = (
         addItem(
           {
             type: 'info',
-            text: `⚠️  ${message}`,
+            text: `⚠  ${message}`,
           },
           userMessageTimestamp,
         );
@@ -1499,19 +1977,27 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
+  const autonomousLoopTickResolverRef =
+    useRef<AutonomousLoopTickResolver | null>(null);
+
   const handleChatCompressionEvent = useCallback(
     (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      autonomousLoopTickResolverRef.current?.resetCache();
       if (pendingHistoryItemRef.current) {
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const activeModel = modelOverrideRef.current ?? config.getModel();
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
-          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
-          : `approached the input token limit for ${config.getModel()}`;
+          ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
+          : `approached the input token limit for ${activeModel}`;
+      const warningSuffix = eventValue?.warning
+        ? `\n⚠️ ${eventValue.warning}`
+        : '';
       return addItem(
         {
           type: 'info',
@@ -1519,7 +2005,8 @@ export const useGeminiStream = (
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
-            `${eventValue?.newTokenCount ?? 'unknown'} tokens).`,
+            `${eventValue?.newTokenCount ?? 'unknown'} tokens).` +
+            warningSuffix,
         },
         Date.now(),
       );
@@ -1547,8 +2034,8 @@ export const useGeminiStream = (
         {
           type: 'error',
           text:
-            `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
-            `💡 Solutions:\n` +
+            `✗ Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
+            `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
@@ -1625,24 +2112,6 @@ export const useGeminiStream = (
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
-      // When the active loop is driven by `/goal`, replace the generic
-      // "Ran N stop hooks" chip with a goal-aware `goal_status`
-      // `kind:'checking'` item. A not-met judge is the expected outcome of a
-      // continuation, not a hook failure.
-      const activeGoal = getActiveGoal(config.getSessionId());
-      if (activeGoal && activeGoal.condition) {
-        const item: HistoryItemGoalStatus = {
-          type: MessageType.GOAL_STATUS,
-          kind: 'checking',
-          condition: activeGoal.condition,
-          iterations: activeGoal.iterations,
-          lastReason:
-            activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
-        };
-        addItem(item, userMessageTimestamp);
-        recordGoalStatusItem(config, item);
-        return;
-      }
       addItem(
         {
           type: 'stop_hook_loop',
@@ -1653,26 +2122,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
-  );
-
-  const handleActiveGoalEvent = useCallback(
-    (activeGoal: ActiveGoal | null) => {
-      const sessionId = config.getSessionId();
-      const currentActiveGoal = getActiveGoal(sessionId);
-      if (activeGoal) {
-        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
-          return;
-        }
-        setActiveGoal(sessionId, activeGoal);
-        return;
-      }
-      if (!currentActiveGoal) {
-        return;
-      }
-      clearActiveGoal(sessionId);
-    },
-    [config],
+    [addItem, commitItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1680,9 +2130,12 @@ export const useGeminiStream = (
       stream: AsyncIterable<GeminiEvent>,
       userMessageTimestamp: number,
       signal: AbortSignal,
-    ): Promise<StreamProcessingStatus> => {
+      submitType: SendMessageType,
+      turnAdmission?: GoalTurnAdmission,
+    ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
+      let scheduledToolContinuation = false;
       const toolCallRequests: ToolCallRequestInfo[] = [];
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1811,6 +2264,14 @@ export const useGeminiStream = (
               commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
+              if (event.value.goalContext && turnAdmission) {
+                bindGoalTurn(
+                  event.value.goalContext,
+                  turnAdmission.turnKey,
+                  turnAdmission.origin,
+                  turnAdmission.controller,
+                );
+              }
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
@@ -1824,10 +2285,13 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return {
+                status: StreamProcessingStatus.UserCancelled,
+                scheduledToolContinuation: false,
+              };
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
-              handleErrorEvent(event.value, userMessageTimestamp);
+              handleErrorEvent(event.value, userMessageTimestamp, submitType);
               break;
             case ServerGeminiEventType.ChatCompressed:
               flushBufferedStreamEvents();
@@ -1914,6 +2378,33 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
+            case ServerGeminiEventType.ModelFallback: {
+              // The primary model (or a prior fallback) exhausted its retry
+              // budget on a capacity/availability error and the system is
+              // switching to the next fallback model. Discard partial content
+              // from the failed attempt and show a notification.
+              discardBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              geminiMessageBuffer = '';
+              toolCallRequests.length = 0;
+              clearRetryCountdown();
+              const fromModel =
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+              addItem(
+                {
+                  type: 'notification',
+                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                },
+                userMessageTimestamp,
+              );
+              break;
+            }
             case ServerGeminiEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
@@ -1942,7 +2433,26 @@ export const useGeminiStream = (
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
             case ServerGeminiEventType.ActiveGoal:
-              handleActiveGoalEvent(event.value);
+              break;
+            case ServerGeminiEventType.GoalState:
+              if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
+                flushBufferedStreamEvents();
+                if (pendingHistoryItemRef.current) {
+                  commitItem(
+                    pendingHistoryItemRef.current,
+                    userMessageTimestamp,
+                  );
+                  setPendingHistoryItem(null);
+                }
+                addItem(
+                  {
+                    type: 'goal_state',
+                    snapshot: event.value,
+                    cause: event.cause,
+                  },
+                  userMessageTimestamp,
+                );
+              }
               break;
             default: {
               // enforces exhaustive switch-case
@@ -1956,8 +2466,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -1971,11 +2481,34 @@ export const useGeminiStream = (
         !loopDetectedRef.current
       ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
-        const duplicateResponseParts: Part[] = [];
+        const duplicateResponses: Array<{
+          request: ToolCallRequestInfo;
+          response: ToolCallResponseInfo;
+        }> = [];
         let duplicatePromptId: string | undefined;
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
           : new Set<string>();
+        const handledProviderIds = new Set([
+          ...handledProviderToolCallIdsRef.current,
+          ...historyCallIdsWithResponse,
+        ]);
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          toolCallRequests,
+          (request) => request.providerCallId,
+          handledProviderIds,
+          duplicateProviderToolCallResponseIdsRef.current,
+        );
+        if (repeatedDuplicateRequest?.providerCallId) {
+          debugLogger.debug(
+            `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          loopDetectedRef.current = true;
+          return {
+            status: StreamProcessingStatus.Completed,
+            scheduledToolContinuation: false,
+          };
+        }
 
         for (const request of toolCallRequests) {
           const providerCallId = request.providerCallId;
@@ -1988,12 +2521,17 @@ export const useGeminiStream = (
             handledProviderToolCallIdsRef.current.has(providerCallId) ||
             historyCallIdsWithResponse.has(providerCallId)
           ) {
+            markDuplicateProviderToolCallResponseSent(
+              providerCallId,
+              duplicateProviderToolCallResponseIdsRef.current,
+            );
+
             const response = createDuplicateProviderToolCallResponse(request);
             debugLogger.debug(
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
             );
             dualOutput?.emitToolResult(request, response);
-            duplicateResponseParts.push(...response.responseParts);
+            duplicateResponses.push({ request, response });
             duplicatePromptId ??= request.prompt_id;
             continue;
           }
@@ -2002,7 +2540,7 @@ export const useGeminiStream = (
           executableToolCallRequests.push(request);
         }
 
-        if (duplicateResponseParts.length > 0) {
+        if (duplicateResponses.length > 0) {
           if (executableToolCallRequests.length > 0) {
             pendingDuplicateToolResponsesRef.current.push({
               executableCallIds: new Set(
@@ -2010,21 +2548,30 @@ export const useGeminiStream = (
               ),
               promptId:
                 duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
-              responseParts: duplicateResponseParts,
+              callOrder: toolCallRequests.map((request) => request.callId),
+              duplicateResponses,
             });
           } else {
             immediateDuplicateToolResponsesRef.current = {
               promptId: duplicatePromptId,
-              responseParts: duplicateResponseParts,
+              responses: duplicateResponses,
             };
           }
         }
 
         if (executableToolCallRequests.length > 0) {
-          scheduleToolCalls(executableToolCallRequests, signal);
+          scheduledToolContinuation = true;
+          scheduleToolCalls(
+            executableToolCallRequests,
+            signal,
+            modelOverrideRef.current,
+          );
         }
       }
-      return StreamProcessingStatus.Completed;
+      return {
+        status: StreamProcessingStatus.Completed,
+        scheduledToolContinuation,
+      };
     },
     [
       handleContentEvent,
@@ -2047,11 +2594,251 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
-      handleActiveGoalEvent,
+      bindGoalTurn,
       addItem,
       commitItem,
       dualOutput,
     ],
+  );
+
+  const resolveSteeredMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<ResolvedSteerMessages> => {
+      const resolvedSegments: Part[][] = [];
+      const resolvedForRecording: Array<{
+        message: string;
+        parts: Part[];
+        sideEffects: Array<() => void>;
+      }> = [];
+      const restoreMessages: string[] = [];
+      const timestamp = Date.now();
+
+      for (let index = 0; index < messages.length; index += 1) {
+        if (signal.aborted) {
+          restoreMessages.push(...messages.slice(index));
+          break;
+        }
+
+        const message = messages[index];
+        if (GOAL_COMMAND_RE.test(message)) {
+          await handleSlashCommand(message);
+          continue;
+        }
+
+        restoreMessages.push(message);
+        const sideEffects: Array<() => void> = [];
+        let resolvedQuery: PartListUnion = [{ text: message }];
+        if (isAtCommand(message)) {
+          const timeout = new AbortController();
+          const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
+          const timeoutId = setTimeout(() => {
+            timeout.abort(
+              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+            );
+          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          try {
+            const atCommandResult = await resolveWithAbort(
+              atCommandSignal,
+              () =>
+                resolveAtCommandQuery({
+                  query: message,
+                  config,
+                  onDebugMessage,
+                  messageId: timestamp + index,
+                  signal: atCommandSignal,
+                }),
+            );
+            const shouldSkipMessage =
+              !atCommandResult.shouldProceed &&
+              (atCommandResult.toolDisplays?.length ?? 0) > 0;
+            if (
+              atCommandResult.shouldProceed &&
+              atCommandResult.processedQuery !== null
+            ) {
+              resolvedQuery = atCommandResult.processedQuery;
+            } else if (atCommandResult.toolDisplays?.length) {
+              const toolDisplays = atCommandResult.toolDisplays;
+              const showToolDisplays = () =>
+                addItem(
+                  { type: 'tool_group', tools: toolDisplays },
+                  timestamp + index,
+                );
+              if (shouldSkipMessage) showToolDisplays();
+              else sideEffects.push(showToolDisplays);
+            }
+            if (atCommandResult.recording) {
+              const recordAtCommand = () =>
+                config.getChatRecordingService?.()?.recordAtCommand?.({
+                  filesRead: atCommandResult.recording!.filesRead,
+                  status: atCommandResult.recording!.status,
+                  ...(atCommandResult.recording!.message
+                    ? { message: atCommandResult.recording!.message }
+                    : {}),
+                  userText: message,
+                });
+              if (shouldSkipMessage) recordAtCommand();
+              else sideEffects.push(recordAtCommand);
+            }
+            if (shouldSkipMessage) continue;
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            onDebugMessage(
+              `Failed to resolve mid-turn @ command: ${errorMessage}`,
+            );
+            if (!signal.aborted) {
+              addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Could not attach file: ${errorMessage}`,
+                },
+                Date.now(),
+              );
+            }
+            continue;
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
+        }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          resolvedQuery,
+          timestamp + index,
+          signal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
+          continue;
+        }
+
+        const messageParts = normalizePartList(
+          bridgeResult.parts ?? resolvedQuery,
+        );
+        const formatCheck = checkImageFormatsSupport(messageParts);
+        if (formatCheck.hasUnsupportedFormats) {
+          sideEffects.push(() =>
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              Date.now(),
+            ),
+          );
+        }
+
+        resolvedSegments.push(messageParts);
+        resolvedForRecording.push({
+          message,
+          parts: messageParts,
+          sideEffects,
+        });
+      }
+
+      const resolvedMessages: Part[] = [];
+      for (const segment of resolvedSegments) {
+        if (segment.length === 0) continue;
+        if (resolvedMessages.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...segment);
+      }
+
+      return {
+        parts: resolvedMessages,
+        restoreMessages,
+        accept: () => {
+          for (const { message, parts, sideEffects } of resolvedForRecording) {
+            for (const sideEffect of sideEffects) sideEffect();
+            const recorder = config.getChatRecordingService?.();
+            const goalPermit = activeGoalTurnRef.current?.permit;
+            if (goalPermit) {
+              recorder?.recordMidTurnUserMessage(parts, message, goalPermit);
+            } else {
+              recorder?.recordMidTurnUserMessage(parts, message);
+            }
+            addItem(
+              {
+                type: MessageType.USER,
+                text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
+                sentToModel: false,
+              },
+              Date.now(),
+            );
+          }
+        },
+      };
+    },
+    [
+      addItem,
+      applyVisionBridgeIfNeeded,
+      config,
+      handleSlashCommand,
+      onDebugMessage,
+    ],
+  );
+
+  const resolveDrainedSteerMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<SteerInput | undefined> => {
+      try {
+        const resolved = await resolveSteeredMessages(messages, signal);
+        if (signal.aborted) {
+          if (resolved.restoreMessages.length > 0) {
+            midTurnRestoreRef?.current?.(resolved.restoreMessages);
+          }
+          return undefined;
+        }
+        if (resolved.parts.length === 0) return undefined;
+        let settled = false;
+        return {
+          parts: resolved.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            resolved.accept();
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            if (resolved.restoreMessages.length > 0) {
+              midTurnRestoreRef?.current?.(resolved.restoreMessages);
+            }
+          },
+        };
+      } catch (error) {
+        midTurnRestoreRef?.current?.(messages);
+        onDebugMessage(
+          `Failed to prepare steer input: ${getErrorMessage(error)}`,
+        );
+        return undefined;
+      }
+    },
+    [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
+  );
+
+  const drainSteerAtBoundary = useCallback(
+    async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      const messages =
+        midTurnDrainRef?.current?.(
+          false,
+          Boolean(activeGoalAdmissionRef.current),
+        ) ?? [];
+      if (messages.length === 0) return undefined;
+      return resolveDrainedSteerMessages(messages, signal);
+    },
+    [midTurnDrainRef, resolveDrainedSteerMessages],
   );
 
   const submitQuery = useCallback(
@@ -2059,34 +2846,81 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      metadata?: { notificationDisplayText?: string },
+      metadata?: {
+        notificationDisplayText?: string;
+        todoWorkChainId?: string;
+        onDelivered?: () => void;
+        onDeliveryFailed?: () => void;
+        onAdmissionFailed?: () => void;
+        onGoalClaimDeferred?: () => void;
+        steerInput?: SteerInput;
+        submittedPrompt?: string;
+        goal?: QueuedGoalTurn;
+        claimGoalTurn?: () => QueuedGoalTurn | undefined;
+        userAdmission?: DirectUserAdmission;
+        goalBinding?: GoalTurnBinding;
+      },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
         typeof query === 'string' &&
-        isBtwCommand(query);
+        isBtwCommand(query) &&
+        !activeGoalAdmissionRef.current;
+      let ownsSubmissionLease = false;
+      let submissionLeaseGeneration: number | undefined;
+      const acquireSubmissionLease = () => {
+        if (isSubmittingQueryRef.current) return;
+        ownsSubmissionLease = true;
+        submissionLeaseGeneration = submissionLeaseGenerationRef.current + 1;
+        submissionLeaseGenerationRef.current = submissionLeaseGeneration;
+        setSubmissionInFlight(true);
+      };
+      const releaseSubmissionLease = () => {
+        if (!ownsSubmissionLease) return;
+        ownsSubmissionLease = false;
+        if (
+          submissionLeaseGeneration !== submissionLeaseGenerationRef.current
+        ) {
+          return;
+        }
+        setSubmissionInFlight(false);
+      };
+      const isTurnContinuation =
+        submitType === SendMessageType.ToolResult ||
+        submitType === SendMessageType.Steer;
+      const submittedPrompt =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.submittedPrompt
+          : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
       if (
         isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
+        await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.();
         return;
       }
 
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
-      )
+      ) {
+        await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.();
         return;
+      }
 
       // Set the flag to indicate we're now executing
-      isSubmittingQueryRef.current = true;
+      acquireSubmissionLease();
 
       // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
       // events), so it must reflect only this turn's state. Reset it
@@ -2108,29 +2942,57 @@ export const useGeminiStream = (
       // ToolResult continuations and same-turn btw concurrencies keep
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
-      if (
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
+        canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
+        duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;
       }
 
       const userMessageTimestamp = Date.now();
 
-      // Reset quota error flag when starting a new query (not a continuation)
+      // Reset quota error flag when starting a new query (not a continuation).
+      // Notifications (background agent/shell/monitor completions) are system
+      // events, not new user turns: they must not clear the user's model
+      // override or an in-flight retry countdown — clearing the override here
+      // silently reverted the session to the default model whenever a
+      // background agent finished, and a long history could then overflow the
+      // default model's smaller context window (#7114).
       if (
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
+        submitType !== SendMessageType.Notification &&
+        submitType !== SendMessageType.Goal &&
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        // Clear model override for new user turns, but preserve it on retry
-        // so the same skill-selected model is used again.
-        if (submitType !== SendMessageType.Retry) {
-          modelOverrideRef.current = undefined;
+        // Clear model override for new user turns. On retry, preserve a
+        // skill-selected override so the same model is used again, but drop an
+        // explicit inline `/model <id> <prompt>` override: that is a one-off
+        // for the original prompt, so a retry reverts to the session model and
+        // lets skill-tool overrides apply again.
+        const droppingInlineOverrideOnRetry =
+          submitType === SendMessageType.Retry &&
+          inlineModelOverrideActiveRef.current;
+        if (
+          submitType !== SendMessageType.Retry ||
+          inlineModelOverrideActiveRef.current
+        ) {
+          // The retry re-sends the same prompt on the session model, which may
+          // differ from the one-shot override. Tell the user so the model
+          // switch isn't silent.
+          if (droppingInlineOverrideOnRetry) {
+            addItem(
+              {
+                type: 'info',
+                text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+              },
+              userMessageTimestamp,
+            );
+          }
+          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -2164,20 +3026,125 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } =
-          submitType === SendMessageType.Retry
-            ? { queryToSend: query, shouldProceed: true }
-            : await prepareQueryForGemini(
-                query,
-                userMessageTimestamp,
-                abortSignal,
-                prompt_id!,
-                submitType,
-              );
+        let queuedGoal = metadata?.goal;
+        let preparedQuery: {
+          queryToSend: PartListUnion | null;
+          shouldProceed: boolean;
+        };
+        try {
+          preparedQuery =
+            submitType === SendMessageType.Goal
+              ? queuedGoal
+                ? {
+                    queryToSend: [
+                      'Continue working on the active Goal.',
+                      'Use get_goal for the authoritative objective and evidence state.',
+                      "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
+                      'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
+                      'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
+                      'A phrase mentioned in the objective or this prompt is not evidence that the user supplied it.',
+                      ...(queuedGoal.verifierFeedback
+                        ? [`Verifier feedback: ${queuedGoal.verifierFeedback}`]
+                        : []),
+                    ].join('\n'),
+                    shouldProceed: true,
+                  }
+                : { queryToSend: null, shouldProceed: false }
+              : submitType === SendMessageType.Retry
+                ? { queryToSend: query, shouldProceed: true }
+                : await prepareQueryForGemini(
+                    query,
+                    userMessageTimestamp,
+                    abortSignal,
+                    prompt_id!,
+                    submitType,
+                    submittedPrompt,
+                    allowConcurrentBtwDuringResponse,
+                  );
+        } catch (error) {
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          releaseSubmissionLease();
+          metadata?.onAdmissionFailed?.();
+          throw error;
+        }
+        const { queryToSend, shouldProceed } = preparedQuery;
 
         if (!shouldProceed || queryToSend === null) {
-          isSubmittingQueryRef.current = false;
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          releaseSubmissionLease();
+          metadata?.onDeliveryFailed?.();
           return;
+        }
+
+        await goalQueueRef?.current?.waitForReservationSettlement?.();
+
+        if (!queuedGoal && metadata?.claimGoalTurn) {
+          queuedGoal = metadata.claimGoalTurn();
+          if (!queuedGoal) {
+            releaseSubmissionLease();
+            metadata.onGoalClaimDeferred?.();
+            return;
+          }
+        }
+
+        let userAdmission: DirectUserAdmission | undefined;
+        if (submitType === SendMessageType.UserQuery) {
+          if (metadata?.userAdmission) {
+            const goal =
+              metadata.userAdmission.goal ??
+              goalQueueRef?.current?.claimGoalTurn?.();
+            userAdmission = {
+              turnKey: metadata.userAdmission.turnKey,
+              ...(goal ? { goal } : {}),
+            };
+          } else {
+            userAdmission =
+              goalQueueRef?.current?.claimDirectUserAdmission?.() ?? {
+                turnKey: prompt_id!,
+              };
+          }
+        }
+        const goal = queuedGoal ?? userAdmission?.goal;
+        let goalBinding =
+          metadata?.goalBinding ??
+          (goal
+            ? bindGoalTurn(
+                goal.permit,
+                goal.turnKey,
+                submitType === SendMessageType.UserQuery ? 'user' : 'runtime',
+              )
+            : undefined);
+        const turnKey = goalBinding?.turnKey ?? userAdmission?.turnKey;
+        const turnController =
+          goalBinding?.controller ??
+          (turnKey ? new AbortController() : undefined);
+        const processingSignal = turnController
+          ? AbortSignal.any([abortSignal, turnController.signal])
+          : abortSignal;
+        const turnAdmission =
+          turnKey && turnController
+            ? {
+                turnKey,
+                controller: turnController,
+                origin: goalBinding?.origin ?? ('user' as const),
+              }
+            : undefined;
+        if (
+          turnAdmission &&
+          !goalBinding &&
+          submitType === SendMessageType.UserQuery &&
+          !allowConcurrentBtwDuringResponse &&
+          !activeGoalAdmissionRef.current
+        ) {
+          try {
+            if (
+              config.getGoalRuntime().getSnapshot().goal?.status === 'active'
+            ) {
+              activeGoalAdmissionRef.current = turnAdmission;
+            }
+          } catch {
+            // Goal runtime is optional during early initialization.
+          }
         }
 
         // Check image format support for non-continuations
@@ -2199,8 +3166,11 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
-        lastPromptRef.current = finalQueryToSend;
-        lastPromptErroredRef.current = false;
+        goalTerminalErrorRef.current = false;
+        if (submitType !== SendMessageType.Goal) {
+          lastPromptRef.current = finalQueryToSend;
+          lastPromptErroredRef.current = false;
+        }
 
         if (
           submitType === SendMessageType.UserQuery ||
@@ -2219,6 +3189,7 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
+                modelOverrideRef.current ?? config.getModel(),
               ),
             );
           }
@@ -2239,15 +3210,21 @@ export const useGeminiStream = (
         setIsReceivingContent(false);
         // Reset char counter only on new user queries; tool-result continuations
         // keep accumulating so the token count only goes up within a turn.
-        if (submitType !== SendMessageType.ToolResult) {
+        if (!isTurnContinuation) {
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
+        let keepGoalBinding = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
           // when the tool completes.
-          if (dualOutput && submitType !== SendMessageType.ToolResult) {
+          if (
+            dualOutput &&
+            submitType !== SendMessageType.ToolResult &&
+            submitType !== SendMessageType.Goal
+          ) {
             const rawParts =
               typeof finalQueryToSend === 'string'
                 ? [finalQueryToSend]
@@ -2260,26 +3237,68 @@ export const useGeminiStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const sendOptions = {
+            type: submitType,
+            notificationDisplayText: metadata?.notificationDisplayText,
+            todoWorkChainId: metadata?.todoWorkChainId,
+            modelOverride: modelOverrideRef.current,
+            steerInput: metadata?.steerInput,
+            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+              ? { getSteerInput: drainSteerAtBoundary }
+              : {}),
+          };
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
             abortSignal,
             prompt_id!,
             {
-              type: submitType,
-              notificationDisplayText: metadata?.notificationDisplayText,
-              modelOverride: modelOverrideRef.current,
+              ...sendOptions,
+              ...(goalBinding
+                ? {
+                    goalPermit: goalBinding.permit,
+                    goalTurnKey: goalBinding.turnKey,
+                    goalSignal: goalBinding.controller.signal,
+                    goalOrigin: goalBinding.origin,
+                    getQueuedGoalTurnKey: () =>
+                      goalQueueRef?.current?.peekNextUserBatchKey(true),
+                  }
+                : userAdmission
+                  ? {
+                      goalTurnKey: userAdmission.turnKey,
+                      goalSignal: turnController!.signal,
+                      goalOrigin: 'user' as const,
+                      getQueuedGoalTurnKey: () =>
+                        goalQueueRef?.current?.peekNextUserBatchKey(true),
+                    }
+                  : {}),
             },
           );
 
-          const processingStatus = await processGeminiStreamEvents(
+          const processingResult = await processGeminiStreamEvents(
             stream,
             userMessageTimestamp,
-            abortSignal,
+            processingSignal,
+            submitType,
+            turnAdmission,
           );
+          if (
+            !goalBinding &&
+            turnAdmission &&
+            activeGoalTurnRef.current?.controller ===
+              turnAdmission.controller &&
+            activeGoalTurnRef.current.turnKey === turnAdmission.turnKey
+          ) {
+            goalBinding = activeGoalTurnRef.current;
+          }
+          keepGoalBinding = processingResult.scheduledToolContinuation;
 
-          if (processingStatus === StreamProcessingStatus.UserCancelled) {
+          if (
+            processingResult.status === StreamProcessingStatus.UserCancelled
+          ) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            isSubmittingQueryRef.current = false;
+            metadata?.onDeliveryFailed?.();
             return;
           }
 
@@ -2292,11 +3311,60 @@ export const useGeminiStream = (
             immediateDuplicateToolResponsesRef.current;
           if (immediateDuplicateToolResponses) {
             immediateDuplicateToolResponsesRef.current = null;
+            const finalized = await finalizeToolResponses(
+              config,
+              immediateDuplicateToolResponses.responses.map(
+                ({ request, response }) => ({
+                  callId: request.callId,
+                  toolName: request.name,
+                  responseParts: response.responseParts,
+                  persistedOutputFiles: response.persistedOutputFiles,
+                }),
+              ),
+            );
+            const responseParts = finalized.flatMap(
+              (entry) => entry.responseParts,
+            );
+            immediateDuplicateToolResponses.responses.forEach(
+              ({ request, response }, index) => {
+                const goalContext = request.goalContext;
+                config.getChatRecordingService?.()?.recordToolResult?.(
+                  finalized[index].responseParts,
+                  {
+                    callId: request.callId,
+                    status: response.error ? 'error' : 'success',
+                    resultDisplay: response.resultDisplay,
+                    error: response.error,
+                    errorType: response.errorType,
+                  },
+                  goalContext
+                    ? request.name === ToolNames.GET_GOAL ||
+                      request.name === ToolNames.UPDATE_GOAL
+                      ? {
+                          goalContext: { ...goalContext },
+                          provenance: 'goal_runtime' as const,
+                        }
+                      : { goalContext: { ...goalContext } }
+                    : undefined,
+                );
+              },
+            );
             await submitQuery(
-              immediateDuplicateToolResponses.responseParts,
+              responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
+              { goalBinding },
             );
+            if (
+              goalBinding &&
+              !turnCancelledRef.current &&
+              !abortControllerRef.current?.signal.aborted &&
+              goalTurnBindingsRef.current.get(goalBinding.permit.turnId) ===
+                goalBinding &&
+              !goalBinding.controller.signal.aborted
+            ) {
+              keepGoalBinding = true;
+            }
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -2304,10 +3372,29 @@ export const useGeminiStream = (
           // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
+          } else if (
+            pendingRetryErrorItemRef.current &&
+            !lastPromptErroredRef.current &&
+            !goalTerminalErrorRef.current
+          ) {
+            // A countdown-originated error item lingers after the timer
+            // expired and the retry succeeded. Clear it so it does not
+            // stay on screen. Terminal errors (handleErrorEvent) set
+            // lastPromptErroredRef (or goalTerminalErrorRef for Goal turns)
+            // and are intentionally left visible.
+            clearRetryCountdown();
           }
-          if (loopDetectedRef.current) {
+          const loopDetected = loopDetectedRef.current;
+          if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          if (lastPromptErroredRef.current || goalTerminalErrorRef.current) {
+            metadata?.onDeliveryFailed?.();
+          } else {
+            metadata?.onDelivered?.();
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete
@@ -2341,11 +3428,18 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
-            lastPromptErroredRef.current = true;
-            const retryHint = t('Press Ctrl+Y to retry');
+            if (submitType !== SendMessageType.Goal) {
+              lastPromptErroredRef.current = true;
+            }
+            const retryHint =
+              submitType !== SendMessageType.Goal
+                ? t('Press Ctrl+Y to retry')
+                : undefined;
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,
@@ -2357,6 +3451,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,
@@ -2365,7 +3466,38 @@ export const useGeminiStream = (
           if (activeModelStreamsRef.current === 0) {
             setIsResponding(false);
           }
-          isSubmittingQueryRef.current = false;
+          if (goalBinding) {
+            let retainGoalBinding =
+              keepGoalBinding && !goalBinding.controller.signal.aborted;
+            if (retainGoalBinding) {
+              try {
+                const currentPermit = config
+                  .getGoalRuntime()
+                  .permitForTurn(goalBinding.turnKey);
+                retainGoalBinding =
+                  currentPermit !== undefined &&
+                  sameGoalPermit(currentPermit, goalBinding.permit);
+              } catch {
+                // Tests and early initialization may not expose a ready runtime.
+              }
+            }
+            if (!retainGoalBinding) {
+              await failClosedGoalTurn(
+                goalBinding,
+                'Goal turn ended without a valid continuation',
+              );
+            }
+          }
+          if (
+            turnAdmission &&
+            !goalBinding &&
+            activeGoalAdmissionRef.current?.controller ===
+              turnAdmission.controller &&
+            activeGoalAdmissionRef.current.turnKey === turnAdmission.turnKey
+          ) {
+            activeGoalAdmissionRef.current = null;
+          }
+          releaseSubmissionLease();
         }
       });
     },
@@ -2391,6 +3523,13 @@ export const useGeminiStream = (
       setPendingRetryErrorItem,
       setPendingThoughtItem,
       dualOutput,
+      drainSteerAtBoundary,
+      midTurnDrainRef,
+      goalQueueRef,
+      bindGoalTurn,
+      failClosedGoalTurn,
+      releaseUndeliveredGoalTurn,
+      setSubmissionInFlight,
     ],
   );
 
@@ -2398,10 +3537,10 @@ export const useGeminiStream = (
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
-   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
-   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
-   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
-   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   * 1. ✓ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✓ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✓ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✓ There must be a stored lastPrompt in lastPromptRef.current
    *
    * When conditions are not met:
    * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
@@ -2448,6 +3587,12 @@ export const useGeminiStream = (
     await submitQuery(lastPrompt, SendMessageType.Retry);
   }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
+  const preemptGoalTurn = useCallback((reason: string) => {
+    const active = activeGoalAdmissionRef.current;
+    if (!active || active.controller.signal.aborted) return;
+    active.controller.abort(reason);
+  }, []);
+
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
       // Auto-approve pending tool calls when switching to auto-approval modes
@@ -2456,8 +3601,17 @@ export const useGeminiStream = (
         newApprovalMode === ApprovalMode.AUTO_EDIT
       ) {
         let awaitingApprovalCalls = toolCalls.filter(
-          (call): call is TrackedWaitingToolCall =>
-            call.status === 'awaiting_approval',
+          (call): call is TrackedWaitingToolCall => {
+            if (call.status !== 'awaiting_approval') {
+              return false;
+            }
+            const { confirmationDetails } = call;
+            return !(
+              confirmationDetails &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true
+            );
+          },
         );
 
         // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
@@ -2605,20 +3759,129 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      if (newSuccessfulMemorySaves.length > 0) {
-        // Perform the refresh only if there are new ones.
-        void performMemoryRefresh();
-        // Mark them as processed so we don't do this again on the next render.
-        newSuccessfulMemorySaves.forEach((t) =>
-          processedMemoryToolsRef.current.add(t.request.callId),
-        );
-      }
-
       const geminiTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      let toolGoalPermit: GoalTurnPermit | undefined;
+      const toolGoalContexts = geminiTools.map(
+        (toolCall) => toolCall.request.goalContext,
+      );
+      try {
+        toolGoalPermit = sharedGoalPermit(toolGoalContexts);
+      } catch (error) {
+        const callIds = geminiTools.map((toolCall) => toolCall.request.callId);
+        markToolsAsSubmitted(callIds);
+        const reason = getErrorMessage(error);
+        const bindings = new Map<string, GoalTurnBinding>();
+        const active = activeGoalTurnRef.current;
+        if (active) {
+          bindings.set(active.turnKey, active);
+        }
+        for (const permit of toolGoalContexts) {
+          if (!permit) continue;
+          const existing = goalTurnBindingsRef.current.get(permit.turnId);
+          const binding =
+            existing ??
+            ({
+              permit: { ...permit },
+              turnKey: `goal-runtime:${permit.turnId}`,
+              controller: new AbortController(),
+              origin: 'runtime',
+            } satisfies GoalTurnBinding);
+          bindings.set(binding.turnKey, binding);
+        }
+        for (const binding of bindings.values()) {
+          await failClosedGoalTurn(binding, reason);
+        }
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: reason,
+          },
+          Date.now(),
+        );
+        return;
+      }
+      if (!toolGoalPermit && toolGoalContexts.length > 0) {
+        const active = activeGoalTurnRef.current;
+        let activeGoalPermitValid = false;
+        if (active) {
+          try {
+            const runtime = config.getGoalRuntime();
+            const currentPermit = runtime.permitForTurn(active.turnKey);
+            activeGoalPermitValid =
+              currentPermit !== undefined &&
+              sameGoalPermit(currentPermit, active.permit);
+          } catch {
+            // A missing runtime means this is an ordinary non-Goal batch.
+          }
+        }
+        if (active && activeGoalPermitValid) {
+          markToolsAsSubmitted(
+            geminiTools.map((toolCall) => toolCall.request.callId),
+          );
+          const reason = 'ToolResult batch is missing the active Goal context';
+          await failClosedGoalTurn(active, reason);
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: reason,
+            },
+            Date.now(),
+          );
+          return;
+        }
+      }
+      let toolGoalBinding: GoalTurnBinding | undefined;
+      if (toolGoalPermit) {
+        const existing = goalTurnBindingsRef.current.get(toolGoalPermit.turnId);
+        if (existing && !sameGoalPermit(existing.permit, toolGoalPermit)) {
+          markToolsAsSubmitted(
+            geminiTools.map((toolCall) => toolCall.request.callId),
+          );
+          const reason = 'ToolResult batch has a stale Goal context';
+          await failClosedGoalTurn(existing, reason);
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: reason,
+            },
+            Date.now(),
+          );
+          return;
+        }
+        toolGoalBinding =
+          existing ??
+          bindGoalTurn(
+            toolGoalPermit,
+            `goal-runtime:${toolGoalPermit.turnId}`,
+            'runtime',
+          );
+      }
+      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
+        config,
+        completedAndReadyToSubmitTools.map((toolCall) => ({
+          toolName: toolCall.request.name,
+          args: toolCall.request.args as Record<string, unknown>,
+          status: toolCall.status,
+        })),
+        { logContext: 'interactive memory tool batch' },
+      );
+      if (newSuccessfulMemorySaves.length > 0) {
+        if (!didRefreshManagedMemory) {
+          // Perform the legacy save_memory refresh only when the managed-memory
+          // write refresh did not already rebuild and publish a fresher state.
+          void performMemoryRefresh().catch((err) => {
+            debugLogger.warn(`save_memory refresh failed: ${err}`);
+          });
+        }
+        // Mark them as processed so we don't do this again on the next render.
+        newSuccessfulMemorySaves.forEach((t) =>
+          processedMemoryToolsRef.current.add(t.request.callId),
+        );
+      }
       const completedCallIds = new Set(
         completedAndReadyToSubmitTools.map(
           (toolCall) => toolCall.request.callId,
@@ -2635,8 +3898,8 @@ export const useGeminiStream = (
           }
           return !isReady;
         });
-      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
-        (batch) => batch.responseParts,
+      const pendingDuplicateResponses = readyDuplicateBatches.flatMap(
+        (batch) => batch.duplicateResponses,
       );
       const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
@@ -2647,12 +3910,93 @@ export const useGeminiStream = (
         );
       }
 
-      if (
-        geminiTools.length === 0 &&
-        pendingDuplicateResponseParts.length === 0
-      ) {
+      if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation ended without a result',
+          );
+        }
         return;
       }
+
+      type ReadyToolResponse = {
+        request: ToolCallRequestInfo;
+        response: ToolCallResponseInfo;
+        status: 'success' | 'error' | 'cancelled';
+      };
+      const executableQueues = new Map<string, ReadyToolResponse[]>();
+      for (const toolCall of geminiTools) {
+        const queue = executableQueues.get(toolCall.request.callId) ?? [];
+        queue.push({
+          request: toolCall.request,
+          response: toolCall.response,
+          status: toolCall.status,
+        });
+        executableQueues.set(toolCall.request.callId, queue);
+      }
+      const duplicateQueues = new Map<string, ReadyToolResponse[]>();
+      for (const duplicate of pendingDuplicateResponses) {
+        const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
+        queue.push({
+          ...duplicate,
+          status: duplicate.response.error ? 'error' : 'success',
+        });
+        duplicateQueues.set(duplicate.request.callId, queue);
+      }
+      const orderedResponses: ReadyToolResponse[] = [];
+      for (const batch of readyDuplicateBatches) {
+        for (const callId of batch.callOrder) {
+          const executable = executableQueues.get(callId)?.shift();
+          if (executable) {
+            orderedResponses.push(executable);
+            continue;
+          }
+          const duplicate = duplicateQueues.get(callId)?.shift();
+          if (duplicate) orderedResponses.push(duplicate);
+        }
+      }
+      for (const queue of executableQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+      for (const queue of duplicateQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+
+      const finalizedResponses = await finalizeToolResponses(
+        config,
+        orderedResponses.map(({ request, response }) => ({
+          callId: request.callId,
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+        })),
+      );
+      const responsesToSend = finalizedResponses.flatMap(
+        (entry) => entry.responseParts,
+      );
+      orderedResponses.forEach(({ request, response, status }, index) => {
+        const goalContext = request.goalContext;
+        config.getChatRecordingService?.()?.recordToolResult?.(
+          finalizedResponses[index].responseParts,
+          {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          },
+          goalContext
+            ? request.name === ToolNames.GET_GOAL ||
+              request.name === ToolNames.UPDATE_GOAL
+              ? {
+                  goalContext: { ...goalContext },
+                  provenance: 'goal_runtime' as const,
+                }
+              : { goalContext: { ...goalContext } }
+            : undefined,
+        );
+      });
 
       if (
         turnCancelledRef.current ||
@@ -2661,6 +4005,12 @@ export const useGeminiStream = (
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
         return;
       }
 
@@ -2669,16 +4019,13 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
+      if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          const combinedParts = geminiTools.flatMap(
-            (toolCall) => toolCall.response.responseParts,
-          );
           geminiClient.addHistory({
             role: 'user',
-            parts: combinedParts,
+            parts: responsesToSend,
           });
 
           // Report cancellation to arena (safety net — cancelOngoingRequest
@@ -2689,13 +4036,15 @@ export const useGeminiStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
         return;
       }
 
-      const responsesToSend: Part[] = geminiTools.flatMap(
-        (toolCall) => toolCall.response.responseParts,
-      );
-      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2708,9 +4057,32 @@ export const useGeminiStream = (
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn, so skip skill-tool writes (including the undefined-clears case)
+      // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          modelOverrideRef.current = toolCall.response.modelOverride;
+          if (
+            inlineModelOverrideActiveRef.current ||
+            modelOverrideRef.current?.endsWith('\0')
+          ) {
+            debugLogger.debug(
+              `skill-tool model override (${String(
+                toolCall.response.modelOverride,
+              )}) blocked: ${
+                inlineModelOverrideActiveRef.current
+                  ? 'inline override active'
+                  : 'full-turn override active'
+              }`,
+            );
+          } else {
+            applyModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              toolCall.response.modelOverride,
+              false,
+            );
+          }
         }
       }
 
@@ -2722,6 +4094,49 @@ export const useGeminiStream = (
       }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+
+      const terminatesGoalTurn = geminiTools.some(
+        (toolCall) => toolCall.response.terminateTurn === true,
+      );
+      if (terminatesGoalTurn && toolGoalBinding) {
+        geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        try {
+          await config.getChatRecordingService()?.flush();
+          const runtime = await config.getGoalRuntimeReady();
+          const currentPermit = runtime.permitForTurn(toolGoalBinding.turnKey);
+          if (
+            currentPermit &&
+            sameGoalPermit(currentPermit, toolGoalBinding.permit)
+          ) {
+            await runtime.finishTurn(toolGoalBinding.permit);
+            const snapshot = runtime.getSnapshot();
+            const status = snapshot.goal?.status;
+            if (
+              status === 'complete' ||
+              status === 'blocked' ||
+              status === 'usage_limited'
+            ) {
+              addItem(
+                {
+                  type: 'goal_state',
+                  snapshot,
+                  cause: status,
+                },
+                Date.now(),
+              );
+            }
+          }
+        } catch (error) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            `Goal turn could not finish: ${getErrorMessage(error)}`,
+          );
+        } finally {
+          // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
+          releaseGoalTurn(toolGoalBinding);
+        }
+        return;
+      }
 
       // Fire tool-use summary generation in parallel with the next API call.
       // The fast-model latency is hidden behind the main-model streaming.
@@ -2735,8 +4150,13 @@ export const useGeminiStream = (
         // fast model happily synthesizes "Attempted to read files" from a
         // batch that was mostly failures). cleanSummary can reject output
         // prefixes but not prevent this kind of polluted-input hallucination.
+        // Goal tools already render authoritative lifecycle copy, which a
+        // generated summary can contradict while verification is pending.
         const successfulTools = geminiTools.filter(
-          (tc) => tc.status === 'success',
+          (tc) =>
+            tc.status === 'success' &&
+            tc.request.name !== ToolNames.GET_GOAL &&
+            tc.request.name !== ToolNames.UPDATE_GOAL,
         );
         if (successfulTools.length > 0) {
           const toolInfoForSummary = successfulTools.map((tc) => ({
@@ -2815,18 +4235,54 @@ export const useGeminiStream = (
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation stopped after a model switch',
+          );
+        }
         return;
       }
 
-      // Mid-turn queue drain: inject queued user messages alongside tool
-      // results so the model sees them in the next API call.
+      const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
+      const backgroundLaunchExhaustedCapacity =
+        backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
+        !backgroundTaskRegistry.canStartBackgroundAgent() &&
+        geminiTools.some((toolCall) => {
+          const display = toolCall.response.resultDisplay;
+          return (
+            toolCall.request.name === ToolNames.AGENT &&
+            typeof display === 'object' &&
+            display !== null &&
+            'type' in display &&
+            'status' in display &&
+            display.type === 'task_execution' &&
+            display.status === 'background'
+          );
+        });
+      if (backgroundLaunchExhaustedCapacity) {
+        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation stopped: background capacity exhausted',
+          );
+        }
+        return;
+      }
+
+      // Drain steerable user messages at this sampling boundary and append
+      // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
       const drained =
         turnCancelledRef.current || abortControllerRef.current?.signal.aborted
           ? []
-          : (midTurnDrainRef?.current?.() ?? []);
+          : (midTurnDrainRef?.current?.(
+              false,
+              Boolean(activeGoalAdmissionRef.current),
+            ) ?? []);
+      let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
-        const midTurnTimestamp = Date.now();
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
         const shouldTrackMidTurnAbort = !abortControllerRef.current;
@@ -2834,119 +4290,12 @@ export const useGeminiStream = (
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
         try {
-          for (let index = 0; index < drained.length; index += 1) {
-            if (midTurnAbort.signal.aborted) {
-              break;
-            }
-            const msg = drained[index];
-            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
-            if (isAtCommand(msg)) {
-              const atCommandTimeout = new AbortController();
-              const atCommandSignal = AbortSignal.any([
-                midTurnAbort.signal,
-                atCommandTimeout.signal,
-              ]);
-              const atCommandTimeoutId = setTimeout(() => {
-                atCommandTimeout.abort(
-                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-                );
-              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
-              try {
-                const atCommandResult = await resolveWithAbort(
-                  atCommandSignal,
-                  () =>
-                    resolveAtCommandQuery({
-                      query: msg,
-                      config,
-                      onDebugMessage,
-                      messageId: midTurnTimestamp + index,
-                      signal: atCommandSignal,
-                    }),
-                );
-                const shouldSkipMidTurnMessage =
-                  !atCommandResult.shouldProceed &&
-                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
-                if (
-                  atCommandResult.shouldProceed &&
-                  atCommandResult.processedQuery !== null
-                ) {
-                  resolvedMidTurnQuery = atCommandResult.processedQuery;
-                } else if (atCommandResult.toolDisplays?.length) {
-                  addItem(
-                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
-                    midTurnTimestamp + index,
-                  );
-                }
-                if (atCommandResult.recording) {
-                  config.getChatRecordingService?.()?.recordAtCommand?.({
-                    filesRead: atCommandResult.recording.filesRead,
-                    status: atCommandResult.recording.status,
-                    ...(atCommandResult.recording.message
-                      ? { message: atCommandResult.recording.message }
-                      : {}),
-                    userText: msg,
-                  });
-                }
-                if (shouldSkipMidTurnMessage) {
-                  continue;
-                }
-              } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                onDebugMessage(
-                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
-                );
-                if (!midTurnAbort.signal.aborted) {
-                  addItem(
-                    {
-                      type: MessageType.WARNING,
-                      text: `Could not attach file: ${errorMessage}`,
-                    },
-                    Date.now(),
-                  );
-                }
-                continue;
-              } finally {
-                clearTimeout(atCommandTimeoutId);
-              }
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-            }
-
-            const bridgeResult = await applyVisionBridgeIfNeeded(
-              resolvedMidTurnQuery,
-              midTurnTimestamp + index,
-              midTurnAbort.signal,
-            );
-            if (!bridgeResult.shouldProceed) {
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-              continue;
-            }
-            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
-
-            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
-              resolvedMidTurnQuery,
-              msg,
-            );
-            const formatCheck = checkImageFormatsSupport(
-              midTurnUserMessageParts,
-            );
-            if (formatCheck.hasUnsupportedFormats) {
-              addItem(
-                {
-                  type: MessageType.INFO,
-                  text: getUnsupportedImageFormatWarning(),
-                },
-                Date.now(),
-              );
-            }
-            responsesToSend.push(...midTurnUserMessageParts);
-            config
-              .getChatRecordingService?.()
-              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
-            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          drainedSteer = await resolveDrainedSteerMessages(
+            drained,
+            midTurnAbort.signal,
+          );
+          if (drainedSteer) {
+            responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
           if (shouldTrackMidTurnAbort) {
@@ -2960,10 +4309,30 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
+        drainedSteer?.restore();
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
+        return;
+      }
+      if (toolGoalBinding?.controller.signal.aborted) {
+        drainedSteer?.restore();
+        await failClosedGoalTurn(
+          toolGoalBinding,
+          'Goal tool continuation was preempted',
+        );
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        steerInput: drainedSteer,
+        onDelivered: drainedSteer?.accept,
+        onDeliveryFailed: drainedSteer?.restore,
+        goalBinding: toolGoalBinding,
+      });
     },
     [
       submitQuery,
@@ -2975,8 +4344,10 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
-      onDebugMessage,
-      applyVisionBridgeIfNeeded,
+      resolveDrainedSteerMessages,
+      bindGoalTurn,
+      failClosedGoalTurn,
+      releaseGoalTurn,
     ],
   );
 
@@ -3090,9 +4461,48 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitor?: { id: string; status: string };
+      todoWorkChainId?: string;
+      onDelivered?: () => void;
+      onDeliveryFailed?: () => void;
+      displayed?: boolean;
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const goalQueuePendingCount =
+    goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0;
+  const claimSystemGoalTurn = useCallback((): {
+    ready: boolean;
+    claimGoalTurn?: () => QueuedGoalTurn | undefined;
+  } => {
+    if (goalQueueRef?.current?.hasQueuedUserMessages?.()) {
+      return { ready: false };
+    }
+    let goalOwnsTurn = false;
+    try {
+      goalOwnsTurn = goalRequiresExactPermit(
+        config.getGoalRuntime().getSnapshot(),
+      );
+    } catch {
+      goalOwnsTurn = false;
+    }
+    if (!goalOwnsTurn) return { ready: true };
+    if ((goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0) === 0) {
+      return { ready: false };
+    }
+    return {
+      ready: true,
+      claimGoalTurn: () => {
+        if (goalQueueRef?.current?.hasQueuedUserMessages?.()) return undefined;
+        return goalQueueRef?.current?.claimGoalTurn?.();
+      },
+    };
+  }, [config, goalQueueRef]);
+
+  const getAutonomousLoopTickResolver = useCallback(() => {
+    autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
+    return autonomousLoopTickResolverRef.current;
+  }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
 
   useEffect(() => {
@@ -3101,6 +4511,7 @@ export const useGeminiStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
   // Current sessionId for the cron effect, read through a ref so the
@@ -3152,13 +4563,38 @@ export const useGeminiStream = (
       // already ran scheduler.stop(), so do not (re)install onFire.
       if (stopped) return;
       scheduler.start(
-        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
-          const label = job.prompt.slice(0, 40);
+        (job: {
+          id?: string;
+          prompt: string;
+          cronExpr?: string;
+          missed?: boolean;
+          todoWorkChainId?: string;
+        }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            if (job.missed) return;
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
+            notificationQueueRef.current.push({
+              displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+              modelText,
+              sendMessageType: SendMessageType.Cron,
+              todoWorkChainId: job.todoWorkChainId,
+              onDelivered: () => resolver.markDelivered(),
+            });
+            setNotificationTrigger((n) => n + 1);
+            return;
+          }
           notificationQueueRef.current.push({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-            modelText: job.prompt,
+            modelText,
             sendMessageType: SendMessageType.Cron,
+            todoWorkChainId: job.todoWorkChainId,
           });
           setNotificationTrigger((n) => n + 1);
         },
@@ -3173,16 +4609,17 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, isConfigInitialized]);
+  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3194,16 +4631,35 @@ export const useGeminiStream = (
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
       registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register background workflow completions onto the shared queue. The
+  // registry keeps this separate from its terminal-bell subscriber.
+  useEffect(() => {
+    const registry = config.getWorkflowRunRegistry();
+    registry.setCompletionCallback((displayText, modelText, meta) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta.todoWorkChainId,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setCompletionCallback(undefined);
     };
   }, [config]);
 
@@ -3219,6 +4675,8 @@ export const useGeminiStream = (
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        monitor: { id: meta.monitorId, status: meta.status },
+        todoWorkChainId: meta.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3239,46 +4697,114 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
-      const queue = notificationQueueRef.current;
-      const targetType = queue[0]!.sendMessageType;
+      // Consumer-side guard for #7156: this effect can run on a render pass
+      // that React batched together with progress setState calls issued from
+      // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
+      // synchronous effect stack — and every async continuation submitQuery
+      // starts — inherits the subagent's runtime view, and the notification
+      // turn resolves Config.getModel() to the SUBAGENT's model. Exiting the
+      // frame here guarantees the drained turn always runs on the main
+      // session's configuration, regardless of which producer's setState
+      // triggered the commit.
+      runOutsideAgentContext(() => {
+        const admission = claimSystemGoalTurn();
+        if (!admission.ready) return;
+        const queue = notificationQueueRef.current;
+        const monitorRegistry = config.getMonitorRegistry();
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const monitor = queue[i]!.monitor;
+          if (
+            monitor?.status === 'running' &&
+            monitorRegistry.get(monitor.id)?.status === 'cancelled'
+          ) {
+            queue.splice(i, 1);
+          }
+        }
+        if (queue.length === 0) {
+          return;
+        }
+        const targetType = queue[0]!.sendMessageType;
 
-      // Cron prompts must run as individual turns — each needs its own
-      // slash/shell/@ preprocessing and approval cycle. Only batch
-      // Notification items (which pass through without preprocessing).
-      if (targetType === SendMessageType.Cron) {
-        const item = queue.shift()!;
-        addItem(
-          { type: 'notification' as const, text: item.displayText },
-          Date.now(),
-        );
-        submitQuery(item.modelText, item.sendMessageType, undefined, {
-          notificationDisplayText: item.displayText,
+        // Cron prompts must run as individual turns — each needs its own
+        // slash/shell/@ preprocessing and approval cycle. Only batch
+        // Notification items (which pass through without preprocessing).
+        if (targetType === SendMessageType.Cron) {
+          const item = queue.shift()!;
+          if (!item.displayed) {
+            addItem(
+              { type: 'notification' as const, text: item.displayText },
+              Date.now(),
+            );
+            item.displayed = true;
+          }
+          void submitQuery(item.modelText, item.sendMessageType, undefined, {
+            notificationDisplayText: item.displayText,
+            todoWorkChainId: item.todoWorkChainId,
+            onDelivered: item.onDelivered,
+            onDeliveryFailed: item.onDeliveryFailed,
+            onAdmissionFailed: () => {
+              queue.unshift(item);
+            },
+            claimGoalTurn: admission.claimGoalTurn,
+            onGoalClaimDeferred: () => {
+              queue.unshift(item);
+              setNotificationTrigger((n) => n + 1);
+            },
+          }).catch((error) => {
+            debugLogger.warn('Failed to admit cron notification', error);
+          });
+          return;
+        }
+
+        // Drain contiguous leading Notification items into one batch.
+        let splitIdx = 0;
+        while (
+          splitIdx < queue.length &&
+          queue[splitIdx]!.sendMessageType === targetType &&
+          queue[splitIdx]!.todoWorkChainId === queue[0]!.todoWorkChainId
+        ) {
+          splitIdx++;
+        }
+        const batch = queue.splice(0, splitIdx);
+
+        const now = Date.now();
+        for (const item of batch) {
+          if (!item.displayed) {
+            addItem(
+              { type: 'notification' as const, text: item.displayText },
+              now,
+            );
+            item.displayed = true;
+          }
+        }
+
+        const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
+        const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
+        void submitQuery(combinedModelText, targetType, undefined, {
+          notificationDisplayText: combinedDisplayText,
+          todoWorkChainId: batch[0]?.todoWorkChainId,
+          onAdmissionFailed: () => {
+            queue.unshift(...batch);
+          },
+          claimGoalTurn: admission.claimGoalTurn,
+          onGoalClaimDeferred: () => {
+            queue.unshift(...batch);
+            setNotificationTrigger((n) => n + 1);
+          },
+        }).catch((error) => {
+          debugLogger.warn('Failed to admit background notification', error);
         });
-        return;
-      }
-
-      // Drain contiguous leading Notification items into one batch.
-      let splitIdx = 0;
-      while (
-        splitIdx < queue.length &&
-        queue[splitIdx]!.sendMessageType === targetType
-      ) {
-        splitIdx++;
-      }
-      const batch = queue.splice(0, splitIdx);
-
-      const now = Date.now();
-      for (const item of batch) {
-        addItem({ type: 'notification' as const, text: item.displayText }, now);
-      }
-
-      const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
-      const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-      submitQuery(combinedModelText, targetType, undefined, {
-        notificationDisplayText: combinedDisplayText,
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [
+    streamingState,
+    submitQuery,
+    notificationTrigger,
+    addItem,
+    config,
+    claimSystemGoalTurn,
+    goalQueuePendingCount,
+  ]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,
@@ -3287,7 +4813,7 @@ export const useGeminiStream = (
   // notification queue uses, so teammate reports no longer dump the
   // whole raw envelope into the conversation as a user bubble.
   const teammateQueueRef = useRef<
-    Array<{ modelText: string; display: string }>
+    Array<{ modelText: string; display: string; displayed?: boolean }>
   >([]);
   const [teammateTrigger, setTeammateTrigger] = useState(0);
 
@@ -3352,23 +4878,48 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
-      const batch = teammateQueueRef.current.splice(0);
-      // Render one compact `● …` line per teammate report; the full
-      // envelope goes only to the model (the USER bubble is suppressed
-      // for SendMessageType.Teammate in prepareQueryForGemini).
-      for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
-      }
-      const modelText = batch.map((e) => e.modelText).join('\n\n');
-      const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
-        notificationDisplayText: display,
+      // React can flush this effect after restoring the teammate frame.
+      runOutsideAgentContext(() => {
+        const admission = claimSystemGoalTurn();
+        if (!admission.ready) return;
+        const batch = teammateQueueRef.current.splice(0);
+        // Render one compact `● …` line per teammate report; the full
+        // envelope goes only to the model (the USER bubble is suppressed
+        // for SendMessageType.Teammate in prepareQueryForGemini).
+        for (const entry of batch) {
+          if (!entry.displayed) {
+            addItem(
+              { type: 'notification' as const, text: entry.display },
+              Date.now(),
+            );
+            entry.displayed = true;
+          }
+        }
+        const modelText = batch.map((e) => e.modelText).join('\n\n');
+        const display = batch.map((e) => e.display).join('; ');
+        void submitQuery(modelText, SendMessageType.Teammate, undefined, {
+          notificationDisplayText: display,
+          onAdmissionFailed: () => {
+            teammateQueueRef.current.unshift(...batch);
+          },
+          claimGoalTurn: admission.claimGoalTurn,
+          onGoalClaimDeferred: () => {
+            teammateQueueRef.current.unshift(...batch);
+            setTeammateTrigger((n) => n + 1);
+          },
+        }).catch((error) => {
+          debugLogger.warn('Failed to admit teammate notification', error);
+        });
       });
     }
-  }, [streamingState, submitQuery, teammateTrigger, addItem]);
+  }, [
+    streamingState,
+    submitQuery,
+    teammateTrigger,
+    addItem,
+    claimSystemGoalTurn,
+    goalQueuePendingCount,
+  ]);
 
   return {
     streamingState,
@@ -3377,6 +4928,7 @@ export const useGeminiStream = (
     pendingHistoryItems,
     thought,
     cancelOngoingRequest,
+    preemptGoalTurn,
     retryLastPrompt,
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,

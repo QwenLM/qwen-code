@@ -17,6 +17,10 @@ import {
   resolveConcurrencyLimit,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
+import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
+import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import { WorkflowRunner } from './workflow-runner.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -26,16 +30,25 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
-  vi.hoisted(() => ({
+const {
+  created,
+  nextFinalText,
+  nextTerminateMode,
+  nextOutputTokens,
+  nextExecuteThrow,
+  nextExecuteHook,
+} = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
     signal?: AbortSignal;
     promptConfigSystemPrompt?: string;
+    promptConfigInitialMessages?: unknown[];
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+    agentId?: string | null;
   }>,
+  nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
   // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
   // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
@@ -53,7 +66,12 @@ const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
   // `createChat` early-return path, NOT the production reasoning-
   // loop throw path.
   nextExecuteThrow: { value: null as Error | null },
-  }));
+  nextExecuteHook: {
+    value: undefined as
+      | ((emitter: AgentEventEmitter, signal?: AbortSignal) => Promise<void>)
+      | undefined,
+  },
+}));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
 // agent({isolation:'worktree'}) need to drive GitWorktreeService's
@@ -111,7 +129,7 @@ vi.mock('./agent-headless.js', () => ({
     create: async (
       name: string,
       _runtimeContext: unknown,
-      promptConfig: { systemPrompt?: string },
+      promptConfig: { systemPrompt?: string; initialMessages?: unknown[] },
       _modelConfig: unknown,
       runConfig: { max_turns?: number; max_time_minutes?: number },
       toolConfig?: { tools?: string[]; disallowedTools?: string[] },
@@ -127,13 +145,16 @@ vi.mock('./agent-headless.js', () => ({
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
       ) => {
+        const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
           name,
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
+          agentId: getCurrentAgentId(),
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -142,6 +163,10 @@ vi.mock('./agent-headless.js', () => ({
             'orchestrator did not pass workflow subagent system prompt',
           );
         }
+        await nextExecuteHook.value?.(
+          _eventEmitter as AgentEventEmitter,
+          signal,
+        );
         // R3 (wenshao #6): simulate the production ERROR path where
         // AgentHeadless.execute() itself throws (see agent-headless.ts
         // catch arm at :287-294). If `nextExecuteThrow.value` is set,
@@ -152,6 +177,7 @@ vi.mock('./agent-headless.js', () => ({
         }
       },
       getFinalText: () =>
+        nextFinalText.value ??
         `headless-said:${created[created.length - 1]!.prompt}`,
       getTerminateMode: () => nextTerminateMode.value,
       // R1 (#1 + #3): expose `getExecutionSummary` so the production
@@ -1075,7 +1101,9 @@ describe('createProductionDispatch', () => {
   // terminate mode back to 'goal' (success).
   beforeEach(() => {
     created.length = 0;
+    nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
@@ -1085,6 +1113,23 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+  });
+
+  it('does not suppress env bootstrap with an empty initial history', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
+  });
+
+  it('strips internal tags from fast-path final text', async () => {
+    nextFinalText.value =
+      '<analysis>scratch</analysis><summary>clean result</summary>';
+    const dispatch = createProductionDispatch(fakeConfig());
+
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'clean result',
+    );
   });
 
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
@@ -1114,6 +1159,110 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.signal!.aborted).toBe(false);
   });
 
+  it('installs and cleans up the approval bridge for every stalled attempt', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+    const installed: AgentEventEmitter[] = [];
+    const cleaned: AgentEventEmitter[] = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      (emitter) => {
+        installed.push(emitter);
+        return () => cleaned.push(emitter);
+      },
+    );
+
+    await expect(dispatch('hello', { label: 'h1', stallMs: 5 })).resolves.toBe(
+      'headless-said:hello',
+    );
+    expect(installed).toHaveLength(2);
+    expect(installed[0]).not.toBe(installed[1]);
+    expect(cleaned).toEqual(installed);
+  });
+
+  it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setApprovalChangeCallback(() => {});
+    const config = {
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    let releaseApproval!: () => void;
+    const approvalResolved = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const respond = vi.fn(async (outcome: ToolConfirmationOutcome) => {
+      expect(outcome).toBe(ToolConfirmationOutcome.ProceedOnce);
+      releaseApproval();
+    });
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'workflow-agent-approval',
+        round: 1,
+        callId: 'call-approval',
+        name: 'Shell',
+        description: 'Run git status',
+        args: { command: 'git status' },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          command: 'git status',
+          rootCommand: 'git status',
+        },
+        respond,
+        timestamp: Date.now(),
+      });
+      await approvalResolved;
+    };
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('approval-required')`,
+      args: undefined,
+    });
+
+    await vi.waitFor(() => {
+      expect(registry.get(handle.runId)?.pendingApprovals).toHaveLength(1);
+    });
+    expect(respond).not.toHaveBeenCalled();
+    const approval = registry.get(handle.runId)!.pendingApprovals[0];
+
+    await expect(
+      registry.resolvePendingApproval(
+        handle.runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).resolves.toBe(true);
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 'headless-said:approval-required' },
+    });
+    expect(respond).toHaveBeenCalledOnce();
+    expect(registry.get(handle.runId)?.pendingApprovals).toEqual([]);
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+  });
+
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
   // §XmO bullets. We assert the JSON-format instruction is present because
   // its absence causes JSON-returning subagents to wrap output in code fences.
@@ -1138,32 +1287,34 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage plus tools that break workflow return/cleanup
+  // contracts.
+  it('disallows workflow-only floor tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
+      'ask_user_question',
       'send_message',
+      'monitor',
+      'enter_plan_mode',
       'exit_plan_mode',
+      'agent',
     ]);
   });
 
   // T10 (PR #4732 R1): the production dispatch must throw when the
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
-  it.each([
-    ['CANCELLED', /terminate mode: CANCELLED/],
-    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
-    ['TIMEOUT', /terminate mode: TIMEOUT/],
-    ['ERROR', /terminate mode: ERROR/],
-  ])(
+  it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
     'throws when subagent terminate mode is %s',
-    async (mode, expectedMessage) => {
+    async (mode) => {
       nextTerminateMode.value = mode;
       const dispatch = createProductionDispatch(fakeConfig());
       await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        expectedMessage,
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );
@@ -1757,6 +1908,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
+    executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
@@ -1843,6 +1995,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 _ctx: unknown,
                 signal?: AbortSignal,
               ): Promise<void> => {
+                const { getCurrentAgentId } = await import(
+                  './agent-context.js'
+                );
+                call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -1911,13 +2067,46 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    const result = await dispatch('find foo', { agentType: 'Explore' });
+    const result = await dispatch('find foo', {
+      agentType: 'Explore',
+      label: 'explore-1',
+    });
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
+    // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
-      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+  });
+
+  it('strips internal tags from override-path final text', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+      }),
+      onCreate: async () => ({
+        finalText:
+          '<analysis>scratch</analysis><summary>clean result</summary>',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await expect(dispatch('find foo', { agentType: 'Explore' })).resolves.toBe(
+      'clean result',
     );
   });
 
@@ -1970,9 +2159,17 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    // Union: Foo (from agentType) + workflow-only floor.
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -2046,10 +2243,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(
-      config,
-      undefined,
-      (tokens) => reports.push(tokens),
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
     );
     const result = await dispatch('extract', {
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
@@ -2077,10 +2272,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     nextExecuteThrow.value = new Error('override-path boom');
     nextOutputTokens.value = 9999;
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(
-      config,
-      undefined,
-      (tokens) => reports.push(tokens),
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
     );
     await expect(
       dispatch('q1', { label: 'thrown', schema: { type: 'object' } }),
@@ -2370,7 +2563,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
     const disallowed = calls[0].config.disallowedTools ?? [];
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -2443,16 +2644,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     // newline + nul + del — all control codes < 0x20 or == 0x7f.
     const evil = 'Explore\n\rEvil\x00\x7f';
-    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
     // The thrown message must NOT contain raw newlines / NULs.
+    let error: unknown;
     try {
       await dispatch('hi', { agentType: evil });
     } catch (err) {
-      const msg = (err as Error).message;
-      // eslint-disable-next-line no-control-regex
-      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
-      expect(msg).toContain('not found');
+      error = err;
     }
+    expect(error).toBeInstanceOf(Error);
+    const msg = (error as Error).message;
+    // eslint-disable-next-line no-control-regex
+    expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+    expect(msg).toContain('not found');
   });
 
   // R2 self-review (test-5): dispose() MUST still run even when
@@ -2971,7 +3174,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       await expect(
         dispatch('extract', { schema: { type: 'object' } }),
       ).rejects.toThrow(
-        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );

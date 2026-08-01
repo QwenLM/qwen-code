@@ -1084,4 +1084,44 @@ describe('useSelectionList', () => {
       expect(result.current.activeIndex).toBe(0);
     });
   });
+
+  describe('selectIndex (click-to-choose)', () => {
+    it('moves the active index to the target and selects it', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          onHighlight: mockOnHighlight,
+        }),
+      );
+      act(() => {
+        result.current.selectIndex(2);
+      });
+      expect(result.current.activeIndex).toBe(2);
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+    });
+
+    it('selects the already-active row when targeted again', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({ items, onSelect: mockOnSelect }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      act(() => {
+        result.current.selectIndex(0);
+      });
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).toHaveBeenCalledWith('A');
+    });
+
+    it('ignores a disabled target (no move, no select)', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({ items, onSelect: mockOnSelect }),
+      );
+      act(() => {
+        result.current.selectIndex(1); // 'B' is disabled
+      });
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+  });
 });

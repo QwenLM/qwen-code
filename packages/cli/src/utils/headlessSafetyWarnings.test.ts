@@ -5,21 +5,16 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   HEADLESS_YOLO_NO_SANDBOX_WARNING,
   getHeadlessYoloSafetyWarning,
 } from './headlessSafetyWarnings.js';
 
-function makeConfig(
-  approvalMode: ApprovalMode,
-  sandbox: unknown,
-): Pick<Config, 'getApprovalMode' | 'getSandbox'> {
+function makeConfig(approvalMode: ApprovalMode, sandbox: unknown) {
   return {
     getApprovalMode: () => approvalMode,
-    // Real return type is `SandboxConfig | undefined`; the warning policy
-    // only cares about truthiness so the tests model it as such.
-    getSandbox: () => sandbox as ReturnType<Config['getSandbox']>,
+    getSandbox: () => sandbox,
   };
 }
 

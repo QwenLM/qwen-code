@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
@@ -88,14 +89,12 @@ function getTitle(
   status: SerializedGoalStatusMessage,
   t: ReturnType<typeof useI18n>['t'],
 ): {
-  prefix: string;
   title: string;
   colorClass: string;
 } {
   switch (status.kind) {
     case 'checking':
       return {
-        prefix: '○',
         title: `${t('goal.check')}${
           status.iterations && status.iterations > 0
             ? ` · ${t('goal.turnLabel', { count: status.iterations })}`
@@ -105,31 +104,26 @@ function getTitle(
       };
     case 'set':
       return {
-        prefix: '◎',
         title: t('goal.set'),
         colorClass: styles.accent,
       };
     case 'achieved':
       return {
-        prefix: '✓',
         title: t('goal.achieved'),
         colorClass: styles.success,
       };
     case 'cleared':
       return {
-        prefix: '○',
         title: t('goal.cleared'),
         colorClass: styles.muted,
       };
     case 'failed':
       return {
-        prefix: '✖',
         title: t('goal.failed'),
         colorClass: styles.error,
       };
     case 'aborted':
       return {
-        prefix: '!',
         title: t('goal.aborted'),
         colorClass: styles.warning,
       };
@@ -144,9 +138,10 @@ export function GoalStatusMessage({
   activateFooter?: boolean;
 }) {
   const { t } = useI18n();
+  const renderMode = useTranscriptRenderMode();
 
   useEffect(() => {
-    if (!activateFooter) return;
+    if (!activateFooter || renderMode === 'readonly') return;
     const active = status.kind === 'set' || status.kind === 'checking';
     window.dispatchEvent(
       new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {
@@ -157,7 +152,7 @@ export function GoalStatusMessage({
         },
       }),
     );
-  }, [activateFooter, status.condition, status.kind, status.setAt]);
+  }, [activateFooter, renderMode, status.condition, status.kind, status.setAt]);
 
   const title = getTitle(status, t);
   const stats: string[] = [];
@@ -181,9 +176,6 @@ export function GoalStatusMessage({
 
   return (
     <div className={styles.message}>
-      <span className={`${styles.prefix} ${title.colorClass}`}>
-        {title.prefix}
-      </span>
       <div className={styles.body}>
         <div className={`${styles.title} ${title.colorClass}`}>
           {title.title}

@@ -52,7 +52,10 @@ export class WsStream implements TransportStream {
     this.heartbeat.unref();
   }
 
-  send(message: unknown): Promise<void> {
+  // `_id` (bus event id) is accepted for `TransportStream` parity but ignored:
+  // WebSocket is a stateful connection with no SSE `Last-Event-ID` replay
+  // (matches `AcpWsTransport.supportsReplay = false`).
+  send(message: unknown, _id?: number): Promise<void> {
     const data = JSON.stringify(message);
     const next = this.writeChain.then(
       () =>

@@ -21,6 +21,8 @@ export const EVENT_EXTENSION_UNINSTALL = 'qwen-code.extension_uninstall';
 export const EVENT_EXTENSION_UPDATE = 'qwen-code.extension_update';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_RIPGREP_FALLBACK = 'qwen-code.ripgrep_fallback';
+export const EVENT_RIPGREP_RUNTIME_RECOVERY =
+  'qwen-code.ripgrep_runtime_recovery';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
 export const EVENT_SLASH_COMMAND = 'qwen-code.slash_command';
 export const EVENT_IDE_CONNECTION = 'qwen-code.ide_connection';
@@ -29,6 +31,8 @@ export const EVENT_INVALID_CHUNK = 'qwen-code.chat.invalid_chunk';
 export const EVENT_CONTENT_RETRY = 'qwen-code.chat.content_retry';
 export const EVENT_CONTENT_RETRY_FAILURE =
   'qwen-code.chat.content_retry_failure';
+export const EVENT_PROTOCOL_TAG_SANITIZED =
+  'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
 // which is fired by geminiChat for InvalidStreamError retries on a separate
@@ -43,6 +47,18 @@ export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
+export const EVENT_TOOL_OUTPUT_TRUNCATED = 'qwen-code.tool_output_truncated';
+
+export const DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH = 1024 * 1024;
+export const SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT = 100 * 1024 * 1024;
+
+export function isValidSensitiveSpanAttributeMaxLength(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+  );
+}
 
 // Prompt Suggestion Events
 export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
@@ -67,6 +83,7 @@ export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
 export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
+export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';

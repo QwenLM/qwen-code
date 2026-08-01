@@ -17,9 +17,11 @@ export {
   useDaemonStreamingState,
   useDaemonSession,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
 } from './DaemonSessionProvider.js';
+export type { DaemonTranscriptHistory } from './DaemonSessionProvider.js';
 export type {
   DaemonCommandInfo,
   DaemonConnectionState,
@@ -40,7 +42,10 @@ export type {
   DaemonTodoPriority,
   DaemonTodoStatus,
   DaemonWorkspaceEventSignals,
+  PendingPromptActionOptions,
   SendPromptOptions,
+  SubmitPromptOptions,
+  SubmitPromptResult,
 } from './types.js';
 export {
   extractDaemonTodosFromToolBlock,
@@ -57,3 +62,4 @@ export {
 } from './selectors.js';
 export type { DaemonStreamingState } from './selectors.js';
 export { toDaemonPromptContent } from './promptContent.js';
+export { isMissingSessionHttpStatus } from './status.js';

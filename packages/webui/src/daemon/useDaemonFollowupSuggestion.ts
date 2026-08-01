@@ -6,7 +6,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSyncExternalStore } from 'react';
-import { useDaemonTranscriptStore } from './session/DaemonSessionProvider.js';
+import {
+  useDaemonConnection,
+  useDaemonTranscriptStore,
+} from './session/DaemonSessionProvider.js';
 import {
   clearSidechannelFollowupSuggestion,
   getSidechannelFollowupSuggestion,
@@ -244,6 +247,7 @@ export function useDaemonFollowupSuggestion(
 ): UseDaemonFollowupSuggestionReturn {
   const { enabled = true, onAccept, onOutcome } = opts;
   const store = useDaemonTranscriptStore();
+  const sessionId = useDaemonConnection().sessionId;
   const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
   const onAcceptRef = useRef(onAccept);
   onAcceptRef.current = onAccept;
@@ -260,7 +264,9 @@ export function useDaemonFollowupSuggestion(
     getSidechannelFollowupSuggestion,
   );
   const activeFollowupSuggestion =
-    sidechannelFollowupSuggestion ?? lastFollowupSuggestion;
+    sidechannelFollowupSuggestion?.sessionId === sessionId
+      ? sidechannelFollowupSuggestion
+      : lastFollowupSuggestion;
 
   const controller = useMemo(
     () =>
@@ -288,6 +294,24 @@ export function useDaemonFollowupSuggestion(
   // controller's React state, which would otherwise re-trigger this
   // effect on the next render and re-show the suggestion.
   const lastPushedPromptIdRef = useRef<string | undefined>(undefined);
+  const previousSessionIdRef = useRef<string | undefined>(sessionId);
+  useEffect(() => {
+    const previousSessionId = previousSessionIdRef.current;
+    previousSessionIdRef.current = sessionId;
+    const sessionChanged =
+      previousSessionId !== undefined &&
+      sessionId !== undefined &&
+      previousSessionId !== sessionId;
+    if (!sessionChanged) return;
+    // Session switches should drop the old local display and global
+    // sidechannel value, but not the transcript store: the provider resets
+    // that store for the new session, and it may already contain the new
+    // session's own follow-up suggestion.
+    controller.clear();
+    clearSidechannelFollowupSuggestion();
+    lastPushedPromptIdRef.current = undefined;
+  }, [controller, sessionId]);
+
   useEffect(() => {
     const nextPromptId = activeFollowupSuggestion?.promptId;
     if (nextPromptId === lastPushedPromptIdRef.current) return;

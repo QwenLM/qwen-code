@@ -30,11 +30,16 @@ vi.mock('../hooks/useQwenAuth.js', () => ({
   })),
 }));
 
-vi.mock('../../utils/settingsUtils.js', () => ({
-  backupSettingsFile: vi.fn(),
-  restoreSettingsFromBackup: vi.fn(),
-  cleanupSettingsBackup: vi.fn(),
-}));
+vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/settingsUtils.js')>();
+  return {
+    ...actual,
+    backupSettingsFile: vi.fn(),
+    restoreSettingsFromBackup: vi.fn(),
+    cleanupSettingsBackup: vi.fn(),
+  };
+});
 
 vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),

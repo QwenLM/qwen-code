@@ -14,6 +14,11 @@ const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
 export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './constants.js';
+export {
   initializeTelemetry,
   shutdownTelemetry,
   forceFlushMetrics,
@@ -46,9 +51,11 @@ export {
   logExtensionDisable,
   logExtensionUpdateEvent,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
+  recordSkillInvocation,
   logUserFeedback,
   logArenaSessionStarted,
   logArenaAgentCompleted,
@@ -56,6 +63,7 @@ export {
   logMemoryExtract,
   logMemoryDream,
   logMemoryRecall,
+  logMemoryRecallDelivery,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -74,6 +82,7 @@ export {
   KittySequenceOverflowEvent,
   ToolOutputTruncatedEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   NextSpeakerCheckEvent,
   AuthEvent,
   SkillLaunchEvent,
@@ -85,6 +94,7 @@ export {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
@@ -98,6 +108,7 @@ export type { TelemetryEvent } from './types.js';
 export { SpanStatusCode, ValueType } from '@opentelemetry/api';
 export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 export * from './uiTelemetry.js';
+export * from './api-activity-tracker.js';
 export {
   // Core metrics functions
   recordToolCallMetrics,
@@ -129,6 +140,8 @@ export {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordChannelMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
   // Performance monitoring types
   PerformanceMetricType,
   MemoryMetricType,
@@ -161,6 +174,7 @@ export {
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
+  StartLLMRequestSpanOptions,
   EndInteractionOptions,
   InteractionSpanResultStatus,
   LLMRequestMetadata,
@@ -204,8 +218,22 @@ export {
   recordDaemonPromptDuration,
   recordDaemonBridgeError,
   recordDaemonCancel,
+  recordDaemonPipeMessage,
 } from './daemon-metrics.js';
-export type { DaemonGaugeCallbacks } from './daemon-metrics.js';
+export type {
+  DaemonGaugeCallbacks,
+  DaemonPipeDirection,
+} from './daemon-metrics.js';
+export {
+  startEventLoopLagMonitor,
+  type EventLoopLagMonitor,
+  type EventLoopLagMonitorOptions,
+  type EventLoopLagSnapshot,
+} from './event-loop-lag.js';
+export {
+  registerDaemonEventLoopLagGauge,
+  registerAcpEventLoopLagGauge,
+} from './event-loop-lag-metrics.js';
 export {
   addUserPromptAttributes,
   addSystemPromptAttributes,
@@ -213,6 +241,9 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
+  areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';
 export { getTraceContext, formatTraceparent } from './trace-context.js';

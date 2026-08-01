@@ -29,6 +29,7 @@ import {
   addMCPStatusChangeListener,
   removeMCPStatusChangeListener,
   MCPServerStatus,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -41,7 +42,11 @@ import type {
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import {
+  CommandKind,
+  type CommandContext,
+  type SlashCommand,
+} from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -49,8 +54,22 @@ import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from '../../services/SkillCommandLoader.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+  MAX_STACKED_SKILLS,
+} from '../../utils/commands.js';
+import { AppEvent } from '../../utils/events.js';
+import { t } from '../../i18n/index.js';
+import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
+import {
+  EXTENSION_RELOAD_FAILED_REASON,
+  ExtensionRefreshState,
+} from '../../config/extension-refresh-state.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -100,6 +119,11 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
   'history',
 ]);
+const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
 
 export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
@@ -112,10 +136,15 @@ export interface SlashCommandProcessorActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+    compactionModelMode?: boolean;
+    imageModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openEffortDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -158,7 +187,17 @@ export const useSlashCommandProcessor = (
   logger: Logger | null,
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
+  extensionRefreshState?: ExtensionRefreshState,
 ) => {
+  const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
+    null,
+  );
+  if (!fallbackExtensionRefreshStateRef.current) {
+    fallbackExtensionRefreshStateRef.current = new ExtensionRefreshState();
+  }
+  const activeExtensionRefreshState =
+    extensionRefreshState ?? fallbackExtensionRefreshStateRef.current;
+
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
   const historyRef = useRef(history);
@@ -175,6 +214,19 @@ export const useSlashCommandProcessor = (
   const commandReloadResolversRef = useRef<
     Array<{ trigger: number; resolve: () => void }>
   >([]);
+  const extensionContentRefreshTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const extensionContentRefreshRunningRef = useRef(false);
+  const extensionContentRefreshPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const resolveCommandReloads = useCallback((completedTrigger: number) => {
     if (commandReloadResolversRef.current.length === 0) {
@@ -208,6 +260,83 @@ export const useSlashCommandProcessor = (
       });
     });
   }, [config]);
+
+  const clearPendingExtensionContentRefresh = useCallback(() => {
+    if (!extensionContentRefreshTimerRef.current) {
+      return;
+    }
+    clearTimeout(extensionContentRefreshTimerRef.current);
+    extensionContentRefreshTimerRef.current = null;
+  }, []);
+
+  const showExtensionContentRefreshError = useCallback(
+    (error: unknown) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      addItem(
+        {
+          type: MessageType.ERROR,
+          text:
+            error instanceof Error
+              ? t(
+                  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+                  { message: error.message },
+                )
+              : t(
+                  'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+                ),
+        },
+        Date.now(),
+      );
+    },
+    [addItem],
+  );
+
+  const runExtensionContentRefresh = useCallback(async () => {
+    if (!config) {
+      return;
+    }
+    if (extensionContentRefreshRunningRef.current) {
+      extensionContentRefreshPendingRef.current = true;
+      return;
+    }
+    extensionContentRefreshRunningRef.current = true;
+    let refreshPasses = 0;
+    try {
+      do {
+        if (refreshPasses >= MAX_EXTENSION_CONTENT_REFRESH_PASSES) {
+          extensionContentRefreshPendingRef.current = false;
+          showExtensionContentRefreshError(
+            new Error('too many extension content changes are still pending'),
+          );
+          return;
+        }
+        refreshPasses++;
+        extensionContentRefreshPendingRef.current = false;
+        if (activeExtensionRefreshState.isReloadInProgress()) {
+          return;
+        }
+        if (activeExtensionRefreshState.needsExtensionRefresh()) {
+          return;
+        }
+        await refreshExtensionContentRuntime({
+          config,
+          reloadCommands,
+        });
+      } while (extensionContentRefreshPendingRef.current);
+    } catch (error: unknown) {
+      extensionContentRefreshPendingRef.current = false;
+      showExtensionContentRefreshError(error);
+    } finally {
+      extensionContentRefreshRunningRef.current = false;
+    }
+  }, [
+    activeExtensionRefreshState,
+    config,
+    reloadCommands,
+    showExtensionContentRefreshError,
+  ]);
   const [shellConfirmationRequest, setShellConfirmationRequest] =
     useState<null | {
       commands: string[];
@@ -301,6 +430,10 @@ export const useSlashCommandProcessor = (
         historyItemContent = {
           type: 'tool_stats',
         };
+      } else if (message.type === MessageType.SKILL_STATS) {
+        historyItemContent = {
+          type: 'skill_stats',
+        };
       } else if (message.type === MessageType.QUIT) {
         historyItemContent = {
           type: 'quit',
@@ -337,6 +470,7 @@ export const useSlashCommandProcessor = (
         config,
         settings,
         logger,
+        extensionRefreshState: activeExtensionRefreshState,
       },
       ui: {
         get history() {
@@ -399,6 +533,7 @@ export const useSlashCommandProcessor = (
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
+      activeExtensionRefreshState,
     ],
   );
 
@@ -488,6 +623,85 @@ export const useSlashCommandProcessor = (
       reloadCommands();
     });
   }, [config, isConfigInitialized, reloadCommands]);
+
+  useEffect(() => {
+    const listener = (reason?: unknown) => {
+      clearPendingExtensionContentRefresh();
+      addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            reason === EXTENSION_RELOAD_FAILED_REASON
+              ? t(
+                  'Extension reload did not complete. Run /reload-plugins to try again.',
+                )
+              : t(
+                  'Extensions changed on disk. Run /reload-plugins to apply updates.',
+                ),
+        },
+        Date.now(),
+      );
+    };
+    activeExtensionRefreshState.on(AppEvent.ExtensionRefreshNeeded, listener);
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionRefreshNeeded,
+        listener,
+      );
+    };
+  }, [
+    activeExtensionRefreshState,
+    addItem,
+    clearPendingExtensionContentRefresh,
+  ]);
+
+  useEffect(() => {
+    activeExtensionRefreshState.on(
+      AppEvent.ExtensionsReloadStarted,
+      clearPendingExtensionContentRefresh,
+    );
+    activeExtensionRefreshState.on(
+      AppEvent.ExtensionsReloaded,
+      clearPendingExtensionContentRefresh,
+    );
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionsReloadStarted,
+        clearPendingExtensionContentRefresh,
+      );
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionsReloaded,
+        clearPendingExtensionContentRefresh,
+      );
+    };
+  }, [activeExtensionRefreshState, clearPendingExtensionContentRefresh]);
+
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    const listener = () => {
+      clearPendingExtensionContentRefresh();
+      extensionContentRefreshTimerRef.current = setTimeout(() => {
+        extensionContentRefreshTimerRef.current = null;
+        void runExtensionContentRefresh();
+      }, 250);
+    };
+    activeExtensionRefreshState.on(AppEvent.ExtensionContentChanged, listener);
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionContentChanged,
+        listener,
+      );
+      clearPendingExtensionContentRefresh();
+      extensionContentRefreshPendingRef.current = false;
+    };
+  }, [
+    clearPendingExtensionContentRefresh,
+    config,
+    activeExtensionRefreshState,
+    runExtensionContentRefresh,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -664,8 +878,110 @@ export const useSlashCommandProcessor = (
         resolvedCommandPath.length > 1
           ? resolvedCommandPath.slice(1).join(' ')
           : undefined;
+      const isSkillCommand = commandToExecute?.kind === CommandKind.SKILL;
+      let skillInvocationRecorded = false;
+      const recordSkillCommandInvocation = (success: boolean) => {
+        if (
+          !config ||
+          !commandToExecute ||
+          !isSkillCommand ||
+          skillInvocationRecorded
+        ) {
+          return;
+        }
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(commandToExecute),
+          success,
+        });
+        skillInvocationRecorded = true;
+      };
 
       try {
+        // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        if (stackedResult.skills.length >= 2) {
+          const combinedContent: PartListUnion[] = [];
+          let firstModelOverride: string | undefined;
+          const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+          for (const skill of stackedResult.skills) {
+            if (!skill.action) continue;
+            const skillContext: CommandContext = {
+              invocation: {
+                raw: `/${skill.name}`,
+                name: skill.name,
+                args: '',
+              },
+              services: { config, settings, logger: null },
+            } as unknown as CommandContext;
+
+            const skillResult = await skill.action(skillContext, '');
+            if (skillResult?.type === 'submit_prompt') {
+              combinedContent.push(skillResult.content);
+              firstModelOverride ??= skillResult.modelOverride;
+              if (skillResult.onComplete) {
+                onCompleteCallbacks.push(skillResult.onComplete);
+              }
+            } else if (
+              skillResult?.type === 'message' &&
+              skillResult.messageType === 'error'
+            ) {
+              addMessage({
+                type: MessageType.ERROR,
+                content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+                timestamp: new Date(),
+              });
+            }
+
+            if (config) {
+              const succeeded = skillResult?.type === 'submit_prompt';
+              recordSkillInvocation(config, {
+                skillName: getSkillCommandName(skill),
+                success: succeeded,
+              });
+              if (succeeded) {
+                void recordAutoSkillCommandUsage(config, skill);
+              }
+            }
+          }
+
+          // Append user's remaining text after skill tokens
+          if (stackedResult.remainingText) {
+            combinedContent.push([{ text: stackedResult.remainingText }]);
+          }
+
+          if (stackedResult.exceededMax) {
+            addMessage({
+              type: MessageType.WARNING,
+              content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+              timestamp: new Date(),
+            });
+          }
+
+          // Mark as sent to model so chat recording and telemetry work correctly
+          invocationSentToModel = true;
+          if (invocationItemId !== undefined) {
+            updateItem(invocationItemId, { sentToModel: true });
+          }
+
+          // Combine all content into a single submit_prompt
+          const mergedContent: PartListUnion = combinedContent.flat();
+          return {
+            type: 'submit_prompt',
+            content: mergedContent,
+            ...(firstModelOverride
+              ? { modelOverride: firstModelOverride }
+              : {}),
+            ...(onCompleteCallbacks.length
+              ? {
+                  onComplete: async () => {
+                    for (const cb of onCompleteCallbacks) await cb();
+                  },
+                }
+              : {}),
+          };
+        }
+
         if (commandToExecute) {
           if (!commandToExecute.hidden) {
             setRecentCommands((previous) => {
@@ -757,6 +1073,36 @@ export const useSlashCommandProcessor = (
                     });
                   }
                   return { type: 'handled' };
+                case 'goal_control': {
+                  // A causeless result (a `status` read, or a `clear` when no
+                  // Goal is active) emits no runtime broadcast, so it must render
+                  // its own card even mid-turn. Mutations broadcast a GoalState
+                  // event the active stream renders, so they defer to it while a
+                  // turn is running.
+                  const rendersHere =
+                    result.cause === undefined ||
+                    commandContext.ui.isIdleRef.current;
+                  if (rendersHere) {
+                    const snapshot = result.response.snapshot;
+                    if (snapshot.goal || result.cause === 'clear') {
+                      addItem(
+                        {
+                          type: MessageType.GOAL_STATE,
+                          snapshot,
+                          ...(result.cause ? { cause: result.cause } : {}),
+                        },
+                        Date.now(),
+                      );
+                    } else {
+                      addMessage({
+                        type: MessageType.INFO,
+                        content: 'No Goal set.',
+                        timestamp: new Date(),
+                      });
+                    }
+                  }
+                  return { type: 'handled' };
+                }
                 case 'dialog':
                   switch (result.dialog) {
                     case 'arena_start':
@@ -790,13 +1136,39 @@ export const useSlashCommandProcessor = (
                       actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
-                      actions.openModelDialog();
+                      actions.openModelDialog({
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'fast-model':
-                      actions.openModelDialog({ fastModelMode: true });
+                      actions.openModelDialog({
+                        fastModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'voice-model':
-                      actions.openModelDialog({ voiceModelMode: true });
+                      actions.openModelDialog({
+                        voiceModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'vision-model':
+                      actions.openModelDialog({
+                        visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'compaction-model':
+                      actions.openModelDialog({
+                        compactionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'image-model':
+                      actions.openModelDialog({
+                        imageModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
@@ -824,6 +1196,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
+                      return { type: 'handled' };
+                    case 'effort':
+                      actions.openEffortDialog();
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
@@ -897,6 +1272,7 @@ export const useSlashCommandProcessor = (
                     const blockingError = output.getBlockingError();
                     if (blockingError.blocked || output.shouldStopExecution()) {
                       hasError = true;
+                      recordSkillCommandInvocation(false);
                       addMessage({
                         type: MessageType.ERROR,
                         content: formatUserPromptExpansionBlockedMessage(
@@ -923,10 +1299,13 @@ export const useSlashCommandProcessor = (
                     // consumers observe it after state has rendered.
                     updateItem(invocationItemId, { sentToModel: true });
                   }
+                  recordSkillCommandInvocation(true);
+                  void recordAutoSkillCommandUsage(config, commandToExecute);
                   return {
                     type: 'submit_prompt',
                     content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
                 }
                 case 'confirm_shell_commands': {
@@ -1047,6 +1426,7 @@ export const useSlashCommandProcessor = (
           return { type: 'handled' };
         }
         hasError = true;
+        recordSkillCommandInvocation(false);
         if (config) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
@@ -1114,6 +1494,7 @@ export const useSlashCommandProcessor = (
     },
     [
       config,
+      settings,
       addItem,
       actions,
       commands,

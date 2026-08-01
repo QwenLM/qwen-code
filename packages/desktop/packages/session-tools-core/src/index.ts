@@ -80,6 +80,8 @@ export {
   // Multi-header credential helpers
   detectCredentialMode,
   getEffectiveHeaderNames,
+  SOURCE_SLUG_REGEX,
+  assertValidSourceSlug,
 } from './source-helpers.ts';
 
 // Validation

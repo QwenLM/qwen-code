@@ -66,6 +66,8 @@ export interface StoredConfig {
   // Input settings
   autoCapitalisation?: boolean;  // Auto-capitalize first letter when typing (default: true)
   sendMessageKey?: 'enter' | 'cmd-enter';  // Key to send messages (default: 'enter')
+  voiceModel?: string;  // ASR model id for voice dictation (default: 'qwen3-asr-flash')
+  voiceEnabled?: boolean;  // show the voice dictation mic in the composer (default: true)
   spellCheck?: boolean;  // Enable spell check in input (default: false)
   // Power settings
   keepAwakeWhileRunning?: boolean;  // Prevent screen sleep while sessions are running (default: false)
@@ -469,6 +471,41 @@ export function setSendMessageKey(key: 'enter' | 'cmd-enter'): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.sendMessageKey = key;
+  saveConfig(config);
+}
+
+/**
+ * Get the ASR model id used for voice dictation.
+ * Defaults to 'qwen3-asr-flash' if not set.
+ */
+export function getVoiceModel(): string {
+  return loadStoredConfig()?.voiceModel ?? 'qwen3-asr-flash';
+}
+
+/**
+ * Set the ASR model id used for voice dictation.
+ */
+export function setVoiceModel(model: string): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.voiceModel = model;
+  saveConfig(config);
+}
+
+/**
+ * Whether the voice dictation mic is shown in the composer. Defaults to true.
+ */
+export function getVoiceEnabled(): boolean {
+  return loadStoredConfig()?.voiceEnabled ?? true;
+}
+
+/**
+ * Enable or disable voice dictation in the composer.
+ */
+export function setVoiceEnabled(enabled: boolean): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.voiceEnabled = enabled;
   saveConfig(config);
 }
 

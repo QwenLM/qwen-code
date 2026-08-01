@@ -187,7 +187,14 @@ function exportSources(
   }
 
   for (const slug of slugs) {
-    const sourcePath = getSourcePath(workspaceRootPath, slug)
+    let sourcePath: string
+    try {
+      sourcePath = getSourcePath(workspaceRootPath, slug)
+    } catch {
+      warnings.push(`Source '${slug}' has invalid slug format, skipping`)
+      continue
+    }
+
     if (!existsSync(sourcePath)) {
       warnings.push(`Source '${slug}' not found, skipping`)
       continue

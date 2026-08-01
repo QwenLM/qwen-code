@@ -168,6 +168,8 @@ export interface TeammateIdentity {
   color?: string;
   /** Whether this agent is the team leader. */
   isTeamLead: boolean;
+  /** Whether this teammate must submit its plan for leader approval. */
+  planModeRequired?: boolean;
   /** Session ID of the parent (leader) session. */
   parentSessionId?: string;
 }

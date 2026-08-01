@@ -9,13 +9,6 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { SourceCredentialManager } from '../credential-manager.ts';
 import type { FolderSourceConfig } from '../types.ts';
 
-// Mock storage module to prevent disk I/O
-mock.module('../storage.ts', () => ({
-  markSourceAuthenticated: mock(() => true),
-  loadSourceConfig: mock(() => null),
-  saveSourceConfig: mock(() => {}),
-}));
-
 // Mock credentials module — track set() calls to verify saves
 let setCalls: unknown[][] = [];
 const mockGet = mock(() => Promise.resolve(null as unknown));

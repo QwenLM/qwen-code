@@ -35,6 +35,53 @@ describe('ModelsConfig', () => {
     return modelsConfig.getGenerationConfig() as ContentGeneratorConfig;
   }
 
+  it('rejects image-only models as the primary model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'chat-model' }, { id: 'image-model', imageOnly: true }],
+      },
+    });
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'chat-model');
+
+    await expect(
+      modelsConfig.switchModel(AuthType.USE_OPENAI, 'image-model'),
+    ).rejects.toThrow(
+      "Image-only model 'image-model' cannot be used as the primary model",
+    );
+    expect(modelsConfig.getModel()).toBe('chat-model');
+  });
+
+  it('rejects an image-only model during auth refresh without changing state', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+      modelProvidersConfig: {
+        openai: [{ id: 'image-model', imageOnly: true }],
+      },
+      generationConfig: { model: 'previous-model' },
+    });
+
+    expect(() =>
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'image-model'),
+    ).toThrow(
+      "Image-only model 'image-model' cannot be used as the primary model",
+    );
+    expect(modelsConfig.getCurrentAuthType()).toBe(AuthType.USE_ANTHROPIC);
+    expect(modelsConfig.getModel()).toBe('previous-model');
+  });
+
+  it('does not choose an image-only model as the auth default', () => {
+    const modelsConfig = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [{ id: 'image-model', imageOnly: true }, { id: 'chat-model' }],
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'missing-model');
+
+    expect(modelsConfig.getModel()).toBe('chat-model');
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -1552,6 +1599,31 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
+    // Start on qwen-oauth with a text-only model so modalities are empty.
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_OAUTH,
+      generationConfig: {
+        model: 'qwen3-coder-flash',
+        modalities: {},
+      },
+      generationConfigSources: {
+        modalities: { kind: 'computed', detail: 'auto-detected from model' },
+      },
+    });
+
+    // Hot-update to coder-model (DEFAULT_QWEN_MODEL), which accepts images.
+    // Without refreshing model-derived defaults the previous model's empty
+    // modalities would linger and the vision-bridge gate would misfire.
+    await modelsConfig.setModel('coder-model');
+
+    expect(modelsConfig.getModel()).toBe('coder-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
   it('rolls back raw model state when owner refresh fails', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
@@ -2633,6 +2705,47 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getModelDisplayName('qwen3.7-max')).toBe(
         '[Idealab] qwen3.7-max',
       );
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBe(idealabBaseUrl);
+    });
+
+    it('tracks implicit and explicit registry routes with the same effective URL', async () => {
+      const defaultBaseUrl = 'https://api.openai.com/v1';
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          { id: 'shared', name: 'Implicit', envKey: 'IMPLICIT_KEY' },
+          {
+            id: 'shared',
+            name: 'Explicit',
+            baseUrl: defaultBaseUrl,
+            envKey: 'EXPLICIT_KEY',
+          },
+        ],
+      };
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'shared');
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBeNull();
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared');
+      expect(modelsConfig.getGenerationConfig().apiKeyEnvKey).toBe(
+        'IMPLICIT_KEY',
+      );
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'shared', {
+        baseUrl: defaultBaseUrl,
+      });
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBe(defaultBaseUrl);
+
+      const restored = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        initialRegistryBaseUrl: defaultBaseUrl,
+        modelProvidersConfig,
+        generationConfig: { model: 'shared' },
+      });
+      restored.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared');
+      expect(restored.getGenerationConfig().apiKeyEnvKey).toBe('EXPLICIT_KEY');
     });
 
     it('should return raw modelId when currentAuthType is falsy', () => {
@@ -2686,6 +2799,54 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getModelDisplayName('coder-model')).toBe(
         'coder-model',
       );
+    });
+  });
+
+  describe('providerProtocolConfig wiring', () => {
+    it('threads providerProtocolConfig into the registry so custom ids resolve', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        providerProtocolConfig: { idealab: 'openai' },
+      });
+
+      // A wire-name typo anywhere in the options->registry chain would make this
+      // empty, so this guards the end-to-end plumbing the unit registry tests miss.
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
+    });
+
+    it('skips a custom id when no providerProtocolConfig is supplied', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+      });
+
+      expect(
+        modelsConfig.getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+      ).toEqual([]);
+    });
+
+    it('threads providerProtocolConfig through reloadModelProvidersConfig', () => {
+      const modelsConfig = new ModelsConfig();
+
+      modelsConfig.reloadModelProvidersConfig(
+        {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
     });
   });
 });

@@ -21,6 +21,8 @@ import type {
   ToolConfig,
 } from '../runtime/agent-types.js';
 import type { AgentEventEmitter } from '../runtime/agent-events.js';
+import type { ApprovalMode } from '../../config/config.js';
+import type { TeammateIdentity } from '../team/types.js';
 
 /**
  * Canonical display mode values shared across core and CLI.
@@ -90,6 +92,10 @@ export interface InProcessSpawnConfig {
     runConfig: RunConfig;
     toolConfig?: ToolConfig;
   };
+  /** Optional per-agent approval mode override. */
+  approvalMode?: ApprovalMode;
+  /** Optional teammate identity for in-process team agents. */
+  teammateIdentity?: TeammateIdentity;
   /**
    * Per-agent auth/provider overrides. When present, a dedicated
    * ContentGenerator is created for this agent instead of inheriting

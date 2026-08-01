@@ -39,13 +39,14 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { EventBus } from '../../packages/cli/src/serve/event-bus.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   spawnDaemon,
   startRssPolling,
   countDescendants,
   percentiles,
   writeWorkspaceSettings,
+  approveWorkspaceMcpServers,
   gitHead,
   makeTempWorkspace,
   sleep,
@@ -386,13 +387,15 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         const ws = makeTempWorkspace('mcp');
         let daemon: SpawnedDaemon | undefined;
         try {
-          writeWorkspaceSettings(ws, {
-            mcpServers: {
-              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
-              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
-            },
-          });
-          daemon = await spawnDaemon({ workspaceCwd: ws });
+          const mcpServers = {
+            idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+            idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+          };
+          writeWorkspaceSettings(ws, { mcpServers });
+          // Workspace-scoped servers are gated (#4615); pre-approve so the
+          // daemon's acp child connects them instead of skipping as pending.
+          const env = approveWorkspaceMcpServers(ws, mcpServers);
+          daemon = await spawnDaemon({ workspaceCwd: ws, env });
 
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
           const at1 = await waitForMcpGrandchildren(
@@ -475,13 +478,15 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         const ws = makeTempWorkspace('mcp-counter');
         let daemon: SpawnedDaemon | undefined;
         try {
-          writeWorkspaceSettings(ws, {
-            mcpServers: {
-              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
-              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
-            },
-          });
-          daemon = await spawnDaemon({ workspaceCwd: ws });
+          const mcpServers = {
+            idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+            idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+          };
+          writeWorkspaceSettings(ws, { mcpServers });
+          // Workspace-scoped servers are gated (#4615); pre-approve so the
+          // daemon's acp child connects them instead of skipping as pending.
+          const env = approveWorkspaceMcpServers(ws, mcpServers);
+          daemon = await spawnDaemon({ workspaceCwd: ws, env });
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
 
           // Wait until the OS sees the full pooled set

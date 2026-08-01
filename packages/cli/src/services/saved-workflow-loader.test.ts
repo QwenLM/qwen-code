@@ -38,7 +38,9 @@ function makeConfig(overrides: Partial<Record<string, unknown>> = {}): Config {
 const ctx = {} as CommandContext;
 const signal = new AbortController().signal;
 
-function entry(overrides: Partial<SavedWorkflowEntry> = {}): SavedWorkflowEntry {
+function entry(
+  overrides: Partial<SavedWorkflowEntry> = {},
+): SavedWorkflowEntry {
   return {
     name: 'deep-research',
     scriptPath: '/proj/.qwen/workflows/deep-research.js',

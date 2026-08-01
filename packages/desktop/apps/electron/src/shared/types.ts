@@ -529,6 +529,9 @@ export interface ElectronAPI {
   ): () => void;
   reconnectTransport(): Promise<void>;
 
+  /** Loopback voice-dictation WebSocket url (with token), or null if unavailable. */
+  getVoiceStreamUrl(): string | null;
+
   /** Fired after a WebSocket reconnect. isStale=true means buffer was evicted — full refresh needed. */
   onReconnected(callback: (isStale: boolean) => void): () => void;
 
@@ -832,6 +835,10 @@ export interface ElectronAPI {
   setAutoCapitalisation(enabled: boolean): Promise<void>;
   getSendMessageKey(): Promise<'enter' | 'cmd-enter'>;
   setSendMessageKey(key: 'enter' | 'cmd-enter'): Promise<void>;
+  getVoiceModel(): Promise<string>;
+  setVoiceModel(model: string): Promise<void>;
+  getVoiceEnabled(): Promise<boolean>;
+  setVoiceEnabled(enabled: boolean): Promise<void>;
   getSpellCheck(): Promise<boolean>;
   setSpellCheck(enabled: boolean): Promise<void>;
 

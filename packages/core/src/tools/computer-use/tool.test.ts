@@ -30,6 +30,7 @@ function makeFakeClient(
     callTool: vi.fn(callToolImpl),
     stop: vi.fn(async () => {}),
     setMaxImageDimension: vi.fn(),
+    setIdleTimeoutMs: vi.fn(),
   };
   return fake as unknown as ComputerUseClient;
 }
@@ -92,6 +93,7 @@ describe('ComputerUseTool', () => {
 
       const config = {
         getComputerUseMaxImageDimension: () => 1280,
+        getComputerUseIdleTimeoutMs: () => 30_000,
       } as unknown as Config;
       const tool = new ComputerUseTool(
         'list_apps',
@@ -101,6 +103,7 @@ describe('ComputerUseTool', () => {
       await tool.build({}).execute(new AbortController().signal);
 
       expect(fake.setMaxImageDimension).toHaveBeenCalledWith(1280);
+      expect(fake.setIdleTimeoutMs).toHaveBeenCalledWith(30_000);
     } finally {
       if (prev === undefined) {
         delete process.env['QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION'];

@@ -15,6 +15,7 @@ import {
   isClaudePluginConfig,
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
+  normalizeClaudeMcpServer,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
@@ -126,6 +127,19 @@ describe('convertClaudeAgentConfig', () => {
     });
 
     expect(result['tools']).toEqual(['ReadFile', 'NotebookEdit', 'Edit']);
+  });
+
+  it('should map Claude WebSearch to Qwen WebSearch', () => {
+    // WebSearch used to map to 'None' before qwen-code shipped a built-in
+    // web_search; reverting the mapping would silently strip search from
+    // converted Claude extensions.
+    const result = convertClaudeAgentConfig({
+      name: 'search-agent',
+      description: 'Searches the web',
+      tools: ['WebSearch', 'WebFetch'],
+    });
+
+    expect(result['tools']).toEqual(['WebSearch', 'WebFetch']);
   });
 });
 
@@ -414,10 +428,48 @@ describe('convertClaudePluginPackage', () => {
         originSource: 'Claude',
       },
       expect.any(String),
+      undefined,
     );
     expect(cloneFromGit).not.toHaveBeenCalled();
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('does not fall back to cloning when conversion is aborted', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-abort');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'test-marketplace',
+        owner: { name: 'Test Owner', email: 'test@example.com' },
+        plugins: [
+          {
+            name: 'remote',
+            version: '1.0.0',
+            source: 'https://github.com/owner/plugin',
+            strict: false,
+          },
+        ],
+      } satisfies ClaudeMarketplaceConfig),
+    );
+    const controller = new AbortController();
+    const reason = new Error('conversion expired');
+    vi.mocked(downloadFromGitHubRelease).mockImplementationOnce(async () => {
+      controller.abort(reason);
+      throw new Error('download failed');
+    });
+
+    await expect(
+      convertClaudePluginPackage(
+        pluginSourceDir,
+        'remote',
+        undefined,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(cloneFromGit).not.toHaveBeenCalled();
   });
 
   it('should use all skills from folder when config does not specify skills', async () => {
@@ -1329,11 +1381,15 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
       sha: 'abc123',
     });
 
-    const result = await convertClaudePluginPackage(extDir, 'p');
+    const result = await convertClaudePluginPackage(extDir, 'p', 'public');
     expect(result.config.name).toBe('p');
     // The immutable sha is preferred over the named ref when both are present.
-    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as { ref?: string };
+    const meta = vi.mocked(cloneFromGit).mock.calls[0][0] as {
+      ref?: string;
+      networkPolicy?: string;
+    };
     expect(meta.ref).toBe('abc123');
+    expect(meta.networkPolicy).toBe('public');
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
@@ -1452,5 +1508,85 @@ describe('convertClaudePluginPackage — string URL source', () => {
     expect(vi.mocked(downloadFromGitHubRelease)).toHaveBeenCalled();
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+});
+
+describe('normalizeClaudeMcpServer', () => {
+  // Cast helpers: inputs may carry Claude-only fields (`type:'http'` etc.) that
+  // aren't on MCPServerConfig, and outputs are inspected as plain records.
+  const norm = (raw: Record<string, unknown>): Record<string, unknown> =>
+    normalizeClaudeMcpServer(raw as never) as unknown as Record<
+      string,
+      unknown
+    >;
+
+  it('maps Claude type:http (url) to httpUrl and drops type/url', () => {
+    expect(norm({ type: 'http', url: 'https://example.com/mcp' })).toEqual({
+      httpUrl: 'https://example.com/mcp',
+    });
+  });
+
+  it('maps Claude type:sse (url) to url and drops type', () => {
+    expect(norm({ type: 'sse', url: 'https://example.com/sse' })).toEqual({
+      url: 'https://example.com/sse',
+    });
+  });
+
+  it('drops type from a Claude stdio server, keeping command', () => {
+    expect(norm({ type: 'stdio', command: 'node', args: ['s.js'] })).toEqual({
+      command: 'node',
+      args: ['s.js'],
+    });
+  });
+
+  it("preserves type:'sdk' (isSdkMcpServerConfig depends on it)", () => {
+    // sdk standalone, and sdk alongside a command — both must keep type:'sdk'.
+    expect(norm({ type: 'sdk', description: 'in-process' })).toEqual({
+      type: 'sdk',
+      description: 'in-process',
+    });
+    expect(norm({ type: 'sdk', command: 'node' })).toEqual({
+      type: 'sdk',
+      command: 'node',
+    });
+  });
+
+  it('drops a bogus non-sdk type from a websocket (tcp) config', () => {
+    // qwen reserves `type` for 'sdk' and selects websocket via the `tcp` field;
+    // any stray non-sdk `type` is meaningless and is removed.
+    expect(norm({ type: 'tcp', tcp: 'localhost:8000' })).toEqual({
+      tcp: 'localhost:8000',
+    });
+  });
+
+  it('preserves non-transport fields (headers, env, timeout)', () => {
+    expect(
+      norm({
+        type: 'http',
+        url: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer x' },
+        timeout: 5000,
+      }),
+    ).toEqual({
+      httpUrl: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer x' },
+      timeout: 5000,
+    });
+  });
+
+  it('passes through an already-Qwen-shaped config unchanged', () => {
+    expect(norm({ httpUrl: 'https://example.com/mcp' })).toEqual({
+      httpUrl: 'https://example.com/mcp',
+    });
+    expect(norm({ command: 'node', args: ['s.js'] })).toEqual({
+      command: 'node',
+      args: ['s.js'],
+    });
+  });
+
+  it('leaves a transport-less config untouched', () => {
+    expect(norm({ description: 'metadata only' })).toEqual({
+      description: 'metadata only',
+    });
   });
 });

@@ -9,9 +9,14 @@ import { renderHook, act } from '@testing-library/react';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  type Config,
+  type MCPServerConfig,
+} from '@qwen-code/qwen-code-core';
 import { useMcpApproval } from './useMcpApproval.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 import {
   loadMcpApprovals,
   resetMcpApprovalsForTesting,
@@ -23,7 +28,10 @@ describe('useMcpApproval', () => {
   let discoverSpy: ReturnType<typeof vi.fn>;
   let approveForSession: ReturnType<typeof vi.fn>;
 
-  const makeConfig = (servers: Record<string, MCPServerConfig>): Config => {
+  const makeConfig = (
+    servers: Record<string, MCPServerConfig>,
+    approvalMode: ApprovalMode = ApprovalMode.DEFAULT,
+  ): Config => {
     const pending = new Set(
       Object.entries(servers)
         .filter(([, c]) => c.scope === 'project')
@@ -32,6 +40,7 @@ describe('useMcpApproval', () => {
     approveForSession = vi.fn((name: string) => pending.delete(name));
     discoverSpy = vi.fn().mockResolvedValue(undefined);
     return {
+      getApprovalMode: () => approvalMode,
       getMcpServers: () => servers,
       getWorkingDir: () => dir,
       approveMcpServerForSession: approveForSession,
@@ -144,6 +153,39 @@ describe('useMcpApproval', () => {
     expect(result.current.isMcpApprovalDialogOpen).toBe(false);
   });
 
+  it('opens the dialog mid-session when a hot-reload pends a new gated server', () => {
+    // Starts with no servers — dialog closed.
+    const servers: Record<string, MCPServerConfig> = {};
+    const config = makeConfig(servers);
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+
+    // A hot-reload adds a gated, unapproved server and signals the change.
+    servers['c'] = { httpUrl: 'https://c.test', scope: 'project' };
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+
+    expect(result.current.isMcpApprovalDialogOpen).toBe(true);
+    expect(result.current.currentMcpApproval?.name).toBe('c');
+  });
+
+  it('does not re-prompt mid-session for an already-approved server', async () => {
+    const a: MCPServerConfig = { command: 'a', scope: 'project' };
+    await loadMcpApprovals().setState(dir, 'a', a, 'approved');
+    resetMcpApprovalsForTesting();
+
+    const config = makeConfig({ a });
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+  });
+
   it('skips servers already decided (only prompts pending)', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     // Pre-approve a.
@@ -155,5 +197,28 @@ describe('useMcpApproval', () => {
 
     expect(result.current.currentMcpApproval?.name).toBe('b');
     expect(result.current.mcpApprovalRemaining).toBe(0);
+  });
+
+  it('YOLO: dialog stays closed even with pending project-scoped servers', () => {
+    const config = makeConfig(
+      { a: { command: 'a', scope: 'project' } },
+      ApprovalMode.YOLO,
+    );
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+  });
+
+  it('YOLO: hot-reload does not open the approval dialog', () => {
+    const servers: Record<string, MCPServerConfig> = {};
+    const config = makeConfig(servers, ApprovalMode.YOLO);
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+
+    servers['c'] = { httpUrl: 'https://c.test', scope: 'project' };
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
   });
 });

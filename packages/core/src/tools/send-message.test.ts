@@ -8,8 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { ToolErrorType } from './tool-error.js';
-import type { Config } from '../config/config.js';
+import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+
+const DEFAULT_MODE = 'default' as ApprovalMode;
+const PLAN_MODE = 'plan' as ApprovalMode;
 
 function makeTeamConfig(opts?: {
   teamManager?: {
@@ -17,10 +20,12 @@ function makeTeamConfig(opts?: {
     broadcast: (...args: unknown[]) => Promise<void>;
     requestShutdown?: (...args: unknown[]) => Promise<void>;
   } | null;
+  approvalMode?: ApprovalMode;
 }) {
   return {
     getTeamManager: () => opts?.teamManager ?? null,
     getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+    getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
   } as unknown as Config;
 }
 
@@ -146,6 +151,38 @@ describe('SendMessageTool — team mode', () => {
     expect(requestShutdown).not.toHaveBeenCalled();
   });
 
+  it('blocks plan-required teammates before leader approval', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        approvalMode: PLAN_MODE,
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'alice',
+      message: 'execute this before approval',
+    });
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: 'team',
+        agentId: 'planner@team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('waiting for leader approval');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('validates required params', () => {
     const tool = new SendMessageTool(makeTeamConfig());
     // `message` is required.
@@ -219,6 +256,39 @@ describe('SendMessageTool — background-task mode', () => {
       'first',
       'second',
     ]);
+  });
+
+  it('revives a task when it finishes while a message waits at the finalization boundary', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.beginFinishing('agent-1');
+    reviveCompletedBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
+
+    const resultPromise = tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'late correction' },
+      new AbortController().signal,
+    );
+    await Promise.resolve();
+
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+
+    registry.complete('agent-1', 'done');
+    const result = await resultPromise;
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('revived it with your message');
+    expect(reviveCompletedBackgroundAgent).toHaveBeenCalledWith(
+      'agent-1',
+      'late correction',
+    );
   });
 
   it('returns error for non-existent task', async () => {
@@ -303,7 +373,37 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).toContain('resumed');
   });
 
-  it('revives a completed task with the message as the next instruction', async () => {
+  it('continues a completed task on its resident runtime', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+    });
+    const continueResident = vi.fn().mockReturnValue(true);
+    registry.registerResidentAgent('agent-1', {
+      continue: continueResident,
+      dispose: vi.fn(),
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'now refactor the helper' },
+      new AbortController().signal,
+    );
+
+    expect(continueResident).toHaveBeenCalledWith('now refactor the helper');
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('existing runtime');
+    expect(result.returnDisplay).toContain('Continued');
+  });
+
+  it('revives a completed task when no resident runtime is available', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',
@@ -351,6 +451,32 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain('could not be revived');
+  });
+
+  it('reports the retained-state reason without attempting continuation', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'unsafe restored agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+      resumeBlockedReason: 'Background task transcript is missing.',
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'try again' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain(
+      'Background task transcript is missing.',
+    );
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
   });
 
   it('includes task description in success display', async () => {

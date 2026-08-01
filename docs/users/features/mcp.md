@@ -295,13 +295,21 @@ The OAuth flow requires a redirect URI where the authorization provider sends th
 
 - **Local development**: By default, Qwen Code uses `http://localhost:7777/oauth/callback`. This works when running Qwen Code on your local machine with a local browser.
 
-- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. You MUST configure `--oauth-redirect-uri` to point to a publicly accessible URL that can receive the OAuth callback.
+- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. Configure `--oauth-redirect-uri` with a public URL ending in `/oauth/callback`, then reverse-proxy that path to `http://127.0.0.1:7777/oauth/callback` on the machine running Qwen Code. Qwen Code does not terminate TLS; the proxy must do so.
 
 Example for remote servers:
 
 ```bash
 qwen mcp add --transport sse remote-server https://api.example.com/sse/ \
   --oauth-redirect-uri https://your-remote-server.example.com/oauth/callback
+```
+
+For example, a reverse proxy can forward only this callback path to the local listener:
+
+```nginx
+location = /oauth/callback {
+  proxy_pass http://127.0.0.1:7777;
+}
 ```
 
 #### Manual configuration via settings.json
@@ -381,12 +389,14 @@ The `mcp` object in your `settings.json` defines global rules for all MCP server
 - `mcp.allowed`: allow-list of MCP server names (keys in `mcpServers`)
 - `mcp.excluded`: deny-list of MCP server names
 
+Both lists support glob patterns: `*` matches any sequence of characters and `?` matches a single character (for example, `"*puppeteer*"` matches every server whose name contains `puppeteer`). Entries without glob characters are matched exactly. When a server matches both lists, `mcp.excluded` takes precedence.
+
 Example:
 
 ```json
 {
   "mcp": {
-    "allowed": ["my-trusted-server"],
+    "allowed": ["my-trusted-server", "*-internal"],
     "excluded": ["experimental-server"]
   }
 }

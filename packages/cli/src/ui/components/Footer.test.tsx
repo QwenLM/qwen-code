@@ -5,8 +5,10 @@
  */
 
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
@@ -15,6 +17,7 @@ import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { StreamingState } from '../types.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
@@ -53,6 +56,7 @@ const createMockConfig = (overrides = {}) => ({
   getProjectRoot: vi.fn(() => '/test/project'),
   getSessionId: vi.fn(() => 'test-session'),
   getMemoryManager: vi.fn(createMockMemoryManager),
+  isSafeMode: vi.fn(() => false),
   ...overrides,
 });
 
@@ -80,6 +84,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    startupIdeConnectionStatus: { state: 'idle' },
     isConfigInitialized: true,
     ...overrides,
   }) as UIState;
@@ -93,12 +98,18 @@ const createMockSettings = (): LoadedSettings =>
     },
   }) as LoadedSettings;
 
-const renderWithWidth = (width: number, uiState: UIState) => {
+const renderWithWidth = (
+  width: number,
+  uiState: UIState,
+  configOverrides = {},
+) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
   const mockSettings = createMockSettings();
   return render(
     <SettingsContext.Provider value={mockSettings}>
-      <ConfigContext.Provider value={createMockConfig() as never}>
+      <ConfigContext.Provider
+        value={createMockConfig(configOverrides) as never}
+      >
         <KeypressProvider kittyProtocolEnabled={false}>
           <VimModeProvider settings={mockSettings}>
             <UIStateContext.Provider value={uiState}>
@@ -131,12 +142,136 @@ describe('<Footer />', () => {
       120,
       createMockUIState({ workflowKeywordActive: true }),
     );
-    expect(lastFrame()).toContain('workflow active');
+    expect(lastFrame()).toContain('▷ workflow active');
   });
 
   it('hides the "workflow active" indicator by default', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows steer and queue shortcuts while the model is responding', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+
+    expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
+  });
+
+  it('shows mode indicator alongside steering hint during streaming', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+
+    const frame = lastFrame()!;
+    expect(frame).toContain('Enter to steer · Ctrl+Q to queue');
+    expect(frame).toContain('YOLO mode');
+  });
+
+  it('shows deferred IDE connection progress', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connecting' },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connecting... context may be unavailable',
+    );
+  });
+
+  it('shows deferred IDE connection failures', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: {
+          state: 'failed',
+          message: 'ide_connect timed out after 10000ms',
+        },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connection unavailable: ide_connect timed out after 10000ms',
+    );
+  });
+
+  it('hides the deferred IDE status after connection succeeds', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connected' },
+      }),
+    );
+
+    expect(lastFrame()).not.toContain('IDE connecting');
+    expect(lastFrame()).not.toContain('IDE connection unavailable');
+    expect(lastFrame()).toContain('? for shortcuts');
+  });
+
+  it('shows the active scheduled task count', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState(), {
+      isCronEnabled: vi.fn(() => true),
+      getCronScheduler: vi.fn(() => ({ size: 2 })),
+    });
+    expect(lastFrame()).toContain('◎\uFE0E 2 scheduled tasks');
+  });
+
+  it('refreshes the scheduled task count after mount', async () => {
+    vi.useFakeTimers();
+    let schedulerSize = 0;
+    let unmount: (() => void) | undefined;
+    const scheduler = {
+      get size() {
+        return schedulerSize;
+      },
+    };
+    try {
+      const renderResult = renderWithWidth(120, createMockUIState(), {
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      });
+      unmount = renderResult.unmount;
+      const { lastFrame } = renderResult;
+      expect(lastFrame()).not.toContain('scheduled task');
+
+      schedulerSize = 1;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).toContain('◎\uFE0E 1 scheduled task');
+
+      schedulerSize = 0;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).not.toContain('scheduled task');
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the default approval mode badge when in DEFAULT mode', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('⏸');
+    expect(frame).toContain('Ask permissions');
+    expect(frame).not.toContain('? for shortcuts');
   });
 
   it('does not display the working directory or branch name', () => {

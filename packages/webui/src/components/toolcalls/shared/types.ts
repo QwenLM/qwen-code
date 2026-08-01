@@ -57,6 +57,7 @@ export type AgentToolCallStatus =
 export interface AgentExecutionSummary {
   totalToolCalls: number;
   totalTokens: number;
+  outputTokens?: number;
   totalDurationMs: number;
   successfulToolCalls?: number;
   failedToolCalls?: number;

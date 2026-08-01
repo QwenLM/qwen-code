@@ -220,7 +220,7 @@ export function ArenaStatusDialog({
         // Use live stats from AgentInteractive when in-process, otherwise
         // fall back to the cached ArenaAgentState.stats (file-polled).
         const live = liveStats?.get(agent.agentId);
-        const totalTokens = live?.totalTokens ?? agent.stats.totalTokens;
+        const outputTokens = live?.outputTokens ?? agent.stats.outputTokens;
         const rounds = live?.rounds ?? agent.stats.rounds;
         const toolCalls = live?.totalToolCalls ?? agent.stats.toolCalls;
         const successfulToolCalls =
@@ -246,7 +246,7 @@ export function ArenaStatusDialog({
               </Box>
               <Box width={colTokens} justifyContent="flex-end">
                 <Text color={theme.text.primary}>
-                  {pad(totalTokens.toLocaleString(), colTokens - 1, 'right')}
+                  {pad(outputTokens.toLocaleString(), colTokens - 1, 'right')}
                 </Text>
               </Box>
               <Box width={colRounds} justifyContent="flex-end">

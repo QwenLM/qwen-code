@@ -24,7 +24,7 @@ import { useTranslation } from 'react-i18next'
 
 // Fallback text icons for badges without iconDataUrl
 // Using simple characters since SVG rendering may not work in all contexts
-const SKILL_ICON_TEXT = '✦'
+const SKILL_ICON_TEXT = '◆'
 const SOURCE_ICON_TEXT = '⊕'
 const CONTEXT_ICON_TEXT = '⚙'
 const COMMAND_ICON_TEXT = '/'

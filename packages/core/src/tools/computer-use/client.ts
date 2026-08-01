@@ -13,6 +13,9 @@ import type {
 import { homedir } from 'node:os';
 import { binaryPath } from './constants.js';
 
+export const DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+export const MAX_COMPUTER_USE_IDLE_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * Singleton stdio MCP client for the cua-driver binary.
  *
@@ -21,11 +24,11 @@ import { binaryPath } from './constants.js';
  * downloads + verifies it before the first spawn). Spawns are sub-second
  * — there is no npx/download cost on this path anymore.
  *
- * Lifecycle: lazy spawn on first `callTool` invocation. The process
- * stays alive until `stop()` or qwen-code exits. State (element_index
- * map per window) lives in the process — if the process restarts, the
- * model must call `get_window_state` again before any element-targeted
- * action.
+ * Lifecycle: lazy spawn on first `callTool` invocation. The process is
+ * stopped by `stop()`, qwen-code exit, or the idle timeout after the last
+ * tool call. State (element_index map per window) lives in the process — if
+ * the process restarts, the model must call `get_window_state` again before
+ * any element-targeted action.
  */
 export interface ComputerUseClientOptions {
   /** Absolute path to the spawnable `cua-driver` binary. */
@@ -38,6 +41,11 @@ export interface ComputerUseClientOptions {
    * (1568) untouched; `0` disables resizing. See {@link resolveMaxImageDimension}.
    */
   maxImageDimension?: number;
+  /**
+   * How long an idle cua-driver client stays alive after the last tool call.
+   * `0` disables automatic idle shutdown.
+   */
+  idleTimeoutMs?: number;
 }
 
 export class ComputerUseClient {
@@ -46,13 +54,17 @@ export class ComputerUseClient {
   private readonly binary: string;
   private readonly onProgress: (message: string) => void;
   private maxImageDimension: number | undefined;
+  private idleTimeoutMs: number;
   private client: Client | undefined;
   private startPromise: Promise<void> | undefined;
+  private activeCalls = 0;
+  private idleStopTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
     this.binary = options.binary;
     this.onProgress = options.onProgress ?? (() => {});
     this.maxImageDimension = options.maxImageDimension;
+    this.idleTimeoutMs = normalizeIdleTimeoutMs(options.idleTimeoutMs);
   }
 
   /**
@@ -63,6 +75,11 @@ export class ComputerUseClient {
    */
   setMaxImageDimension(value: number | undefined): void {
     this.maxImageDimension = value;
+  }
+
+  setIdleTimeoutMs(value: number | undefined): void {
+    this.idleTimeoutMs = normalizeIdleTimeoutMs(value);
+    this.scheduleIdleStop();
   }
 
   /**
@@ -104,12 +121,20 @@ export class ComputerUseClient {
    * responsible for mapping the throw into user-facing UX.
    */
   async start(onProgress?: (message: string) => void): Promise<void> {
-    if (this.client) return;
+    this.clearIdleStopTimer();
+    if (this.client) {
+      this.scheduleIdleStop();
+      return;
+    }
     if (this.startPromise) return this.startPromise;
 
-    this.startPromise = this.doStart(onProgress).finally(() => {
-      this.startPromise = undefined;
-    });
+    this.startPromise = this.doStart(onProgress)
+      .then(() => {
+        this.scheduleIdleStop();
+      })
+      .finally(() => {
+        this.startPromise = undefined;
+      });
     return this.startPromise;
   }
 
@@ -178,58 +203,67 @@ export class ComputerUseClient {
    *
    * On transport-closed errors (e.g. macOS kills the upstream binary after
    * the user grants Screen Recording permission), this method transparently
-   * tears down the stale connection, reconnects, and retries the call once.
-   * If the retry also fails, the error is re-thrown without further
-   * reconnect attempts.
+   * tears down the stale connection, reconnects, and retries with a bounded
+   * backoff loop. If the retries also fail, the last error is re-thrown.
    */
   async callTool(
     name: string,
     args: Record<string, unknown>,
   ): Promise<CallToolResult> {
     if (!this.client) throw new Error('ComputerUseClient not started');
+    this.activeCalls++;
+    this.clearIdleStopTimer();
     try {
-      return (await this.client.callTool({
-        name,
-        arguments: args,
-      })) as CallToolResult;
-    } catch (err) {
-      if (!isTransportClosedError(err)) throw err;
-      // The connection died. Two recoverable causes, both fixed by respawning
-      // the proxy (which relaunches the cua-driver daemon):
-      //   1. stdio "Connection closed" — the `cua-driver mcp` child was killed.
-      //   2. "daemon transport error … Connection refused" — the CuaDriver
-      //      DAEMON behind the proxy restarted. macOS forces a restart right
-      //      after the Screen Recording grant, so the proxy's Unix socket to
-      //      the daemon goes dead and every subsequent tool fails. This is the
-      //      first-use failure mode (grant SR → restart → all tools error).
-      //
-      // Respawn + retry, with a few attempts to absorb the daemon's restart /
-      // startup window (a single retry can land before the new daemon is up).
-      // Element-index state is lost across the restart; the model re-snapshots
-      // via get_window_state on a stale-index error.
-      let lastErr: unknown = err;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await this.stop();
-        await this.start();
-        if (!this.client) throw new Error('ComputerUseClient reconnect failed');
-        try {
-          return (await this.client.callTool({
-            name,
-            arguments: args,
-          })) as CallToolResult;
-        } catch (retryErr) {
-          if (!isTransportClosedError(retryErr)) throw retryErr;
-          lastErr = retryErr;
-          // Daemon may still be coming up after a restart — back off, retry.
-          await new Promise((r) => setTimeout(r, 1000));
+      try {
+        return (await this.client.callTool({
+          name,
+          arguments: args,
+        })) as CallToolResult;
+      } catch (err) {
+        if (!isTransportClosedError(err)) throw err;
+        // The connection died. Two recoverable causes, both fixed by respawning
+        // the proxy (which relaunches the cua-driver daemon):
+        //   1. stdio "Connection closed" — the `cua-driver mcp` child was killed.
+        //   2. "daemon transport error … Connection refused" — the CuaDriver
+        //      DAEMON behind the proxy restarted. macOS forces a restart right
+        //      after the Screen Recording grant, so the proxy's Unix socket to
+        //      the daemon goes dead and every subsequent tool fails. This is the
+        //      first-use failure mode (grant SR → restart → all tools error).
+        //
+        // Respawn + retry, with a few attempts to absorb the daemon's restart /
+        // startup window (a single retry can land before the new daemon is up).
+        // Element-index state is lost across the restart; the model re-snapshots
+        // via get_window_state on a stale-index error.
+        let lastErr: unknown = err;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await this.stop();
+          await this.start();
+          if (!this.client) {
+            throw new Error('ComputerUseClient reconnect failed');
+          }
+          try {
+            return (await this.client.callTool({
+              name,
+              arguments: args,
+            })) as CallToolResult;
+          } catch (retryErr) {
+            if (!isTransportClosedError(retryErr)) throw retryErr;
+            lastErr = retryErr;
+            // Daemon may still be coming up after a restart — back off, retry.
+            await new Promise((r) => setTimeout(r, 1000));
+          }
         }
+        throw lastErr;
       }
-      throw lastErr;
+    } finally {
+      this.activeCalls--;
+      this.scheduleIdleStop();
     }
   }
 
   /** Tear down the child process. Safe to call multiple times. */
   async stop(): Promise<void> {
+    this.clearIdleStopTimer();
     const client = this.client;
     this.client = undefined;
     if (client) {
@@ -240,6 +274,36 @@ export class ComputerUseClient {
       }
     }
   }
+
+  private scheduleIdleStop(): void {
+    this.clearIdleStopTimer();
+    if (!this.client || this.activeCalls > 0 || this.idleTimeoutMs <= 0) {
+      return;
+    }
+
+    this.idleStopTimer = setTimeout(() => {
+      this.idleStopTimer = undefined;
+      if (this.activeCalls > 0) return;
+      void this.stop();
+    }, this.idleTimeoutMs);
+    this.idleStopTimer.unref?.();
+  }
+
+  private clearIdleStopTimer(): void {
+    if (!this.idleStopTimer) return;
+    clearTimeout(this.idleStopTimer);
+    this.idleStopTimer = undefined;
+  }
+}
+
+function normalizeIdleTimeoutMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS;
+  if (!Number.isFinite(value)) return DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS;
+  if (value < 0) return DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS;
+  if (value > MAX_COMPUTER_USE_IDLE_TIMEOUT_MS) {
+    return DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS;
+  }
+  return value;
 }
 
 /**

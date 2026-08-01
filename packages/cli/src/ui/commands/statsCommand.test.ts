@@ -187,6 +187,22 @@ describe('statsCommand', () => {
     );
   });
 
+  it('should display skill stats when using the "skills" subcommand', () => {
+    const skillsSubCommand = statsCommand.subCommands?.find(
+      (sc) => sc.name === 'skills',
+    );
+    if (!skillsSubCommand?.action) throw new Error('Subcommand has no action');
+
+    skillsSubCommand.action(mockContext, '');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.SKILL_STATS,
+      },
+      expect.any(Number),
+    );
+  });
+
   describe('non-interactive mode', () => {
     let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
 
@@ -211,6 +227,68 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Session duration');
       expect(result.content).toContain('Prompts');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('includes live generation timing when a streamed response is available', async () => {
+      if (!statsCommand.action) throw new Error('Command has no action');
+      nonInteractiveContext.session.stats.metrics.generation = {
+        timedRequests: 2,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 2000,
+        totalThroughputOutputTokens: 80,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 250,
+          generationDurationMs: 1250,
+          outputTokens: 50,
+        },
+      };
+
+      const result = (await statsCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('Generation Metrics');
+      expect(result.content).toContain('Generation Metrics (Latest Request)');
+      expect(result.content).toContain('Model: qwen3-coder');
+      expect(result.content).toContain('TTFT: 250ms');
+      expect(result.content).toContain('Generation Time: 1.3s');
+      expect(result.content).toContain('TPS: 40.0 tok/s');
+      expect(result.content).toContain('Average TTFT: 150ms');
+      expect(result.content).toContain('Session TPS: 40.0 tok/s');
+    });
+
+    it('should return skill stats in text mode', async () => {
+      const skillsSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'skills',
+      );
+      if (!skillsSubCommand?.action)
+        throw new Error('Subcommand has no action');
+      nonInteractiveContext.session.stats.metrics.skills = {
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      };
+
+      const result = (await skillsSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as {
+        type: string;
+        messageType: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('Skill calls: 3 (2 ok, 1 fail)');
+      expect(result.content).toContain('review');
+      expect(result.content).toContain('testing');
     });
 
     it('should return info with zero duration if sessionStartTime is not available', async () => {

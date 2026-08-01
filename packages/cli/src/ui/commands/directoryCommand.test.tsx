@@ -5,12 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
-  directoryCommand,
   expandHomeDir,
-  getDirPathCompletions,
-} from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+  type Config,
+  type WorkspaceContext,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext, SlashCommandActionReturn } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
@@ -71,6 +71,7 @@ describe('directoryCommand', () => {
       }),
       getWorkingDir: () => '/test/dir',
       shouldLoadMemoryFromIncludeDirectories: () => false,
+      isSafeMode: () => false,
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
@@ -186,6 +187,17 @@ describe('directoryCommand', () => {
           `Successfully added directories:\n- ${newPath}`,
         ),
       });
+    });
+
+    it('should expand Windows-style home-relative paths before adding directories', async () => {
+      const homeProject = path.join(os.homedir(), 'new-project');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, '~\\new-project');
+
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(
+        homeProject,
+      );
     });
 
     it('should persist added directories to workspace settings', async () => {
@@ -468,12 +480,19 @@ describe('getDirPathCompletions', () => {
 
         // Directory values should end with path separator for continued navigation
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-
-        // Should match one of our created directories
-        const dirNameWithoutSlash = suggestion.value.slice(0, -1);
-        const basename = path.basename(dirNameWithoutSlash);
-        expect(['sub1', 'sub2'].includes(basename)).toBe(true);
       });
+
+      // The first result should be the typed directory itself (#7318)
+      const normalizedTempDir = tempTestDir.endsWith(path.sep)
+        ? tempTestDir
+        : tempTestDir + path.sep;
+      expect(results[0].value).toBe(normalizedTempDir);
+
+      // Remaining results should be child directories
+      const childBasenames = results
+        .slice(1)
+        .map((s) => path.basename(s.value.slice(0, -1)));
+      expect(childBasenames).toEqual(expect.arrayContaining(['sub1', 'sub2']));
     });
 
     it('should filter by prefix while preserving isDirectory flag', () => {
@@ -492,6 +511,33 @@ describe('getDirPathCompletions', () => {
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
       });
+    });
+
+    it('should complete Windows-style home-relative paths', () => {
+      const homeSubdir = fs.mkdtempSync(
+        path.join(os.homedir(), `qwen-dir-complete-${process.pid}-`),
+      );
+      const partialName = path.basename(homeSubdir).slice(0, -2);
+
+      try {
+        const results = getDirPathCompletions(`~\\${partialName}`);
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(
+          results.some(
+            (suggestion) => suggestion.value === homeSubdir + path.sep,
+          ),
+        ).toBe(true);
+        results.forEach((suggestion) => {
+          expect(suggestion.isDirectory).toBe(true);
+          expect(path.basename(suggestion.value.slice(0, -1))).toContain(
+            partialName,
+          );
+          expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        });
+      } finally {
+        fs.rmSync(homeSubdir, { recursive: true, force: true });
+      }
     });
 
     it('should support comma-separated paths with isDirectory flag on last segment', () => {
@@ -514,12 +560,15 @@ describe('getDirPathCompletions', () => {
 
       expect(deepResults.length).toBeGreaterThan(0);
 
-      // Only directories inside sub1 should be returned
-      deepResults.forEach((suggestion) => {
+      // First result should be the typed directory itself (#7318)
+      const sub1Path = path.join(tempTestDir, 'sub1') + path.sep;
+      expect(deepResults[0].value).toBe(sub1Path);
+
+      // Remaining results should be directories inside sub1
+      deepResults.slice(1).forEach((suggestion) => {
         expect(suggestion.isDirectory).toBe(true);
         expect(suggestion.value).toContain('sub1');
         expect(suggestion.value.endsWith(path.sep)).toBe(true);
-        // The nested 'deep' directory should be in the results
         const basename = path.basename(suggestion.value.slice(0, -1));
         expect(basename).toBe('deep');
       });

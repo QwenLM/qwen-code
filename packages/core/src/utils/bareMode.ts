@@ -6,7 +6,7 @@
 
 export const QWEN_CODE_SIMPLE_ENV_VAR = 'QWEN_CODE_SIMPLE';
 
-function isTruthy(value: string | undefined): boolean {
+export function isTruthy(value: string | undefined): boolean {
   if (!value) {
     return false;
   }

@@ -104,6 +104,27 @@ describe('<LoadingIndicator />', () => {
     expect(lastFrame()).toContain('Processing data...');
   });
 
+  it('should display whole elapsed seconds below one minute', () => {
+    const half = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={17.5} />,
+      StreamingState.Responding,
+    );
+    expect(half.lastFrame()).toContain('(17s · esc to cancel)');
+
+    const whole = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={18} />,
+      StreamingState.Responding,
+    );
+    expect(whole.lastFrame()).toContain('(18s · esc to cancel)');
+
+    // Timer start / reset publishes exactly 0.
+    const zero = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={0} />,
+      StreamingState.Responding,
+    );
+    expect(zero.lastFrame()).toContain('(0s · esc to cancel)');
+  });
+
   it('should display the elapsedTime correctly when Responding', () => {
     const props = {
       currentLoadingPhrase: 'Working...',
@@ -368,6 +389,26 @@ describe('<LoadingIndicator />', () => {
       expect(output).toContain('↓ 650 tokens');
       expect(output).toContain('20 t/s');
       expect(output).not.toContain('130 t/s');
+    });
+
+    it('should not count excluded tool tokens toward response tokens/sec', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={8000}
+          taskStartTokens={8000}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 8.1k tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('1620 t/s');
     });
 
     it('should format sub-10 response tokens/sec with one decimal place', () => {

@@ -247,8 +247,8 @@ function compareRankedCommandMatches(
   return (
     right.matchStrength - left.matchStrength ||
     right.completionPriority - left.completionPriority ||
-    right.recentScore - left.recentScore ||
     nameVsAlias ||
+    right.recentScore - left.recentScore ||
     right.score - left.score ||
     left.start - right.start ||
     left.itemLength - right.itemLength ||

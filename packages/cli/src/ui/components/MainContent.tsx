@@ -4,29 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
+import { Box, Static } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { isHistoryItemVisibleAfterRestore, StreamingState } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
-import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
 import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
+import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
 import {
-  isForceExpandGroup,
-  mergeCompactToolGroups,
-} from '../utils/mergeCompactToolGroups.js';
-import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
-import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
+} from './shared/ScrollableList.js';
+import { TextSelectionController } from '../selection/use-text-selection.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -88,26 +89,33 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
-// Stable empty Set used by `absorbedCallIds` when compact mode is off so the
-// memo returns a referentially-stable value across renders. Without this, every
-// re-render where compactMode is false produced a brand-new empty Set, which
-// invalidated `isSummaryAbsorbed`, then `renderVirtualItem`, then forced
-// `VirtualizedList.renderedItems` to recompute and call renderItem for every
-// item — defeating the static-item memo.
-const EMPTY_ABSORBED_CALL_IDS = new Set<string>();
+// Banner sentinel injected as the first virtual-scroll item so it scrolls with
+// content instead of being pinned at the top (saves vertical space on small
+// terminals).
+type VpBannerItem = { type: 'vp-banner'; id: number };
+type VpItem = HistoryItem | VpBannerItem;
+const VP_BANNER_ID = Number.MIN_SAFE_INTEGER;
+const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
 
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
-const virtualEstimatedItemHeight = () => 3;
-const virtualKeyExtractor = (item: HistoryItem) =>
-  item.id >= 0 ? `h-${item.id}` : `p-${-item.id - 1}`;
-const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
+// index 0 is always the banner sentinel (VP_BANNER_ITEM is prepended first).
+const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 10 : 3);
+const virtualKeyExtractor = (item: VpItem) =>
+  item.type === 'vp-banner'
+    ? 'vp-banner'
+    : item.id >= 0
+      ? `h-${item.id}`
+      : `p-${-item.id - 1}`;
+const virtualIsStaticItem = (item: VpItem) =>
+  item.type === 'vp-banner' || item.id > 0;
 
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const uiActions = useUIActions();
-  const { compactMode, compactInline } = useCompactMode();
+  const { allExpanded: fullDetail } = useThoughtExpanded();
+  const streamingState = uiState.streamingState;
+  const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -119,222 +127,24 @@ export const MainContent = () => {
 
   // Filter out items whose display is suppressed (e.g. /history collapse).
   const visibleHistory = useMemo(
-    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
     [uiState.history],
   );
 
-  // Set of callIds whose label is absorbed by a compact-mode tool_group header.
-  // Computed from RAW history (not merged) — force-expand status depends only
-  // on the tool_group's own state, and mergeable groups don't change force-
-  // expand status when merged. Iterating raw history avoids a circular
-  // dependency with mergedHistory (which receives absorbedCallIds).
-  //
-  // In compact mode, non-force-expanded tool_groups render via
-  // CompactToolGroupDisplay and consume the label as their header replacement.
-  // Force-expanded groups (errors, confirmations, user-initiated, focused
-  // shell) render through the full ToolGroupMessage path and ignore
-  // compactLabel — their callIds are intentionally NOT in this set so the
-  // standalone `● <label>` line in HistoryItemDisplay is the label's only
-  // path to the screen.
-  // Content-stable absorbedCallIds: when the recomputed Set has identical
-  // membership to the previous render, return the previous reference. Avoids
-  // the cascade where activePtyId/embeddedShellFocused flips while a shell
-  // tool runs produce a fresh empty-or-same Set per tick, invalidating
-  // `isSummaryAbsorbed` → `renderVirtualItem` → every static item re-renders.
-  const prevAbsorbedCallIdsRef = useRef<Set<string>>(EMPTY_ABSORBED_CALL_IDS);
-  const absorbedCallIds = useMemo(() => {
-    // When no cross-group merge will happen (Static mode or compactInline),
-    // don't mark summaries as absorbed so the standalone `● <label>` line
-    // in HistoryItemDisplay can render — <Static> can't repaint committed
-    // items, so the label's only path to the screen is the standalone line.
-    if (!compactMode || !uiState.useTerminalBuffer || compactInline)
-      return EMPTY_ABSORBED_CALL_IDS;
-    const absorbed = new Set<string>();
-    for (const item of visibleHistory) {
-      if (item.type !== 'tool_group') continue;
-      if (
-        isForceExpandGroup(
-          item,
-          uiState.embeddedShellFocused ?? false,
-          uiState.activePtyId,
-        )
-      ) {
-        continue;
-      }
-      for (const tool of item.tools) absorbed.add(tool.callId);
-    }
-    const prev = prevAbsorbedCallIdsRef.current;
-    if (prev.size === absorbed.size) {
-      let allMatch = true;
-      for (const id of absorbed) {
-        if (!prev.has(id)) {
-          allMatch = false;
-          break;
-        }
-      }
-      if (allMatch) return prev;
-    }
-    prevAbsorbedCallIdsRef.current = absorbed;
-    return absorbed;
-  }, [
-    compactMode,
-    compactInline,
-    visibleHistory,
-    uiState.embeddedShellFocused,
-    uiState.activePtyId,
-    uiState.useTerminalBuffer,
-  ]);
-
-  // Merge consecutive tool_groups for compact mode display. Summaries for
-  // absorbed call IDs are dropped during merging so the compact header can
-  // display the label directly; summaries for force-expanded (non-absorbed)
-  // groups pass through so HistoryItemDisplay can render them as standalone
-  // `● <label>` lines.
-  //
-  // Compact-mode content-stable: `mergeCompactToolGroups` always allocates a
-  // fresh array. With `activePtyId` / `embeddedShellFocused` in the deps,
-  // every streaming tick mid-shell-tool produced a new array even when
-  // membership was identical, defeating the Round-2 renderItem stability
-  // fix for compact-mode users. Pair-wise compare the new merged array to
-  // the previous one and return the previous reference when items align.
-  const prevMergedHistoryRef = useRef<HistoryItem[] | null>(null);
-  const mergedHistory = useMemo(() => {
-    if (!compactMode) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    // <Static> is append-only: merging reduces item count, which <Static>
-    // can't handle without clearTerminal + remount (the flash we're fixing).
-    if (!uiState.useTerminalBuffer) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    // compactInline: user opted into per-group display without cross-group merging.
-    if (compactInline) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    const next = mergeCompactToolGroups(
-      visibleHistory,
-      uiState.embeddedShellFocused,
-      uiState.activePtyId,
-      absorbedCallIds,
-    );
-    const prev = prevMergedHistoryRef.current;
-    if (prev && prev.length === next.length) {
-      let same = true;
-      for (let i = 0; i < next.length; i++) {
-        if (prev[i] !== next[i]) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return prev;
-    }
-    prevMergedHistoryRef.current = next;
-    return next;
-  }, [
-    compactMode,
-    compactInline,
-    visibleHistory,
-    uiState.useTerminalBuffer,
-    uiState.embeddedShellFocused,
-    uiState.activePtyId,
-    absorbedCallIds,
-  ]);
-
-  // Build a callId → summary lookup from `tool_use_summary` history items so
-  // compact-mode tool groups can render a semantic label instead of a generic
-  // "Tool × N" line. A summary is indexed under every callId it covers; when
-  // multiple groups are merged, the first group's summary wins (see below).
-  const summaryByCallId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const item of visibleHistory) {
-      if (item.type === 'tool_use_summary') {
-        for (const callId of item.precedingToolUseIds) {
-          // First summary wins — earlier summaries represent the opening
-          // intent of a batch streak, later ones would override it otherwise.
-          if (!map.has(callId)) {
-            map.set(callId, item.summary);
-          }
-        }
-      }
-    }
-    return map;
-  }, [visibleHistory]);
-
-  const isSummaryAbsorbed = useCallback(
-    (item: HistoryItem | HistoryItemWithoutId): boolean => {
-      if (item.type !== 'tool_use_summary') return false;
-      return item.precedingToolUseIds.some((id) => absorbedCallIds.has(id));
-    },
-    [absorbedCallIds],
-  );
-
-  const getCompactLabel = useCallback(
-    (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
-      if (item.type !== 'tool_group' || item.tools.length === 0)
-        return undefined;
-      // When merge is skipped (Static mode or compactInline), tool_groups
-      // render via the full ToolGroupMessage path which ignores compactLabel.
-      // The standalone `● <label>` line in HistoryItemDisplay is the label's
-      // only path to the screen. Suppress the header label to avoid
-      // double-display.
-      if (!uiState.useTerminalBuffer || compactInline) return undefined;
-      // Look up ONLY the first tool's callId. A merged group concatenates
-      // batch A (earliest calls) then batch B; earlier iterations scanned
-      // all callIds and returned "first hit", but async resolution order
-      // breaks that — if B's summary resolves first, the header renders
-      // SB; when A later resolves, the next render flips to SA. Anchoring
-      // on item.tools[0].callId gives stable "leading batch governs"
-      // semantics; if A's call failed and only B resolved, the header
-      // stays blank for that group (acceptable — the fallback is the
-      // default "Tool × N" rendering once the lookup misses).
-      return summaryByCallId.get(item.tools[0].callId);
-    },
-    [summaryByCallId, uiState.useTerminalBuffer, compactInline],
-  );
-
-  // Ink's <Static> is append-only: once an item is rendered to the terminal
-  // buffer, it cannot be replaced. In compact mode, when a new tool_group is
-  // merged into a previous one, the merged result has FEWER items than the
-  // raw history. Static would not re-render the older items even though their
-  // content changed, so we explicitly call refreshStatic() to clear the
-  // terminal and re-render the merged view.
-  //
-  // Detection: if history length grew but mergedHistory length did NOT grow
-  // proportionally (i.e., a merge consolidated items), trigger a refresh.
-  const prevHistoryLengthRef = useRef(visibleHistory.length);
-  const prevMergedLengthRef = useRef(mergedHistory.length);
-  useEffect(() => {
-    if (!compactMode) {
-      prevHistoryLengthRef.current = visibleHistory.length;
-      prevMergedLengthRef.current = mergedHistory.length;
-      return;
-    }
-    const prevHLen = prevHistoryLengthRef.current;
-    const currHLen = visibleHistory.length;
-    const prevMLen = prevMergedLengthRef.current;
-    const currMLen = mergedHistory.length;
-    // History grew, but merged length stayed same or shrank → a merge happened.
-    if (currHLen > prevHLen && currMLen <= prevMLen) {
-      uiActions.refreshStatic();
-    }
-    prevHistoryLengthRef.current = currHLen;
-    prevMergedLengthRef.current = currMLen;
-  }, [compactMode, visibleHistory, mergedHistory, uiActions]);
+  // History is rendered as-is (no cross-group merging).
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
   // state still computes because it lives at the top of the component, but
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
+  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
       let runningOffsets = createEmptySourceCopyOffsets();
 
-      const items = mergedHistory.map((item) => {
+      const items = visibleHistory.map((item) => {
         if (item.type === 'gemini') {
           runningOffsets = createEmptySourceCopyOffsets();
           const offsets = cloneSourceCopyOffsets(runningOffsets);
@@ -348,7 +158,9 @@ export const MainContent = () => {
           return { item, sourceCopyIndexOffsets: offsets };
         }
 
-        if (item.type === 'user') {
+        // Steer items (sentToModel === false) are mid-turn injections, not turn
+        // boundaries; don't reset code-block copy numbering on them.
+        if (item.type === 'user' && item.sentToModel !== false) {
           runningOffsets = createEmptySourceCopyOffsets();
         }
 
@@ -359,7 +171,7 @@ export const MainContent = () => {
         historyItemsWithSourceCopyOffsets: items,
         pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
       };
-    }, [mergedHistory]);
+    }, [visibleHistory]);
 
   const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
     let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
@@ -378,7 +190,9 @@ export const MainContent = () => {
         return { item, sourceCopyIndexOffsets: offsets };
       }
 
-      if (item.type === 'user') {
+      // Steer items (sentToModel === false) are mid-turn injections, not turn
+      // boundaries; don't reset code-block copy numbering on them.
+      if (item.type === 'user' && item.sentToModel !== false) {
         runningOffsets = createEmptySourceCopyOffsets();
       }
 
@@ -388,18 +202,18 @@ export const MainContent = () => {
 
   // Progressive Static replay (issue #3899). `replayCount` is the number of
   // history items currently passed to <Static>. It catches up to
-  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // visibleHistory.length either in one shot (small lag) or chunk-by-chunk
   // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
   // session).
   //
-  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // Note: source-copy offsets are computed across the FULL visibleHistory
   // above so each code block keeps its stable copy index even when only a
   // prefix is visible; we slice the post-offset array here.
   const [replayCount, setReplayCount] = useState(() =>
-    initialReplayCount(mergedHistory.length),
+    initialReplayCount(visibleHistory.length),
   );
-  const mergedLengthRef = useRef(mergedHistory.length);
-  mergedLengthRef.current = mergedHistory.length;
+  const visibleHistoryLengthRef = useRef(visibleHistory.length);
+  visibleHistoryLengthRef.current = visibleHistory.length;
 
   // The reset MUST happen during render (not in an effect): historyRemountKey
   // also drives the <Static> key below, and Ink remounts Static synchronously
@@ -417,27 +231,30 @@ export const MainContent = () => {
     // `replayCount` / `visibleHistoryItemsWithSourceCopyOffsets`. Skip the
     // chunked-replay reset for VP users so a Ctrl+O / model-change bump
     // doesn't trigger ~M/CHUNK_SIZE extra setImmediate-scheduled
-    // re-renders (M = mergedHistory.length) that the VP path discards.
+    // re-renders (M = visibleHistory.length) that the VP path discards.
     if (!useVirtualScroll) {
-      setReplayCount(initialReplayCount(mergedLengthRef.current));
+      setReplayCount(initialReplayCount(visibleHistoryLengthRef.current));
     }
   }
 
   useEffect(() => {
     if (useVirtualScroll) return;
-    if (replayCount >= mergedHistory.length) return;
-    const remaining = mergedHistory.length - replayCount;
+    if (replayCount >= visibleHistory.length) return;
+    const remaining = visibleHistory.length - replayCount;
     if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
-      setReplayCount(mergedHistory.length);
+      setReplayCount(visibleHistory.length);
       return;
     }
     const handle = setImmediate(() => {
       setReplayCount((c) =>
-        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+        Math.min(
+          c + PROGRESSIVE_REPLAY_CHUNK_SIZE,
+          visibleHistoryLengthRef.current,
+        ),
       );
     });
     return () => clearImmediate(handle);
-  }, [useVirtualScroll, replayCount, mergedHistory.length]);
+  }, [useVirtualScroll, replayCount, visibleHistory.length]);
 
   // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
   // covers the normal append path: a pending item finalizes, replayCount is
@@ -453,13 +270,15 @@ export const MainContent = () => {
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   // Combine completed history + live pending items for the virtualized list.
+  // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
   const allVirtualItems = useMemo(
-    (): HistoryItem[] => [
-      ...mergedHistory,
+    (): VpItem[] => [
+      VP_BANNER_ITEM,
+      ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ],
-    [mergedHistory, pendingHistoryItems],
+    [visibleHistory, pendingHistoryItems],
   );
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
@@ -467,7 +286,7 @@ export const MainContent = () => {
   // diagram stay stable across continuation messages. Build lookup tables so
   // the VP renderItem can attach the same offsets without changing the
   // VirtualizedList API.
-  //   - Static items: look up by HistoryItem reference (mergedHistory items
+  //   - Static items: look up by HistoryItem reference (visibleHistory items
   //     are passed by ref, so identity-keyed lookup is stable).
   //   - Pending items: look up by pending-array index (the spread
   //     `{...item, id: -(i+1)}` creates a new object every render, so the
@@ -488,12 +307,12 @@ export const MainContent = () => {
     return map;
   }, [historyItemsWithSourceCopyOffsets]);
 
-  const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(mergedHistory),
-    [mergedHistory],
+  const thoughtHeadIdByItem = useMemo(
+    () => buildThoughtHeadIdMap(visibleHistory),
+    [visibleHistory],
   );
-  const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
-  thinkingFullTextByItemRef.current = thinkingFullTextByItem;
+  const thoughtHeadIdByItemRef = useRef(thoughtHeadIdByItem);
+  thoughtHeadIdByItemRef.current = thoughtHeadIdByItem;
 
   const pendingSourceCopyOffsetsByIndex = useMemo(
     () =>
@@ -533,11 +352,20 @@ export const MainContent = () => {
 
   // Stable renderItem: deps shrink to inputs that legitimately change the
   // render output for a given item identity (terminalWidth, slashCommands,
-  // compactLabel, summary absorption, static-history source-copy offsets).
+  // static-history source-copy offsets).
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
-    ({ item }: { item: HistoryItem }) => {
+    ({ item }: { item: VpItem }) => {
+      if (item.type === 'vp-banner') {
+        return (
+          <Box flexDirection="column">
+            <AppHeader version={version} />
+            <DebugModeNotification />
+            <Notifications />
+          </Box>
+        );
+      }
       const isPending = item.id < 0;
       const sourceCopyIndexOffsets = isPending
         ? pendingSourceCopyOffsetsRef.current[-item.id - 1]
@@ -557,9 +385,8 @@ export const MainContent = () => {
             activeShellPtyId={ps.activePtyId}
             embeddedShellFocused={ps.embeddedShellFocused}
             commands={uiState.slashCommands}
-            compactLabel={getCompactLabel(item)}
-            summaryAbsorbed={isSummaryAbsorbed(item)}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+            fullDetail={fullDetail}
           />
         );
       }
@@ -572,54 +399,61 @@ export const MainContent = () => {
           item={item}
           isPending={false}
           commands={uiState.slashCommands}
-          compactLabel={getCompactLabel(item)}
-          summaryAbsorbed={isSummaryAbsorbed(item)}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-          thinkingFullText={thinkingFullTextByItemRef.current.get(item)}
+          thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
+          fullDetail={fullDetail}
         />
       );
     },
     [
+      version,
       terminalWidth,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       uiState.slashCommands,
-      getCompactLabel,
-      isSummaryAbsorbed,
       sourceCopyOffsetsByHistoryItem,
+      fullDetail,
     ],
   );
-
-  const vpHeaderRef = useRef<DOMElement>(null);
-  const { height: vpHeaderHeight } = useBoxMetrics(vpHeaderRef);
 
   if (useVirtualScroll) {
     const scrollContainerHeight = Math.max(
       0,
-      (uiState.availableTerminalHeight ?? 0) - vpHeaderHeight,
+      uiState.availableTerminalHeight ?? 0,
     );
 
     return (
-      <>
-        <Box ref={vpHeaderRef} flexDirection="column" flexShrink={0}>
-          <AppHeader version={version} />
-          <DebugModeNotification />
-          <Notifications />
-        </Box>
-        <OverflowProvider>
-          <ScrollableList
-            hasFocus={!uiState.dialogsVisible}
-            data={allVirtualItems}
-            renderItem={renderVirtualItem}
-            estimatedItemHeight={virtualEstimatedItemHeight}
-            keyExtractor={virtualKeyExtractor}
-            initialScrollIndex={SCROLL_TO_ITEM_END}
-            isStaticItem={virtualIsStaticItem}
-            containerHeight={scrollContainerHeight}
-          />
-          <ShowMoreLines constrainHeight={uiState.constrainHeight} />
-        </OverflowProvider>
-      </>
+      <OverflowProvider>
+        <ScrollableList
+          ref={scrollRef}
+          hasFocus={!uiState.dialogsVisible}
+          data={allVirtualItems}
+          renderItem={renderVirtualItem}
+          estimatedItemHeight={virtualEstimatedItemHeight}
+          keyExtractor={virtualKeyExtractor}
+          initialScrollIndex={
+            allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
+          }
+          isStaticItem={virtualIsStaticItem}
+          containerHeight={scrollContainerHeight}
+          showScrollbar={showScrollbar}
+        />
+        <TextSelectionController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+        />
+        <ShowMoreLines constrainHeight={uiState.constrainHeight} />
+      </OverflowProvider>
     );
   }
 
@@ -647,10 +481,9 @@ export const MainContent = () => {
                 item={h}
                 isPending={false}
                 commands={uiState.slashCommands}
-                compactLabel={getCompactLabel(h)}
-                summaryAbsorbed={isSummaryAbsorbed(h)}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                thinkingFullText={thinkingFullTextByItem.get(h)}
+                thoughtHeadId={thoughtHeadIdByItem.get(h)}
+                fullDetail={fullDetail}
               />
             ),
           ),
@@ -660,26 +493,65 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItemsWithSourceCopyOffsets.map(
-            ({ item, sourceCopyIndexOffsets }, i) => (
-              <HistoryItemDisplay
-                key={i}
-                availableTerminalHeight={
-                  uiState.constrainHeight ? availableTerminalHeight : undefined
-                }
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                item={{ ...item, id: 0 }}
-                isPending={true}
-                isFocused={!uiState.isEditorDialogOpen}
-                activeShellPtyId={uiState.activePtyId}
-                embeddedShellFocused={uiState.embeddedShellFocused}
-                compactLabel={getCompactLabel(item)}
-                summaryAbsorbed={isSummaryAbsorbed(item)}
-                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-              />
-            ),
-          )}
+          {/*
+            Hard Ink backstop on the live (non-<Static>) pending region. The
+            estimator's source-line slice (MarkdownDisplay's fitPendingSlice) is
+            the primary bound, but it is disabled whenever availableTerminalHeight
+            is undefined — which is exactly what happens when constrainHeight is
+            off (ctrl-s "show more lines"). A tall pending item (e.g. a long
+            vertical-fallback table) then renders past the viewport, Ink cannot
+            update incrementally and clears the terminal, redrawing from the top
+            on every repaint — the "scroll-to-top lock". Capping this region at
+            availableTerminalHeight (which already excludes the footer/controls)
+            keeps its measured height within the viewport so Ink never trips that
+            path. While constrained the estimator keeps content well under this,
+            so the clamp is a no-op there and only engages on residual overflow.
+            ShowMoreLines stays OUTSIDE the clamp; it only renders while
+            constrained (so the clamp is inert) and must not be clipped.
+
+            The clamp engages while constrained OR while the model is actively
+            streaming (Responding) — i.e. the case that trips the scroll-to-top
+            lock. It is deliberately dropped in "show more lines" mode
+            (constrainHeight off) once streaming has settled to a static
+            confirmation (WaitingForConfirmation): a tall edit/write_file diff
+            preview must render every row so the user can scroll the terminal
+            scrollback and review the full change before approving (#6809). A
+            static confirmation is a single render, so it does not trip Ink's
+            from-top full-redraw path the way a streaming table does.
+          */}
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            maxHeight={
+              uiState.constrainHeight ||
+              streamingState === StreamingState.Responding
+                ? availableTerminalHeight || undefined
+                : undefined
+            }
+            overflow="hidden"
+          >
+            {pendingHistoryItemsWithSourceCopyOffsets.map(
+              ({ item, sourceCopyIndexOffsets }, i) => (
+                <HistoryItemDisplay
+                  key={i}
+                  availableTerminalHeight={
+                    uiState.constrainHeight
+                      ? availableTerminalHeight
+                      : undefined
+                  }
+                  terminalWidth={terminalWidth}
+                  mainAreaWidth={mainAreaWidth}
+                  item={{ ...item, id: 0 }}
+                  isPending={true}
+                  isFocused={!uiState.isEditorDialogOpen}
+                  activeShellPtyId={uiState.activePtyId}
+                  embeddedShellFocused={uiState.embeddedShellFocused}
+                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                  fullDetail={fullDetail}
+                />
+              ),
+            )}
+          </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>

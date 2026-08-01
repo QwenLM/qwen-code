@@ -29,11 +29,11 @@ describe('rememberCommand', () => {
     });
   });
 
-  it('returns submit_prompt for managed auto-memory', () => {
+  it('routes to managed memory when available', () => {
     const context = createMockCommandContext({
       services: {
         config: {
-          getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+          isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
         },
       },
@@ -43,13 +43,17 @@ describe('rememberCommand', () => {
       type: 'submit_prompt',
       content: expect.stringContaining('user prefers dark mode'),
     });
+    expect((result as { content: string }).content).toContain('memory system');
+    expect((result as { content: string }).content).not.toContain(
+      '<user-content>',
+    );
   });
 
-  it('returns submit_prompt for non-managed memory (QWEN.md fallback)', () => {
+  it('falls back to QWEN.md in bare mode', () => {
     const context = createMockCommandContext({
       services: {
         config: {
-          getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+          isManagedMemoryAvailable: vi.fn().mockReturnValue(false),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
         },
       },
@@ -59,6 +63,7 @@ describe('rememberCommand', () => {
       type: 'submit_prompt',
       content: expect.stringContaining('some fact'),
     });
+    expect((result as { content: string }).content).toContain('QWEN.md');
   });
 
   it('declares acp in supportedModes', () => {

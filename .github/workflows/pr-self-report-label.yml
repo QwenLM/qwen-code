@@ -1,0 +1,88 @@
+name: 'PR self-report label'
+
+# When a PR closes an issue that its OWN author opened (self-reported and
+# self-fixed), apply a label so a reviewer can see at a glance that the problem
+# itself was not independently reported — worth a look that the issue is real,
+# not only that the fix is correct. Metadata only: it reads the PR's linked
+# issues and applies a label, and NEVER checks out the PR's code, so running
+# under pull_request_target (needed for write access on fork PRs) is safe.
+
+on:
+  pull_request_target:
+    types: ['opened', 'edited', 'reopened', 'synchronize']
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+concurrency:
+  group: 'pr-self-report-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+jobs:
+  label:
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Label a self-reported PR'
+        # PR-controlled values reach the script ONLY through env, never
+        # interpolated into the run body — the injection-safe pattern for
+        # pull_request_target.
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          PR: '${{ github.event.pull_request.number }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          LABEL: 'review/self-reported'
+        run: |
+          set -euo pipefail
+          # Issues this PR closes — "Fixes/Closes #N" keywords AND Development
+          # sidebar links — and the login that OPENED each. Track whether the
+          # query succeeded: an API blip must never strip a correct label, so a
+          # failed query sets API_OK=false and blocks removal (fail-open) rather
+          # than masquerading as "no linked issues".
+          API_OK='false'
+          if ISSUE_AUTHORS="$(gh api graphql \
+            -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="${PR}" -f query='
+            query($owner: String!, $name: String!, $pr: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $pr) {
+                  closingIssuesReferences(first: 50) { nodes { author { login } } }
+                }
+              }
+            }' --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]
+                     | .author.login // empty' 2> /dev/null)"; then
+            API_OK='true'
+          fi
+
+          # Self-reported iff SOME closed issue was opened by the PR author.
+          SELF='false'
+          while IFS= read -r a; do
+            if [[ -n "${a}" && "${a}" == "${PR_AUTHOR}" ]]; then
+              SELF='true'
+              break
+            fi
+          done <<< "${ISSUE_AUTHORS}"
+
+          HAS_LABEL="$(gh pr view "${PR}" --repo "${REPO}" --json labels \
+            --jq "[.labels[].name] | index(\"${LABEL}\") != null" 2> /dev/null || echo 'false')"
+
+          if [[ "${SELF}" == 'true' && "${HAS_LABEL}" != 'true' ]]; then
+            # Create the label on first use (idempotent), then apply it.
+            gh label create "${LABEL}" --repo "${REPO}" --color 'BFD4F2' \
+              --description 'The linked issue was opened by the PR author (self-reported)' \
+              2> /dev/null || true
+            gh pr edit "${PR}" --repo "${REPO}" --add-label "${LABEL}"
+            echo "🏷️ #${PR}: added ${LABEL} — a closed issue was opened by ${PR_AUTHOR}"
+          elif [[ "${SELF}" != 'true' && "${HAS_LABEL}" == 'true' && "${API_OK}" == 'true' ]]; then
+            # The link was removed or re-pointed to someone else's issue — clear
+            # the now-stale label so it never lies. Only when the query itself
+            # succeeded: an API failure must not look like "no self-reported link".
+            gh pr edit "${PR}" --repo "${REPO}" --remove-label "${LABEL}"
+            echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
+          else
+            echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"
+          fi

@@ -1,24 +1,36 @@
-import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import type {
   ACPToolCall,
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
-import { isSubAgentToolCall } from '../../adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from '../../adapters/toolClassification';
 // Circular import with SubAgentPanel (its SubToolLine renders ToolLine
 // from this module). Safe only while both modules dereference each
 // other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
-import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
 } from '../../utils/todos';
 import { useSharedNow } from '../../hooks/useSharedNow';
+import { useSubagentDetails } from '../../subagentDetailsContext';
+import { useMonitorDetails } from '../../monitorDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
+import { Markdown } from './Markdown';
 import {
   formatDurationMs,
   formatElapsed,
@@ -31,41 +43,61 @@ import {
   extractText,
   formatTokenCount,
   getAgentCancellationReason,
-  getAgentCurrentToolHint,
   getAgentDescription,
   getAgentDisplayStatus,
   getAgentType,
   getTaskExecutionRecord,
+  getShellToolSemanticDescription,
   getToolDescription,
+  getToolSummaryDescription,
   getToolResultSummary,
   isAskUserQuestionToolName,
+  isSkillToolName,
   isShellToolName,
+  localizeAgentTypeName,
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { CompactModeContext, TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
   useWebShellCustomization,
 } from '../../customization';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   workspaceCwd?: string;
-  shellOutputMaxLines?: number;
+  isLocateFlashing?: boolean;
 }
 
-const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
+function openMonitorDetailsOnce(
+  requestRef: { current: object | null },
+  open: () => Promise<boolean>,
+  fallback: () => void,
+): void {
+  if (requestRef.current) return;
+  const request = {};
+  requestRef.current = request;
+  void open()
+    .then(
+      (opened) => {
+        if (requestRef.current === request && !opened) fallback();
+      },
+      () => {
+        if (requestRef.current === request) fallback();
+      },
+    )
+    .finally(() => {
+      if (requestRef.current === request) requestRef.current = null;
+    });
+}
 
-function hasExpandableContent(tool: ACPToolCall): boolean {
+export function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
@@ -76,6 +108,9 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   if (isShellToolName(name)) {
     const text = extractText(tool);
     return !!text && text.trim().length > 0 && text.split('\n').length > 1;
+  }
+  if (isSkillToolName(name)) {
+    return !!getFirstToolContentText(tool);
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
     return hasEditContent(tool);
@@ -104,6 +139,7 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read' ||
     name === 'read_file' ||
     name === 'readfile' ||
+    isSkillToolName(name) ||
     isAskUserQuestionToolName(tool.toolName)
   );
 }
@@ -117,14 +153,18 @@ function hasEditContent(tool: ACPToolCall): boolean {
   return hasDiffContent(tool) || !!extractText(tool);
 }
 
-function extractDiff(tool: ACPToolCall): string {
+export function extractDiff(tool: ACPToolCall): string {
+  const rawFileDiff = getRawFileDiff(tool);
+  if (rawFileDiff) return rawFileDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
-  return getRawFileDiff(tool);
+
+  return '';
 }
 
 export function getRawFileDiff(tool: ACPToolCall): string {
@@ -189,61 +229,33 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   return result.reverse().join('\n');
 }
 
-const MAX_BASH_LINE_CHARS = 150;
-const MAX_READ_LINES = 25;
-
 // A description longer than this is likely ellipsised on a normal-width row, so
 // the row becomes expandable to re-flow the full text into a wrapped block.
 const DESCRIPTION_EXPAND_THRESHOLD = 60;
+const MAX_MARKDOWN_READ_CHARS = 200_000;
+const MAX_MARKDOWN_READ_LINES = 1000;
+const READ_LANGUAGE_ALIASES: Record<string, string> = {
+  cjs: 'javascript',
+  cts: 'typescript',
+  h: 'c',
+  hpp: 'cpp',
+  js: 'javascript',
+  jsx: 'jsx',
+  mjs: 'javascript',
+  mts: 'typescript',
+  py: 'python',
+  rb: 'ruby',
+  sh: 'bash',
+  ts: 'typescript',
+  tsx: 'tsx',
+  yml: 'yaml',
+};
 
-export function resolveShellOutputMaxLines(
-  settings: readonly DaemonSettingDescriptor[],
-): number {
-  const setting = settings.find((s) => s.key === 'ui.shellOutputMaxLines');
-  const value = setting?.values.effective;
-  const raw =
-    typeof value === 'number' ? value : DEFAULT_SHELL_OUTPUT_MAX_LINES;
-  return Math.max(0, Math.floor(raw || 0));
-}
-
-function truncateLine(line: string, max: number): string {
-  if (line.length <= max) return line;
-  return line.slice(0, max) + ' …';
-}
-
-function ExpandedBashOutput({
-  tool,
-  maxLines,
-}: {
-  tool: ACPToolCall;
-  maxLines: number;
-}) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
+function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const output = useMemo(() => extractText(tool) || '', [tool]);
-  const lines = useMemo(() => output.split('\n'), [output]);
-  const isLong = maxLines > 0 && lines.length > maxLines;
-  const hiddenLinesCount = Math.max(0, lines.length - maxLines);
-  const hasTruncatedLine = useMemo(
-    () => lines.some((l) => l.length > MAX_BASH_LINE_CHARS),
-    [lines],
-  );
-  const expandable = isLong || hasTruncatedLine;
-  const displayText = useMemo(() => {
-    if (showAll) return output;
-    if (isLong) {
-      return [
-        `... first ${hiddenLinesCount} lines hidden ...`,
-        ...lines
-          .slice(-maxLines)
-          .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
-      ].join('\n');
-    }
-    return lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n');
-  }, [hiddenLinesCount, isLong, lines, maxLines, output, showAll]);
   const ansiSegments = useMemo(
-    () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
-    [displayText],
+    () => (hasAnsi(output) ? parseAnsi(output) : null),
+    [output],
   );
 
   return (
@@ -262,53 +274,59 @@ function ExpandedBashOutput({
                 {seg.text}
               </span>
             ))
-          : displayText}
+          : output}
       </pre>
-      {expandable && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-          aria-expanded={showAll}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : isLong
-              ? t('tool.showAll', { count: lines.length })
-              : t('tool.showFullLines')}
-        </button>
-      )}
     </div>
   );
 }
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
   const content = useMemo(() => extractText(tool) || '', [tool]);
-  const lines = useMemo(() => content.split('\n'), [content]);
-  const isLong = lines.length > MAX_READ_LINES;
-  const displayText = useMemo(
-    () =>
-      isLong && !showAll ? lines.slice(0, MAX_READ_LINES).join('\n') : content,
-    [content, isLong, lines, showAll],
-  );
+  const language = languageForPath(getReadFilePath(tool));
+  const plainText =
+    language === 'text' ||
+    content.length > MAX_MARKDOWN_READ_CHARS ||
+    exceedsLineLimit(content, MAX_MARKDOWN_READ_LINES);
 
   return (
     <div className={styles.expandedRead}>
-      <pre className={styles.expandedOutput}>{displayText}</pre>
-      {isLong && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-          aria-expanded={showAll}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : t('tool.linesTotal', { count: lines.length })}
-        </button>
+      {plainText ? (
+        <pre className={styles.expandedOutput}>{content}</pre>
+      ) : (
+        <Markdown content={fencedCodeBlock(language, content)} />
       )}
     </div>
   );
+}
+
+function getReadFilePath(tool: ACPToolCall): string {
+  const filePath = tool.args?.file_path ?? tool.args?.path;
+  return typeof filePath === 'string' ? filePath : '';
+}
+
+function exceedsLineLimit(text: string, maxLines: number): boolean {
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 && ++lines > maxLines) return true;
+  }
+  return false;
+}
+
+export function languageForPath(filePath: string): string {
+  const ext = filePath.split(/[?#]/, 1)[0]?.split('.').pop()?.toLowerCase();
+  if (!ext || ext === filePath.toLowerCase()) return 'text';
+  if (ext === 'mermaid' || ext === 'mmd') return 'text';
+  const language = READ_LANGUAGE_ALIASES[ext] ?? ext;
+  return /^[\w+.#-]+$/.test(language) ? language : 'text';
+}
+
+export function fencedCodeBlock(language: string, code: string): string {
+  const longestFence =
+    code
+      .match(/~{3,}/g)
+      ?.reduce((max, fence) => Math.max(max, fence.length), 0) ?? 0;
+  const fence = '~'.repeat(Math.max(3, longestFence + 1));
+  return `${fence}${language}\n${code}\n${fence}`;
 }
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
@@ -322,6 +340,26 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       ) : (
         <pre className={styles.expandedOutput}>{text}</pre>
       )}
+    </div>
+  );
+}
+
+function ToolExpandedCard({
+  title,
+  detail,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={styles.expandedCard}>
+      <div className={styles.expandedCardHeader}>
+        <span className={styles.expandedCardTitle}>{title}</span>
+        {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
+      </div>
+      {children && <div className={styles.expandedCardBody}>{children}</div>}
     </div>
   );
 }
@@ -348,20 +386,24 @@ function TodoToolBody({
   tool,
   todos,
   expanded,
+  title,
 }: {
   tool: ACPToolCall;
   todos: TodoItem[];
   expanded: boolean;
+  title: string;
 }) {
   const timeline = useContext(TodoTimelineContext);
   const events = timeline.get(tool.callId)?.events ?? [];
-  return (
-    <div className={styles.todoBody}>
-      {expanded ? (
+  return expanded ? (
+    <ToolExpandedCard title={title}>
+      <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
-      ) : (
-        <TodoEventSummary todos={todos} events={events} />
-      )}
+      </div>
+    </ToolExpandedCard>
+  ) : (
+    <div className={styles.todoBody}>
+      <TodoEventSummary todos={todos} events={events} />
     </div>
   );
 }
@@ -369,9 +411,12 @@ function TodoToolBody({
 interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
-  onConfirm?: (id: string, selectedOption: string) => void;
   workspaceCwd?: string;
-  shellOutputMaxLines?: number;
+  summaryOnly?: boolean;
+  forceExpanded?: boolean;
+  forceExpandable?: boolean;
+  hideHeader?: boolean;
+  hideCollapsedOutput?: boolean;
 }
 
 function getAgentDisplayInfo(
@@ -379,6 +424,7 @@ function getAgentDisplayInfo(
   now?: number,
 ): {
   agentType: string;
+  explicitAgentType: string;
   description: string;
   subToolCount: number;
   elapsed: string;
@@ -390,6 +436,7 @@ function getAgentDisplayInfo(
   const reason = getAgentCancellationReason(tool);
   const status = getAgentDisplayStatus(tool);
   const agentType = getAgentType(tool);
+  const explicitAgentType = getExplicitAgentType(tool);
   const description = getAgentDescription(tool);
 
   const subToolCount =
@@ -409,20 +456,21 @@ function getAgentDisplayInfo(
             (tool.status === 'in_progress' && now ? now : undefined),
         );
 
-  const totalTokens =
+  const outputTokens =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
-  const tokens = totalTokens > 0 ? formatTokenCount(totalTokens) : '';
+  const tokens = outputTokens > 0 ? formatTokenCount(outputTokens) : '';
 
   return {
     agentType,
+    explicitAgentType,
     description,
     subToolCount,
     elapsed,
@@ -430,6 +478,17 @@ function getAgentDisplayInfo(
     status,
     reason,
   };
+}
+
+function getExplicitAgentType(tool: ACPToolCall): string {
+  const taskExec = getTaskExecutionRecord(tool.rawOutput);
+  const name = taskExec?.['subagentName'];
+  if (typeof name === 'string' && name.trim()) return name.trim();
+  const subagentType = tool.args?.subagent_type;
+  if (typeof subagentType === 'string' && subagentType.trim()) {
+    return subagentType.trim();
+  }
+  return '';
 }
 
 export function shouldAutoExpand(tool: ACPToolCall): boolean {
@@ -454,9 +513,26 @@ function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
   return <pre className={styles.expandedOutput}>{text}</pre>;
 }
 
+function ExpandedSkillOutput({ tool }: { tool: ACPToolCall }) {
+  const content =
+    getFirstToolContentText(tool) ||
+    (typeof tool.args?.args === 'string' && tool.args.args.trim()
+      ? tool.args.args.trim()
+      : (tool.title ?? ''));
+
+  return <pre className={styles.expandedOutput}>{content}</pre>;
+}
+
+function getFirstToolContentText(tool: ACPToolCall): string {
+  const block = tool.content?.[0];
+  if (block?.type !== 'content') return '';
+  return typeof block.content?.text === 'string' ? block.content.text : '';
+}
+
 export function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
   const name = tool.toolName.toLowerCase();
   if (isSubAgentToolCall(tool)) return 'agent';
+  if (isAskUserQuestionToolName(tool.toolName)) return 'ask';
   if (isShellToolName(name)) return 'shell';
   if (isWebFetchToolName(name)) return 'fetch';
   if (isTodoWriteToolName(name)) return 'todo';
@@ -523,7 +599,17 @@ export function formatToolGroupSummary(
   duration?: string,
 ): string {
   if (hasActiveTool(tools)) {
-    const activeTool = getActiveTool(tools);
+    const foregroundActiveTool = tools.find(
+      (tool) =>
+        isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+    );
+    const activeTool = foregroundActiveTool ?? getActiveTool(tools);
+    if (isAskUserQuestionToolName(activeTool.toolName)) {
+      return t('toolGroup.summary.provideInformation');
+    }
+    if (!foregroundActiveTool && isBackgroundSubAgentToolCall(activeTool)) {
+      return t('subagent.background');
+    }
     return t('toolGroup.running', {
       name: localizeToolDisplayName(activeTool.toolName, t),
       count: tools.length,
@@ -531,9 +617,167 @@ export function formatToolGroupSummary(
     });
   }
 
+  const summary = formatCompletedToolSummary(tools, t);
+  if (summary) return summary;
+
   return t('toolGroup.summary', {
     count: tools.length,
   });
+}
+
+export function formatSingleToolSummary(
+  tool: ACPToolCall,
+  t: ReturnType<typeof useI18n>['t'],
+  workspaceCwd?: string,
+): string {
+  if (isTodoWriteToolName(tool.toolName)) {
+    return t('toolGroup.summary.updatedTodos', { count: 1 });
+  }
+  if (isAskUserQuestionToolName(tool.toolName)) {
+    return isActiveToolStatus(tool.status)
+      ? t('toolGroup.summary.provideInformation')
+      : t('toolGroup.summary.askedQuestions', {
+          count: getAskUserQuestionCount(tool),
+        });
+  }
+
+  const { displayName, description, hideDisplayName } =
+    getSingleToolSummaryInfo(tool, t, workspaceCwd);
+  return [hideDisplayName ? '' : displayName, description]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function getSingleToolSummaryInfo(
+  tool: ACPToolCall,
+  t: ReturnType<typeof useI18n>['t'],
+  workspaceCwd?: string,
+): ToolHeaderExtraRenderInfo & { hideDisplayName: boolean } {
+  const displayName = localizeToolDisplayName(tool.toolName, t);
+  const description = truncateText(
+    getToolSummaryDescription(tool, workspaceCwd),
+    120,
+  );
+  return {
+    kind: getToolHeaderKind(tool),
+    tool,
+    displayName,
+    description,
+    elapsed: '',
+    workspaceCwd,
+    hideDisplayName: !!getShellToolSemanticDescription(tool),
+  };
+}
+
+function SingleToolSummary({
+  tool,
+  runningDuration,
+  workspaceCwd,
+}: {
+  tool: ACPToolCall;
+  runningDuration?: string;
+  workspaceCwd?: string;
+}) {
+  const { t } = useI18n();
+  const isAskUserQuestion = isAskUserQuestionToolName(tool.toolName);
+  const isActive = isActiveToolStatus(tool.status);
+  const runningPrefix =
+    !isAskUserQuestion && isActive
+      ? isBackgroundSubAgentToolCall(tool)
+        ? t('subagent.background')
+        : t('toolGroup.runningPrefix').trim()
+      : '';
+
+  if (isTodoWriteToolName(tool.toolName) || isAskUserQuestion) {
+    return (
+      <>
+        {runningPrefix && <span>{runningPrefix} </span>}
+        {formatSingleToolSummary(tool, t, workspaceCwd)}
+        {runningDuration && <span> {runningDuration}</span>}
+      </>
+    );
+  }
+
+  const info = getSingleToolSummaryInfo(tool, t, workspaceCwd);
+
+  return (
+    <>
+      {runningPrefix && <span>{runningPrefix} </span>}
+      <span className={styles.chatSummaryInline}>
+        {!info.hideDisplayName && (
+          <span className={styles.lineName}>{info.displayName}</span>
+        )}
+        <ToolHeaderExtra info={info} />
+      </span>
+      {runningDuration && <span> {runningDuration}</span>}
+    </>
+  );
+}
+
+function formatCompletedToolSummary(
+  tools: ACPToolCall[],
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  let edited = 0;
+  let commands = 0;
+  let read = 0;
+  let searched = 0;
+  let todos = 0;
+  let askedQuestions = 0;
+  let other = 0;
+
+  for (const tool of tools) {
+    const name = tool.toolName.toLowerCase();
+    if (isShellToolName(name)) {
+      commands++;
+    } else if (
+      name === 'edit' ||
+      name === 'editfile' ||
+      name === 'write' ||
+      name === 'write_file' ||
+      name === 'writefile'
+    ) {
+      edited++;
+    } else if (name === 'read' || name === 'read_file' || name === 'readfile') {
+      read++;
+    } else if (
+      name === 'grep' ||
+      name === 'grep_search' ||
+      name === 'search' ||
+      name === 'glob' ||
+      name === 'web_search' ||
+      name === 'websearch'
+    ) {
+      searched++;
+    } else if (isTodoWriteToolName(name)) {
+      todos++;
+    } else if (isAskUserQuestionToolName(name)) {
+      askedQuestions += getAskUserQuestionCount(tool);
+    } else {
+      other++;
+    }
+  }
+
+  const parts = [
+    edited ? t('toolGroup.summary.editedFiles', { count: edited }) : '',
+    commands ? t('toolGroup.summary.ranCommands', { count: commands }) : '',
+    read ? t('toolGroup.summary.readFiles', { count: read }) : '',
+    searched ? t('toolGroup.summary.searched', { count: searched }) : '',
+    todos ? t('toolGroup.summary.updatedTodos', { count: todos }) : '',
+    askedQuestions
+      ? t('toolGroup.summary.askedQuestions', { count: askedQuestions })
+      : '',
+    other ? t('toolGroup.summary.otherTools', { count: other }) : '',
+  ].filter(Boolean);
+
+  return parts.join(' ');
+}
+
+function getAskUserQuestionCount(tool: ACPToolCall): number {
+  const questions = tool.args?.questions;
+  return Array.isArray(questions) && questions.length > 0
+    ? questions.length
+    : 1;
 }
 
 export function hasActiveTool(tools: ACPToolCall[]): boolean {
@@ -572,25 +816,25 @@ function ToolGroupIcon() {
       aria-hidden="true"
     >
       <rect
-        x="1.25"
-        y="1.25"
-        width="11.5"
-        height="11.5"
-        rx="3"
+        x="2"
+        y="2"
+        width="10"
+        height="10"
+        rx="2.4"
         stroke="currentColor"
-        strokeWidth="1.4"
+        strokeWidth="1.2"
       />
       <path
-        d="M4.2 5.1 5.8 6.7 4.2 8.3"
+        d="M4.6 5.2 6 6.6 4.6 8"
         stroke="currentColor"
-        strokeWidth="1.15"
+        strokeWidth="1.05"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M7.1 8.4h2.4"
+        d="M7.3 8.1h2.1"
         stroke="currentColor"
-        strokeWidth="1.15"
+        strokeWidth="1.05"
         strokeLinecap="round"
       />
     </svg>
@@ -668,6 +912,27 @@ function TodoIcon() {
   );
 }
 
+function AskUserIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M3.4 3.2h7.2c.7 0 1.25.55 1.25 1.25v3.4c0 .7-.55 1.25-1.25 1.25H7.5L4.5 11V9.1H3.4c-.7 0-1.25-.55-1.25-1.25v-3.4c0-.7.55-1.25 1.25-1.25Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function AgentIcon() {
   return (
     <svg
@@ -691,6 +956,7 @@ function AgentIcon() {
 function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
   const kind = getToolHeaderKind(tool);
   if (kind === 'agent') return <AgentIcon />;
+  if (kind === 'ask') return <AskUserIcon />;
   if (kind === 'edit' || kind === 'write') return <PencilIcon />;
   if (kind === 'fetch') return <WebFetchIcon />;
   if (kind === 'read') return <FileIcon />;
@@ -708,9 +974,11 @@ const getCompactDisplayStatus = getAgentDisplayStatus;
 function CompactToolGroup({
   tools,
   workspaceCwd,
+  isLocateFlashing = false,
 }: {
   tools: ACPToolCall[];
   workspaceCwd?: string;
+  isLocateFlashing?: boolean;
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
@@ -718,13 +986,19 @@ function CompactToolGroup({
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
+    (isActiveToolStatus(activeTool.status) &&
+      isBackgroundSubAgentToolCall(activeTool)) ||
     isShellToolName(activeTool.toolName) ||
     isWebFetchToolName(activeTool.toolName)
       ? ''
       : formatElapsed(activeTool.startTime, activeTool.endTime);
 
   return (
-    <div className={styles.compactGroup}>
+    <div
+      className={`${styles.compactGroup}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       <div className={styles.compactHeader}>
         <StatusIcon status={overallStatus} />
         <span className={styles.lineName}>{displayName}</span>
@@ -755,9 +1029,12 @@ function areToolLinePropsEqual(
   next: ToolLineProps,
 ): boolean {
   if (prev.approval?.id !== next.approval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.summaryOnly !== next.summaryOnly) return false;
+  if (prev.forceExpanded !== next.forceExpanded) return false;
+  if (prev.forceExpandable !== next.forceExpandable) return false;
+  if (prev.hideHeader !== next.hideHeader) return false;
+  if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -801,30 +1078,98 @@ function areSubToolsEqual(
   return true;
 }
 
+/** Parse `[text](qwen-session://id)` links in plain-text tool output and
+ * replace them with clickable `<a>` elements that dispatch a DOM event.
+ * Keeps the rendering pipeline plain-text-compatible for all other tools. */
+const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
+
+function renderWithSessionLinks(
+  text: string,
+  renderMode: 'interactive' | 'readonly',
+): ReactNode {
+  if (!text || !text.includes('qwen-session://')) return text;
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  SESSION_LINK_RE.lastIndex = 0;
+  while ((match = SESSION_LINK_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const sessionId = match[2];
+    parts.push(
+      renderMode === 'readonly' ? (
+        <span key={match.index} style={{ textDecoration: 'underline' }}>
+          {match[1]}
+        </span>
+      ) : (
+        <a
+          key={match.index}
+          href="#"
+          role="button"
+          style={{ textDecoration: 'underline', cursor: 'pointer' }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            window.dispatchEvent(
+              new CustomEvent('qwen:open-session', { detail: sessionId }),
+            );
+          }}
+        >
+          {match[1]}
+        </a>
+      ),
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
+}
+
 export const ToolLine = memo(function ToolLine({
   tool,
   approval,
-  onConfirm,
   workspaceCwd,
-  shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
+  summaryOnly = false,
+  forceExpanded = false,
+  forceExpandable = false,
+  hideHeader = false,
+  hideCollapsedOutput = false,
 }: ToolLineProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
+  const monitorDetails = useMonitorDetails();
+  const monitorDetailsAvailable = monitorDetails !== undefined;
+  const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
+    useState(false);
   const [expanded, setExpanded] = useState(
-    () => !compactMode && shouldAutoExpand(tool),
+    () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
   );
+  const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
 
   useEffect(
     () => {
-      setExpanded(compactMode ? false : shouldAutoExpand(tool));
+      setExpanded(
+        forceExpanded || (compactMode ? false : shouldAutoExpand(tool)),
+      );
+      setMonitorDetailsUnavailable(false);
+      monitorDetailsRequestRef.current = null;
       // A new tool identity (or compact-mode toggle) resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [compactMode, tool.callId, tool.toolName],
+    [
+      compactMode,
+      forceExpanded,
+      monitorDetailsAvailable,
+      tool.callId,
+      tool.toolName,
+    ],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -842,107 +1187,127 @@ export const ToolLine = memo(function ToolLine({
   // user chose, driven from their own panel) and failures stay open so the
   // error output remains visible.
   useEffect(() => {
-    if (!isAgent && tool.status === 'completed' && !userToggledRef.current) {
+    if (
+      !forceExpanded &&
+      !isAgent &&
+      tool.status === 'completed' &&
+      !userToggledRef.current
+    ) {
       setExpanded(false);
     }
-  }, [isAgent, tool.status]);
+  }, [forceExpanded, isAgent, tool.status]);
 
   if (isAgent) {
-    if (hasApproval && onConfirm) {
+    const info = getAgentDisplayInfo(tool, now);
+    const displayName = info.explicitAgentType
+      ? `${t('agent.label')} (${localizeAgentTypeName(info.explicitAgentType, t)})`
+      : t('agent.label');
+    const isComplete = tool.status === 'completed' || tool.status === 'failed';
+    const isBackground = isBackgroundSubAgentToolCall(tool);
+    const progressLabel =
+      isBackground && !isComplete
+        ? t('subagent.background')
+        : tool.status === 'pending'
+          ? t('subagent.pending')
+          : t('subagent.running');
+    const runningMeta = [
+      progressLabel,
+      isBackground && !isComplete ? '' : info.elapsed,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const completeMeta = [
+      info.subToolCount > 0
+        ? t('subagent.toolsCount', { count: info.subToolCount })
+        : '',
+      info.elapsed,
+      info.tokens,
+      info.reason ? truncateText(info.reason, 80) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const showExpanded =
+      forceExpanded || expanded || !!hasApproval || !!hasSubToolApproval;
+    const panel = (
+      <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+    );
+    if (subagentDetails && !hideHeader) {
       return (
         <div className={styles.line}>
-          <ToolApproval request={approval} onConfirm={onConfirm} />
+          <button
+            type="button"
+            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+            onClick={() => subagentDetails.onOpen(tool)}
+          >
+            <AgentIcon />
+            <StatusIcon status={isComplete ? info.status : tool.status} />
+            <span className={styles.lineName}>{displayName}</span>
+            <ToolHeaderExtra
+              info={{
+                kind: 'agent',
+                tool,
+                displayName,
+                description: info.description
+                  ? truncateText(info.description, 60)
+                  : '',
+                elapsed: isComplete ? completeMeta : runningMeta,
+                workspaceCwd,
+              }}
+            />
+            <span className={styles.lineChevronRight} aria-hidden="true" />
+          </button>
         </div>
       );
     }
-
-    const info = getAgentDisplayInfo(tool, now);
-    const displayName = t('agent.label');
-    const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const toolHint = getAgentCurrentToolHint(tool, t);
-    const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
-    const runningMeta = [toolHint, progressLabel, info.elapsed]
-      .filter(Boolean)
-      .join(' · ');
-    const showExpanded = expanded || !!hasSubToolApproval;
     return (
       <div className={styles.line}>
-        <div className={styles.lineMain}>
-          <StatusIcon status={tool.status} />
-          <span className={styles.lineName}>{displayName}</span>
-          <ToolHeaderExtra
-            info={{
-              kind: 'agent',
-              tool,
-              displayName,
-              description: info.description
-                ? truncateText(info.description, 60)
-                : '',
-              elapsed: '',
-              workspaceCwd,
-            }}
-          />
-        </div>
-        {!isComplete && (
+        {!hideHeader && (
           <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
+            className={`${styles.lineMain} ${styles.lineExpandable}`}
             onClick={() => setExpanded(!expanded)}
           >
-            <StatusIcon status={tool.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description || info.agentType, 50)}
-            </span>
-            {runningMeta && (
-              <span className={styles.lineElapsed}>· {runningMeta}</span>
-            )}
+            <AgentIcon />
+            <StatusIcon status={isComplete ? info.status : tool.status} />
+            <span className={styles.lineName}>{displayName}</span>
+            <ToolHeaderExtra
+              info={{
+                kind: 'agent',
+                tool,
+                displayName,
+                description: info.description
+                  ? truncateText(info.description, 60)
+                  : '',
+                elapsed: isComplete ? completeMeta : runningMeta,
+                workspaceCwd,
+              }}
+            />
+            <span
+              className={
+                expanded ? styles.lineChevronDown : styles.lineChevronRight
+              }
+              aria-hidden="true"
+            />
           </div>
-        )}
-        {isComplete && (
-          <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <StatusIcon status={info.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description, 50)}
-            </span>
-            {info.subToolCount > 0 && (
-              <span className={styles.lineElapsed}>
-                · {info.subToolCount} tools
-              </span>
-            )}
-            {info.elapsed && (
-              <span className={styles.lineElapsed}>· {info.elapsed}</span>
-            )}
-            {info.tokens && (
-              <span className={styles.lineElapsed}>· {info.tokens}</span>
-            )}
-            {info.reason && (
-              <span className={styles.lineElapsed}>
-                · {truncateText(info.reason, 80)}
-              </span>
-            )}
-          </div>
-        )}
-        {hasApproval && onConfirm && (
-          <ToolApproval request={approval} onConfirm={onConfirm} />
-        )}
-        {hasSubToolApproval && onConfirm && (
-          <ToolApproval request={approval!} onConfirm={onConfirm} />
         )}
         {showExpanded && (
           <div className={styles.lineDetail}>
-            <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+            {hideHeader ? (
+              <div className={styles.expandedAgentCard}>{panel}</div>
+            ) : (
+              panel
+            )}
           </div>
         )}
       </div>
     );
   }
 
-  const description = getToolDescription(tool, workspaceCwd);
+  const fullDescription = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
+  const summaryShell = summaryOnly && isShellToolName(tool.toolName);
+  const description = summaryShell
+    ? getToolSummaryDescription(tool, workspaceCwd)
+    : fullDescription;
   const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
@@ -950,118 +1315,204 @@ export const ToolLine = memo(function ToolLine({
       : formatElapsed(tool.startTime, tool.endTime);
 
   const name = tool.toolName.toLowerCase();
+  const opensMonitorDetails =
+    name === 'monitor' &&
+    monitorDetailsAvailable &&
+    !monitorDetailsUnavailable &&
+    !hideHeader;
   const isTodo = isTodoWriteToolName(name);
   const todoItems = isTodo ? extractTodosFromToolCall(tool) : undefined;
   const hasTodoList = !!todoItems && todoItems.length > 0;
   const todoCompleted = todoItems
     ? todoItems.filter((td) => td.status === 'completed').length
     : 0;
+  const isShell = isShellToolName(name);
+  const isSearch =
+    name === 'grep' ||
+    name === 'grep_search' ||
+    name === 'search' ||
+    name === 'glob';
+  const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
   // A row expands when it has a todo list to reveal, detail output
   // (bash/diff/read content), or a description long enough to be ellipsised.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = isTodo
-    ? hasTodoList
-    : hasExpandableContent(tool) || descExpandable;
-  const relocateDescription = expanded && descExpandable;
+  const expandable =
+    !forceExpanded &&
+    (forceExpandable ||
+      (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
+  const interactive = opensMonitorDetails || expandable;
+  const fallbackToMonitorInline = () => {
+    setMonitorDetailsUnavailable(true);
+    if (!expandable) return;
+    userToggledRef.current = true;
+    setExpanded((value) => !value);
+  };
+  const tryOpenMonitorDetails = () => {
+    if (!monitorDetails) return;
+    openMonitorDetailsOnce(
+      monitorDetailsRequestRef,
+      () => monitorDetails.onOpen(tool),
+      fallbackToMonitorInline,
+    );
+  };
   // Whether the expanded row renders a kind-specific detail view. When it does
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
-
-  if (hasApproval && onConfirm) {
-    return (
-      <div className={styles.line}>
-        <ToolApproval request={approval} onConfirm={onConfirm} />
-      </div>
-    );
-  }
+  const showDescriptionInDetail = expanded && descExpandable;
+  const useMarkdownDetail = isRead;
+  const hideDescriptionInHeader =
+    showDescriptionInDetail && !isShell && !isSearch && !isRead;
+  const expandedCardDetail = fullDescription;
+  const showExpandedSummaryPanel =
+    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
 
   return (
     <div className={styles.line}>
-      <div
-        className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
-        title={
-          expandable
-            ? expanded
-              ? t('tool.collapseHint')
-              : t('tool.expand')
-            : undefined
-        }
-        aria-expanded={expandable ? expanded : undefined}
-        role={expandable ? 'button' : undefined}
-        tabIndex={expandable ? 0 : undefined}
-        onClick={
-          expandable
-            ? () => {
-                userToggledRef.current = true;
-                setExpanded((value) => !value);
+      {!hideHeader && (
+        <div
+          className={`${styles.lineMain} ${interactive ? styles.lineExpandable : ''}`}
+          title={
+            opensMonitorDetails
+              ? undefined
+              : expandable
+                ? expanded
+                  ? t('tool.collapseHint')
+                  : t('tool.expand')
+                : undefined
+          }
+          aria-expanded={
+            opensMonitorDetails ? undefined : expandable ? expanded : undefined
+          }
+          role={interactive ? 'button' : undefined}
+          tabIndex={interactive ? 0 : undefined}
+          onClick={
+            interactive
+              ? () => {
+                  if (opensMonitorDetails) {
+                    tryOpenMonitorDetails();
+                    return;
+                  }
+                  userToggledRef.current = true;
+                  setExpanded((value) => !value);
+                }
+              : undefined
+          }
+          onKeyDown={
+            interactive
+              ? (event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                  event.preventDefault();
+                  if (opensMonitorDetails) {
+                    tryOpenMonitorDetails();
+                    return;
+                  }
+                  userToggledRef.current = true;
+                  setExpanded((value) => !value);
+                }
+              : undefined
+          }
+        >
+          <StatusIcon status={tool.status} />
+          <span className={styles.lineName}>{displayName}</span>
+          {isTodo && hasTodoList && (
+            <span className={styles.todoProgress}>
+              {todoCompleted}/{todoItems!.length}
+            </span>
+          )}
+          <ToolHeaderExtra
+            info={{
+              kind: getToolHeaderKind(tool),
+              tool,
+              displayName,
+              // A todo row carries its checklist in the body below; a redundant
+              // "Update Todos" description and the instant write duration would
+              // only clutter the header next to the progress count.
+              description: isTodo || hideDescriptionInHeader ? '' : description,
+              elapsed: isTodo ? '' : elapsed,
+              workspaceCwd,
+            }}
+          />
+          {interactive && (
+            <span
+              className={
+                !opensMonitorDetails && expanded
+                  ? styles.lineChevronDown
+                  : styles.lineChevronRight
               }
-            : undefined
-        }
-        onKeyDown={
-          expandable
-            ? (event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
-                event.preventDefault();
-                userToggledRef.current = true;
-                setExpanded((value) => !value);
-              }
-            : undefined
-        }
-      >
-        <StatusIcon status={tool.status} />
-        <span className={styles.lineName}>{displayName}</span>
-        {isTodo && hasTodoList && (
-          <span className={styles.todoProgress}>
-            {todoCompleted}/{todoItems!.length}
-          </span>
-        )}
-        <ToolHeaderExtra
-          info={{
-            kind: getToolHeaderKind(tool),
-            tool,
-            displayName,
-            // A todo row carries its checklist in the body below; a redundant
-            // "Update Todos" description and the instant write duration would
-            // only clutter the header next to the progress count.
-            description: isTodo || relocateDescription ? '' : description,
-            elapsed: isTodo ? '' : elapsed,
-            workspaceCwd,
-          }}
+              aria-hidden="true"
+            />
+          )}
+        </div>
+      )}
+      {(!summaryOnly || expanded) && isTodo && hasTodoList && (
+        <TodoToolBody
+          tool={tool}
+          todos={todoItems!}
+          expanded={expanded}
+          title={displayName}
         />
-      </div>
-      {isTodo && hasTodoList && (
-        <TodoToolBody tool={tool} todos={todoItems!} expanded={expanded} />
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
-      {isTodo && !hasTodoList && result && (
-        <div className={styles.lineOutput}>{result}</div>
+      {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
+        <div className={styles.lineOutput}>
+          {renderWithSessionLinks(result, transcriptRenderMode)}
+        </div>
       )}
-      {relocateDescription && (
-        <div className={styles.lineFullArg}>{description}</div>
+      {showExpandedSummaryPanel && (
+        <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+          {result && (
+            <div
+              className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
+            >
+              {renderWithSessionLinks(result, transcriptRenderMode)}
+            </div>
+          )}
+        </ToolExpandedCard>
       )}
-      {!isTodo && result && (!expanded || !detailView) && (
-        <div className={styles.lineOutput}>{result}</div>
-      )}
+      {!isTodo &&
+        !hideCollapsedOutput &&
+        result &&
+        !showExpandedSummaryPanel &&
+        (!expanded || !detailView) &&
+        (!summaryOnly || expanded) && (
+          <div
+            className={
+              expanded
+                ? `${styles.lineOutput} ${styles.expandedLineOutput}`
+                : styles.lineOutput
+            }
+          >
+            {renderWithSessionLinks(result, transcriptRenderMode)}
+          </div>
+        )}
       {!isTodo && expanded && detailView && (
-        <div className={styles.lineDetail}>
-          {isShellToolName(name) && (
-            <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
-          )}
-          {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedEditContent tool={tool} />
-          )}
-          {(name === 'edit' || name === 'write' || name === 'editfile') && (
-            <ExpandedEditContent tool={tool} />
-          )}
-          {(name === 'read' || name === 'read_file' || name === 'readfile') && (
+        <div
+          className={
+            useMarkdownDetail
+              ? `${styles.lineDetail} ${styles.markdownLineDetail}`
+              : styles.lineDetail
+          }
+        >
+          {isRead ? (
             <ExpandedReadContent tool={tool} />
-          )}
-          {isAskUserQuestionToolName(tool.toolName) && (
-            <ExpandedAskUserQuestionOutput tool={tool} />
+          ) : (
+            <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+              {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
+              {(name === 'write_file' || name === 'writefile') && (
+                <ExpandedEditContent tool={tool} />
+              )}
+              {(name === 'edit' || name === 'write' || name === 'editfile') && (
+                <ExpandedEditContent tool={tool} />
+              )}
+              {isAskUserQuestionToolName(tool.toolName) && (
+                <ExpandedAskUserQuestionOutput tool={tool} />
+              )}
+              {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
+            </ToolExpandedCard>
           )}
         </div>
       )}
@@ -1072,51 +1523,107 @@ export const ToolLine = memo(function ToolLine({
 export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
-  onConfirm,
   workspaceCwd,
-  shellOutputMaxLines,
+  isLocateFlashing = false,
 }: ToolGroupProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
+  const monitorDetails = useMonitorDetails();
+  const monitorDetailsAvailable = monitorDetails !== undefined;
+  const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
+    useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
+  const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveTool(tools);
+  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
+  const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const singleSubagent =
+    singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
+  const singleMonitor =
+    singleTool && singleTool.toolName.toLowerCase() === 'monitor'
+      ? singleTool
+      : undefined;
+  const hasForegroundActiveTool = tools.some(
+    (tool) =>
+      isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+  );
+  const animateSummary = hasRunningTool && hasForegroundActiveTool;
+  const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
+  const opensMonitorDetails = Boolean(
+    singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
+  );
+  const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = tools[0] ?? activeTool;
   const liveStartedAtRef = useRef(Date.now());
-  const summaryNow = useSharedNow(hasRunningTool);
-  const directApprovalTool =
-    pendingApproval?.toolCallId &&
-    tools.find((t) => t.callId === pendingApproval.toolCallId);
+  const summaryNow = useSharedNow(animateSummary);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
-  const runningDuration = hasRunningTool
+  const runningDuration = animateSummary
     ? formatLiveElapsed(summaryNow - liveStartedAtRef.current)
     : undefined;
 
   useEffect(() => {
-    if (!hasRunningTool) return;
+    if (!animateSummary) return;
     liveStartedAtRef.current = Date.now();
-  }, [hasRunningTool, activeTool?.callId]);
+  }, [animateSummary, activeTool?.callId]);
 
-  if (directApprovalTool && tools.length === 1 && onConfirm) {
-    return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
-  }
+  useEffect(() => {
+    setMonitorDetailsUnavailable(false);
+    setChatExpanded(false);
+    monitorDetailsRequestRef.current = null;
+  }, [monitorDetailsAvailable, singleMonitor?.callId]);
+
+  const tryOpenMonitorDetails = () => {
+    if (!singleMonitor || !monitorDetails) return;
+    openMonitorDetailsOnce(
+      monitorDetailsRequestRef,
+      () => monitorDetails.onOpen(singleMonitor),
+      () => {
+        setMonitorDetailsUnavailable(true);
+        setChatExpanded((value) => !value);
+      },
+    );
+  };
 
   if (showCompact) {
-    return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;
+    return (
+      <CompactToolGroup
+        tools={tools}
+        workspaceCwd={workspaceCwd}
+        isLocateFlashing={isLocateFlashing}
+      />
+    );
   }
 
   if (!hasApprovalTool) {
     return (
-      <div className={styles.chatGroupWrap}>
+      <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
           type="button"
           className={styles.chatSummary}
-          onClick={() => setChatExpanded((value) => !value)}
-          aria-expanded={chatExpanded}
-          title={chatExpanded ? t('tool.collapseHint') : t('tool.expand')}
+          onClick={() => {
+            if (singleSubagent && subagentDetails) {
+              subagentDetails.onOpen(singleSubagent);
+              return;
+            }
+            if (opensMonitorDetails && singleMonitor && monitorDetails) {
+              tryOpenMonitorDetails();
+              return;
+            }
+            setChatExpanded((value) => !value);
+          }}
+          aria-expanded={opensToolDetails ? undefined : chatExpanded}
+          title={
+            opensToolDetails
+              ? undefined
+              : chatExpanded
+                ? t('tool.collapseHint')
+                : t('tool.expand')
+          }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
             {summaryIconTool ? (
@@ -1125,14 +1632,23 @@ export const ToolGroup = memo(function ToolGroup({
               <ToolGroupIcon />
             )}
           </span>
+          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
-              hasRunningTool
+              animateSummary
                 ? `${styles.chatSummaryText} ${styles.chatSummaryTextActive}`
                 : styles.chatSummaryText
             }
           >
-            {formatToolGroupSummary(tools, t, runningDuration)}
+            {singleTool ? (
+              <SingleToolSummary
+                tool={singleTool}
+                runningDuration={runningDuration}
+                workspaceCwd={workspaceCwd}
+              />
+            ) : (
+              formatToolGroupSummary(tools, t, runningDuration)
+            )}
           </span>
           <span
             className={
@@ -1149,15 +1665,16 @@ export const ToolGroup = memo(function ToolGroup({
           }
         >
           <div className={styles.chatSummaryContentInner}>
-            <div className={styles.group}>
+            <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
               {tools.map((tool) => (
                 <ToolLine
                   key={tool.callId}
                   tool={tool}
                   approval={pendingApproval}
-                  onConfirm={onConfirm}
                   workspaceCwd={workspaceCwd}
-                  shellOutputMaxLines={shellOutputMaxLines}
+                  summaryOnly={!singleTool}
+                  forceExpanded={!!singleTool}
+                  hideHeader={!!singleTool}
                 />
               ))}
             </div>
@@ -1168,15 +1685,17 @@ export const ToolGroup = memo(function ToolGroup({
   }
 
   return (
-    <div className={styles.group}>
+    <div
+      className={`${styles.group}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       {tools.map((tool) => (
         <ToolLine
           key={tool.callId}
           tool={tool}
           approval={pendingApproval}
-          onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
-          shellOutputMaxLines={shellOutputMaxLines}
         />
       ))}
     </div>

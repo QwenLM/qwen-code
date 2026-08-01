@@ -11,6 +11,7 @@ const requestContext = {
 
 const getDefaultThinkingLevelMock = mock(() => 'think');
 const setDefaultThinkingLevelMock = mock((_level: string) => true);
+const setVoiceModelMock = mock((_model: string) => {});
 let mockedWorkspace: Record<string, unknown> | null = null;
 let mockedWorkspaceConfig: Record<string, unknown> | null = null;
 const getWorkspaceByNameOrIdMock = mock(
@@ -64,7 +65,12 @@ mock.module('@craft-agent/shared/config', () => ({
   getWorkspaceByNameOrId: getWorkspaceByNameOrIdMock,
   getDefaultThinkingLevel: getDefaultThinkingLevelMock,
   setDefaultThinkingLevel: setDefaultThinkingLevelMock,
+  setVoiceModel: setVoiceModelMock,
   isProtectedWorkspace: () => false,
+}));
+
+mock.module('@craft-agent/shared/config/storage', () => ({
+  setVoiceModel: setVoiceModelMock,
 }));
 
 mock.module('@craft-agent/shared/workspaces', () => ({
@@ -94,6 +100,7 @@ describe('settings default thinking RPC handlers', () => {
     handlers.clear();
     getDefaultThinkingLevelMock.mockClear();
     setDefaultThinkingLevelMock.mockClear();
+    setVoiceModelMock.mockClear();
     mockedWorkspace = null;
     mockedWorkspaceConfig = null;
     getWorkspaceByNameOrIdMock.mockClear();
@@ -187,6 +194,17 @@ describe('settings default thinking RPC handlers', () => {
       'Invalid thinking level',
     );
     expect(setDefaultThinkingLevelMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts dated voice model variants supported by the transport resolver', async () => {
+    const setHandler = handlers.get(RPC_CHANNELS.input.SET_VOICE_MODEL);
+    expect(setHandler).toBeTruthy();
+
+    await setHandler!(requestContext, 'qwen3-asr-flash-2025-06-01');
+
+    expect(setVoiceModelMock).toHaveBeenCalledWith(
+      'qwen3-asr-flash-2025-06-01',
+    );
   });
 
   it('returns global permission mode through Qwen ACP', async () => {

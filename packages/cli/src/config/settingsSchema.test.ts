@@ -5,9 +5,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '@qwen-code/qwen-code-core';
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
+  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
@@ -31,6 +36,7 @@ describe('SettingsSchema', () => {
         'advanced',
         'plansDirectory',
         'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -117,6 +123,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -175,6 +192,60 @@ describe('SettingsSchema', () => {
       expect(voiceModel.showInDialog).toBe(false);
     });
 
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
+    });
+
+    it('should define the built-in Explore model setting', () => {
+      const exploreModel =
+        getSettingsSchema().agents.properties.builtin.properties.exploreModel;
+
+      expect(exploreModel.type).toBe('string');
+      expect(exploreModel.category).toBe('Model');
+      expect(exploreModel.default).toBe('inherit');
+      expect(exploreModel.requiresRestart).toBe(true);
+      expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
+    it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
+      const timeout = getSettingsSchema().visionBridgeTimeoutMs;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(2_147_483_647);
+      expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define count-based model limits as integers', () => {
+      const model = getSettingsSchema().model.properties;
+
+      expect(model.maxSessionTurns.type).toBe('integer');
+      expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
@@ -182,6 +253,29 @@ describe('SettingsSchema', () => {
         type: 'integer',
         minimum: 1,
         default: 8,
+      });
+    });
+
+    it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(
+        telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
+      ).toEqual({
+        description:
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
+        type: 'integer',
+        minimum: 1,
+        maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
       });
     });
 
@@ -200,6 +294,12 @@ describe('SettingsSchema', () => {
 
       expect(voice.language.type).toBe('string');
       expect(voice.language.default).toBe('');
+
+      expect(voice.keytermsFile.type).toBe('string');
+      expect(voice.keytermsFile.default).toBe('');
+
+      expect(voice.refineTranscript.type).toBe('boolean');
+      expect(voice.refineTranscript.default).toBe(true);
     });
 
     it('should have unique categories', () => {
@@ -228,6 +328,45 @@ describe('SettingsSchema', () => {
       expect(categories).toContain('General');
       expect(categories).toContain('UI');
       expect(categories).toContain('Advanced');
+    });
+
+    it('marks MCP reconcile inputs as hot-reloadable but startup-only MCP keys as restart-required (sub-task 3)', () => {
+      // These three feed the runtime reconcile (mcpServers is the server map;
+      // mcp.allowed / mcp.excluded are read by mcpGatingEqual), so they MUST be
+      // hot-reloadable — otherwise the SettingsWatcher suppresses MCP-only
+      // edits and registerMcpHotReload never fires for the advertised
+      // add/remove/restart/gating changes.
+      expect(getSettingsSchema().mcpServers.requiresRestart).toBe(false);
+      expect(getSettingsSchema().mcp.properties!.allowed.requiresRestart).toBe(
+        false,
+      );
+      expect(getSettingsSchema().mcp.properties!.excluded.requiresRestart).toBe(
+        false,
+      );
+      // serverCommand is consumed once at startup (not part of the reconcile
+      // input), so it stays restart-required. The mcp parent node also stays
+      // restart-required; the watcher resolves the longest-matching schema key,
+      // so the flipped leaves win for allowed/excluded edits regardless.
+      expect(
+        getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
+      ).toBe(true);
+      expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
     });
 
     it('should have consistent default values for boolean settings', () => {
@@ -319,9 +458,9 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui.properties.useTerminalBuffer;
       expect(useTerminalBuffer).toBeDefined();
       expect(useTerminalBuffer.type).toBe('boolean');
-      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.default).toBe(true);
       expect(useTerminalBuffer.showInDialog).toBe(true);
-      expect(useTerminalBuffer.requiresRestart).toBe(false);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {

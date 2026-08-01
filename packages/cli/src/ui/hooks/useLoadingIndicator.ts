@@ -14,11 +14,16 @@ export const useLoadingIndicator = (
   customWittyPhrases?: string[],
   currentCandidatesTokens?: number,
   currentStreamingChars?: number,
+  isToolExecuting = false,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
 
-  const elapsedTimeFromTimer = useTimer(isTimerActive, timerResetKey);
+  const elapsedTimeFromTimer = useTimer(
+    isTimerActive,
+    timerResetKey,
+    isTimerActive && isToolExecuting,
+  );
 
   const isPhraseCyclingActive = streamingState === StreamingState.Responding;
   const isWaiting = streamingState === StreamingState.WaitingForConfirmation;
@@ -29,19 +34,43 @@ export const useLoadingIndicator = (
   );
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);
-  const [taskStartTokens, setTaskStartTokens] = useState(0);
-  const [taskStartStreamingChars, setTaskStartStreamingChars] = useState(0);
+  const [taskStartTokens, setTaskStartTokensState] = useState(0);
+  const [taskStartStreamingChars, setTaskStartStreamingCharsState] =
+    useState(0);
+  const taskStartTokensRef = useRef(0);
+  const taskStartStreamingCharsRef = useRef(0);
+  const pauseStartTokensRef = useRef<number | null>(null);
+  const pauseStartStreamingCharsRef = useRef<number | null>(null);
+  const pauseBaseTaskStartTokensRef = useRef(0);
+  const pauseBaseTaskStartStreamingCharsRef = useRef(0);
   const prevStreamingStateRef = useRef<StreamingState | null>(null);
 
   useEffect(() => {
+    const currentTokens = currentCandidatesTokens ?? 0;
+    const currentChars = currentStreamingChars ?? 0;
+    const setTaskStartTokens = (tokens: number) => {
+      if (taskStartTokensRef.current === tokens) {
+        return;
+      }
+      taskStartTokensRef.current = tokens;
+      setTaskStartTokensState(tokens);
+    };
+    const setTaskStartStreamingChars = (chars: number) => {
+      if (taskStartStreamingCharsRef.current === chars) {
+        return;
+      }
+      taskStartStreamingCharsRef.current = chars;
+      setTaskStartStreamingCharsState(chars);
+    };
+
     if (
       prevStreamingStateRef.current === StreamingState.WaitingForConfirmation &&
       streamingState === StreamingState.Responding
     ) {
       setTimerResetKey((prevKey) => prevKey + 1);
       setRetainedElapsedTime(0);
-      setTaskStartTokens(currentCandidatesTokens ?? 0);
-      setTaskStartStreamingChars(currentStreamingChars ?? 0);
+      setTaskStartTokens(currentTokens);
+      setTaskStartStreamingChars(currentChars);
     } else if (
       streamingState === StreamingState.Idle &&
       prevStreamingStateRef.current === StreamingState.Responding
@@ -54,10 +83,35 @@ export const useLoadingIndicator = (
       streamingState === StreamingState.Responding &&
       prevStreamingStateRef.current !== StreamingState.Responding
     ) {
-      setTaskStartTokens(currentCandidatesTokens ?? 0);
-      setTaskStartStreamingChars(currentStreamingChars ?? 0);
+      setTaskStartTokens(currentTokens);
+      setTaskStartStreamingChars(currentChars);
     } else if (streamingState === StreamingState.WaitingForConfirmation) {
       setRetainedElapsedTime(elapsedTimeFromTimer);
+    }
+
+    if (streamingState === StreamingState.Responding && isToolExecuting) {
+      if (pauseStartTokensRef.current === null) {
+        pauseStartTokensRef.current = currentTokens;
+        pauseStartStreamingCharsRef.current = currentChars;
+        pauseBaseTaskStartTokensRef.current = taskStartTokensRef.current;
+        pauseBaseTaskStartStreamingCharsRef.current =
+          taskStartStreamingCharsRef.current;
+      }
+
+      setTaskStartTokens(
+        pauseBaseTaskStartTokensRef.current +
+          Math.max(0, currentTokens - pauseStartTokensRef.current),
+      );
+      setTaskStartStreamingChars(
+        pauseBaseTaskStartStreamingCharsRef.current +
+          Math.max(
+            0,
+            currentChars - (pauseStartStreamingCharsRef.current ?? 0),
+          ),
+      );
+    } else {
+      pauseStartTokensRef.current = null;
+      pauseStartStreamingCharsRef.current = null;
     }
 
     prevStreamingStateRef.current = streamingState;
@@ -66,6 +120,7 @@ export const useLoadingIndicator = (
     elapsedTimeFromTimer,
     currentCandidatesTokens,
     currentStreamingChars,
+    isToolExecuting,
   ]);
 
   return {

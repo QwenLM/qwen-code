@@ -6,19 +6,22 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import {
   atomicWriteFileSync,
   FatalConfigError,
   getErrorMessage,
-  isWithinRoot,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
-import { applyUpdates } from '../utils/commentJson.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
+import {
+  arePathsEquivalent,
+  getPathComparisonVariants,
+  isWithinRoot,
+} from './path-comparison.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -55,6 +58,37 @@ export interface TrustedFoldersFile {
 export interface TrustResult {
   isTrusted: boolean | undefined;
   source: 'ide' | 'file' | undefined;
+}
+
+export type TrustedFoldersChangeListener = () => void;
+
+const trustedFoldersChangeListeners = new Set<TrustedFoldersChangeListener>();
+
+export function onTrustedFoldersChanged(
+  listener: TrustedFoldersChangeListener,
+): () => void {
+  trustedFoldersChangeListeners.add(listener);
+  return () => trustedFoldersChangeListeners.delete(listener);
+}
+
+function notifyTrustedFoldersChanged(): void {
+  for (const listener of trustedFoldersChangeListeners) listener();
+}
+
+export type WorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type WorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export interface WorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: WorkspaceTrustState;
+    source: WorkspaceTrustSource;
+  };
+  explicitTrustLevel: TrustLevel | null;
+  requiresDaemonRestartForChanges: true;
 }
 
 export class LoadedTrustedFolders {
@@ -98,15 +132,26 @@ export class LoadedTrustedFolders {
       }
     }
 
+    const locationVariants = getPathComparisonVariants(location);
     for (const trustedPath of trustedPaths) {
-      if (isWithinRoot(location, trustedPath)) {
-        return true;
+      for (const locationVariant of locationVariants) {
+        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
+          if (isWithinRoot(locationVariant, trustedVariant)) {
+            return true;
+          }
+        }
       }
     }
 
     for (const untrustedPath of untrustedPaths) {
-      if (path.normalize(location) === path.normalize(untrustedPath)) {
-        return false;
+      for (const locationVariant of locationVariants) {
+        for (const untrustedVariant of getPathComparisonVariants(
+          untrustedPath,
+        )) {
+          if (locationVariant === untrustedVariant) {
+            return false;
+          }
+        }
       }
     }
 
@@ -114,8 +159,12 @@ export class LoadedTrustedFolders {
   }
 
   setValue(path: string, trustLevel: TrustLevel): void {
-    this.user.config[path] = trustLevel;
-    saveTrustedFolders(this.user);
+    const committedConfig = writeTrustedFolders(
+      this.user.path,
+      (diskConfig) => ({ ...diskConfig, [path]: trustLevel }),
+    );
+    this.user.config = committedConfig;
+    notifyTrustedFoldersChanged();
   }
 }
 
@@ -175,57 +224,72 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
 export function saveTrustedFolders(
   trustedFoldersFile: TrustedFoldersFile,
 ): void {
-  try {
-    // Ensure the directory exists
-    const dirPath = path.dirname(trustedFoldersFile.path);
-    if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
+  writeTrustedFolders(trustedFoldersFile.path, () => ({
+    ...trustedFoldersFile.config,
+  }));
+}
+
+function assertTrustedFoldersConfig(
+  config: Record<string, unknown>,
+): asserts config is Record<string, TrustLevel> {
+  for (const [rulePath, trustLevel] of Object.entries(config)) {
+    if (!Object.values(TrustLevel).includes(trustLevel as TrustLevel)) {
+      throw new FatalConfigError(
+        `Invalid trusted folder rule for ${JSON.stringify(rulePath)}.`,
+      );
     }
+  }
+}
 
-    let content = stringify(trustedFoldersFile.config, null, 2);
-    if (fs.existsSync(trustedFoldersFile.path)) {
-      try {
-        // Intentionally keep the comment-preserving round-trip local here
-        // instead of reusing updateSettingsFilePreservingFormat(), because
-        // trustedFolders.json must continue to use atomicWriteFileSync with
-        // noFollow:true when it is finally written to disk.
-        const originalContent = fs.readFileSync(
-          trustedFoldersFile.path,
-          'utf-8',
-        );
-        const parsed = parse(originalContent);
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          Array.isArray(parsed) ||
-          parsed instanceof String ||
-          parsed instanceof Number ||
-          parsed instanceof Boolean
-        ) {
-          throw new Error('trusted folders file is not a JSON object');
-        }
-        const updated = applyUpdates(
-          parsed as Record<string, unknown>,
-          trustedFoldersFile.config as Record<string, unknown>,
-          true,
-        );
-        const preservedContent = stringify(updated, null, 2);
+function writeTrustedFolders(
+  filePath: string,
+  update: (
+    diskConfig: Record<string, TrustLevel>,
+  ) => Record<string, TrustLevel>,
+): Record<string, TrustLevel> {
+  const dirPath = path.dirname(filePath);
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
 
-        // Validate the serialized output before writing. If the round-trip
-        // fails at any point, fall back to writing a clean normalized file so
-        // a corrupted trustedFolders.json can still self-heal on save.
-        parse(preservedContent);
-        content = preservedContent;
-      } catch (error) {
-        // Fall back to a clean rewrite when comment-preserving round-trip fails.
-        writeStderrLine(
-          `Falling back to clean rewrite for trusted folders: ${error instanceof Error ? error.message : String(error)}`,
+  const release = lockfile.lockSync(filePath, {
+    realpath: false,
+    stale: 10_000,
+  });
+  try {
+    let originalContent = '{}';
+    if (fs.existsSync(filePath)) {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new FatalConfigError(
+          'Trusted folders path must be a regular file.',
         );
       }
+      originalContent = fs.readFileSync(filePath, 'utf-8');
     }
 
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseJsoncObject(originalContent);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
+      ) {
+        throw new FatalConfigError(
+          'Trusted folders file is not a valid JSON object.',
+        );
+      }
+      throw error;
+    }
+    const diskConfig = Object.fromEntries(Object.entries(parsed));
+    assertTrustedFoldersConfig(diskConfig);
+    const nextConfig = update({ ...diskConfig });
+    assertTrustedFoldersConfig(nextConfig);
+    const content = updateJsoncContent(originalContent, nextConfig, true);
+
     atomicWriteFileSync(
-      trustedFoldersFile.path,
+      filePath,
       content,
       // noFollow: refuse to follow any pre-placed symlink at the
       // config path — a redirected write could either leak the
@@ -235,9 +299,13 @@ export function saveTrustedFolders(
       // file-token-storage all use noFollow:true).
       { encoding: 'utf-8', mode: 0o600, forceMode: true, noFollow: true },
     );
-  } catch (error) {
-    writeStderrLine('Error saving trusted folders file.');
-    writeStderrLine(error instanceof Error ? error.message : String(error));
+    return nextConfig;
+  } finally {
+    try {
+      release();
+    } catch {
+      // The atomic write is authoritative; stale-lock cleanup is retryable.
+    }
   }
 }
 
@@ -247,14 +315,50 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
-function getWorkspaceTrustFromLocalConfig(
-  trustConfig?: Record<string, TrustLevel>,
-): TrustResult {
-  const folders = loadTrustedFolders();
-
-  if (trustConfig) {
-    folders.user.config = trustConfig;
+function isWithinRootAcrossVariants(childPath: string, parentPath: string) {
+  for (const childVariant of getPathComparisonVariants(childPath)) {
+    for (const parentVariant of getPathComparisonVariants(parentPath)) {
+      if (isWithinRoot(childVariant, parentVariant)) {
+        return true;
+      }
+    }
   }
+  return false;
+}
+
+function getExplicitTrustLevel(
+  trustConfig: Record<string, TrustLevel>,
+  workspaceCwd: string,
+): TrustLevel | null {
+  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
+    if (
+      trustLevel === TrustLevel.TRUST_FOLDER &&
+      isWithinRootAcrossVariants(workspaceCwd, rulePath)
+    ) {
+      return trustLevel;
+    }
+    if (
+      trustLevel === TrustLevel.TRUST_PARENT &&
+      isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
+    ) {
+      return trustLevel;
+    }
+  }
+  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
+    if (
+      trustLevel === TrustLevel.DO_NOT_TRUST &&
+      arePathsEquivalent(workspaceCwd, rulePath)
+    ) {
+      return trustLevel;
+    }
+  }
+  return null;
+}
+
+function loadTrustedFoldersWithOverrides(
+  trustConfig?: Record<string, TrustLevel>,
+): LoadedTrustedFolders {
+  const folders = loadTrustedFolders();
 
   if (folders.errors.length > 0) {
     const errorMessages = folders.errors.map(
@@ -265,26 +369,121 @@ function getWorkspaceTrustFromLocalConfig(
     );
   }
 
-  const isTrusted = folders.isPathTrusted(process.cwd());
+  if (trustConfig) {
+    // Return a fresh instance instead of mutating the cached singleton. Callers
+    // pass an override to *preview* trust status for a tentative config (e.g.
+    // useTrustModify's updateTrustLevel, which builds the config "to check the
+    // new trust status without writing"). Mutating the cached singleton here
+    // would leak that unconfirmed config into every later loadTrustedFolders()
+    // read and persist it on the next setValue().
+    return new LoadedTrustedFolders(
+      { ...folders.user, config: trustConfig },
+      folders.errors,
+    );
+  }
+
+  return folders;
+}
+
+function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
+  if (status.effective.source === 'disabled') {
+    return { isTrusted: true, source: undefined };
+  }
   return {
-    isTrusted,
-    source: isTrusted !== undefined ? 'file' : undefined,
+    isTrusted:
+      status.effective.state === 'trusted'
+        ? true
+        : status.effective.state === 'untrusted'
+          ? false
+          : undefined,
+    source:
+      status.effective.source === 'file' || status.effective.source === 'ide'
+        ? status.effective.source
+        : undefined,
+  };
+}
+
+export function getWorkspaceTrustStatus(
+  settings: Settings,
+  workspaceCwd: string,
+  trustConfig?: Record<string, TrustLevel>,
+): WorkspaceTrustStatus {
+  if (!isFolderTrustEnabled(settings)) {
+    return {
+      v: 1,
+      workspaceCwd,
+      folderTrustEnabled: false,
+      effective: { state: 'trusted', source: 'disabled' },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    };
+  }
+
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  if (
+    ideTrust !== undefined &&
+    arePathsEquivalent(workspaceCwd, process.cwd())
+  ) {
+    return {
+      v: 1,
+      workspaceCwd,
+      folderTrustEnabled: true,
+      effective: {
+        state: ideTrust ? 'trusted' : 'untrusted',
+        source: 'ide',
+      },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    };
+  }
+
+  const folders = loadTrustedFoldersWithOverrides(trustConfig);
+  const isTrusted = folders.isPathTrusted(workspaceCwd);
+  const state: WorkspaceTrustState =
+    isTrusted === true
+      ? 'trusted'
+      : isTrusted === false
+        ? 'untrusted'
+        : 'unknown';
+  return {
+    v: 1,
+    workspaceCwd,
+    folderTrustEnabled: true,
+    effective: {
+      state,
+      source: isTrusted === undefined ? 'none' : 'file',
+    },
+    explicitTrustLevel: getExplicitTrustLevel(
+      folders.user.config,
+      workspaceCwd,
+    ),
+    requiresDaemonRestartForChanges: true,
   };
 }
 
 export function isWorkspaceTrusted(
   settings: Settings,
   trustConfig?: Record<string, TrustLevel>,
+  workspacePath?: string,
 ): TrustResult {
   if (!isFolderTrustEnabled(settings)) {
     return { isTrusted: true, source: undefined };
   }
 
   const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (ideTrust !== undefined) {
+  if (
+    ideTrust !== undefined &&
+    (workspacePath === undefined ||
+      arePathsEquivalent(workspacePath, process.cwd()))
+  ) {
     return { isTrusted: ideTrust, source: 'ide' };
   }
 
-  // Fall back to the local user configuration
-  return getWorkspaceTrustFromLocalConfig(trustConfig);
+  return trustStatusToResult(
+    getWorkspaceTrustStatus(
+      settings,
+      workspacePath ?? process.cwd(),
+      trustConfig,
+    ),
+  );
 }

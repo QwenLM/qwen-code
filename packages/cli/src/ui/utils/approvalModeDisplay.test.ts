@@ -10,23 +10,35 @@ import {
   formatApprovalModeDescription,
   formatApprovalModeName,
 } from './approvalModeDisplay.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('approval mode display', () => {
   describe('formatApprovalModeName', () => {
-    it('formats yolo as uppercase', () => {
-      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO');
-    });
-
-    it('formats default mode as a friendly name', () => {
+    it('formats all modes as friendly names', () => {
+      expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('plan mode');
       expect(formatApprovalModeName(ApprovalMode.DEFAULT)).toBe(
         'Ask permissions',
       );
+      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe(
+        'auto-accept edits',
+      );
+      expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('Auto mode');
+      expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO mode');
     });
 
-    it('falls back to the raw mode value for modes without a custom name', () => {
-      expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('plan');
-      expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe('auto-edit');
-      expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('auto');
+    it('formats mode names with the active locale', async () => {
+      await setLanguageAsync('zh');
+      try {
+        expect(formatApprovalModeName(ApprovalMode.PLAN)).toBe('规划模式');
+        expect(formatApprovalModeName(ApprovalMode.DEFAULT)).toBe('请求授权');
+        expect(formatApprovalModeName(ApprovalMode.AUTO_EDIT)).toBe(
+          '自动接受编辑',
+        );
+        expect(formatApprovalModeName(ApprovalMode.AUTO)).toBe('自动模式');
+        expect(formatApprovalModeName(ApprovalMode.YOLO)).toBe('YOLO 模式');
+      } finally {
+        await setLanguageAsync('en');
+      }
     });
   });
 
@@ -50,6 +62,29 @@ describe('approval mode display', () => {
       expect(formatApprovalModeDescription(ApprovalMode.YOLO)).toBe(
         'Automatically approve all tools',
       );
+    });
+
+    it('formats descriptions with the active locale', async () => {
+      await setLanguageAsync('zh');
+      try {
+        expect(formatApprovalModeDescription(ApprovalMode.PLAN)).toBe(
+          '仅分析，不修改文件或执行命令',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.DEFAULT)).toBe(
+          '需要批准文件编辑或 shell 命令',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.AUTO_EDIT)).toBe(
+          '自动批准文件编辑',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.AUTO)).toBe(
+          '使用分类器自动批准安全的工具调用',
+        );
+        expect(formatApprovalModeDescription(ApprovalMode.YOLO)).toBe(
+          '自动批准所有工具',
+        );
+      } finally {
+        await setLanguageAsync('en');
+      }
     });
   });
 });

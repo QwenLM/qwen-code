@@ -113,20 +113,14 @@ Both variants are stable across the F1 lift.
 
 ## Backward compatibility
 
-`packages/cli/src/serve/event-bus.ts` and
-`packages/cli/src/serve/in-memory-channel.ts` remain as one-line
-re-export wrappers, so every existing relative import inside
-`serve/` and the one external import in `cli/src/commands/serve.ts`
-keeps resolving without churn.
+CLI code imports event-bus and in-memory channel primitives directly from
+`@qwen-code/acp-bridge/eventBus` and
+`@qwen-code/acp-bridge/inMemoryChannel`.
 
-After F1, `packages/cli/src/serve/httpAcpBridge.ts` shrinks to a
-~97-line re-export shim that forwards every previously-exported
-symbol (`createHttpAcpBridge`, `defaultSpawnChannelFactory`,
-`BridgeClient`, all the typed errors, all the type aliases) from
-the lifted subpaths. Every relative `./httpAcpBridge.js` import in
-`server.ts` / `run-qwen-serve.ts` / `workspace-agents.ts` /
-`workspace-memory.ts` / `index.ts` / the bridge test suite keeps
-resolving without any call-site changes.
+`packages/cli/src/serve/acp-session-bridge.ts` remains as the CLI-local
+compatibility facade for the broader bridge surface, forwarding previously
+exported symbols (`createHttpAcpBridge`, `defaultSpawnChannelFactory`,
+`BridgeClient`, typed errors, and type aliases) from the lifted subpaths.
 
 ## See also
 

@@ -18,9 +18,9 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
  *   - respect backpressure (`res.write` → false ⇒ await `drain`),
  *   - emit periodic comment heartbeats to keep NAT/proxies alive.
  *
- * This mirrors the battle-tested pattern in `server.ts`'s SSE handler but
- * trimmed to what the ACP transport needs (no ring-buffer `id:` sequencing —
- * resumability is RFD Phase 4, deferred per the design doc §7).
+ * This mirrors the battle-tested pattern in `server.ts`'s SSE handler,
+ * including the optional ring-buffer `id:` sequencing that drives
+ * `Last-Event-ID` resume (see `docs/design/daemon-acp-http/sse-resumable-stream.md`).
  */
 export class SseStream {
   readonly kind = 'sse' as const;
@@ -63,9 +63,16 @@ export class SseStream {
     this.res.on('error', this.cleanupFn);
   }
 
-  /** Serialize a JSON-RPC message as one SSE frame. */
-  send(message: unknown): Promise<void> {
-    return this.writeRaw(`data: ${JSON.stringify(message)}\n\n`);
+  /**
+   * Serialize a JSON-RPC message as one SSE frame. When `id` is supplied
+   * (a bus event id) prepend an `id:` line so an EventSource/SSE client
+   * tracks it and resends it as `Last-Event-ID` on reconnect — the resume
+   * cursor for ring replay. Omitted for JSON-RPC responses and synthetic
+   * terminal frames (no bus id), matching REST `formatSseFrame`.
+   */
+  send(message: unknown, id?: number): Promise<void> {
+    const idLine = id !== undefined ? `id: ${id}\n` : '';
+    return this.writeRaw(`${idLine}data: ${JSON.stringify(message)}\n\n`);
   }
 
   get isClosed(): boolean {

@@ -151,6 +151,7 @@ describe('buildClassifierSystemPrompt', () => {
     expect(prompt).toContain('.qwen/settings');
     expect(prompt).toContain('QWEN.local.md');
     expect(prompt).toContain('.qwen/rules/');
+    expect(prompt).toContain('.qwen/fork-profiles/');
     expect(prompt).toContain('.mcp.json');
     // Keep wildcard allow-rule widening in the protected self-edit category.
     expect(prompt).toContain('adding or widening permission allow rules');
@@ -167,6 +168,23 @@ describe('buildClassifierSystemPrompt', () => {
     const prompt = buildClassifierSystemPrompt(makeConfig({}));
     expect(prompt).toContain('AUTO-mode bypass');
     expect(prompt).toContain('Data exfiltration');
+  });
+
+  it('keeps out-of-band callback guidance free of specific IOC domains', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+
+    expect(prompt).toContain('out-of-band callback');
+    expect(prompt).toContain('collaborator');
+    expect(prompt).toContain('request-bin services');
+    expect(prompt).toContain('public tunnel endpoints');
+    for (const domain of [
+      ['oastify', 'com'].join('.'),
+      ['webhook', 'site'].join('.'),
+      ['ngrok', 'io'].join('.'),
+      ['ngrok-free', 'app'].join('.'),
+    ]) {
+      expect(prompt).not.toContain(domain);
+    }
   });
 
   it('renders the four classifier sections (allow / soft / hard / environment)', () => {

@@ -26,6 +26,7 @@ export interface UseReverseSearchCompletionReturn {
   isLoadingSuggestions: boolean;
   navigateUp: () => void;
   navigateDown: () => void;
+  setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   handleAutocomplete: (i: number) => void;
   resetCompletionState: () => void;
 }
@@ -149,6 +150,7 @@ export function useReverseSearchCompletion(
     isLoadingSuggestions,
     navigateUp,
     navigateDown,
+    setActiveSuggestionIndex,
     handleAutocomplete,
     resetCompletionState,
   };

@@ -22,6 +22,20 @@ export const LOOPBACK_BINDS: ReadonlySet<string> = new Set([
   '[::1]',
 ]);
 
+function isIpv4Loopback(hostname: string): boolean {
+  const octets = hostname.split('.');
+  if (octets.length !== 4) return false;
+  const [first, ...rest] = octets;
+  return (
+    first === '127' &&
+    rest.every((octet) => {
+      if (!/^\d+$/.test(octet)) return false;
+      const value = Number(octet);
+      return value >= 0 && value <= 255;
+    })
+  );
+}
+
 export function isLoopbackBind(hostname: string): boolean {
   // Lowercase the operator-supplied hostname so `--hostname Localhost`
   // / `--hostname LOCALHOST` are treated identically to `localhost`.
@@ -30,5 +44,6 @@ export function isLoopbackBind(hostname: string): boolean {
   // detection with the runtime check so a valid loopback bind isn't
   // forced to require a token just because the operator typed a
   // capital. All entries in `LOOPBACK_BINDS` are already lowercase.
-  return LOOPBACK_BINDS.has(hostname.toLowerCase());
+  const normalized = hostname.toLowerCase();
+  return LOOPBACK_BINDS.has(normalized) || isIpv4Loopback(normalized);
 }

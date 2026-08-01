@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 
@@ -21,23 +22,26 @@ describe('pid-descendants', () => {
     });
 
     it('returns [] for a pid with no children (current test process leaf)', async () => {
-      // The vitest worker forks happen at the test runner level; a
-      // freshly-spawned no-child process should reliably have no
-      // descendants. Use process.pid only if the worker has no child
-      // — fallback to a real spawn for robustness.
-      const child = spawn(process.execPath, [
-        '-e',
-        'setTimeout(() => {}, 200)',
-      ]);
+      // Keep the sample alive through Windows CIM snapshot startup latency.
+      const child = spawn(
+        process.execPath,
+        ['-e', 'setTimeout(() => {}, 30000)'],
+        {
+          stdio: 'ignore',
+        },
+      );
       try {
-        // Give the child a moment to settle.
-        await new Promise((r) => setTimeout(r, 50));
-        const descendants = await listDescendantPids(child.pid!);
+        await once(child, 'spawn');
+        if (child.pid === undefined) {
+          throw new Error('child pid unavailable after spawn');
+        }
+
+        const descendants = await listDescendantPids(child.pid);
         expect(descendants).toEqual([]);
       } finally {
         child.kill('SIGKILL');
       }
-    });
+    }, 10_000);
   });
 
   describe('sigtermPids', () => {

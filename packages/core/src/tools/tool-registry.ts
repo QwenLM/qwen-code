@@ -12,7 +12,7 @@ import type {
   ToolInvocation,
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, matchesAnyServerPattern } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -24,7 +24,11 @@ import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -60,7 +64,14 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
-    const child = spawn(callCommand, [this.toolName]);
+    // The user-configured tool-call command is a child process launched on the
+    // agent's behalf, so it must not inherit Qwen-internal daemon secrets.
+    // Passing `env` explicitly loses the native inheritance that resolved
+    // Windows' case-insensitive PATH keys, so normalize as the shell and MCP
+    // spawn sites do (a no-op off win32).
+    const child = spawn(callCommand, [this.toolName], {
+      env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+    });
     child.stdin.write(JSON.stringify(this.params));
     child.stdin.end();
 
@@ -217,6 +228,19 @@ export class ToolRegistry {
     });
   }
 
+  // Stable declaration order keeps the serialized tools block independent of
+  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  private static compareToolsByDeclarationName(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    const byName = aName.localeCompare(bName);
+    if (byName !== 0) return byName;
+    return a.displayName.localeCompare(b.displayName);
+  }
+
   /**
    * Returns true when `name` is in the Config's `disabledTools` set, in
    * which case `registerTool` / `registerFactory` will skip it. This is
@@ -225,8 +249,24 @@ export class ToolRegistry {
    * built-ins and MCP-discovered tools flow through `registerTool`, so
    * gating here covers every registration path.
    */
-  private isToolDisabled(name: string): boolean {
-    return this.config.getDisabledTools().has(name);
+  private isToolDisabled(
+    name: string,
+    aliases: readonly string[] = [],
+  ): boolean {
+    const disabledTools = this.config.getDisabledTools();
+    const hasExactMatch =
+      disabledTools.has(name) ||
+      aliases.some((alias) => disabledTools.has(alias));
+    if (hasExactMatch || !name.startsWith('mcp__')) {
+      return hasExactMatch;
+    }
+
+    for (const disabledName of disabledTools) {
+      if (normalizeMcpToolName(disabledName) === name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -234,7 +274,12 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped: present in disabledTools set.`,
       );
@@ -271,7 +316,12 @@ export class ToolRegistry {
     // `isToolDisabled(tool.name)` gate above when the operator
     // disabled the renamed-and-exposed name. Re-evaluating after the
     // rename closes that hole.
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
       );
@@ -449,7 +499,7 @@ export class ToolRegistry {
         // while isMcpServerDisabled still returns false, mis-reporting
         // an intentional disable as a connectivity failure.
         const currentExcluded = this.config.getExcludedMcpServers() || [];
-        if (!currentExcluded.includes(serverName)) {
+        if (!matchesAnyServerPattern(serverName, currentExcluded)) {
           this.config.setExcludedMcpServers([...currentExcluded, serverName]);
         }
       } finally {
@@ -552,7 +602,12 @@ export class ToolRegistry {
           'Tool discovery command is empty or contains only whitespace.',
         );
       }
-      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[]);
+      // Same as the tool-call command above: the discovery command is
+      // agent-launched, must not inherit Qwen-internal daemon secrets, and
+      // needs the Windows PATH normalization that comes with an explicit env.
+      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
+        env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      });
       let stdout = '';
       const stdoutDecoder = new StringDecoder('utf8');
       let stderr = '';
@@ -679,19 +734,16 @@ export class ToolRegistry {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
-    const declarations: FunctionDeclaration[] = [];
-    this.tools.forEach((tool) => {
-      if (
-        !includeDeferred &&
-        tool.shouldDefer &&
-        !tool.alwaysLoad &&
-        !this.revealedDeferred.has(tool.name)
-      ) {
-        return;
-      }
-      declarations.push(tool.schema);
-    });
-    return declarations;
+    return Array.from(this.tools.values())
+      .filter(
+        (tool) =>
+          includeDeferred ||
+          !tool.shouldDefer ||
+          tool.alwaysLoad ||
+          !this.isDeferredAndHidden(tool.name),
+      )
+      .sort(ToolRegistry.compareToolsByDeclarationName)
+      .map((tool) => tool.schema);
   }
 
   /**
@@ -722,6 +774,25 @@ export class ToolRegistry {
   }
 
   /**
+   * Whether a deferred tool is currently hidden from the model's
+   * function-declaration list. Returns `true` when the tool:
+   * - is deferred (`shouldDefer=true`),
+   * - is not always-loaded,
+   * - has not been revealed this session, AND
+   * - is not in the visibleTools config list.
+   */
+  isDeferredAndHidden(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
+      !this.config.getVisibleTools().has(name)
+    );
+  }
+
+  /**
    * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
    * with no revealed tools — the same state as any fresh session.
@@ -734,12 +805,17 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools are excluded.
+   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
-      if (tool.shouldDefer && !tool.alwaysLoad) {
+      if (
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.config.getVisibleTools().has(tool.name)
+      ) {
         summary.push({
           name: tool.name,
           description: tool.description,
@@ -752,6 +828,57 @@ export class ToolRegistry {
     // Stable order so the startup reminder text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
+  }
+
+  /**
+   * Reveals every deferred tool — bundled built-ins and MCP alike — when
+   * the combined estimated token footprint of their schemas fits within
+   * `budgetTokens`. Every mid-session reveal rewrites the declaration
+   * list and invalidates the prompt-cache prefix, so the prefix only
+   * stays stable when NOTHING is left for ToolSearch to reveal: a small
+   * deferred set is cheaper to declare upfront in full than to load one
+   * cache-busting piece at a time. All-or-nothing on purpose — a partial
+   * reveal would leave an arbitrary subset behind ToolSearch.
+   *
+   * Already-revealed tools count toward the total (reveal is
+   * idempotent), so repeated calls cannot ratchet past the budget as MCP
+   * servers come and go. Returns the number of newly revealed tools.
+   */
+  preloadDeferredToolsWithinBudget(budgetTokens: number): number {
+    const candidates: string[] = [];
+    let totalChars = 0;
+    for (const tool of this.tools.values()) {
+      if (!tool.shouldDefer || tool.alwaysLoad) continue;
+      if (this.config.getVisibleTools().has(tool.name)) continue;
+      candidates.push(tool.name);
+      totalChars += JSON.stringify(tool.schema).length;
+    }
+    const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
+    if (candidates.length === 0) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: no deferrable tools to preload (budget=${budgetTokens} tokens).`,
+      );
+      return 0;
+    }
+    if (estimatedTokens > budgetTokens) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+          `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
+      );
+      return 0;
+    }
+    let revealed = 0;
+    for (const name of candidates) {
+      if (!this.revealedDeferred.has(name)) {
+        this.revealDeferredTool(name);
+        revealed++;
+      }
+    }
+    debugLogger.debug(
+      `preloadDeferredToolsWithinBudget: preloading ${candidates.length} deferred tool(s) ` +
+        `(estimated ${estimatedTokens} tokens <= budget ${budgetTokens} tokens); ${revealed} newly revealed.`,
+    );
+    return revealed;
   }
 
   getMcpServerInstructions(): Map<string, string> {

@@ -5,13 +5,26 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SkillCommandLoader } from './SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from './SkillCommandLoader.js';
+import { skillArgsPath } from './skill-args-file.js';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
   type Config,
   type SkillConfig,
 } from '@qwen-code/qwen-code-core';
+
+const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  recordAutoSkillUsage: recordAutoSkillUsageMock,
+}));
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
@@ -42,6 +55,8 @@ describe('SkillCommandLoader', () => {
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getBareMode: vi.fn().mockReturnValue(false),
+      getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
@@ -177,6 +192,79 @@ describe('SkillCommandLoader', () => {
     expect(commands[0].sourceDetail).toBe('project');
     expect(commands[0].source).toBe('skill-dir-command');
     expect(commands[0].modelInvocable).toBe(true);
+    expect(commands[0].skillDetail?.filePath).toBe(skill.filePath);
+
+    await recordAutoSkillCommandUsage(mockConfig, commands[0]);
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'my-skill',
+      level: 'project',
+      filePath: skill.filePath,
+    });
+  });
+
+  it('records curator usage while Auto Skill generation is disabled', async () => {
+    vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(false);
+
+    await recordAutoSkillCommandUsage(mockConfig, {
+      name: 'my-skill',
+      description: 'My skill',
+      kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'my-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+      },
+    });
+
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'my-skill',
+      level: 'project',
+      filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+    });
+  });
+
+  it.each([
+    {
+      caseName: 'user-level skills',
+      skillDetail: {
+        name: 'my-skill',
+        level: 'user',
+        filePath: '/test/user/.qwen/skills/my-skill/SKILL.md',
+      },
+    },
+    {
+      caseName: 'skills without a file path',
+      skillDetail: {
+        name: 'my-skill',
+        level: 'project',
+      },
+    },
+  ])('does not record curator usage for $caseName', async ({ skillDetail }) => {
+    await recordAutoSkillCommandUsage(mockConfig, {
+      name: 'my-skill',
+      description: 'My skill',
+      kind: CommandKind.SKILL,
+      skillDetail,
+    });
+
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps usage recording best-effort when persistence fails', async () => {
+    recordAutoSkillUsageMock.mockRejectedValueOnce(new Error('lock busy'));
+
+    await expect(
+      recordAutoSkillCommandUsage(mockConfig, {
+        name: 'my-skill',
+        description: 'My skill',
+        kind: CommandKind.SKILL,
+        skillDetail: {
+          name: 'my-skill',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it('should submit skill body as prompt', async () => {
@@ -200,27 +288,35 @@ describe('SkillCommandLoader', () => {
   });
 
   it('should append raw invocation when args are provided', async () => {
-    const skill = makeSkill();
-    mockSkillManager.listSkills.mockImplementation(
-      ({ level }: { level: string }) =>
-        Promise.resolve(level === 'user' ? [skill] : []),
-    );
+    // The args file is written relative to the process's directory; without a
+    // temp cwd this suite would write into the real repository.
+    const dir = mkdtempSync(join(tmpdir(), 'skill-cmd-args-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const skill = makeSkill();
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
 
-    const loader = new SkillCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(signal);
-    const result = await commands[0].action!(
-      { invocation: { raw: '/my-skill foo', args: 'foo' } } as never,
-      'foo',
-    );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      const result = (await commands[0].action!(
+        { invocation: { raw: '/my-skill hello', args: 'hello' } } as never,
+        'hello',
+      )) as { type: string; content: Array<{ text: string }> };
 
-    expect(result).toEqual({
-      type: 'submit_prompt',
-      content: [
-        {
-          text: `${makeSkillPrompt('Skill body content.')}\n\n/my-skill foo`,
-        },
-      ],
-    });
+      expect(result.type).toBe('submit_prompt');
+      const text = result.content[0].text;
+      expect(text).toContain('/my-skill hello');
+
+      // The arguments are written down for the skill to read, not transcribed
+      // by the model. See BundledSkillLoader's tests for why.
+      const path = skillArgsPath('my-skill');
+      expect(readFileSync(path, 'utf8')).toBe('hello');
+      expect(text).toContain('<skill-args>hello</skill-args>');
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('should return empty array when listSkills throws', async () => {

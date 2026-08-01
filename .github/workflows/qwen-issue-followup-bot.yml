@@ -2,18 +2,13 @@ name: 'Qwen Issue Follow-up Bot'
 
 # Required for automatic runs:
 # - Repository variable QWEN_ISSUE_FOLLOWUP_BOT_ENABLED=true.
-# - Optional repository variable QWEN_ISSUE_FOLLOWUP_BOT_ISSUES_DRY_RUN=false
-#   enables real writes for newly opened issues.
 # - Optional repository variable QWEN_ISSUE_FOLLOWUP_BOT_SCHEDULE_DRY_RUN=false
 #   enables real writes for scheduled batch runs.
 # - Legacy repository variable QWEN_ISSUE_FOLLOWUP_BOT_DRY_RUN is still used as
-#   a fallback for both automatic paths.
+#   a fallback for scheduled runs.
 # - Secret QWEN_CODE_BOT_TOKEN is preferred; CI_BOT_PAT is a fallback.
 
 on:
-  issues:
-    types:
-      - 'opened'
   schedule:
     - cron: '5 */6 * * *'
   workflow_dispatch:
@@ -34,7 +29,7 @@ on:
         type: 'string'
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.inputs.issue_number || 'batch' }}"
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.inputs.issue_number || 'batch' }}"
   cancel-in-progress: false
 
 defaults:
@@ -54,8 +49,7 @@ jobs:
     if: |-
       ${{
         github.repository == 'QwenLM/qwen-code' &&
-        (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true') &&
-        (github.event_name != 'issues' || github.event.issue.pull_request == null)
+        (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true')
       }}
     runs-on: 'ubuntu-latest'
     steps:
@@ -65,7 +59,6 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           GH_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           DISPATCH_DRY_RUN: "${{ github.event.inputs.dry_run || 'true' }}"
-          ISSUE_OPENED_DRY_RUN: "${{ vars.QWEN_ISSUE_FOLLOWUP_BOT_ISSUES_DRY_RUN || vars.QWEN_ISSUE_FOLLOWUP_BOT_DRY_RUN || 'true' }}"
           SCHEDULE_DRY_RUN: "${{ vars.QWEN_ISSUE_FOLLOWUP_BOT_SCHEDULE_DRY_RUN || vars.QWEN_ISSUE_FOLLOWUP_BOT_DRY_RUN || 'true' }}"
           SCHEDULED_LIMIT_INPUT: "${{ github.event.inputs.scheduled_limit || '10' }}"
           SCHEDULED_LIMIT_MAX: '50'
@@ -277,10 +270,6 @@ jobs:
             if [[ "${DISPATCH_DRY_RUN}" == 'false' ]]; then
               dry_run='false'
             fi
-          elif [[ "${EVENT_NAME}" == 'issues' ]]; then
-            if [[ "${ISSUE_OPENED_DRY_RUN}" == 'false' ]]; then
-              dry_run='false'
-            fi
           else
             if [[ "${SCHEDULE_DRY_RUN}" == 'false' ]]; then
               dry_run='false'
@@ -289,16 +278,16 @@ jobs:
 
           echo "dry_run=${dry_run}" >> "${GITHUB_OUTPUT}"
           echo "scheduled_limit=${SCHEDULED_LIMIT_INPUT}" >> "${GITHUB_OUTPUT}"
-          echo "Issue follow-up state: event=${EVENT_NAME} dispatch_dry=${DISPATCH_DRY_RUN} issues_dry=${ISSUE_OPENED_DRY_RUN} schedule_dry=${SCHEDULE_DRY_RUN} resolved_dry_run=${dry_run} scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
+          echo "Issue follow-up state: event=${EVENT_NAME} dispatch_dry=${DISPATCH_DRY_RUN} schedule_dry=${SCHEDULE_DRY_RUN} resolved_dry_run=${dry_run} scheduled_limit=${SCHEDULED_LIMIT_INPUT}"
 
       - name: 'Run Qwen issue follow-up'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
         env:
           GITHUB_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           GH_TOKEN: '${{ env.BOT_GITHUB_TOKEN }}'
           REPOSITORY: '${{ github.repository }}'
           EVENT_NAME: '${{ github.event_name }}'
-          ISSUE_NUMBER: '${{ github.event.issue.number || github.event.inputs.issue_number }}'
+          ISSUE_NUMBER: '${{ github.event.inputs.issue_number }}'
           DRY_RUN: '${{ steps.runtime.outputs.dry_run }}'
           SCHEDULED_LIMIT: '${{ steps.runtime.outputs.scheduled_limit }}'
         with:
@@ -328,15 +317,15 @@ jobs:
 
             - Repository: `${{ github.repository }}`
             - Event name: `${{ github.event_name }}`
-            - Issue number, when the event targets one issue: `${{ github.event.issue.number || github.event.inputs.issue_number }}`
+            - Issue number, when manually targeting one issue: `${{ github.event.inputs.issue_number }}`
             - Scheduled candidate limit: `${{ steps.runtime.outputs.scheduled_limit }}`
             - Dry run: `${{ steps.runtime.outputs.dry_run }}`
 
             ## Scope
 
             If `ISSUE_NUMBER` is set, inspect and process only that issue. This
-            is the normal path for a newly opened issue. Do not scan or process
-            unrelated recent issues in this mode.
+            is the manual single-issue path. Do not scan or process unrelated
+            recent issues in this mode.
 
             If `ISSUE_NUMBER` is empty, this is a scheduled/manual batch run.
             Find and process at most `SCHEDULED_LIMIT` open issues that are

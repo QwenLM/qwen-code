@@ -138,7 +138,15 @@ The `code: 'token_required'` shape is distinct from `bearerAuth`'s plain `Unauth
 `/workspace/tools/:name/enable`, `/workspace/mcp/:server/restart`,
 `/workspace/mcp/:server/{enable,disable,authenticate,clear-auth}`,
 `/workspace/mcp/servers` (POST/DELETE), `/workspace/auth/device-flow`,
-`/workspace/init`, `/session/:id/approval-mode`.
+`/workspace/init`, `/session/:id/approval-mode`, `/session/:id/rewind`, and
+`/session/:id/shell`.
+
+Rewind remains REST-only in the TypeScript SDK even when an ACP transport is
+configured. This preserves the strict mutation gate and bearer/client identity
+headers; the ACP route table intentionally has no rewind mapping. Owner routing
+also rechecks workspace trust before either rewind or shell reaches a secondary
+runtime bridge. Duplicate live session ids fail closed as
+`ambiguous_session_owner` instead of falling back to the primary runtime.
 
 ### `/health` exemption
 

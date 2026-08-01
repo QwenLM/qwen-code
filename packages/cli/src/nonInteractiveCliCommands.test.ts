@@ -12,11 +12,18 @@ import {
 import {
   __resetActiveGoalStoreForTests,
   type Config,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+
+const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  recordAutoSkillUsage: recordAutoSkillUsageMock,
+}));
 
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
@@ -37,6 +44,7 @@ describe('handleSlashCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -87,6 +95,7 @@ describe('handleSlashCommand', () => {
   });
 
   afterEach(() => {
+    uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
   });
 
@@ -371,6 +380,263 @@ describe('handleSlashCommand', () => {
     if (result.type === 'submit_prompt') {
       expect(result.content).toEqual([{ text: 'Custom prompt' }]);
     }
+  });
+
+  it('passes a submit_prompt modelOverride through to the result', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with a per-turn model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the override model' }],
+        modelOverride: 'glm-5.1',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([{ text: 'Run on the override model' }]);
+      expect(result.modelOverride).toBe('glm-5.1');
+    }
+  });
+
+  it('omits modelOverride when the command does not set one', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command without a model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the session model' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.modelOverride).toBeUndefined();
+    }
+  });
+
+  it('records successful SKILL submit_prompt commands in session metrics', async () => {
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'review-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Review prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        'review-skill': { count: 1, success: 1, fail: 0 },
+      },
+    });
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'review-skill',
+      level: 'project',
+      filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+    });
+  });
+
+  it('records ACP SKILL submit_prompt commands in session metrics', async () => {
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Review prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        review: { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('records failed SKILL commands when action throws', async () => {
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockRejectedValue(new Error('boom')),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('boom');
+
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('records blocked SKILL submit_prompt commands as failures', async () => {
+    mockFireUserPromptExpansionEvent.mockResolvedValue({
+      getBlockingError: () => ({
+        blocked: true,
+        reason: 'Blocked by policy',
+      }),
+      shouldStopExecution: () => false,
+    });
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Review prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    const result = await handleSlashCommand(
+      '/review',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('message');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+  });
+
+  it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
+    mockFireUserPromptExpansionEvent.mockRejectedValue(new Error('hook crash'));
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Review prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('hook crash');
+
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('does not record FILE submit_prompt commands as skill metrics', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Custom prompt' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    });
   });
 
   it('should fire UserPromptExpansion hooks for submit_prompt commands', async () => {
@@ -763,6 +1029,290 @@ describe('handleSlashCommand', () => {
       const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
         .mock.calls[0]?.[0];
       await expect(executor?.('custom')).resolves.toBeNull();
+    });
+  });
+
+  describe('stacked skill invocations', () => {
+    const createSkillCommand = (name: string, body: string) => ({
+      name,
+      description: `Skill ${name}`,
+      kind: CommandKind.SKILL,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: `SKILL_BODY:${name}:${body}` }],
+      }),
+    });
+
+    it('combines two stacked skills into a single submit_prompt', async () => {
+      const skillA = createSkillCommand('feat-dev', 'feature workflow');
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
+        expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
+        expect(texts).toContain('implement X');
+      }
+    });
+
+    it('calls each skill action once', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+      expect(skillB.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('records successful stacked project auto-skills as used', async () => {
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(2);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'feat-dev',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      });
+    });
+
+    it('does not record blocked stacked auto-skills as used', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('message');
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+    });
+
+    it('handles stacked skills with no remaining text', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('bugfix', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /bugfix',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:bugfix:b');
+        expect(texts).toHaveLength(2);
+      }
+    });
+
+    it('falls through to normal dispatch for a single skill', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      mockGetCommands.mockReturnValue([skillA]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev build something',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Single skill goes through normal dispatch, not stacked path
+      expect(result.type).toBe('submit_prompt');
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips skills whose action is undefined', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const noActionSkill = {
+        name: 'no-action',
+        description: 'No action',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: undefined,
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, noActionSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /no-action /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+      }
+    });
+
+    it('excludes non-submit_prompt results from combined content', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Something failed',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, errorSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+        // Error message is not in combined content
+        expect(texts).not.toContain('Something failed');
+      }
+    });
+
+    it('records telemetry success=false for non-submit_prompt results', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'fail',
+        }),
+      };
+      mockGetCommands.mockReturnValue([skillA, errorSkill]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Verify the error skill's action was actually called
+      // (telemetry recording logic is tested in slashCommandProcessor.test.ts)
+      expect(errorSkill.action).toHaveBeenCalledTimes(1);
+      expect(result.type).toBe('submit_prompt');
+    });
+
+    it('propagates modelOverride from first submit_prompt skill', async () => {
+      const skillA = {
+        name: 'feat-dev',
+        description: 'Skill with model override',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:feat-dev' }],
+          modelOverride: 'gemini-2.5-pro',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.modelOverride).toBe('gemini-2.5-pro');
+      }
     });
   });
 });

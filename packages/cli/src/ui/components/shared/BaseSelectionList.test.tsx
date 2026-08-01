@@ -64,6 +64,7 @@ describe('BaseSelectionList', () => {
     vi.mocked(useSelectionList).mockReturnValue({
       activeIndex,
       setActiveIndex: vi.fn(),
+      selectIndex: vi.fn(),
     });
 
     mockRenderItem.mockImplementation(
@@ -288,6 +289,7 @@ describe('BaseSelectionList', () => {
       vi.mocked(useSelectionList).mockReturnValue({
         activeIndex: initialActiveIndex,
         setActiveIndex: vi.fn(),
+        selectIndex: vi.fn(),
       });
 
       mockRenderItem.mockImplementation(
@@ -305,6 +307,7 @@ describe('BaseSelectionList', () => {
         vi.mocked(useSelectionList).mockReturnValue({
           activeIndex: newIndex,
           setActiveIndex: vi.fn(),
+          selectIndex: vi.fn(),
         });
 
         await act(async () => {

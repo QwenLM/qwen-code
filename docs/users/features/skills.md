@@ -17,13 +17,15 @@ Agent Skills package expertise into discoverable capabilities. Each Skill consis
 
 Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill's description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
 
-If you want to invoke a Skill explicitly, use the `/skills` slash command:
+If you want to invoke a Skill explicitly, type it as a slash command using the Skill's name:
 
 ```bash
-/skills <skill-name>
+/<skill-name>
 ```
 
-Use autocomplete to browse available Skills and descriptions.
+Start typing `/` to autocomplete and browse available Skills alongside their descriptions. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively.
+
+> **Note:** If you previously ran a Skill with `/skills <skill-name>`, that syntax now just opens the Skills panel and ignores the trailing argument. Use `/<skill-name>` to run a Skill directly.
 
 ### Benefits
 
@@ -65,6 +67,20 @@ Use project Skills for:
 - Shared utilities and scripts
 
 Project Skills can be checked into git and automatically become available to teammates.
+
+### Maintain auto-generated project Skills
+
+Qwen Code tracks successful uses of generated project Skills locally, including while new Auto Skill generation is disabled, so re-enabling maintenance cannot mistake a recently used skill for an inactive one. When **Auto Skill** is enabled, it periodically moves inactive generated Skills out of the active library. Only directories named `.qwen/skills/auto-skill-*` whose `SKILL.md` frontmatter contains `source: auto-skill` are managed; personal, extension, bundled, and hand-authored Skills are never selected.
+
+- After 30 days without a successful use or `SKILL.md` edit, an auto-skill is marked stale.
+- After 90 days, its complete directory is moved to `.qwen/archived-skills/`. Nothing is permanently deleted.
+- Automatic maintenance runs at most once every 7 days in trusted workspaces. Each newly observed auto-skill gets a full grace period before maintenance begins.
+- A pinned auto-skill is excluded from automatic stale and archive transitions until it is unpinned.
+- Archived directory names remain reserved, and an existing archive destination skips only that collision rather than stopping maintenance for other skills.
+
+Use `/curator` to see active, stale, archived, and pinned auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, `/curator pin <directory>` or `/curator unpin <directory>` to control per-skill maintenance, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
+
+Status and dry-run previews are available in safe mode and untrusted workspaces. Applying maintenance, changing pins, and restoring archived auto-skills require a trusted workspace outside safe mode.
 
 ## Write `SKILL.md`
 

@@ -12,7 +12,11 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput, HookPhase } from './types.js';
+import type {
+  ContextUsageData,
+  DefaultHookOutput,
+  HookPhase,
+} from './types.js';
 import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
@@ -86,6 +90,11 @@ export class HookSystem {
     debugLogger.debug('Hook system initialized successfully');
   }
 
+  async reload(): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks();
+    debugLogger.debug('Hook system reloaded successfully');
+  }
+
   /**
    * Set the messages provider for automatic conversation history passing
    * to function hooks during execution
@@ -144,10 +153,12 @@ export class HookSystem {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
+      submittedPrompt,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
@@ -200,11 +211,30 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      contextUsage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MessageDisplay event - called repeatedly as the assistant's reply streams
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMessageDisplayEvent(
+      messageId,
+      displayedText,
+      isFinal,
       signal,
     );
   }
@@ -238,6 +268,19 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('SessionEnd', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionDeleteEvent(
+      deletedSessionId,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionDelete', result.finalOutput)
       : undefined;
   }
 

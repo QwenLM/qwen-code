@@ -35,6 +35,31 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('parses a CRLF (Windows checkout) topic document', () => {
+    // Team files are read raw (utf-8); a Windows checkout yields `---\r\n`,
+    // which the `^---\n` delimiter would reject — dropping the file from the
+    // shared index. The parser must normalize CRLF first.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/crlf.md',
+      [
+        '---',
+        'type: project',
+        'name: CRLF Memory',
+        'description: Windows line endings',
+        '---',
+        '',
+        'Body line one.',
+      ].join('\r\n'),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.type).toBe('project');
+    expect(parsed?.title).toBe('CRLF Memory');
+    expect(parsed?.description).toBe('Windows line endings');
+    // The body is normalized to LF, not left with stray carriage returns.
+    expect(parsed?.body).toBe('Body line one.');
+  });
+
   it('parses a managed auto-memory topic document', () => {
     const parsed = parseAutoMemoryTopicDocument(
       '/tmp/project.md',
@@ -89,5 +114,34 @@ describe('auto-memory topic scanning', () => {
     expect(referenceDoc?.description).toBe('External references');
     expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
+  });
+
+  it('survives an unreadable file instead of dropping the whole index', async () => {
+    const goodPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('feedback', 'good.md'),
+    );
+    await fs.mkdir(path.dirname(goodPath), { recursive: true });
+    await fs.writeFile(
+      goodPath,
+      '---\ntype: feedback\nname: Good\ndescription: kept\n---\nbody',
+      'utf-8',
+    );
+    // A directory named like a `.md` file forces an EISDIR on readFile — a
+    // deterministic stand-in for a permission error or a TOCTOU delete during
+    // `git pull`. The good file must still be scanned.
+    await fs.mkdir(
+      getAutoMemoryFilePath(projectRoot, path.join('feedback', 'broken.md')),
+      { recursive: true },
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(
+      docs.find((d) => d.relativePath === 'feedback/good.md'),
+    ).toBeTruthy();
+    expect(docs.some((d) => d.relativePath === 'feedback/broken.md')).toBe(
+      false,
+    );
   });
 });

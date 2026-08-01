@@ -142,6 +142,12 @@ describe('UiTelemetryService', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      skills: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });
@@ -296,6 +302,97 @@ describe('UiTelemetryService', () => {
       expect(metrics.models['gemini-2.5-pro'].api.totalRequests).toBe(1);
       expect(metrics.models['gemini-2.5-flash'].api.totalRequests).toBe(1);
       expect(service.getLastPromptTokenCount()).toBe(0);
+    });
+  });
+
+  describe('Generation Timing Metrics', () => {
+    const timedResponse = (
+      overrides: Partial<ApiResponseEvent> = {},
+    ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model: 'qwen3-coder',
+        prompt_id: 'user-query',
+        duration_ms: 500,
+        ttft_ms: 100,
+        input_token_count: 10,
+        output_token_count: 20,
+        total_token_count: 30,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        ...overrides,
+      }) as ApiResponseEvent & {
+        'event.name': typeof EVENT_API_RESPONSE;
+      };
+
+    it('aggregates timed streaming responses and keeps the latest sample', () => {
+      service.addEvent(timedResponse());
+      service.addEvent(
+        timedResponse({
+          model: 'qwen-plus',
+          duration_ms: 800,
+          ttft_ms: 200,
+          output_token_count: 30,
+        }),
+      );
+
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 1000,
+        totalThroughputOutputTokens: 50,
+        last: {
+          model: 'qwen-plus',
+          ttftMs: 200,
+          generationDurationMs: 600,
+          outputTokens: 30,
+        },
+      });
+    });
+
+    it('does not create samples for missing TTFT or internal prompts', () => {
+      service.addEvent(timedResponse({ ttft_ms: undefined }));
+      service.addEvent(timedResponse({ prompt_id: 'prompt_suggestion' }));
+
+      expect(service.getMetrics().generation).toBeUndefined();
+    });
+
+    it('clamps sampling time when TTFT exceeds request duration', () => {
+      service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
+
+      expect(service.getMetrics().generation).toMatchObject({
+        timedRequests: 1,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+        last: {
+          ttftMs: 150,
+          generationDurationMs: 0,
+        },
+      });
+    });
+
+    it('keeps generation metrics isolated per session', () => {
+      service.addEvent(timedResponse(), 'session-a');
+      service.addEvent(
+        timedResponse({ model: 'qwen-plus', ttft_ms: 250 }),
+        'session-b',
+      );
+
+      expect(
+        service.getMetricsForSession('session-a').generation?.last?.model,
+      ).toBe('qwen3-coder');
+      expect(
+        service.getMetricsForSession('session-b').generation?.last?.model,
+      ).toBe('qwen-plus');
+    });
+
+    it('clears generation metrics when the service resets', () => {
+      service.addEvent(timedResponse());
+      expect(service.getMetrics().generation).toBeDefined();
+
+      service.reset();
+
+      expect(service.getMetrics().generation).toBeUndefined();
     });
   });
 
@@ -798,6 +895,40 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Skill Invocation Metrics', () => {
+    it('aggregates successful and failed skill invocations by name', () => {
+      service.recordSkillInvocation('review', true);
+      service.recordSkillInvocation('review', false);
+      service.recordSkillInvocation('testing', true);
+
+      expect(service.getMetrics().skills).toEqual({
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('handles skill names that collide with object prototype keys', () => {
+      service.recordSkillInvocation('constructor', true);
+      service.recordSkillInvocation('__proto__', false);
+
+      expect(service.getMetrics().skills?.byName['constructor']).toEqual({
+        count: 1,
+        success: 1,
+        fail: 0,
+      });
+      expect(service.getMetrics().skills?.byName['__proto__']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+      });
+    });
+  });
+
   describe('resetLastPromptTokenCount', () => {
     it('should reset the last prompt token count to 0', () => {
       // First, set up some initial token count
@@ -1096,6 +1227,52 @@ describe('UiTelemetryService', () => {
       expect(metricsB.tools.totalCalls).toBe(2);
       expect(metricsB.tools.byName['Write']?.count).toBe(1);
       expect(metricsB.tools.byName['Read']?.count).toBe(1);
+    });
+
+    it('should isolate skill invocation metrics by session', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.recordSkillInvocation('review', false, SESSION_B);
+      service.recordSkillInvocation('testing', true, SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.skills).toEqual({
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: {
+          review: { count: 1, success: 1, fail: 0 },
+        },
+      });
+      expect(metricsB.skills).toEqual({
+        totalCalls: 2,
+        totalSuccess: 1,
+        totalFail: 1,
+        byName: {
+          review: { count: 1, success: 0, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('removeSession should prevent late skill metrics from recreating bucket', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.removeSession(SESSION_A);
+
+      service.recordSkillInvocation('review', false, SESSION_A);
+
+      expect(service.getMetricsForSession(SESSION_A).skills).toEqual({
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      });
+      expect(service.getMetrics().skills?.byName['review']).toEqual({
+        count: 2,
+        success: 1,
+        fail: 1,
+      });
     });
 
     it('resetSession should not clear global metrics (replay scenario)', () => {

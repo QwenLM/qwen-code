@@ -6,24 +6,26 @@
 
 import type { Dispatch, SetStateAction } from 'react';
 import type {
+  DaemonApprovalMode,
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
+  DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskStatus,
+  DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import {
-  isDaemonTurnError,
-  isNonBlockingAccepted,
-  type PromptResult,
-} from '@qwen-code/sdk/daemon';
+import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import { extractHttpStatus } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -31,7 +33,10 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
-import { persistStableClientId } from './clientLifecycle.js';
+import {
+  getPersistedClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -55,15 +60,66 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
+  manualSessionClearRef: RefBox<boolean>;
+  skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
+  createDetachedSession: (
+    workspaceCwd?: string,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+    >,
+  ) => Promise<DaemonSessionClient>;
+  getConnection: () => DaemonConnectionState;
+  hasSessionActivePrompt: () => boolean;
+  resetCurrentSessionActivePrompt: () => void;
+  restartEventStream: (sessionId: string) => void;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
+  setRestoreWorkspaceCwd: Dispatch<SetStateAction<string | undefined>>;
   setRestoreMode: Dispatch<SetStateAction<'load' | 'resume'>>;
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
+  setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
+}
+
+export function getConnectionAfterSessionClear(
+  current: DaemonConnectionState,
+  clearedSessionId: string | undefined,
+): DaemonConnectionState {
+  const next = { ...current };
+  if (!clearedSessionId || current.sessionId === clearedSessionId) {
+    delete next.sessionId;
+    delete next.clientId;
+    delete next.displayName;
+    delete next.tokenUsage;
+    delete next.tokenCount;
+    // Drop the session-scoped raw snapshots (both carry the cleared
+    // sessionId), which also makes the effect's canReuseSessionMetadata
+    // check refetch fresh data for the next session.
+    delete next.supportedCommands;
+    delete next.context;
+    // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
+    // MCP-prompt and workflow slash commands all live at the workspace/config
+    // level, not the session), so they stay valid after the session is
+    // cleared. Clearing starts a fresh deferred session that is not created
+    // until the first prompt (#6066); preserving these keeps skill-backed
+    // slash commands like /review autocompleting in that window — the same
+    // guarantee #6153 added for the initial deferred connect. The next
+    // session's available_commands_update refreshes them once it lands.
+  }
+  return {
+    ...next,
+    status: 'connected',
+    loadingTranscript: undefined,
+    catchingUp: undefined,
+    error: undefined,
+    errorStatus: undefined,
+    missingSession: false,
+  };
 }
 
 export function createDaemonSessionActions({
@@ -74,19 +130,58 @@ export function createDaemonSessionActions({
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
+  manualSessionClearRef,
+  skipNextCleanupDetachSessionIdRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
+  createDetachedSession,
+  getConnection,
+  hasSessionActivePrompt,
+  resetCurrentSessionActivePrompt,
+  restartEventStream,
   addNotice,
   setConnection,
   setPromptStatus,
   setRestoreSessionId,
+  setRestoreWorkspaceCwd,
   setRestoreMode,
   setRestoreSessionNonce,
+  setAttachSessionNonce,
   setNewSessionNonce,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
-  function startSessionSwitch(
+  const silentHardFailureNoticeKeys = new Set<string>();
+
+  function clearActiveSessionState() {
+    silentHardFailureNoticeKeys.clear();
+    for (const [, active] of activePromptsRef.current) {
+      active.controller.abort();
+    }
+    activePromptsRef.current.clear();
+    settledPromptsRef.current.clear();
+    setPromptStatus('idle');
+    clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+    if (pendingSessionLoadRef.current) {
+      if (
+        skipNextCleanupDetachSessionIdRef.current ===
+        pendingSessionLoadRef.current.sessionId
+      ) {
+        skipNextCleanupDetachSessionIdRef.current = undefined;
+      }
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.reject(
+        new DOMException('Session cleared', 'AbortError'),
+      );
+      pendingSessionLoadRef.current = undefined;
+    }
+    store.reset();
+    setRestoreSessionId(undefined);
+    setRestoreWorkspaceCwd(undefined);
+  }
+
+  function startPendingSessionLoad(
     sessionId: string,
-    mode: 'load' | 'resume',
+    mode: PendingSessionLoad['mode'],
+    signal?: AbortSignal,
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -108,7 +203,7 @@ export function createDaemonSessionActions({
               addNotice,
               `${capitalize(mode)} session failed`,
               new Error(`Session ${mode} timed out`),
-              mode === 'load' ? 'load_session' : 'resume_session',
+              getSessionLoadNoticeOperation(mode),
             ),
           );
         }
@@ -120,16 +215,87 @@ export function createDaemonSessionActions({
         timeout,
         resolve,
         reject,
+        ...(signal ? { signal } : {}),
       };
     });
+    return loadPromise;
+  }
+
+  function startSessionSwitch(
+    sessionId: string,
+    mode: 'load' | 'resume',
+    workspaceCwd?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.reject(
+        new DOMException('Session load cancelled', 'AbortError'),
+      );
+    }
+    manualSessionClearRef.current = false;
+    const loadPromise = startPendingSessionLoad(sessionId, mode, signal);
+    const currentSession = sessionRef.current;
+    const currentSessionId = currentSession?.sessionId;
+    const activePrompt = currentSessionId
+      ? activePromptsRef.current.get(currentSessionId)
+      : undefined;
+    activePrompt?.reject?.(
+      new DOMException('Session switch interrupted prompt wait', 'AbortError'),
+    );
+    if (currentSessionId) {
+      activePromptsRef.current.delete(currentSessionId);
+    }
+    resetCurrentSessionActivePrompt();
+    const reloadingCurrentSession =
+      mode === 'load' && currentSessionId === sessionId;
+    if (currentSession) {
+      const detachCurrentSession = () =>
+        currentSession.detach().catch((error: unknown) => {
+          console.warn(
+            '[DaemonSessionActions] detach before session switch failed:',
+            error,
+          );
+        });
+      if (reloadingCurrentSession) {
+        skipNextCleanupDetachSessionIdRef.current = sessionId;
+        void loadPromise.then(detachCurrentSession, () => undefined);
+      } else {
+        void detachCurrentSession();
+      }
+    }
+    if (!reloadingCurrentSession) sessionRef.current = undefined;
+    if (!reloadingCurrentSession) {
+      setConnection((current) => ({
+        ...current,
+        status: 'connecting',
+        sessionId,
+        clientId: undefined,
+        displayName: undefined,
+        error: undefined,
+        errorStatus: undefined,
+        missingSession: false,
+        loadingTranscript: true,
+        catchingUp: undefined,
+      }));
+    }
     setPromptStatus('idle');
     settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-    store.reset();
+    if (!reloadingCurrentSession) store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
+    setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
     setRestoreSessionNonce((nonce) => nonce + 1);
-    return loadPromise;
+    return loadPromise.catch((error: unknown) => {
+      if (!isAbortError(error)) {
+        setConnection((current) => ({
+          ...current,
+          loadingTranscript: undefined,
+          catchingUp: undefined,
+        }));
+      }
+      throw error;
+    });
   }
 
   return {
@@ -162,35 +328,43 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const inputAnnotations =
+          options?.inputAnnotations && options.inputAnnotations.length > 0
+            ? options.inputAnnotations
+            : undefined;
         if (options?.optimisticUserMessage !== false) {
-          store.appendLocalUserMessage(text, normalizedImages);
+          store.appendLocalUserMessage(
+            text,
+            normalizedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+          );
         }
         const promptRequest: Record<string, unknown> = {
           prompt: toDaemonPromptContent(text, normalizedImages),
         };
+        if (inputAnnotations) {
+          promptRequest['_meta'] = { inputAnnotations };
+        }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        const result = await session.prompt(
-          promptRequest as Parameters<typeof session.prompt>[0],
+        const accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
-        if (isNonBlockingAccepted(result)) {
-          return await waitForAcceptedPromptCompletion(
-            activePromptsRef.current,
-            settledPromptsRef.current,
-            sessionId,
-            ctrl,
-            result.promptId,
-          );
+        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
+          restartEventStream(sessionId);
         }
-        if (sessionRef.current?.sessionId === sessionId) {
-          store.dispatch({
-            type: 'assistant.done',
-            reason: result.stopReason,
-          });
-        }
-        return result;
+        // The prompt is admitted to the session here — signal it before we wait
+        // out the (possibly long) turn, so an admission-only caller can proceed.
+        options?.onAdmitted?.();
+        return await waitForAcceptedPromptCompletion(
+          activePromptsRef.current,
+          settledPromptsRef.current,
+          sessionId,
+          ctrl,
+          accepted.promptId,
+        );
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -198,11 +372,11 @@ export function createDaemonSessionActions({
           }
           return { stopReason: 'cancelled' };
         }
-        if (sessionRef.current?.sessionId === sessionId) {
-          store.dispatch({ type: 'assistant.done', reason: 'error' });
-        }
         if (isDaemonTurnError(error)) {
           throw error;
+        }
+        if (sessionRef.current?.sessionId === sessionId) {
+          store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
         throw dispatchActionError(
           addNotice,
@@ -217,11 +391,76 @@ export function createDaemonSessionActions({
         }
         if (
           sessionRef.current?.sessionId === sessionId &&
-          !activePromptsRef.current.has(sessionId)
+          !hasSessionActivePrompt()
         ) {
           setPromptStatus('idle');
         }
       }
+    },
+
+    async submitPrompt(text, options) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Prompt failed',
+        'send_prompt',
+      );
+      if (options?.sessionId && session.sessionId !== options.sessionId) {
+        throw new Error('Session changed before prompt submission');
+      }
+      const normalizedImages: Array<{ data: string; mimeType: string }> = (
+        options?.images ?? []
+      ).map((img) => ({
+        data: img.data,
+        mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
+      }));
+      const inputAnnotations =
+        options?.inputAnnotations && options.inputAnnotations.length > 0
+          ? options.inputAnnotations
+          : undefined;
+      if (options?.optimisticUserMessage !== false) {
+        store.appendLocalUserMessage(
+          text,
+          normalizedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+        );
+      }
+      const promptRequest: Record<string, unknown> = {
+        prompt: toDaemonPromptContent(text, normalizedImages),
+      };
+      if (inputAnnotations) {
+        promptRequest['_meta'] = { inputAnnotations };
+      }
+      if (options?.retry) {
+        promptRequest['retry'] = true;
+      }
+      const accepted = await session.submitPrompt(
+        promptRequest as Parameters<typeof session.submitPrompt>[0],
+      );
+      if (options?.signal?.aborted) {
+        await session
+          .removePendingPrompt(accepted.promptId)
+          .catch((err: unknown) => {
+            console.warn(
+              '[submitPrompt] removePendingPrompt failed after abort',
+              err,
+            );
+            addNotice({
+              severity: 'error',
+              category: 'user_action',
+              operation: 'send_prompt',
+              code: 'daemon.send_prompt.pending_cleanup_failed',
+              message:
+                'Prompt was accepted after cancellation but could not be removed from the queue.',
+              debugMessage: err instanceof Error ? err.message : String(err),
+              recoverable: true,
+            });
+          });
+        throw (
+          options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+        );
+      }
+      return { promptId: accepted.promptId };
     },
 
     async cancel() {
@@ -259,7 +498,7 @@ export function createDaemonSessionActions({
         }
         if (
           sessionRef.current?.sessionId === session.sessionId &&
-          !activePromptsRef.current.has(session.sessionId)
+          !hasSessionActivePrompt()
         ) {
           setPromptStatus('idle');
         }
@@ -380,12 +619,12 @@ export function createDaemonSessionActions({
       return withActionTimeout(session.heartbeat(), 'Heartbeat timed out');
     },
 
-    async listSessions() {
+    async listSessions(options) {
       const session = sessionRef.current;
       if (!session) return [];
       try {
         return await withActionTimeout(
-          session.client.listWorkspaceSessions(session.workspaceCwd),
+          session.client.listWorkspaceSessions(session.workspaceCwd, options),
           'List sessions timed out',
         );
       } catch (error) {
@@ -398,46 +637,158 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId) {
-      return startSessionSwitch(sessionId, 'load');
+    async loadSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
-    },
-
-    async createSession() {
+    async reloadSession(signal) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
-        'Create session failed',
-        'create_session',
+        'Reload session failed',
+        'load_session',
       );
-      const nextSession = await withActionTimeout(
-        session.client.createOrAttachSession(getCreateSessionRequest()),
-        'Create session timed out',
+      return startSessionSwitch(
+        session.sessionId,
+        'load',
+        session.workspaceCwd,
+        signal,
       );
-      persistStableClientId(nextSession.clientId, nextSession.sessionId);
-      return nextSession;
+    },
+
+    async resumeSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'resume', options?.workspaceCwd);
+    },
+
+    async createSession(options?: {
+      workspaceCwd?: string;
+      approvalMode?: DaemonApprovalMode;
+      sourceType?: string;
+      worktree?: { slug?: string };
+      branch?: { name: string };
+    }) {
+      try {
+        manualSessionClearRef.current = false;
+        // Fold the initial approval mode into the create request so the daemon
+        // applies it atomically at spawn (`POST /session` →
+        // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
+        // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
+        // an application failure aborts creation (this call rejects) rather than
+        // leaving the session in a different mode than the caller requested.
+        const requestOverrides = {
+          ...(options?.approvalMode !== undefined
+            ? { approvalMode: options.approvalMode }
+            : {}),
+          ...(options?.sourceType !== undefined
+            ? { sourceType: options.sourceType }
+            : {}),
+          ...(options?.worktree !== undefined
+            ? { worktree: options.worktree }
+            : {}),
+          ...(options?.branch !== undefined ? { branch: options.branch } : {}),
+        };
+        const session = sessionRef.current;
+        const activeSession =
+          session && getConnection().sessionId === session.sessionId
+            ? session
+            : undefined;
+        if (activeSession) {
+          const nextSession = await withActionTimeout(
+            activeSession.client.createOrAttachSession({
+              ...getCreateSessionRequest(),
+              ...(options?.workspaceCwd !== undefined
+                ? { workspaceCwd: options.workspaceCwd }
+                : {}),
+              ...requestOverrides,
+            }),
+            'Create session timed out',
+          );
+          persistStableClientId(nextSession.clientId, nextSession.sessionId);
+          return nextSession;
+        }
+
+        const nextSession = await withActionTimeout(
+          createDetachedSession(options?.workspaceCwd, requestOverrides),
+          'Create session timed out',
+        );
+        if (manualSessionClearRef.current) {
+          try {
+            await withActionTimeout(
+              nextSession.detach(),
+              'Detach cleared session timed out',
+            );
+          } catch (error) {
+            console.warn(
+              '[DaemonSessionActions] detach after interrupted create failed:',
+              error,
+            );
+          }
+          throw new DOMException('Session creation interrupted', 'AbortError');
+        }
+        persistStableClientId(nextSession.clientId, nextSession.sessionId);
+        sessionRef.current = nextSession;
+        skipNextCleanupDetachSessionIdRef.current = nextSession.sessionId;
+        setConnection((current) => ({
+          ...current,
+          status: 'connected',
+          sessionId: nextSession.sessionId,
+          ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
+          workspaceCwd: nextSession.workspaceCwd,
+          error: undefined,
+          errorStatus: undefined,
+          missingSession: false,
+        }));
+        return nextSession;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          `Create session failed${
+            options?.workspaceCwd ? ` (workspace: ${options.workspaceCwd})` : ''
+          }`,
+          error,
+          'create_session',
+        );
+      }
+    },
+
+    async attachSession() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Attach session failed',
+        'attach_session',
+      );
+      const loadPromise = startPendingSessionLoad(session.sessionId, 'attach');
+      setAttachSessionNonce((nonce) => nonce + 1);
+      return loadPromise;
+    },
+
+    async clearSession() {
+      const session = sessionRef.current;
+      manualSessionClearRef.current = true;
+      clearActiveSessionState();
+      sessionRef.current = undefined;
+      setConnection((current) =>
+        getConnectionAfterSessionClear(current, session?.sessionId),
+      );
+      if (session) {
+        try {
+          await withActionTimeout(session.detach(), 'Clear session timed out');
+        } catch (error) {
+          console.warn('[DaemonSessionActions] detach on clear failed:', error);
+        }
+      }
     },
 
     async newSession() {
-      for (const [, active] of activePromptsRef.current) {
-        active.controller.abort();
-      }
-      activePromptsRef.current.clear();
-      settledPromptsRef.current.clear();
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      if (pendingSessionLoadRef.current) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
-        pendingSessionLoadRef.current.reject(
-          new DOMException('New session requested', 'AbortError'),
-        );
-        pendingSessionLoadRef.current = undefined;
-      }
-      store.reset();
-      setRestoreSessionId(undefined);
+      manualSessionClearRef.current = false;
+      clearActiveSessionState();
+      setConnection((current) => ({
+        ...current,
+        missingSession: false,
+        error: undefined,
+        errorStatus: undefined,
+      }));
       setNewSessionNonce((nonce) => nonce + 1);
     },
 
@@ -608,6 +959,19 @@ export function createDaemonSessionActions({
       }
     },
 
+    async *generateSessionContent(
+      prompt: string,
+      opts?: { signal?: AbortSignal },
+    ): AsyncGenerator<DaemonSessionGenerationEvent> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Generate content failed',
+        'generate_session_content',
+      );
+      yield* session.generateContent(prompt, opts);
+    },
+
     async getRewindSnapshots(): Promise<{
       snapshots: DaemonRewindSnapshotInfo[];
     }> {
@@ -715,6 +1079,57 @@ export function createDaemonSessionActions({
       }
     },
 
+    async removeMidTurnMessage(
+      messageId: string,
+      opts,
+    ): Promise<DaemonRemoveMidTurnMessageResult> {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // The bridge removes a mid-turn message only on an exact originator
+        // match. The originator is the client id that was attached to the
+        // TARGET session when the message was queued — with per-session client
+        // ids that differs from the currently selected session's id, so
+        // forwarding our own id would resolve to a foreign originator and the
+        // bridge would reject a valid removal after a session switch. Prefer
+        // the target session's persisted id; fall back to our own when nothing
+        // is persisted (a shared caller-provided client id covers every
+        // session).
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
+        return await session.client.removeMidTurnMessage(
+          opts.sessionId,
+          messageId,
+          {
+            ...(targetClientId ? { clientId: targetClientId } : {}),
+          },
+        );
+      }
+      return await session.removeMidTurnMessage(messageId);
+    },
+
+    async getPendingPrompts(opts) {
+      const session = sessionRef.current;
+      if (!session)
+        return { pendingPrompts: [] as DaemonPendingPromptSummary[] };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        throw new Error('Session changed before pending prompts refresh');
+      }
+      return await session.getPendingPrompts();
+    },
+
+    async removePendingPrompt(promptId: string, opts) {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        return await session.client.removePendingPrompt(
+          opts.sessionId,
+          promptId,
+        );
+      }
+      return await session.removePendingPrompt(promptId);
+    },
+
     async sendShellCommand(command: string) {
       const session = requireSessionForAction(
         addNotice,
@@ -739,27 +1154,41 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
           activePromptsRef.current.delete(shellKey);
         }
-        if (sessionRef.current?.sessionId === session.sessionId) {
+        if (
+          sessionRef.current?.sessionId === session.sessionId &&
+          !hasSessionActivePrompt()
+        ) {
           setPromptStatus('idle');
         }
       }
     },
 
-    async getTasks() {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Get tasks failed',
-        'load_tasks',
-      );
+    async getTasks(opts) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'Daemon session is not connected'
+        ) {
+          throw error;
+        }
+        if (opts?.silent && isTransientActionError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Get tasks failed',
           error,
           'load_tasks',
+          opts?.silent
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey('load_tasks', error),
+              }
+            : undefined,
         );
       }
     },
@@ -825,6 +1254,12 @@ export function createDaemonSessionActions({
           'load_stats',
         );
       }
+    },
+
+    async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(session.artifacts(), 'Load artifacts timed out');
     },
 
     async respondToGlobalPermission(
@@ -1037,6 +1472,10 @@ function dispatchActionError(
   action: string,
   error: unknown,
   operation: DaemonNoticeOperation,
+  opts?: {
+    dispatchedNoticeKeys?: Set<string>;
+    noticeOnceKey?: string;
+  },
 ): Error {
   if (isAbortError(error)) {
     if (error instanceof Error) return error;
@@ -1046,17 +1485,50 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
-  addNotice({
-    severity: 'error',
-    category: 'user_action',
-    operation,
-    code: `daemon.${operation}.failed`,
-    message: `${action}: ${message}`,
-    debugMessage: message,
-    recoverable: true,
-  });
+  const noticeKey = opts?.noticeOnceKey;
+  const dispatchedNoticeKeys = opts?.dispatchedNoticeKeys;
+  if (!noticeKey || !dispatchedNoticeKeys?.has(noticeKey)) {
+    addNotice({
+      severity: 'error',
+      category: 'user_action',
+      operation,
+      code: `daemon.${operation}.failed`,
+      message: `${action}: ${message}`,
+      debugMessage: message,
+      recoverable: true,
+    });
+    if (noticeKey) {
+      dispatchedNoticeKeys?.add(noticeKey);
+    }
+  }
   return markNoticeDispatched(
     error instanceof Error ? error : new Error(message),
+  );
+}
+
+function getActionErrorNoticeKey(
+  operation: DaemonNoticeOperation,
+  error: unknown,
+): string {
+  return `${operation}:${getActionErrorMessage(error)}`;
+}
+
+function getActionErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientActionError(error: unknown): boolean {
+  if (isAbortError(error)) return true;
+  const status = extractHttpStatus(error);
+  if (status !== undefined) {
+    return status >= 500 || status === 408 || status === 429;
+  }
+  const message = getActionErrorMessage(error).toLowerCase();
+  return (
+    message.includes('timed out') ||
+    message.includes('failed to fetch') ||
+    message.includes('network error') ||
+    message.includes('networkerror')
   );
 }
 
@@ -1075,4 +1547,12 @@ function markNoticeDispatched(error: Error): Error {
 
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function getSessionLoadNoticeOperation(
+  mode: PendingSessionLoad['mode'],
+): DaemonNoticeOperation {
+  if (mode === 'resume') return 'resume_session';
+  if (mode === 'attach') return 'attach_session';
+  return 'load_session';
 }

@@ -56,6 +56,7 @@ export function DaemonWorkspaceProvider({
   const capabilitiesPromiseRef = useRef<
     Promise<DaemonCapabilities> | undefined
   >(undefined);
+  const capabilitiesGenerationRef = useRef(0);
   const resolvedCwdRef = useRef<string | undefined>(workspaceCwd);
 
   const [capabilities, setCapabilities] = useState<
@@ -72,6 +73,7 @@ export function DaemonWorkspaceProvider({
     if (capabilitiesClientRef.current !== client) {
       capabilitiesClientRef.current = client;
       capabilitiesPromiseRef.current = undefined;
+      capabilitiesGenerationRef.current++;
     }
     if (!capabilitiesPromiseRef.current) {
       const promise = client.capabilities().catch((error: unknown) => {
@@ -83,6 +85,66 @@ export function DaemonWorkspaceProvider({
       capabilitiesPromiseRef.current = promise;
     }
     return capabilitiesPromiseRef.current;
+  }, [client]);
+
+  // Force a fresh capabilities fetch and update state. `getCapabilities`
+  // memoizes its first in-flight promise and only feeds `setCapabilities`
+  // from the mount effect, so callers that mutate capabilities at runtime
+  // (e.g. registering a workspace) would otherwise see no change until a
+  // full reload. This bypasses the cache, replaces the cached promise so
+  // later `getCapabilities` callers see the new value too, and pushes the
+  // result into state.
+  const refreshCapabilities = useCallback(() => {
+    if (!client) {
+      return Promise.reject(new Error('Daemon workspace client unavailable'));
+    }
+    if (capabilitiesClientRef.current !== client) {
+      capabilitiesClientRef.current = client;
+      capabilitiesGenerationRef.current++;
+    }
+    const generation = ++capabilitiesGenerationRef.current;
+    // Superseded callers must observe the accepted successor, not the stale
+    // payload they happened to receive from their own HTTP request.
+    const followAcceptedSuccessor = (): Promise<DaemonCapabilities> => {
+      const successor = capabilitiesPromiseRef.current;
+      if (
+        capabilitiesClientRef.current === client &&
+        successor &&
+        capabilitiesGenerationRef.current !== generation
+      ) {
+        return successor;
+      }
+      return Promise.reject(
+        new Error('Capabilities refresh was superseded by a client change'),
+      );
+    };
+    const acceptedPromise = client.capabilities().then(
+      (caps) => {
+        if (
+          capabilitiesClientRef.current !== client ||
+          capabilitiesGenerationRef.current !== generation
+        ) {
+          return followAcceptedSuccessor();
+        }
+        setCapabilities(caps);
+        setStatus('connected');
+        setError(undefined);
+        return caps;
+      },
+      (error: unknown) => {
+        if (
+          capabilitiesClientRef.current !== client ||
+          capabilitiesGenerationRef.current !== generation
+        ) {
+          return followAcceptedSuccessor();
+        }
+        setError(error instanceof Error ? error : new Error(String(error)));
+        setStatus('error');
+        throw error;
+      },
+    );
+    capabilitiesPromiseRef.current = acceptedPromise;
+    return acceptedPromise;
   }, [client]);
 
   useEffect(() => {
@@ -99,15 +161,26 @@ export function DaemonWorkspaceProvider({
     }
 
     let disposed = false;
-    void getCapabilities()
+    const initialPromise = getCapabilities();
+    void initialPromise
       .then((caps) => {
-        if (!disposed) {
+        // A user-triggered refresh may supersede the mount request before it
+        // resolves; only the still-current promise may initialize state.
+        if (
+          !disposed &&
+          capabilitiesClientRef.current === client &&
+          capabilitiesPromiseRef.current === initialPromise
+        ) {
           setCapabilities(caps);
           setStatus('connected');
         }
       })
       .catch((err: unknown) => {
-        if (!disposed) {
+        if (
+          !disposed &&
+          capabilitiesClientRef.current === client &&
+          capabilitiesPromiseRef.current === initialPromise
+        ) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setStatus('error');
         }
@@ -153,6 +226,7 @@ export function DaemonWorkspaceProvider({
       error,
       capabilities,
       getCapabilities,
+      refreshCapabilities,
       actions: workspaceActions,
     };
   }, [
@@ -164,6 +238,7 @@ export function DaemonWorkspaceProvider({
     error,
     capabilities,
     getCapabilities,
+    refreshCapabilities,
     workspaceActions,
   ]);
 

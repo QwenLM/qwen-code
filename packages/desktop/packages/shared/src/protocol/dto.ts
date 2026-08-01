@@ -565,6 +565,7 @@ export type QwenCoreSettingKey =
   | 'memory.enableManagedAutoMemory'
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
+  | 'memory.autoSkillConfirm'
   | 'disableAllHooks'
 
 export interface QwenMcpServerConfig {

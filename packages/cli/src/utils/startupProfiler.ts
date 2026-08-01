@@ -17,10 +17,11 @@
  *   recordStartupEvent('name', attrs?) — record a discrete event (multi-fire allowed)
  *   finalizeStartupProfile(id)   — call after last checkpoint to write report
  *
- * By default profiles only inside the sandbox child process to avoid duplicate
- * reports. Set QWEN_CODE_PROFILE_STARTUP_OUTER=1 to also profile the outer
- * (pre-sandbox) process; outer reports are written with an `outer-` filename
- * prefix to keep them separate from sandbox-child reports.
+ * By default profiles inside the sandbox child process to avoid duplicate
+ * reports. `qwen serve` has no sandbox child, so it is profiled directly.
+ * Set QWEN_CODE_PROFILE_STARTUP_OUTER=1 to also profile the outer
+ * (pre-sandbox) process for non-serve runs; outer reports are written with an
+ * `outer-` filename prefix to keep them separate from sandbox-child reports.
  *
  * Zero overhead when disabled (single env var check).
  */
@@ -30,6 +31,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import type { StartupEventAttrs } from '@qwen-code/qwen-code-core';
+import { isServeFastPathArgv } from '../serve/fast-path-argv.js';
 
 interface Checkpoint {
   name: string;
@@ -141,16 +143,17 @@ export function initStartupProfiler(): void {
 
   const inSandboxChild = !!process.env['SANDBOX'];
   const outerOptIn = process.env['QWEN_CODE_PROFILE_STARTUP_OUTER'] === '1';
+  const serveCommand = isServeFastPathArgv(process.argv.slice(2));
 
-  // Default behavior is unchanged: only the sandbox child collects.
-  // Outer (pre-sandbox) collection requires an explicit opt-in to avoid
-  // accidentally producing duplicate reports.
-  if (!inSandboxChild && !outerOptIn) {
+  // Non-serve outer (pre-sandbox) collection requires an explicit opt-in to
+  // avoid accidentally producing duplicate reports. Serve has no sandbox child,
+  // so the primary startup flag should collect in the current process.
+  if (!inSandboxChild && !outerOptIn && !serveCommand) {
     return;
   }
 
   enabled = true;
-  outerProcess = !inSandboxChild;
+  outerProcess = !inSandboxChild && !serveCommand;
   // Default to capturing heap snapshots at every checkpoint.
   // Disable with QWEN_CODE_PROFILE_STARTUP_NO_HEAP=1 when measuring the
   // Heisenberg overhead of the heap call itself.

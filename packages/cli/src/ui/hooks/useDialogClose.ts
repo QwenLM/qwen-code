@@ -6,7 +6,11 @@
 
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
-import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  ApprovalMode,
+  ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import type { ArenaDialogType } from './useArenaCommand.js';
 
 export interface DialogCloseOptions {
@@ -20,6 +24,10 @@ export interface DialogCloseOptions {
     mode: ApprovalMode | undefined,
     scope: SettingScope,
   ) => void;
+
+  // Reasoning effort dialog
+  isEffortDialogOpen: boolean;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
 
   // Auth dialog
   isAuthDialogOpen: boolean;
@@ -57,6 +65,10 @@ export interface DialogCloseOptions {
   isHelpDialogOpen?: boolean;
   closeHelpDialog?: () => void;
 
+  // Skill review dialog
+  isSkillReviewDialogOpen: boolean;
+  dismissSkillReviewDialog: () => void;
+
   // Background tasks dialog
   isBackgroundTasksDialogOpen: boolean;
   closeBackgroundTasksDialog: () => void;
@@ -91,6 +103,12 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isApprovalModeDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current mode
       options.handleApprovalModeSelect(undefined, SettingScope.User);
+      return true;
+    }
+
+    if (options.isEffortDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined) - keeps the current effort.
+      options.handleEffortSelect(undefined);
       return true;
     }
 
@@ -157,6 +175,14 @@ export function useDialogClose(options: DialogCloseOptions) {
       // Ctrl+C should dismiss the dialog rather than fall through to the
       // exit-prompt path or cancel the (non-existent) request.
       options.closeDiffDialog();
+      return true;
+    }
+
+    if (options.isSkillReviewDialogOpen) {
+      // Skill-review dialog: Ctrl+C defers it (same as Esc "decide later").
+      // Must call dismiss (not close) so the batch is recorded in the dismissed
+      // set — otherwise the idle effect immediately reopens it.
+      options.dismissSkillReviewDialog();
       return true;
     }
 

@@ -5,10 +5,10 @@
  */
 
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getSingleDirPathCompletions } from './directoryCommand.js';
+import { resolvePath } from '@qwen-code/qwen-code-core';
 import {
   isFolderTrustEnabled,
   loadTrustedFolders,
@@ -36,19 +36,7 @@ function resolveCdPath(input: string, baseDir: string): string {
     throw new Error('Path contains null bytes.');
   }
 
-  if (input === '~') {
-    return path.normalize(os.homedir());
-  }
-
-  if (input.startsWith('~/')) {
-    return path.normalize(path.join(os.homedir(), input.slice(2)));
-  }
-
-  if (path.isAbsolute(input)) {
-    return path.normalize(input);
-  }
-
-  return path.resolve(baseDir, input);
+  return path.normalize(resolvePath(baseDir, input));
 }
 
 export const cdCommand: SlashCommand = {
@@ -191,6 +179,15 @@ export const cdCommand: SlashCommand = {
           }`,
         );
       }
+      if (relocation.mcpRefreshError) {
+        warnings.push(
+          `MCP refresh failed: ${
+            relocation.mcpRefreshError instanceof Error
+              ? relocation.mcpRefreshError.message
+              : String(relocation.mcpRefreshError)
+          }`,
+        );
+      }
     } catch (error) {
       return {
         type: 'message' as const,
@@ -201,7 +198,16 @@ export const cdCommand: SlashCommand = {
       };
     }
     if (trustedTargetPath) {
-      loadTrustedFolders().setValue(trustedTargetPath, TrustLevel.TRUST_FOLDER);
+      try {
+        loadTrustedFolders().setValue(
+          trustedTargetPath,
+          TrustLevel.TRUST_FOLDER,
+        );
+      } catch (error) {
+        warnings.push(
+          `Trust setting update failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     try {

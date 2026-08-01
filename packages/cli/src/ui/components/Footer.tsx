@@ -21,16 +21,39 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
-import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import {
+  GoalPill,
+  isLiveGoalSnapshot,
+  useFooterGoalState,
+} from './GoalPill.js';
+import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
+import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { StreamingState } from '../types.js';
+
+import type { PasteProgress } from '../contexts/KeypressContext.js';
+
+const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
+  progress,
+}) => {
+  const { receivedBytes } = progress;
+  const kb = receivedBytes / 1024;
+  const label = kb >= 1 ? `${kb.toFixed(0)} KB` : `${receivedBytes} B`;
+
+  return (
+    <Text dimColor>
+      {t('Pasting…')} {label}
+    </Text>
+  );
+};
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
@@ -82,6 +105,8 @@ export const Footer: React.FC = () => {
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+  ) : pasteProgress.active ? (
+    <PasteProgressBar progress={pasteProgress} />
   ) : uiState.rewindEscPending ? (
     <Text color={theme.text.secondary}>
       {t('Press Esc again to rewind conversation.')}
@@ -96,8 +121,27 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+    </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+    <Text color={theme.status.warning}>
+      {t('IDE connection unavailable: {{message}}', {
+        message: uiState.startupIdeConnectionStatus.message,
+      })}
+    </Text>
+  ) : uiState.streamingState === StreamingState.Responding ? (
+    <Text color={theme.text.secondary}>
+      {t('Enter to steer · Ctrl+Q to queue')}
+      {showAutoAcceptIndicator !== undefined && (
+        <>
+          {' · '}
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+        </>
+      )}
+    </Text>
+  ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
@@ -107,7 +151,13 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
+    });
+  }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
     });
   }
   if (debugMode) {
@@ -117,7 +167,7 @@ export const Footer: React.FC = () => {
     });
   }
   // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
-  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // alongside the other background-task kinds. The previous `◆ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
@@ -137,9 +187,16 @@ export const Footer: React.FC = () => {
   // Goal pill: only present in `rightItems` when a goal is active so the
   // divider chain stays tight; the pill itself does the live elapsed-time
   // refresh internally.
-  const goalActive = useFooterGoalState() !== undefined;
-  if (goalActive) {
-    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  const goalState = useFooterGoalState();
+  if (isLiveGoalSnapshot(goalState)) {
+    rightItems.push({
+      key: 'goal',
+      node: <GoalPill snapshot={goalState} />,
+    });
+  }
+  const cronTaskCount = useFooterCronTaskCount();
+  if (cronTaskCount > 0) {
+    rightItems.push({ key: 'cron', node: <CronPill count={cronTaskCount} /> });
   }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
@@ -209,13 +266,21 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text color={theme.text.accent} wrap="truncate">
-              {`⚙ ${t('workflow active')}`}
+              {`▷ ${t('workflow active')}`}
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

@@ -190,7 +190,7 @@ describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
 
   it('handles bare tilde (~) as home directory', () => {
     Storage.setRuntimeBaseDir('~');
-    expect(Storage.getRuntimeBaseDir()).toBe(os.homedir());
+    expect(Storage.getRuntimeBaseDir()).toBe(path.normalize(os.homedir()));
   });
 });
 
@@ -578,7 +578,7 @@ describe('Storage – QWEN_HOME env var', () => {
 
   it('handles bare tilde (~) as home directory in QWEN_HOME', () => {
     process.env['QWEN_HOME'] = '~';
-    expect(Storage.getGlobalQwenDir()).toBe(os.homedir());
+    expect(Storage.getGlobalQwenDir()).toBe(path.normalize(os.homedir()));
   });
 
   it('QWEN_HOME and QWEN_RUNTIME_DIR are independent', () => {
@@ -640,5 +640,54 @@ describe('Storage – runtime base dir async context isolation', () => {
     const [a, b] = await Promise.all([runA, runB]);
     expect(a).toBe(path.join(cwdA, '.qwen-a'));
     expect(b).toBe(path.join(cwdB, '.qwen-b'));
+  });
+
+  it('lets a resolved runtime pin override later process env changes', async () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+    process.env['QWEN_RUNTIME_DIR'] = path.resolve(
+      'workspace',
+      'ambient-runtime',
+    );
+
+    await Storage.runWithResolvedRuntimeBaseDir(pinned, async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+      await Promise.resolve();
+      expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+    });
+  });
+
+  it('keeps a resolved runtime pin across nested configurable contexts', () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+
+    Storage.runWithResolvedRuntimeBaseDir(pinned, () => {
+      Storage.runWithRuntimeBaseDir(
+        path.resolve('workspace', 'nested-runtime'),
+        undefined,
+        () => {
+          expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+          expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+        },
+      );
+    });
+  });
+
+  it('pins an instance to the runtime dir where it was created', () => {
+    const cwd = path.resolve('workspace', 'pinned');
+    const runtimeDir = path.join(cwd, '.qwen-a');
+    const storage = Storage.runWithRuntimeBaseDir(
+      '.qwen-a',
+      cwd,
+      () => new Storage(cwd),
+    );
+
+    Storage.runWithRuntimeBaseDir('.qwen-b', cwd, () => {
+      expect(storage.getRuntimeBaseDir()).toBe(runtimeDir);
+      expect(storage.getProjectDir()).toContain(
+        path.join(runtimeDir, 'projects'),
+      );
+      expect(storage.getProjectTempDir()).toContain(
+        path.join(runtimeDir, 'tmp'),
+      );
+    });
   });
 });

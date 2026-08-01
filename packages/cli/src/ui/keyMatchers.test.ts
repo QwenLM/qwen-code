@@ -29,7 +29,8 @@ describe('keyMatchers', () => {
     [Command.END]: (key: Key) => key.ctrl && key.name === 'e',
     [Command.KILL_LINE_RIGHT]: (key: Key) => key.ctrl && key.name === 'k',
     [Command.KILL_LINE_LEFT]: (key: Key) => key.ctrl && key.name === 'u',
-    [Command.CLEAR_INPUT]: (key: Key) => key.ctrl && key.name === 'c',
+    [Command.CLEAR_INPUT]: (key: Key) =>
+      key.ctrl && key.name === 'c' && !key.shift,
     [Command.DELETE_WORD_BACKWARD]: (key: Key) =>
       ((key.ctrl || key.meta) && key.name === 'backspace') ||
       key.sequence === '\x1f',
@@ -39,15 +40,21 @@ describe('keyMatchers', () => {
     [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up' && !key.shift,
     [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
-      key.name === 'tab' || (key.name === 'return' && !key.ctrl),
+      key.name === 'tab' || (key.name === 'return' && !key.ctrl && !key.shift),
     // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
     [Command.COMPLETION_UP]: (key: Key) =>
       (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
     [Command.COMPLETION_DOWN]: (key: Key) =>
       (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
+    [Command.COMPLETION_TAB_LEFT]: (key: Key) =>
+      key.name === 'left' && !key.shift && key.ctrl && !key.meta,
+    [Command.COMPLETION_TAB_RIGHT]: (key: Key) =>
+      key.name === 'right' && !key.shift && key.ctrl && !key.meta,
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
+    [Command.QUEUE_MESSAGE]: (key: Key) =>
+      key.name === 'q' && key.ctrl && !key.meta && !key.shift && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
     [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
@@ -60,11 +67,10 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 't',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
       key.ctrl && key.name === 'g',
-    [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
+    [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c' && !key.shift,
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
-    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
     [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
       key.ctrl && key.name === 'b',
@@ -93,7 +99,7 @@ describe('keyMatchers', () => {
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
-      key.meta && key.name === 't',
+      (key.ctrl && key.name === 'o') || (key.meta && key.name === 't'),
   };
 
   // Test data for each command with positive and negative test cases
@@ -144,7 +150,12 @@ describe('keyMatchers', () => {
     {
       command: Command.CLEAR_INPUT,
       positive: [createKey('c', { ctrl: true })],
-      negative: [createKey('c'), createKey('k', { ctrl: true })],
+      negative: [
+        createKey('c'),
+        createKey('k', { ctrl: true }),
+        // Ctrl+Shift+C is the terminal copy shortcut — must not clear input
+        createKey('c', { ctrl: true, shift: true }),
+      ],
     },
     {
       command: Command.DELETE_WORD_BACKWARD,
@@ -202,7 +213,11 @@ describe('keyMatchers', () => {
     {
       command: Command.ACCEPT_SUGGESTION,
       positive: [createKey('tab'), createKey('return')],
-      negative: [createKey('return', { ctrl: true }), createKey('space')],
+      negative: [
+        createKey('return', { ctrl: true }),
+        createKey('return', { shift: true }),
+        createKey('space'),
+      ],
     },
     {
       // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
@@ -226,6 +241,26 @@ describe('keyMatchers', () => {
         createKey('down', { shift: true }),
       ],
     },
+    {
+      command: Command.COMPLETION_TAB_LEFT,
+      positive: [createKey('left', { ctrl: true })],
+      negative: [
+        createKey('left'),
+        createKey('left', { shift: true, ctrl: true }),
+        createKey('left', { ctrl: true, meta: true }),
+        createKey('right', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.COMPLETION_TAB_RIGHT,
+      positive: [createKey('right', { ctrl: true })],
+      negative: [
+        createKey('right'),
+        createKey('right', { shift: true, ctrl: true }),
+        createKey('right', { ctrl: true, meta: true }),
+        createKey('left', { ctrl: true }),
+      ],
+    },
 
     // Text input
     {
@@ -235,6 +270,17 @@ describe('keyMatchers', () => {
         createKey('return', { ctrl: true }),
         createKey('return', { meta: true }),
         createKey('return', { paste: true }),
+      ],
+    },
+    {
+      command: Command.QUEUE_MESSAGE,
+      positive: [createKey('q', { ctrl: true })],
+      negative: [
+        createKey('q'),
+        createKey('q', { ctrl: true, meta: true }),
+        createKey('q', { ctrl: true, shift: true }),
+        createKey('q', { ctrl: true, paste: true }),
+        createKey('return', { ctrl: true }),
       ],
     },
     {
@@ -280,7 +326,12 @@ describe('keyMatchers', () => {
     {
       command: Command.QUIT,
       positive: [createKey('c', { ctrl: true })],
-      negative: [createKey('c'), createKey('d', { ctrl: true })],
+      negative: [
+        createKey('c'),
+        createKey('d', { ctrl: true }),
+        // Ctrl+Shift+C is the terminal copy shortcut — must not quit
+        createKey('c', { ctrl: true, shift: true }),
+      ],
     },
     {
       command: Command.EXIT,
@@ -296,11 +347,6 @@ describe('keyMatchers', () => {
       command: Command.RETRY_LAST,
       positive: [createKey('y', { ctrl: true })],
       negative: [createKey('y'), createKey('r', { ctrl: true })],
-    },
-    {
-      command: Command.TOGGLE_COMPACT_MODE,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('p', { ctrl: true })],
     },
 
     // Selection list navigation
@@ -415,8 +461,16 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.TOGGLE_THINKING_EXPANDED,
-      positive: [createKey('t', { meta: true })],
-      negative: [createKey('t'), createKey('t', { ctrl: true })],
+      positive: [
+        createKey('t', { meta: true }),
+        createKey('o', { ctrl: true }),
+      ],
+      negative: [
+        createKey('t'),
+        createKey('t', { ctrl: true }),
+        createKey('o'),
+        createKey('o', { meta: true }),
+      ],
     },
   ];
 
@@ -461,6 +515,46 @@ describe('keyMatchers', () => {
           createKey('tab', { ctrl: true }),
         ),
       ).toBe(true); // modifiers ignored
+    });
+  });
+
+  // The Ctrl+Tab / Ctrl+Shift+Tab alternatives intentionally diverge from the
+  // original hard-coded matchers (which only knew Ctrl+←/→), so they are
+  // asserted against the data-driven matchers here rather than in the
+  // comparison block above (#8069).
+  describe('Completion tab-switching alternative bindings (#8069)', () => {
+    it('should match Ctrl+Tab as COMPLETION_TAB_RIGHT', () => {
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_RIGHT](
+          createKey('tab', { ctrl: true }),
+        ),
+      ).toBe(true);
+      // Bare Tab accepts the suggestion; Ctrl+Shift+Tab switches left.
+      expect(keyMatchers[Command.COMPLETION_TAB_RIGHT](createKey('tab'))).toBe(
+        false,
+      );
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_RIGHT](
+          createKey('tab', { ctrl: true, shift: true }),
+        ),
+      ).toBe(false);
+    });
+
+    it('should match Ctrl+Shift+Tab as COMPLETION_TAB_LEFT', () => {
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_LEFT](
+          createKey('tab', { ctrl: true, shift: true }),
+        ),
+      ).toBe(true);
+      // Bare Tab accepts the suggestion; Ctrl+Tab switches right.
+      expect(keyMatchers[Command.COMPLETION_TAB_LEFT](createKey('tab'))).toBe(
+        false,
+      );
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_LEFT](
+          createKey('tab', { ctrl: true }),
+        ),
+      ).toBe(false);
     });
   });
 

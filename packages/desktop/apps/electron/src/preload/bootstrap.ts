@@ -258,6 +258,10 @@ client.onConnectionStateChanged((state) => {
 ;(api as any).reconnectTransport = async () => {
   client.reconnectNow()
 }
+// Voice dictation: the loopback voice WS url (with token). Read lazily each call
+// so it reflects the server once it has started.
+;(api as any).getVoiceStreamUrl = (): string | null =>
+  ipcRenderer.sendSync('__get-voice-stream-url')
 
 // ── performOAuth ─────────────────────────────────────────────────────────
 // Multi-step orchestration: callback server (local) → oauth:start (server) →

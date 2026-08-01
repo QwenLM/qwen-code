@@ -241,6 +241,27 @@ describe('parseAllowOriginPatterns (T2.4 #4514)', () => {
     expect(out.origins.has('http://localhost:3000')).toBe(true);
   });
 
+  it('accepts a browser-extension opaque-origin scheme (chrome-extension://<id>)', () => {
+    // `chrome-extension://` gets an opaque `null` origin from the URL spec, so
+    // the canonical origin is rebuilt from scheme+host — this is what lets the
+    // extension's origin open the daemon WS reverse channel (issue #5626).
+    const out = parseAllowOriginPatterns([
+      'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk',
+    ]);
+    expect(out.allowAny).toBe(false);
+    expect(
+      out.origins.has('chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk'),
+    ).toBe(true);
+  });
+
+  it('still rejects a trailing slash on an extension origin', () => {
+    expect(() =>
+      parseAllowOriginPatterns([
+        'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk/',
+      ]),
+    ).toThrow(InvalidAllowOriginPatternError);
+  });
+
   it('accepts the `*` literal and sets allowAny', () => {
     const out = parseAllowOriginPatterns(['*']);
     expect(out.allowAny).toBe(true);
@@ -327,9 +348,12 @@ describe('allowOriginCors (T2.4 #4514)', () => {
     expect(res.headers.get('access-control-allow-headers')).toMatch(
       /Authorization/,
     );
+    expect(res.headers.get('access-control-allow-headers')).toMatch(
+      /X-Qwen-Event-Epoch/,
+    );
     expect(res.headers.get('access-control-max-age')).toBe('86400');
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After',
+      'Retry-After, X-Qwen-Event-Epoch',
     );
   });
 

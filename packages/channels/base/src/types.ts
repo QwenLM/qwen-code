@@ -1,15 +1,43 @@
-import type { AcpBridge } from './AcpBridge.js';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
+import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
-export type SessionScope = 'user' | 'thread' | 'single';
+export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+
+export interface ChannelIdentityConfig {
+  id?: string;
+  displayName?: string;
+  description?: string;
+}
+
+export interface ChannelRuntimeIdentity {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description?: string;
+}
+
+export type ChannelMemoryScopeMode = 'metadata-only';
+
+export interface ChannelMemoryScopeConfig {
+  namespace?: string;
+  mode?: ChannelMemoryScopeMode;
+}
+
+export interface ChannelRuntimeMemoryScope {
+  readonly namespace: string;
+  readonly mode: ChannelMemoryScopeMode;
+}
 
 export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
+  groupHistoryLimit?: number;
 }
 
 export interface BlockStreamingChunkConfig {
@@ -35,12 +63,20 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  identity?: ChannelIdentityConfig;
+  memoryScope?: ChannelMemoryScopeConfig;
+  webhooks?: ChannelWebhookConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
+  dmPolicy: DmPolicy; // default: "open"
+  groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
-  /** Dispatch mode for concurrent messages. Default: 'collect'. */
+  /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */
   dispatchMode?: DispatchMode;
+
+  /** Poll interval in ms for polling adapters. Default: 60000. */
+  pollInterval?: number;
 
   /** Enable block streaming — emit completed blocks as separate messages. */
   blockStreaming?: 'on' | 'off';
@@ -68,6 +104,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
@@ -83,6 +120,22 @@ export interface Envelope {
   imageMimeType?: string;
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
+  /**
+   * Contextual metadata (e.g. issue type, title, URL) kept separate from `text`
+   * so slash-command parsing operates on the comment body alone. Appended to
+   * the prompt after command parsing, sanitized via sanitizePromptText.
+   */
+  metadata?: string;
+  /**
+   * Marks an envelope whose `text` ALREADY carries its `[sender]` attribution, so
+   * handleInbound must NOT re-prefix it. Set in two places: on a synthetic
+   * collect-mode re-entry (coalesced text already carries each message's prefix), AND
+   * by the QQ adapter on a REAL inbound it self-prefixes as `[name]: …`. QQ
+   * neutralizes that embedded name with sanitizeSenderName at the source (QQChannel),
+   * so the self-prefixed name reaching the prompt is already sanitized — setting this
+   * flag does not bypass sanitization.
+   */
+  alreadyPrefixed?: true;
 }
 
 export interface SessionTarget {
@@ -90,6 +143,261 @@ export interface SessionTarget {
   senderId: string;
   chatId: string;
   threadId?: string;
+  isGroup?: boolean;
+}
+
+export interface ObservedChannelIdentity {
+  id: string;
+  label: string;
+}
+
+export interface ObservedChannelContactObservation {
+  user: ObservedChannelIdentity;
+  group?: ObservedChannelIdentity;
+  topic?: ObservedChannelIdentity;
+}
+
+export interface ObservedChannelContact extends ObservedChannelIdentity {
+  channelName: string;
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelRelatedContact extends ObservedChannelIdentity {
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelTopic extends ObservedChannelRelatedContact {
+  users: ObservedChannelRelatedContact[];
+}
+
+export interface ObservedChannelGroup extends ObservedChannelContact {
+  users: ObservedChannelRelatedContact[];
+  topics: ObservedChannelTopic[];
+}
+
+export interface ObservedChannelContactGraph {
+  users: ObservedChannelContact[];
+  groups: ObservedChannelGroup[];
+}
+
+export interface ChannelPromptOwner {
+  kind: 'channel_user';
+  id: string;
+}
+
+export type UserInputPresentationResult =
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' };
+
+export type UserInputSettlementReason =
+  | 'resolved_outside_presenter'
+  | 'cancelled'
+  | 'run_cancelled';
+
+export type ChannelUserInputResponse = RequestPermissionResponse & {
+  answers?: Record<string, string>;
+};
+
+export interface ChannelUserQuestion {
+  answerKey: string;
+  header: string;
+  question: string;
+  options: Array<{
+    label: string;
+    description: string;
+  }>;
+  multiSelect: boolean;
+}
+
+export interface ChannelUserInputRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  questions: ChannelUserQuestion[];
+  submitOptionId: string;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export interface ChannelOutputSegmentContext {
+  channelName: string;
+  sessionId: string;
+  runId: string;
+  segmentId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  messageId?: string;
+}
+
+export type ChannelOutputSegmentEndReason =
+  | 'response_boundary'
+  | 'input_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ChannelProactiveTarget {
+  channelName: string;
+  type: 'user' | 'chat';
+  id: string;
+}
+
+export interface ChannelTaskLifecycleBase {
+  channelName: string;
+  chatId: string;
+  sessionId: string;
+  messageId?: string;
+  runId?: string;
+  owner?: ChannelPromptOwner;
+  identity: ChannelRuntimeIdentity;
+  memoryScope: ChannelRuntimeMemoryScope;
+}
+
+/**
+ * Whitelist of tool-call fields exposed to lifecycle consumers. Kept explicit
+ * (not derived from ToolCallEvent) so a new bridge field can't leak through.
+ */
+export interface SanitizedToolCallEvent {
+  sessionId: string;
+  toolCallId: string;
+  kind: string;
+  title: string;
+  status: string;
+}
+
+/** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
+export type ChannelTaskCancellationReason =
+  | 'cancel_command'
+  | 'clear'
+  | 'steer'
+  | 'timeout'
+  | 'dropped';
+
+export type ChannelTaskLifecycleEvent =
+  | (ChannelTaskLifecycleBase & { type: 'started' })
+  /** `chunk` is raw model output — content, not metadata; deliberately unsanitized. */
+  | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
+  | (ChannelTaskLifecycleBase & {
+      type: 'tool_call';
+      toolCall: SanitizedToolCallEvent;
+    })
+  | (ChannelTaskLifecycleBase & {
+      type: 'cancelled';
+      reason: ChannelTaskCancellationReason;
+    })
+  | (ChannelTaskLifecycleBase & { type: 'completed' })
+  | (ChannelTaskLifecycleBase & {
+      type: 'failed';
+      error: string;
+      /** Where the turn failed: agent generation vs delivery to the platform. */
+      phase: 'agent' | 'delivery';
+    });
+
+/** Terminal lifecycle event types — exactly one is expected per task. */
+export function isTerminalTaskLifecycleType(
+  type: ChannelTaskLifecycleEvent['type'],
+): type is 'completed' | 'cancelled' | 'failed' {
+  return type === 'completed' || type === 'cancelled' || type === 'failed';
+}
+
+export interface ChannelMemoryTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+}
+
+export interface ChannelMemoryEntry {
+  id: string;
+  text: string;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
+}
+
+export interface ChannelMemoryCallbacks {
+  readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
+  getChannelMemoryRevision?(target: ChannelMemoryTarget): Promise<string>;
+  listChannelMemoryEntries(
+    target: ChannelMemoryTarget,
+  ): Promise<ChannelMemoryEntry[]>;
+  addChannelMemoryEntries(
+    target: ChannelMemoryTarget,
+    texts: readonly string[],
+    createdBy?: string,
+  ): Promise<{
+    changed: boolean;
+    added: ChannelMemoryEntry[];
+    duplicateIds: string[];
+  }>;
+  updateChannelMemoryEntry(
+    target: ChannelMemoryTarget,
+    mutation: { id: string; text: string; expectedText?: string },
+  ): Promise<{ changed: boolean; entry?: ChannelMemoryEntry }>;
+  removeChannelMemoryEntries(
+    target: ChannelMemoryTarget,
+    mutation: {
+      ids: readonly string[];
+      expectedTextById?: Readonly<Record<string, string>>;
+    },
+  ): Promise<{ changed: boolean; removed: ChannelMemoryEntry[] }>;
+  clearChannelMemory(target: ChannelMemoryTarget): Promise<{
+    changed: boolean;
+  }>;
+}
+
+export type ChannelMemoryIntentClassifierResult =
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
+  | { intent: 'list'; targetIds?: string[]; confidence: number }
+  | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
+  | {
+      intent: 'update';
+      targetIds: string[];
+      memory: string;
+      confidence: number;
+    }
+  | { intent: 'clear_all' | 'none'; confidence: number };
+
+export interface ChannelMemoryIntentClassifier {
+  classifyChannelMemoryIntent(
+    text: string,
+    entries?: readonly ChannelMemoryEntry[],
+  ): Promise<ChannelMemoryIntentClassifierResult>;
+}
+
+export type ChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum';
+
+export interface ChannelConfigFieldDescriptor {
+  key: string;
+  label: string;
+  kind: ChannelConfigFieldKind;
+  required?: boolean;
+  envResolvable?: boolean;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  description?: string;
+}
+
+export interface ChannelManagementDescriptor {
+  fields: readonly ChannelConfigFieldDescriptor[];
 }
 
 /**
@@ -110,11 +418,20 @@ export interface ChannelPlugin {
    */
   requiredConfigFields?: string[];
 
+  /** Optional config fields whose string values may reference environment vars. */
+  envResolvableConfigFields?: string[];
+
+  /** Serializable metadata for safe configuration management. */
+  management?: ChannelManagementDescriptor;
+
+  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  defaultSessionScope?: SessionScope;
+
   /** Create a channel adapter instance. */
   createChannel(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ): ChannelBase;
 }

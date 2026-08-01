@@ -125,7 +125,52 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
-  it('hides background task notifications by metadata', () => {
+  it('preserves user source metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
+        meta: { source: 'cron' },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'scheduled prompt',
+      source: 'cron',
+    });
+  });
+
+  it('preserves user input annotations metadata', () => {
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 14,
+        text: '@dataset:users',
+        reference: {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      },
+    ];
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@dataset:users', 1, false, {
+        meta: { inputAnnotations },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: '@dataset:users',
+      inputAnnotations,
+    });
+  });
+
+  it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
         'bg-1',
@@ -146,11 +191,135 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages).toEqual([
       {
+        id: 'bg-1',
+        role: 'system',
+        content:
+          'Background agent "general-purpose: 查询百度云活动信息" completed.',
+        variant: 'info',
+        source: 'background_notification',
+        data: { taskId: 'task-1', status: 'completed' },
+        timestamp: 1,
+      },
+      {
         id: 'assistant-1',
         role: 'assistant',
         content: '正常回复',
         isStreaming: false,
         timestamp: 2,
+      },
+    ]);
+  });
+
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'completed'],
+  ] as const)(
+    'projects a background agent %s notification onto its tool',
+    (notificationStatus, expectedStatus) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-block', 'agent-call', 'completed', 1, {
+          toolName: 'agent',
+          rawInput: { run_in_background: true },
+          rawOutput: { type: 'task_execution', status: 'background' },
+        }),
+        textBlock(
+          'agent-terminal',
+          'assistant',
+          'background agent finished',
+          2,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                status: notificationStatus,
+                taskId: 'agent-task',
+                toolUseId: 'agent-call',
+              },
+            },
+          },
+        ),
+      ]);
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-call', status: expectedStatus, endTime: 2 }],
+      });
+      expect(messages[1]).toMatchObject({
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          status: notificationStatus,
+          taskId: 'agent-task',
+          toolUseId: 'agent-call',
+        },
+      });
+      if (notificationStatus === 'cancelled') {
+        expect(
+          messages[0]?.role === 'tool_group'
+            ? messages[0].tools[0]?.rawOutput
+            : undefined,
+        ).toMatchObject({ status: 'cancelled' });
+      }
+    },
+  );
+
+  it('does not apply a non-agent background notification to an agent tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 1, {
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      textBlock('shell-terminal', 'assistant', 'shell completed', 2, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            kind: 'shell',
+            status: 'completed',
+            toolUseId: 'agent-call',
+          },
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'pending' }] },
+      {
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'shell',
+          status: 'completed',
+          toolUseId: 'agent-call',
+        },
+      },
+    ]);
+  });
+
+  it('renders replayed background notifications without task metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('bg-replay', 'user', 'Monitor completed.', 1, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'bg-replay',
+        role: 'system',
+        content: 'Monitor completed.',
+        variant: 'info',
+        source: 'background_notification',
+        timestamp: 1,
       },
     ]);
   });
@@ -2004,6 +2173,93 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('treats switch-to-default permission resolutions as approved', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Present HTML',
+        options: [
+          {
+            optionId: 'proceed_once_and_switch_to_default',
+            label: 'Switch to Default Mode and allow once (recommended)',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+        toolCall: {
+          toolCallId: 'mcp-1',
+          kind: 'other',
+          _meta: { toolName: 'mcp__agentic-pai__present_html' },
+          rawInput: { path: 'interactive.html' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:proceed_once_and_switch_to_default',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      callId: 'mcp-1',
+      status: 'in_progress',
+    });
+  });
+
+  it.each([
+    'selected:proceed_once',
+    'selected:proceed_once_and_switch_to_default',
+  ])(
+    'does not overwrite a completed tool with a later %s permission block',
+    (resolved) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'mcp-1', 'completed', 1, {
+          toolName: 'mcp__agentic-pai__present_html',
+          rawOutput: '{"approved":true}',
+          updatedAt: 3,
+        }),
+        {
+          id: 'perm-1',
+          kind: 'permission',
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          title: 'Present HTML',
+          options: [
+            {
+              optionId: resolved.slice('selected:'.length),
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+          ],
+          toolCall: {
+            toolCallId: 'mcp-1',
+            kind: 'other',
+            _meta: { toolName: 'mcp__agentic-pai__present_html' },
+            rawInput: { path: 'interactive.html' },
+          },
+          preview: { kind: 'generic' as const },
+          resolved,
+          clientReceivedAt: 2,
+          createdAt: 2,
+          updatedAt: 4,
+        },
+      ]);
+
+      const tool =
+        messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+      expect(tool).toMatchObject({
+        callId: 'mcp-1',
+        status: 'completed',
+        rawOutput: '{"approved":true}',
+        endTime: 3,
+      });
+    },
+  );
+
   it('renders rejected permission as completed agent card', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'first thinking', 1),
@@ -2162,6 +2418,131 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('renders model stream interruption errors from structured errorKind labels', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          data: { diagnosticId: 'abc' },
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Localized stream interruption.',
+        variant: 'error',
+        retryable: true,
+        source: 'turn_error',
+        data: {
+          diagnosticId: 'abc',
+          errorKind: 'model_stream_interrupted',
+        },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('upgrades older daemon terminated turn errors to localized text', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          text: 'terminated',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized stream interruption.',
+      retryable: true,
+      source: 'turn_error',
+    });
+  });
+
+  it('does not add data solely for structured errorKind labels', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized stream interruption.',
+      retryable: true,
+      source: 'turn_error',
+    });
+    expect(messages[0]).not.toHaveProperty('data');
+  });
+
+  it('preserves non-object error data when adding structured errorKind', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          data: 'diagnostic text',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      data: {
+        value: 'diagnostic text',
+        errorKind: 'model_stream_interrupted',
+      },
+    });
   });
 
   it('converts debug blocks to system messages with info variant', () => {

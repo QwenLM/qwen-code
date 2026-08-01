@@ -38,6 +38,7 @@
 
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { parsePositiveIntegerEnv } from '../../utils/env.js';
 
 /** Default stall timeout: 60s of no progress (with no tool in flight). */
 export const DEFAULT_STALL_MS = 60_000;
@@ -64,10 +65,11 @@ export function resolveStallMs(
     if (perCall > 0) return perCall;
   }
   const raw = env[MAX_WORKFLOW_STALL_MS_ENV];
-  if (raw !== undefined && raw.trim() !== '') {
-    const sec = Number(raw);
-    if (Number.isFinite(sec) && sec > 0) return sec * 1000;
-    if (sec === 0) return 0;
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (trimmed === '0') return 0;
+    const sec = parsePositiveIntegerEnv(trimmed, 0);
+    if (sec > 0) return sec * 1000;
   }
   return DEFAULT_STALL_MS;
 }

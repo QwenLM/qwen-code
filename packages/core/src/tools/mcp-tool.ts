@@ -17,13 +17,27 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import type { CallableTool, FunctionCall, Part } from '@google/genai';
+import type {
+  CallableTool,
+  FunctionCall,
+  Part,
+  PartListUnion,
+} from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
+import {
+  getInvocationContext,
+  INVOCATION_CONTEXT_META_KEY,
+} from '../utils/invocation-context.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
@@ -47,7 +61,11 @@ type ToolParams = Record<string, unknown>;
  */
 export interface McpDirectClient {
   callTool(
-    params: { name: string; arguments?: Record<string, unknown> },
+    params: {
+      name: string;
+      arguments?: Record<string, unknown>;
+      _meta?: Record<string, unknown>;
+    },
     resultSchema?: unknown,
     options?: {
       onprogress?: (progress: {
@@ -131,31 +149,30 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     readonly serverName: string,
     readonly serverToolName: string,
     readonly displayName: string,
+    readonly registeredToolName: string,
+    readonly permissionAliases: readonly string[],
     readonly trust?: boolean,
     params: ToolParams = {},
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
+    private readonly allowInvocationContext: boolean = false,
     private readonly retryCount: number = 0,
   ) {
     super(params);
   }
 
   /**
-   * MCP tool default permission based on trust and annotations:
+   * MCP tool default permission based on trust:
    * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
-   * - readOnlyHint → 'allow'
    * - All other MCP tools → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     // MCP servers explicitly marked as trusted bypass confirmation,
     // but only when the workspace folder is also trusted (security gate).
     if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
-      return 'allow';
-    }
-    // MCP tools annotated with readOnlyHint: true are safe
-    if (this.annotations?.readOnlyHint === true) {
       return 'allow';
     }
     return 'ask';
@@ -167,7 +184,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const permissionRule = `mcp__${this.serverName}__${this.serverToolName}`;
+    const permissionRule = this.registeredToolName;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
       type: 'mcp',
@@ -219,9 +236,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const toolRegistry = this.cliConfig.getToolRegistry();
       await toolRegistry.discoverToolsForServer(this.serverName);
 
-      const newTool = await toolRegistry.ensureTool(
-        `mcp__${this.serverName}__${this.serverToolName}`,
-      );
+      const newTool = await toolRegistry.ensureTool(this.registeredToolName);
       if (newTool instanceof DiscoveredMCPTool) {
         debugLogger.info(
           `Successfully reconnected to MCP server '${this.serverName}'`,
@@ -259,12 +274,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.serverName,
           this.serverToolName,
           this.displayName,
+          newTool.name,
+          newTool.permissionAliases,
           this.trust,
           this.params,
           this.cliConfig,
           newTool['mcpClient'],
           this.mcpTimeout,
+          this.mcpToolIdleTimeoutMs,
           this.annotations,
+          newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
         return newInvocation.execute(signal, updateOutput);
@@ -317,15 +336,59 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Create an AbortController for idle timeout
+    const idleTimeoutController = new AbortController();
+    let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    // Combine the external signal with our idle timeout controller
+    const combinedSignal = AbortSignal.any([
+      signal,
+      idleTimeoutController.signal,
+    ]);
+
+    const resetIdleTimeout = () => {
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
+      if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
+        const timer = setTimeout(() => {
+          const error = new Error(
+            `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
+              `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
+          );
+          error.name = 'AbortError';
+          idleTimeoutController.abort(error);
+        }, this.mcpToolIdleTimeoutMs);
+        timer.unref();
+        idleTimeoutId = timer;
+      }
+    };
+
     try {
+      // Start the idle timeout
+      resetIdleTimeout();
+
+      const invocationContext = this.allowInvocationContext
+        ? getInvocationContext()
+        : undefined;
       const callToolResult = await this.mcpClient!.callTool(
         {
           name: this.serverToolName,
           arguments: this.params as Record<string, unknown>,
+          ...(invocationContext
+            ? {
+                _meta: {
+                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+                },
+              }
+            : {}),
         },
         undefined,
         {
           onprogress: (progress) => {
+            // Reset idle timeout on progress
+            resetIdleTimeout();
+
             if (updateOutput) {
               const progressData: McpToolProgressData = {
                 type: 'mcp_tool_progress',
@@ -337,7 +400,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             }
           },
           timeout: this.mcpTimeout,
-          signal,
+          signal: combinedSignal,
         },
       );
 
@@ -349,31 +412,30 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorMessage = `MCP tool '${
-          this.serverToolName
-        }' reported tool error for function call: ${safeJsonStringify({
+        return await this.buildMcpToolError(rawResponseParts, {
           name: this.serverToolName,
           args: this.params,
-        })} with response: ${safeJsonStringify(rawResponseParts)}`;
-        return {
-          llmContent: errorMessage,
-          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-          error: {
-            message: errorMessage,
-            type: ToolErrorType.MCP_TOOL_ERROR,
-          },
-        };
+        });
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
-      const truncatedParts = await this.truncateTextParts(transformedParts);
+      const truncated = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: truncatedParts,
-        returnDisplay: getDisplayFromParts(truncatedParts),
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal, updateOutput);
+    } finally {
+      // Clear the idle timeout in all cases
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
     }
   }
 
@@ -424,48 +486,82 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       });
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorMessage = `MCP tool '${
-          this.serverToolName
-        }' reported tool error for function call: ${safeJsonStringify(
-          functionCalls[0],
-        )} with response: ${safeJsonStringify(rawResponseParts)}`;
-        return {
-          llmContent: errorMessage,
-          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-          error: {
-            message: errorMessage,
-            type: ToolErrorType.MCP_TOOL_ERROR,
-          },
-        };
+        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
-      const truncatedParts = await this.truncateTextParts(transformedParts);
+      const truncated = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: truncatedParts,
-        returnDisplay: getDisplayFromParts(truncatedParts),
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal);
     }
   }
 
+  private async buildMcpToolError(
+    rawResponseParts: Part[],
+    functionCall: FunctionCall,
+  ): Promise<ToolResult> {
+    const imageContent = getMcpErrorImageContent(rawResponseParts);
+    let llmContent: PartListUnion;
+    let errorMessage: string;
+    let persistedOutputFiles: string[] | undefined;
+    if (imageContent) {
+      const truncatedContent = await this.truncateTextParts(imageContent);
+      llmContent = truncatedContent.parts;
+      persistedOutputFiles = truncatedContent.persistedOutputFiles;
+      errorMessage = `MCP tool '${
+        this.serverToolName
+      }' reported tool error for function call: ${safeJsonStringify(
+        functionCall,
+      )} with response: ${getDisplayFromParts(truncatedContent.parts)}`;
+    } else {
+      errorMessage = `MCP tool '${
+        this.serverToolName
+      }' reported tool error for function call: ${safeJsonStringify(
+        functionCall,
+      )} with response: ${safeJsonStringify(rawResponseParts)}`;
+      llmContent = errorMessage;
+    }
+
+    return {
+      llmContent,
+      returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+      error: {
+        message: errorMessage,
+        type: ToolErrorType.MCP_TOOL_ERROR,
+      },
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+    };
+  }
+
   /**
    * Truncates text parts in the transformed result if they exceed the
    * configured threshold. Non-text parts (images, audio, etc.) are preserved.
    */
-  private async truncateTextParts(parts: Part[]): Promise<Part[]> {
+  private async truncateTextParts(parts: Part[]): Promise<{
+    parts: Part[];
+    persistedOutputFiles?: string[];
+  }> {
     if (!this.cliConfig) {
-      return parts;
+      return { parts };
     }
 
     const result: Part[] = [];
+    const persistedOutputFiles: string[] = [];
+    let persistenceAttempted = false;
     for (const part of parts) {
       if (part.text && !part.inlineData) {
         const truncated = await truncateToolOutput(
           this.cliConfig,
-          `mcp__${this.serverName}__${this.serverToolName}`,
+          this.registeredToolName,
           part.text,
           // Per-tool char budget; mirrors DiscoveredMCPTool.maxOutputChars
           // (10x the global default, since MCP servers return large structured
@@ -473,14 +569,25 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // undercut the 500k char budget — many short lines (structured JSON,
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
-          { threshold: 500_000, lines: Number.POSITIVE_INFINITY },
+          {
+            threshold: 500_000,
+            previewChars: 2000,
+            lines: Number.POSITIVE_INFINITY,
+          },
         );
         result.push({ text: truncated.content });
+        persistenceAttempted ||= truncated.content !== part.text;
+        if (truncated.outputFile) {
+          persistedOutputFiles.push(truncated.outputFile);
+        }
       } else {
         result.push(part);
       }
     }
-    return result;
+    return {
+      parts: result,
+      ...(persistenceAttempted ? { persistedOutputFiles } : {}),
+    };
   }
 
   getDescription(): string {
@@ -499,6 +606,14 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     return 500_000;
   }
 
+  /** Keeps pre-normalization permission and disabled-tool entries effective. */
+  get permissionAliases(): readonly string[] {
+    const legacyName = generateLegacyMcpToolName(
+      `mcp__${this.serverName}__${this.serverToolName}`,
+    );
+    return legacyName === this.name ? [] : [legacyName];
+  }
+
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
@@ -510,7 +625,10 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     readonly annotations?: McpToolAnnotations,
+    alwaysLoad = false,
+    private readonly allowInvocationContext: boolean = false,
   ) {
     super(
       nameOverride ??
@@ -523,7 +641,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       true, // canUpdateOutput — enables streaming progress for MCP tools
       true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
       //   initial tool-declaration list small when many MCP servers are attached.
-      false, // alwaysLoad
+      alwaysLoad,
       // searchHint: server name boosts fuzzy matching when the user references
       // the server in their query ("send a slack message").
       `mcp ${serverName}`,
@@ -542,7 +660,10 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -577,7 +698,10 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -589,12 +713,16 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.serverName,
       this.serverToolName,
       this.displayName,
+      this.name,
+      this.permissionAliases,
       this.trust,
       params,
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.allowInvocationContext,
     );
   }
 }
@@ -714,6 +842,11 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
   return transformed.filter((part): part is Part => part !== null);
 }
 
+function getMcpErrorImageContent(rawResponseParts: Part[]): Part[] | undefined {
+  const transformedParts = transformMcpContentToParts(rawResponseParts);
+  return transformedParts.some(isImagePart) ? transformedParts : undefined;
+}
+
 /**
  * Builds a human-readable display string from transformed Part[].
  * Text parts are shown directly; inline data is summarized by mime type.
@@ -735,16 +868,18 @@ function getDisplayFromParts(parts: Part[]): string {
   return displayParts.join('\n');
 }
 
+function getDisplayFromPartsWithPersistedOutput(
+  parts: Part[],
+  persistedOutputFiles: string[] | undefined,
+): string {
+  const display = getDisplayFromParts(parts);
+  if (!persistedOutputFiles?.length) return display;
+
+  const paths = persistedOutputFiles.map((file) => `- ${file}`).join('\n');
+  return `${display}\nOutput too long and was saved to:\n${paths}`;
+}
+
 /** Visible for testing */
 export function generateValidName(name: string) {
-  // Replace invalid characters (based on 400 error message from Gemini API) with underscores
-  let validToolname = name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-
-  // If longer than 63 characters, replace middle with '___'
-  // (Gemini API says max length 64, but actual limit seems to be 63)
-  if (validToolname.length > 63) {
-    validToolname =
-      validToolname.slice(0, 28) + '___' + validToolname.slice(-32);
-  }
-  return validToolname;
+  return normalizeToolNameForProvider(name);
 }

@@ -8,6 +8,8 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
+  GoalStateResponse,
+  GoalStateCause,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -24,6 +26,7 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -50,6 +53,7 @@ export interface CommandContext {
     config: Config | null;
     settings: LoadedSettings;
     logger: Logger | null;
+    extensionRefreshState?: ExtensionRefreshState;
   };
   // UI state and history management
   ui: {
@@ -137,6 +141,21 @@ export interface MessageActionReturn {
   content: string;
 }
 
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+  cause?: GoalStateCause;
+}
+
 /**
  * The return type for a command action that streams multiple messages.
  * Used for long-running operations that need to send progress updates.
@@ -165,6 +184,12 @@ export interface OpenDialogActionReturn {
   /** Optional session name for /branch — passed through to handleBranch. */
   name?: string;
 
+  /**
+   * Optional persist scope for model dialog — controls which settings file
+   * the model selection is written to ('workspace' = project, 'user' = global).
+   */
+  persistScope?: 'workspace' | 'user';
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -180,12 +205,16 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'fast-model'
     | 'voice-model'
+    | 'vision-model'
+    | 'compaction-model'
+    | 'image-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -216,6 +245,13 @@ export interface SubmitPromptActionReturn {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. When set, this prompt (and any tool-call
+   * continuations it spawns) runs on the given model without changing the
+   * session's selected model or persisting anything; it auto-reverts on the
+   * next user turn.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -250,6 +286,7 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
+  | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn;
 
@@ -348,6 +385,13 @@ export interface SlashCommand {
    */
   supportedModes?: ExecutionMode[];
 
+  /**
+   * Whether the interactive UI may execute this command immediately while a
+   * model response is streaming. Commands opt in only when they do not submit
+   * a model turn or mutate conversation state owned by the active turn.
+   */
+  canRunDuringStreaming?: boolean;
+
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**
    * Whether users can invoke this command via a slash command.
@@ -410,6 +454,7 @@ export interface SlashCommand {
     body?: string;
     filePath?: string;
     level?: string;
+    extensionName?: string;
   };
 
   // The action to run. Optional for parent commands that only group sub-commands.

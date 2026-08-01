@@ -18,8 +18,11 @@ import type {
   UserPromptSubmitInput,
   UserPromptExpansionInput,
   StopInput,
+  MessageDisplayInput,
+  ContextUsageData,
   SessionStartInput,
   SessionEndInput,
+  SessionDeleteInput,
   SessionStartSource,
   SessionEndReason,
   AgentType,
@@ -51,11 +54,14 @@ import type {
   InstructionsLoadedInput,
   InstructionMemoryType,
   InstructionLoadReason,
+  BackgroundTaskInfo,
+  CronJobInfo,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
+import type { CronJob } from '../services/cronScheduler.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -102,16 +108,65 @@ export class HookEventHandler {
   }
 
   /**
+   * Snapshot of current background tasks for hook payloads.
+   * Non-blocking: reads registry state synchronously.
+   */
+  private getBackgroundTaskSnapshot(): BackgroundTaskInfo[] {
+    try {
+      const registry = this.config.getBackgroundTaskRegistry();
+      return registry.getAll().map((task) => ({
+        id: task.id,
+        status: task.status,
+        agent_type: task.subagentType ?? 'unknown',
+        started_at: new Date(task.startTime).toISOString(),
+        description: task.description,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Snapshot of current cron jobs for hook payloads.
+   * Non-blocking: reads scheduler state synchronously.
+   */
+  private getCronJobSnapshot(): CronJobInfo[] {
+    try {
+      const scheduler = this.config.getCronScheduler();
+      return scheduler.list().map((job: CronJob) => ({
+        id: job.id,
+        schedule: job.cronExpr,
+        prompt: job.prompt,
+        recurring: job.recurring,
+        next_run: job.fireAtMs
+          ? new Date(job.fireAtMs).toISOString()
+          : undefined,
+        last_run: job.lastFiredAt
+          ? new Date(job.lastFiredAt).toISOString()
+          : undefined,
+        enabled: true,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Fire a UserPromptSubmit event
    * Called by handleHookExecutionRequest - executes hooks directly
    */
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
       prompt,
+      ...(typeof submittedPrompt === 'string' &&
+      submittedPrompt.trim().length > 0
+        ? { submitted_prompt: submittedPrompt }
+        : {}),
     };
 
     return this.executeHooks(
@@ -188,15 +243,46 @@ export class HookEventHandler {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
       ...this.createBaseInput(HookEventName.Stop),
       stop_hook_active: stopHookActive,
       last_assistant_message: lastAssistantMessage,
+      background_tasks: this.getBackgroundTaskSnapshot(),
+      crons: this.getCronJobSnapshot(),
+      ...contextUsage,
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);
+  }
+
+  /**
+   * Fire a MessageDisplay event
+   * Called repeatedly as the assistant's reply streams (before Stop). Fire-and-forget:
+   * callers should not await this on the critical streaming path — see client.ts, which
+   * fires it without blocking the next chunk's display.
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: MessageDisplayInput = {
+      ...this.createBaseInput(HookEventName.MessageDisplay),
+      message_id: messageId,
+      displayed_text: displayedText,
+      is_final: isFinal,
+    };
+
+    return this.executeHooks(
+      HookEventName.MessageDisplay,
+      input,
+      undefined,
+      signal,
+    );
   }
 
   /**
@@ -249,6 +335,26 @@ export class HookEventHandler {
       {
         trigger: reason,
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a SessionDelete event after an explicitly selected session is deleted.
+   */
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionDeleteInput = {
+      ...this.createBaseInput(HookEventName.SessionDelete),
+      deleted_session_id: deletedSessionId,
+    };
+
+    return this.executeHooks(
+      HookEventName.SessionDelete,
+      input,
+      undefined,
       signal,
     );
   }
@@ -543,6 +649,8 @@ export class HookEventHandler {
       agent_type: agentType,
       agent_transcript_path: agentTranscriptPath,
       last_assistant_message: lastAssistantMessage,
+      background_tasks: this.getBackgroundTaskSnapshot(),
+      crons: this.getCronJobSnapshot(),
     };
 
     // Pass agentType as context for matcher filtering
@@ -806,9 +914,13 @@ export class HookEventHandler {
   private createBaseInput(eventName: HookEventName): HookInput {
     // Get the transcript path from the Config
     const transcriptPath = this.config.getTranscriptPath();
+    const sourceType = this.config.getSessionSourceType();
+    const sourceId = this.config.getSessionSourceId();
 
     return {
       session_id: this.config.getSessionId(),
+      ...(sourceType !== undefined ? { source_type: sourceType } : {}),
+      ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       transcript_path: transcriptPath,
       cwd: this.config.getWorkingDir(),
       hook_event_name: eventName,

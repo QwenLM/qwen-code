@@ -859,7 +859,7 @@ function findMmdc(env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
-function findExecutable(
+export function findExecutable(
   command: string,
   env: NodeJS.ProcessEnv,
 ): string | null {
@@ -1049,7 +1049,7 @@ async function renderPngWithMmdcAsync(
   }
 }
 
-function shouldRunThroughShell(command: string): boolean {
+export function shouldRunThroughShell(command: string): boolean {
   return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
 }
 
@@ -1069,7 +1069,9 @@ function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
   return DEFAULT_RENDER_TIMEOUT_MS;
 }
 
-function createRendererChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function createRendererChildEnv(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
   const sourceEnv = { ...process.env, ...env };
   const childEnv: NodeJS.ProcessEnv = {};
 

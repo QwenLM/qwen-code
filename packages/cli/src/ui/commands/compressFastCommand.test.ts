@@ -65,6 +65,79 @@ describe('compressFastCommand', () => {
     expect(mockTryCompressChatFast).toHaveBeenCalledWith();
   });
 
+  it('should reject trailing text in ACP mode', async () => {
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/compress-fast continue investigating',
+        name: 'compress-fast',
+        args: 'continue investigating',
+      },
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'The /compress-fast command does not accept arguments.',
+    });
+    expect(mockTryCompressChatFast).not.toHaveBeenCalled();
+  });
+
+  it('should accept whitespace-only arguments in ACP mode', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/compress-fast   ',
+        name: 'compress-fast',
+        args: '   ',
+      },
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+
+    expect(messages).toEqual([
+      {
+        messageType: 'info',
+        content: 'Compressing context (fast)...',
+      },
+      {
+        messageType: 'info',
+        content: 'Context compressed (200 -> 100).',
+      },
+    ]);
+    expect(mockTryCompressChatFast).toHaveBeenCalledWith();
+  });
+
   it('should display compression result on success (interactive)', async () => {
     mockTryCompressChatFast.mockResolvedValue({
       originalTokenCount: 200,

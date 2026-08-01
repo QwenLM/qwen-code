@@ -122,7 +122,13 @@ export class FileDiscoveryService {
   }
 
   /**
-   * Unified method to check if a file should be ignored based on filtering options
+   * Unified method to check if a file should be ignored based on filtering options.
+   *
+   * Convention: append a trailing `/` to `filePath` to signal that the path
+   * refers to a directory. This allows directory-only ignore patterns (e.g.
+   * `node_modules/`) to match correctly during traversal pruning. Both the
+   * GitIgnoreParser and QwenIgnoreParser preserve the trailing slash through
+   * their internal path normalization.
    */
   shouldIgnoreFile(
     filePath: string,

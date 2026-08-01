@@ -131,7 +131,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Task: 'Task',
   TodoWrite: 'TodoList',
   WebFetch: 'WebFetch',
-  WebSearch: 'None',
+  WebSearch: 'WebSearch',
   Write: 'WriteFile',
   LS: 'ListFiles',
 };
@@ -331,36 +331,54 @@ ${systemPrompt}
 }
 
 /**
- * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * Maps a single Claude `.mcp.json` server entry to Qwen's MCPServerConfig shape.
  * Claude discriminates transport with a `type` field (`http`/`sse`/`stdio`),
  * whereas Qwen keys off which field is set: `httpUrl` (streamable HTTP),
- * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore
- * has to move its `url` to `httpUrl`, and the now-meaningless `type` is dropped.
+ * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore has
+ * to move its `url` to `httpUrl`. Qwen reserves `type` for `'sdk'`, so any other
+ * `type` value (Claude's transport discriminator) is dropped while `'sdk'` —
+ * which `isSdkMcpServerConfig` depends on — is always preserved.
+ */
+export function normalizeClaudeMcpServer(
+  raw: MCPServerConfig,
+): MCPServerConfig {
+  const server = raw as unknown as Record<string, unknown>;
+  // stdio / already-Qwen-shaped configs pass through; only a non-sdk `type`
+  // (Claude's transport discriminator) is stripped.
+  if (server['command'] || server['httpUrl'] || server['tcp']) {
+    if (server['type'] === undefined || server['type'] === 'sdk') {
+      return raw;
+    }
+    const rest = { ...server };
+    delete rest['type'];
+    return rest as unknown as MCPServerConfig;
+  }
+  if (typeof server['url'] === 'string') {
+    const rest = { ...server };
+    delete rest['url'];
+    if (rest['type'] !== 'sdk') {
+      delete rest['type'];
+    }
+    return {
+      ...rest,
+      ...(server['type'] === 'http'
+        ? { httpUrl: server['url'] }
+        : { url: server['url'] }),
+    } as unknown as MCPServerConfig;
+  }
+  return raw;
+}
+
+/**
+ * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * @see normalizeClaudeMcpServer for the per-server transport mapping.
  */
 function normalizeClaudeMcpServers(
   servers: Record<string, MCPServerConfig>,
 ): Record<string, MCPServerConfig> {
   const normalized: Record<string, MCPServerConfig> = {};
   for (const [name, raw] of Object.entries(servers)) {
-    const server = raw as unknown as Record<string, unknown>;
-    // stdio / already-Qwen-shaped configs pass through unchanged.
-    if (server['command'] || server['httpUrl'] || server['tcp']) {
-      normalized[name] = raw;
-      continue;
-    }
-    if (typeof server['url'] === 'string') {
-      const rest = { ...server };
-      delete rest['type'];
-      delete rest['url'];
-      normalized[name] = {
-        ...rest,
-        ...(server['type'] === 'http'
-          ? { httpUrl: server['url'] }
-          : { url: server['url'] }),
-      } as unknown as MCPServerConfig;
-      continue;
-    }
-    normalized[name] = raw;
+    normalized[name] = normalizeClaudeMcpServer(raw);
   }
   return normalized;
 }
@@ -433,7 +451,10 @@ export function convertClaudeToQwenConfig(
 export async function convertClaudePluginPackage(
   extensionDir: string,
   pluginName: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
     extensionDir,
@@ -476,6 +497,8 @@ export async function convertClaudePluginPackage(
     marketplacePlugin,
     extensionDir,
     pluginDir,
+    networkPolicy,
+    signal,
   );
 
   if (!fs.existsSync(pluginSource)) {
@@ -997,7 +1020,10 @@ async function resolvePluginSource(
   pluginConfig: ClaudeMarketplacePluginConfig,
   marketplaceDir: string,
   pluginDir: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const source = pluginConfig.source;
 
   // Handle string source (relative path or URL)
@@ -1013,11 +1039,13 @@ async function resolvePluginSource(
         source,
         type: 'git',
         originSource: 'Claude',
+        networkPolicy,
       };
       try {
-        await downloadFromGitHubRelease(installMetadata, pluginDir);
+        await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
       } catch {
-        await cloneFromGit(installMetadata, pluginDir);
+        signal?.throwIfAborted();
+        await cloneFromGit(installMetadata, pluginDir, signal);
       }
       return pluginDir;
     }
@@ -1067,11 +1095,13 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: `https://github.com/${source.repo}`,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1080,11 +1110,13 @@ async function resolvePluginSource(
     const installMetadata: ExtensionInstallMetadata = {
       source: source.url,
       type: 'git',
+      networkPolicy,
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitHubRelease(installMetadata, pluginDir, signal);
     } catch {
-      await cloneFromGit(installMetadata, pluginDir);
+      signal?.throwIfAborted();
+      await cloneFromGit(installMetadata, pluginDir, signal);
     }
     return pluginDir;
   }
@@ -1098,8 +1130,9 @@ async function resolvePluginSource(
       // Prefer the immutable SHA pin when present; fall back to a named ref.
       ref: source.sha || source.ref,
       originSource: 'Claude',
+      networkPolicy,
     };
-    await cloneFromGit(installMetadata, pluginDir);
+    await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
     if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {

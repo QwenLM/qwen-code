@@ -7,6 +7,12 @@
   padding: 6px 8px 0;
 }
 
+/* Focused programmatically for keyboard nav / aria-activedescendant; selection
+   is shown by the roving row highlight, so suppress the container outline. */
+.list:focus {
+  outline: none;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -16,7 +22,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   text-align: left;
@@ -24,11 +30,22 @@
 
 .row:hover,
 .selected {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
+}
+
+/* Keyboard mode: the pointer yields to the keyboard, so a cursor resting on a
+   row must not paint a second highlight. Only the keyboard-selected row keeps
+   its background. */
+.keyboardOnly .row:hover {
+  background: transparent;
+}
+
+.keyboardOnly .row.selected:hover {
+  background: var(--secondary);
 }
 
 .selected .modeName {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .modeIcon {
@@ -38,7 +55,7 @@
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .modeIcon svg {
@@ -57,7 +74,7 @@
 
 .modeName {
   overflow: hidden;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -65,7 +82,7 @@
 
 .modeDesc {
   overflow: hidden;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;

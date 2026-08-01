@@ -12,6 +12,14 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import type { ToolResult } from './tools.js';
+import { CronCreateTool } from './cron-create.js';
+import { CronDeleteTool } from './cron-delete.js';
+import { CronListTool } from './cron-list.js';
+import { LoopWakeupTool } from './loop-wakeup.js';
+import { ToolNames } from './tool-names.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -32,11 +40,10 @@ function makeConfigWithRegistry(): {
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
-  // Stub out the chat client reference ToolSearch tries to refresh; we don't
-  // need end-to-end chat behaviour, just to confirm the call is tolerated.
+  // Stub out the chat client reference so ToolSearch can sync newly
+  // revealed tools via setTools() without a real GeminiClient.
   vi.spyOn(config, 'getGeminiClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
-    refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
 }
@@ -52,6 +59,12 @@ describe('tokenize', () => {
 
   it('filters empty tokens', () => {
     expect(tokenize('   foo    bar  ')).toEqual(['foo', 'bar']);
+  });
+
+  it('drops natural-language filler words and trailing punctuation', () => {
+    expect(tokenize('How do I stop this cron?')).toEqual(['stop', 'cron']);
+    expect(tokenize('please +cron, tasks!')).toEqual(['+cron', 'tasks']);
+    expect(tokenize('C++ C# search')).toEqual(['c++', 'c#', 'search']);
   });
 });
 
@@ -126,6 +139,32 @@ describe('scoreTool', () => {
       description: 'this tool does slack things',
     });
     expect(scoreTool(tool, ['slack'])).toBe(2); // SCORE_DESC_BUILTIN
+  });
+
+  it.each([
+    ['cancel', 'cron_delete'],
+    ['clear', 'cron_delete'],
+    ['delete', 'cron_remove'],
+    ['remove', 'cron_delete'],
+    ['stop', 'cron_delete'],
+  ])('bridges action alias "%s" to %s', (term, toolName) => {
+    const tool = new MockTool({
+      name: toolName,
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, [term])).toBe(16);
+  });
+
+  it('does not add the alias bonus for a direct action-term match', () => {
+    const tool = new MockTool({
+      name: 'cron_stop',
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, ['stop'])).toBe(10);
   });
 
   it('returns 0 when no term matches', () => {
@@ -246,6 +285,76 @@ describe('ToolSearchTool', () => {
     // Unrelated tools should not surface on a 'schedule' query.
     expect(content).not.toContain('"name":"lsp"');
     expect(content).not.toContain('"name":"ask_user_question"');
+  });
+
+  it('finds the cron delete tool for natural-language stop requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: 'how do I stop this cron or loop wakeup?',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('matches required action aliases when filtering candidates', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: '+stop cron',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('No tools found');
+  });
+
+  it('finds the cron list tool for natural-language task visibility requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'show active loop tasks', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_list"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('still finds the loop wakeup tool for scheduling loop wakeups', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'schedule loop wakeup', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"loop_wakeup"');
+    expect(content).not.toContain('"name":"cron_delete"');
   });
 
   it('returns a friendly message when nothing matches', async () => {
@@ -481,6 +590,188 @@ describe('ToolSearchTool', () => {
     expect(setToolsSpy).not.toHaveBeenCalled();
   });
 
+  it('select: exit_plan_mode remains inspectable in the main session', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: setToolsSpy,
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: `select:${ToolNames.EXIT_PLAN_MODE}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(registry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE)).toBe(
+      false,
+    );
+    expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it.each<{
+    toolName: string;
+    shouldDefer: boolean;
+    alwaysLoad: boolean;
+  }>([
+    {
+      toolName: ToolNames.ENTER_PLAN_MODE,
+      shouldDefer: false,
+      alwaysLoad: false,
+    },
+    {
+      toolName: ToolNames.EXIT_PLAN_MODE,
+      shouldDefer: true,
+      alwaysLoad: true,
+    },
+  ])(
+    'select: rejects $toolName inside subagent-like context without revealing or syncing tools',
+    async ({ toolName, shouldDefer, alwaysLoad }) => {
+      registry.registerTool(
+        new MockTool({
+          name: toolName,
+          shouldDefer,
+          alwaysLoad,
+        }),
+      );
+      const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+        setTools: setToolsSpy,
+      } as never);
+
+      const tool = new ToolSearchTool(config);
+      const contextCases: Array<{
+        run: (callback: () => Promise<ToolResult>) => Promise<ToolResult>;
+      }> = [
+        {
+          run: (callback) => runWithAgentContext('agent-1', callback),
+        },
+        {
+          run: (callback) =>
+            runWithTeammateIdentity(
+              {
+                agentId: 'agent@test',
+                agentName: 'agent',
+                teamName: 'test',
+                isTeamLead: false,
+              },
+              callback,
+            ),
+        },
+      ];
+
+      for (const { run } of contextCases) {
+        const result = await run(() =>
+          tool
+            .build({ query: `select:${toolName}` })
+            .execute(new AbortController().signal),
+        );
+
+        expect(String(result.llmContent)).toContain(
+          'not available inside subagents',
+        );
+        expect(String(result.llmContent)).toContain('return your plan');
+        expect(result.error?.message).toContain(
+          'not available inside subagents',
+        );
+        expect(result.error?.message).toContain('return your plan');
+        expect(String(result.returnDisplay)).toContain('1 unavailable');
+        expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
+        expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
+        expect(setToolsSpy).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('select: loads allowed tools while rejecting plan lifecycle tools inside subagent context', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.READ_FILE,
+        shouldDefer: false,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () =>
+      tool
+        .build({
+          query: `select:${ToolNames.READ_FILE},${ToolNames.ENTER_PLAN_MODE}`,
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.READ_FILE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      'not available inside subagents',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+  });
+
+  it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        tool
+          .build({
+            query: `select:${ToolNames.EXIT_PLAN_MODE},${ToolNames.ENTER_PLAN_MODE}`,
+          })
+          .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      `${ToolNames.ENTER_PLAN_MODE} is not available`,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+  });
+
   it('+must-word filters candidates whose name does not contain the required term', async () => {
     // Both tools would match on "send" in description; only one has "slack"
     // in its name. The +slack prefix should narrow the result to that one.
@@ -554,17 +845,12 @@ describe('ToolSearchTool', () => {
     // First search uses keyword path (which calls loadAndReturnSchemas →
     // revealDeferredTool); confirm registry agrees.
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
-    const geminiClient = config.getGeminiClient() as unknown as {
-      refreshStartupContextReminder: ReturnType<typeof vi.fn>;
-    };
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
 
     // Second: same keyword search now finds nothing (tool excluded).
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('No tools found matching');
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
   });
 
   it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {
@@ -685,6 +971,126 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
     // Reveal rolled back so subsequent ToolSearch can find the tool.
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+  });
+
+  it('excludes visibleTools from keyword-search candidates', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({
+        name: 'web_fetch',
+        shouldDefer: true,
+        searchHint: 'fetch data from web',
+      }),
+    );
+    visibleRegistry.registerTool(
+      new MockTool({
+        name: 'monitor',
+        shouldDefer: true,
+        searchHint: 'fetch process output',
+      }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockResolvedValue(undefined),
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    expect(content).toContain('monitor');
+    expect(content).not.toContain('web_fetch');
+  });
+
+  it('select: for a visibleTool does NOT trigger reveal/setTools', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Schema returned (model can inspect it)
+    expect(content).toContain('"name":"web_fetch"');
+    // But no reveal happened — tool is already visible
+    expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    // And setTools was NOT called — no KV-cache invalidation
+    expect(mockSetTools).not.toHaveBeenCalled();
+  });
+
+  it('select: for a non-visible deferred tool still triggers reveal', async () => {
+    const { config, registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    await tool
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+  });
+
+  it('select: mixed visible+non-visible only reveals the hidden ones', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch,cron_create' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Both schemas returned
+    expect(content).toContain('"name":"web_fetch"');
+    expect(content).toContain('"name":"cron_create"');
+    // web_fetch NOT revealed (visible), cron_create revealed
+    expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    expect(visibleRegistry.isDeferredToolRevealed('cron_create')).toBe(true);
+    // setTools called exactly once for cron_create
+    expect(mockSetTools).toHaveBeenCalledTimes(1);
   });
 });
 

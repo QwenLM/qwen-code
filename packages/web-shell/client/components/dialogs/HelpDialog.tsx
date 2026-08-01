@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { CommandInfo } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { useFilterInput } from '../../hooks/useFilterInput';
 import styles from './HelpDialog.module.css';
 
 type HelpTab = 'general' | 'commands' | 'custom-commands';
@@ -233,7 +234,7 @@ function CommandsHelp({
 export function HelpDialog({ commands }: HelpDialogProps) {
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<HelpTab>('general');
-  const [query, setQuery] = useState('');
+  const { filterValue: query, inputProps } = useFilterInput();
   const showSearch = activeTab !== 'general';
 
   return (
@@ -256,8 +257,7 @@ export function HelpDialog({ commands }: HelpDialogProps) {
         {showSearch && (
           <input
             className={styles.search}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            {...inputProps}
             placeholder={t('help.search')}
           />
         )}

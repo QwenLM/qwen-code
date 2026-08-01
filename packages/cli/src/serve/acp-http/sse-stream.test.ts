@@ -63,6 +63,36 @@ describe('SseStream', () => {
     );
   });
 
+  it('send(message, id) prepends an `id:` line before `data:` (resume cursor)', async () => {
+    const res = mockRes();
+    const s = new SseStream(res);
+    s.open();
+    await s.send({ jsonrpc: '2.0', method: 'session/update', params: {} }, 7);
+    const joined = (res as unknown as { chunks: string[] }).chunks.join('');
+    expect(joined).toContain(
+      'id: 7\ndata: {"jsonrpc":"2.0","method":"session/update","params":{}}\n\n',
+    );
+  });
+
+  it('send(message) without an id omits the `id:` line (synthetic/response frames)', async () => {
+    const res = mockRes();
+    const s = new SseStream(res);
+    s.open();
+    await s.send({ jsonrpc: '2.0', id: 1, result: {} });
+    const joined = (res as unknown as { chunks: string[] }).chunks.join('');
+    expect(joined).toContain('data: {"jsonrpc":"2.0","id":1,"result":{}}\n\n');
+    expect(joined).not.toMatch(/(^|\n)id: /);
+  });
+
+  it('send(message, 0) emits `id: 0` (id 0 is a real cursor, not "absent")', async () => {
+    const res = mockRes();
+    const s = new SseStream(res);
+    s.open();
+    await s.send({ ping: true }, 0);
+    const joined = (res as unknown as { chunks: string[] }).chunks.join('');
+    expect(joined).toContain('id: 0\ndata: {"ping":true}\n\n');
+  });
+
   it('close() ends the response once and is idempotent', () => {
     const res = mockRes();
     const s = new SseStream(res);

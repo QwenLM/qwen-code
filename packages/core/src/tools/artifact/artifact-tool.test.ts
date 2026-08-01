@@ -70,6 +70,16 @@ describe('ArtifactTool', () => {
     expect(res.llmContent).toMatch(/Published artifact/);
     expect(res.llmContent).toMatch(/file:\/\//);
     expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(res.artifacts).toMatchObject([
+      {
+        kind: 'html',
+        storage: 'published',
+        title: 'My Report',
+        mimeType: 'text/html',
+      },
+    ]);
+    expect(res.artifacts?.[0]?.url).toMatch(/^file:\/\//);
+    expect(res.artifacts?.[0]?.managedId).toBeTruthy();
 
     const published = res.resultFilePaths?.[0];
     expect(published).toBeTruthy();
@@ -124,6 +134,31 @@ describe('ArtifactTool', () => {
     expect(res.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
   });
 
+  it('forwards cancellation signals to source file reads', async () => {
+    const file = path.join(workdir, 'page.html');
+    const controller = new AbortController();
+    const readTextFile = vi.fn(async () => ({ content: '<p>x</p>' }));
+    const signalAwareTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        getFileSystemService: () => ({ readTextFile }),
+      } as unknown as Config,
+      {
+        kind: 'oss',
+        publish: async () => ({ id: 'x', url: 'https://h/x' }),
+      },
+      openSpy as unknown as UrlOpener,
+    );
+
+    await signalAwareTool.build({ file_path: file }).execute(controller.signal);
+
+    expect(readTextFile).toHaveBeenCalledWith({
+      path: file,
+      maxOutputBytes: MAX_ARTIFACT_BYTES,
+      signal: controller.signal,
+    });
+  });
+
   it('returns EXECUTION_FAILED when the publisher throws', async () => {
     const file = await writeFragment('page.html', '<p>x</p>');
     const failingTool = new ArtifactTool(
@@ -144,11 +179,22 @@ describe('ArtifactTool', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
-  it('enforces the size cap', async () => {
+  it('rejects source fragments that exceed the artifact byte budget', async () => {
     const big = '<p>' + 'a'.repeat(MAX_ARTIFACT_BYTES) + '</p>';
     const file = await writeFragment('big.html', big);
     const res = await tool.build({ file_path: file }).execute(signal);
     expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+    expect(res.error?.message).toContain('source exceeds');
+    expect(res.error?.message).toContain(`${MAX_ARTIFACT_BYTES} byte limit`);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('enforces the published artifact size cap', async () => {
+    const almostTooBig = 'a'.repeat(MAX_ARTIFACT_BYTES - 1);
+    const file = await writeFragment('wrapped-big.html', almostTooBig);
+    const res = await tool.build({ file_path: file }).execute(signal);
+    expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+    expect(res.error?.message).toContain('Artifact is too large');
     expect(openSpy).not.toHaveBeenCalled();
   });
 

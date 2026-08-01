@@ -9,7 +9,6 @@ import type {
   Config,
   SessionMetrics,
   AgentResultDisplay,
-  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   ToolErrorType,
@@ -31,7 +30,7 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   functionResponsePartsToString,
-  toolResultContent,
+  insertAfterFunctionResponses,
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
@@ -585,6 +584,28 @@ describe('createToolProgressHandler', () => {
     handler('tool-call-1', 'plain string progress');
 
     expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
+  });
+
+  it('should forward shell heartbeats as tool progress', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const shellRequest = { ...mockRequest, name: 'run_shell_command' };
+    const { handler } = createToolProgressHandler(shellRequest, mockAdapter);
+
+    const heartbeat = {
+      type: 'shell_progress' as const,
+      elapsedMs: 10_000,
+      lastOutputAgeMs: 4_000,
+      timeoutMs: 120_000,
+    };
+    handler('tool-call-1', heartbeat);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledWith(
+      shellRequest,
+      heartbeat,
+    );
   });
 
   it('should forward multiple progress updates', () => {
@@ -1160,105 +1181,39 @@ describe('functionResponsePartsToString', () => {
   });
 });
 
-describe('toolResultContent', () => {
-  it('should return resultDisplay string when available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Result content',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Result content');
+describe('insertAfterFunctionResponses', () => {
+  const fr = (id: string): Part => ({
+    functionResponse: { id, name: 'tool', response: { ok: true } },
   });
 
-  it('should return undefined for empty resultDisplay string', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: '   ',
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
+  it('inserts additions before the first non-functionResponse part', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), { text: 'reminder' }, { text: 'prompt' }]);
   });
 
-  it('should use functionResponsePartsToString for responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
+  it('appends additions when every part is a functionResponse', () => {
+    const parts: Part[] = [fr('a'), fr('b')];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), fr('b'), { text: 'reminder' }]);
   });
 
-  it('should return error message when error is present', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: new Error('Test error message'),
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Test error message');
+  it('prepends additions when the first part is not a functionResponse', () => {
+    const parts: Part[] = [{ text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([{ text: 'reminder' }, { text: 'prompt' }]);
   });
 
-  it('should prefer resultDisplay over responseParts', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: 'Direct result',
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('Direct result');
+  it('is a no-op shape with empty additions and does not mutate the input', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, []);
+    expect(result).toEqual([fr('a'), { text: 'prompt' }]);
+    expect(result).not.toBe(parts);
   });
 
-  it('should prefer responseParts over error', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      error: new Error('Error message'),
-      responseParts: [
-        {
-          functionResponse: {
-            response: {
-              output: 'function output',
-            },
-          },
-        },
-      ],
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBe('function output');
-  });
-
-  it('should return undefined when no content is available', () => {
-    const response: ToolCallResponseInfo = {
-      callId: 'test-call',
-      resultDisplay: undefined,
-      responseParts: [],
-      error: undefined,
-      errorType: undefined,
-    };
-    expect(toolResultContent(response)).toBeUndefined();
+  it('returns just the additions for empty parts', () => {
+    expect(insertAfterFunctionResponses([], [{ text: 'reminder' }])).toEqual([
+      { text: 'reminder' },
+    ]);
   });
 });

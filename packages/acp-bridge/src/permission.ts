@@ -55,6 +55,8 @@ export interface PermissionRequestRecord {
    * always per-session — workspace-scoped permission is out of
    * scope for v1. */
   readonly sessionId: string;
+  /** Admitted prompt that produced this permission request, when known. */
+  readonly promptId?: string;
   /**
    * `originatorClientId` that triggered the underlying prompt.
    * `designated` policy votes are only accepted from this id;

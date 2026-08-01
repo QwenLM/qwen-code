@@ -11,27 +11,14 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
+  expandHomeDir,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-
-export function expandHomeDir(p: string): string {
-  if (!p) {
-    return '';
-  }
-  let expandedPath = p;
-  if (p.toLowerCase().startsWith('%userprofile%')) {
-    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
-  } else if (p === '~' || p.startsWith('~/')) {
-    expandedPath = os.homedir() + p.substring(1);
-  }
-  return path.normalize(expandedPath);
-}
 
 function findExistingWorkspaceDirectory(
   directory: string,
@@ -87,15 +74,15 @@ function getPathCompletions(
   const trimmed = partial.trim();
   if (!trimmed) return [];
 
-  const expanded = trimmed.startsWith('~')
-    ? trimmed.replace(/^~/, os.homedir())
-    : trimmed;
-  const endsWithSep = expanded.endsWith('/') || expanded.endsWith(path.sep);
+  const inputEndsWithSep = trimmed.endsWith('/') || trimmed.endsWith('\\');
+  const expanded = expandHomeDir(trimmed);
+  const endsWithSep =
+    inputEndsWithSep || expanded.endsWith('/') || expanded.endsWith(path.sep);
   const searchDir = endsWithSep ? expanded : path.dirname(expanded);
   const namePrefix = endsWithSep ? '' : path.basename(expanded);
 
   try {
-    return fs
+    const children = fs
       .readdirSync(searchDir, { withFileTypes: true })
       .filter(
         (e) =>
@@ -106,8 +93,22 @@ function getPathCompletions(
       .map((e) => ({
         value: prefix + path.join(searchDir, e.name) + path.sep,
         isDirectory: true,
-      }))
-      .slice(0, 8);
+      }));
+
+    // When the input ends with a separator (e.g. "learn/"), also include
+    // the typed directory itself so the user can select it to cd into it
+    // rather than being forced to pick a child (#7318).
+    if (endsWithSep) {
+      const selfPath = prefix + searchDir;
+      const normalizedSelf = selfPath.endsWith(path.sep)
+        ? selfPath
+        : selfPath + path.sep;
+      if (!children.some((c) => c.value === normalizedSelf)) {
+        children.unshift({ value: normalizedSelf, isDirectory: true });
+      }
+    }
+
+    return children.slice(0, 8);
   } catch {
     return [];
   }
@@ -233,7 +234,13 @@ export const directoryCommand: SlashCommand = {
 
           if (added.length > 0) {
             try {
-              if (config.shouldLoadMemoryFromIncludeDirectories()) {
+              if (config.isSafeMode()) {
+                messages.push(
+                  t(
+                    'Safe mode active — skipping memory reload from include directories.',
+                  ),
+                );
+              } else if (config.shouldLoadMemoryFromIncludeDirectories()) {
                 const {
                   memoryContent,
                   fileCount,

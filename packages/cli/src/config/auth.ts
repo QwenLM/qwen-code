@@ -9,8 +9,10 @@ import {
   type Config,
   type ModelProvidersConfig,
   type ProviderModelConfig,
+  type ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import { loadEnvironment, loadSettings, type Settings } from './settings.js';
+import { collectProviderModelsForProtocol } from '../utils/modelConfigUtils.js';
 import { t } from '../i18n/index.js';
 
 /**
@@ -33,6 +35,7 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
   authType: string,
   modelId: string | undefined,
   baseUrl?: string,
@@ -41,8 +44,14 @@ function findModelConfig(
     return undefined;
   }
 
-  const models = modelProviders[authType];
-  if (!Array.isArray(models)) {
+  // Merge across all provider ids routing to this protocol (built-in key or
+  // custom id via providerProtocol) so a custom provider's envKey is found.
+  const models = collectProviderModelsForProtocol(
+    modelProviders,
+    providerProtocol,
+    authType,
+  );
+  if (models.length === 0) {
     return undefined;
   }
 
@@ -123,6 +132,7 @@ function hasApiKeyForAuth(
   // baseUrl so duplicate-id providers resolve to the selected one.
   const modelConfig = findModelConfig(
     modelProviders,
+    settings.providerProtocol,
     authType,
     modelId,
     baseUrl,
@@ -272,6 +282,7 @@ export function validateAuthMethod(
     const { modelId, baseUrl } = resolveSelectedModel(settings.merged, config);
     const modelConfig = findModelConfig(
       modelProviders,
+      settings.merged.providerProtocol,
       authMethod,
       modelId,
       baseUrl,

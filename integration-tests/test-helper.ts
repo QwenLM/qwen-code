@@ -5,7 +5,7 @@
  */
 
 import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
+import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -122,6 +123,44 @@ export async function type(ptyProcess: pty.IPty, text: string) {
   }
 }
 
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+
+export const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+
+export const CONTAINER_SANDBOX_NO_PROXY =
+  '127.0.0.1,localhost,host.docker.internal';
+
+export function fakeServerHostOptions(): FakeOpenAIServerOptions | undefined {
+  return IS_CONTAINER_SANDBOX
+    ? { listenHost: '0.0.0.0', baseUrlHost: 'host.docker.internal' }
+    : undefined;
+}
+
+// Sets NO_PROXY so a containerized CLI reaches the host-side fake server, and
+// returns a restorer for the previous values. No-op outside a container sandbox.
+export function applyContainerSandboxNoProxy(): () => void {
+  if (!IS_CONTAINER_SANDBOX) {
+    return () => {};
+  }
+  const savedNoProxy = process.env['NO_PROXY'];
+  const savedNoProxyLower = process.env['no_proxy'];
+  process.env['NO_PROXY'] = CONTAINER_SANDBOX_NO_PROXY;
+  process.env['no_proxy'] = CONTAINER_SANDBOX_NO_PROXY;
+  return () => {
+    if (savedNoProxy === undefined) {
+      delete process.env['NO_PROXY'];
+    } else {
+      process.env['NO_PROXY'] = savedNoProxy;
+    }
+    if (savedNoProxyLower === undefined) {
+      delete process.env['no_proxy'];
+    } else {
+      process.env['no_proxy'] = savedNoProxyLower;
+    }
+  };
+}
+
 interface ParsedLog {
   attributes?: {
     'event.name'?: string;
@@ -167,6 +206,11 @@ export class TestRig {
     this.testName = testName;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
+    // Two cases that set up under the same name share this directory, and
+    // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
+    // sets. Reset it so a case never inherits the previous one's files; see the
+    // SDK helper, where exactly that made a suite pass locally and fail in CI.
+    rmSync(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
@@ -544,20 +588,34 @@ export class TestRig {
   ): Promise<boolean> {
     const startTime = Date.now();
     let attempts = 0;
+    let lastError: unknown;
     while (Date.now() - startTime < timeout) {
       attempts++;
-      const result = predicate();
-      if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
-        console.log(
-          `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
-        );
-      }
-      if (result) {
-        return true;
+      try {
+        const result = predicate();
+        if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
+          console.log(
+            `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
+          );
+        }
+        if (result) {
+          lastError = undefined;
+          return true;
+        }
+      } catch (err) {
+        lastError = err;
+        if (env['VERBOSE'] === 'true') {
+          console.log(`Poll attempt ${attempts}: predicate threw: ${err}`);
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, interval));
     }
-    if (env['VERBOSE'] === 'true') {
+    if (lastError) {
+      console.log(
+        `Poll timed out after ${attempts} attempts. Last error:`,
+        lastError,
+      );
+    } else if (env['VERBOSE'] === 'true') {
       console.log(`Poll timed out after ${attempts} attempts`);
     }
     return false;
