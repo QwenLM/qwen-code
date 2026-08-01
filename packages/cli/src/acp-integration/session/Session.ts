@@ -7422,6 +7422,8 @@ export class Session implements SessionContext {
       const loopDetected =
         opts?.recordInvalidToolParams === true &&
         !activeToolAbortSignal.aborted &&
+        // A permission cancellation is the user declining, not the model
+        // re-sending invalid params, so it must not feed loop detection.
         !opts?.stopAfterPermissionCancel &&
         recordDaemonInvalidToolParams(
           this.config,

@@ -1879,7 +1879,10 @@ export class CoreToolScheduler {
           const span = this.toolSpans.get(callId);
           if (span) {
             setToolSpanCancelled(span);
-            this.finalizeToolSpan(callId);
+            // Abort drain is terminal: force-finalize even when this is the
+            // deferred PostToolBatch parent span, which otherwise stays open
+            // for a batch hook that will no longer run on an aborted batch.
+            this.finalizeToolSpan(callId, true);
           }
           this.callIdToPostToolBatchSignal.delete(callId);
           this.autoModeFallbackCallIds.delete(callId);
@@ -4911,7 +4914,7 @@ export class CoreToolScheduler {
               scheduledCall.request,
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
-              'success',
+              executionStatus,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
