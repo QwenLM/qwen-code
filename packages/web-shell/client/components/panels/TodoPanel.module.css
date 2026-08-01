@@ -38,6 +38,30 @@
     );
 }
 
+.progressButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.progressButton:hover .stepText,
+.progressButton:focus-visible .stepText {
+  color: var(--foreground);
+}
+
+.progressButton:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
 .stepText {
   min-width: 0;
   overflow: hidden;

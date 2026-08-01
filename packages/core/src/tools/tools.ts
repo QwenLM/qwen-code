@@ -769,10 +769,12 @@ export interface DiffStat {
 
 export interface TodoResultDisplay {
   type: 'todo_list';
+  planId?: string;
   todos: Array<{
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+    blockedBy?: string[];
   }>;
 }
 
