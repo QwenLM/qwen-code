@@ -16,6 +16,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { resolveModelId } from '../utils/modelId.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
@@ -199,7 +200,6 @@ export type CompactTrigger = 'manual' | 'auto';
 export interface CompressOptions {
   promptId: string;
   force: boolean;
-  model: string;
   config: Config;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
@@ -318,7 +318,6 @@ export class ChatCompressionService {
     const {
       promptId,
       force,
-      model,
       config,
       consecutiveFailures,
       originalTokenCount,
@@ -517,10 +516,61 @@ export class ChatCompressionService {
         );
     }
 
+    // Hoist the system prompt so the guard can include it in the estimate.
+    const systemInstruction = buildCompressionSystemPrompt(
+      opts.customInstructions,
+      hookExtraInstructions,
+    );
+
+    // Guard: if the compaction model's context window is too small for the
+    // slimmed payload, fall back to the main model for this compression only.
+    // Coalesce to the main model so an undefined getCompactionModel() (e.g.
+    // validation failure) never leaks to the fast model via resolveDefaultModel.
+    let effectiveCompactionModel =
+      config.getCompactionModel?.() ?? config.getModel();
+    let compactionWarning: string | undefined;
+    // Only check the window when the effective model differs from the main
+    // model — warning about the main model being "too small" is confusing
+    // when no compaction model was explicitly configured.
+    if (effectiveCompactionModel !== config.getModel()) {
+      const resolved = resolveModelId(effectiveCompactionModel);
+      if (resolved) {
+        const models = resolved.authType
+          ? config.getAllConfiguredModels([resolved.authType])
+          : config.getAllConfiguredModels();
+        const entry = models.find((m) => m.id === resolved.modelId);
+        const window = entry?.contextWindowSize;
+        // Include the system prompt and the output reserve: providers check
+        // prompt + max_tokens <= window, so all three terms count.
+        const slimmedTokenEstimate =
+          estimateContentTokens(
+            slim.slimmedHistory,
+            slimmingConfig.imageTokenEstimate,
+          ) +
+          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+          COMPACT_MAX_OUTPUT_TOKENS;
+        if (window && window > 0 && slimmedTokenEstimate > window) {
+          compactionWarning =
+            `Compaction model "${resolved.modelId}" context window ` +
+            `(${window.toLocaleString()} tokens) is too small for the current ` +
+            `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
+            `using the main model for this compression.`;
+          config
+            .getDebugLogger()
+            .warn(`[chat-compression] ${compactionWarning}`);
+          effectiveCompactionModel = config.getModel();
+        }
+      }
+    }
+
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       skipOutputLanguagePreference: true,
-      model,
+      model: effectiveCompactionModel,
+      // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
+      // Falls back to the main model if not set or if the payload exceeds the
+      // compaction model's context window.
+      // See https://github.com/QwenLM/qwen-code/issues/5956
       // Stream so a slow compression inference keeps the HTTP connection alive.
       // Non-streaming returns no bytes until the whole summary is generated, so
       // behind a BFF gateway with a short `proxy_read_timeout` a long inference
@@ -530,10 +580,7 @@ export class ChatCompressionService {
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: buildCompressionSystemPrompt(
-        opts.customInstructions,
-        hookExtraInstructions,
-      ),
+      systemInstruction,
       contents: [
         ...slim.slimmedHistory,
         {
@@ -878,6 +925,7 @@ export class ChatCompressionService {
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
+          ...(compactionWarning && { warning: compactionWarning }),
         },
       };
     }
