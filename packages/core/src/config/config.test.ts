@@ -83,6 +83,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -205,6 +206,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../skills/skill-curator.js', () => ({
+  maybeRunAutoSkillCurator: vi.fn().mockResolvedValue({ status: 'not_due' }),
 }));
 vi.mock('../memory/team-memory-git-status.js', () => ({
   getTeamMemoryShareabilityWarning: vi.fn().mockReturnValue(null),
@@ -3118,6 +3122,44 @@ describe('Server Config (config.ts)', () => {
       expect(
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([initializationError, closeError]);
+    });
+
+    it('runs due auto-skill curation before loading skills when enabled', async () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await config.initialize();
+
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(TARGET_DIR);
+      expect(
+        vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);
+    });
+
+    it('does not run auto-skill curation when auto-skill is disabled', async () => {
+      await new Config({ ...baseParams, enableAutoSkill: false }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('does not run auto-skill curation in an untrusted folder', async () => {
+      await new Config({
+        ...baseParams,
+        enableAutoSkill: true,
+        trustedFolder: false,
+      }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('continues loading skills when auto-skill curation fails', async () => {
+      vi.mocked(maybeRunAutoSkillCurator).mockRejectedValueOnce(
+        new Error('corrupt curator state'),
+      );
+
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+      expect(SkillManager).toHaveBeenCalledTimes(1);
     });
 
     it('waits for in-flight initialization before cleaning late resources', async () => {

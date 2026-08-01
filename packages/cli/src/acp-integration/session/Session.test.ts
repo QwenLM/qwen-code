@@ -16429,6 +16429,50 @@ describe('Session', () => {
       };
     }
 
+    it('publishes a persisted Todo plan when cancellation races completion', async () => {
+      const controller = new AbortController();
+      const execute = vi.fn().mockImplementation(async () => {
+        controller.abort();
+        return {
+          llmContent: 'updated',
+          returnDisplay: {
+            type: 'todo_list',
+            planId: 'plan-1',
+            todos: [{ id: '1', content: 'Ship', status: 'pending' }],
+          },
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.TODO_WRITE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        controller.signal,
+        'prompt-cancelled-todo',
+        [
+          {
+            id: 'todo-call',
+            name: core.ToolNames.TODO_WRITE,
+            args: { todos: [{ id: '1', content: 'Ship', status: 'pending' }] },
+          },
+        ],
+      );
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'plan',
+            entries: [
+              expect.objectContaining({
+                content: 'Ship',
+                _meta: { qwenTodo: { id: '1' } },
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+
     it('lets normalized tool images select a full-turn model', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: [
@@ -20065,6 +20109,26 @@ describe('Session', () => {
             ([params]) =>
               params.update.sessionUpdate === 'agent_message_chunk' &&
               params.update._meta?.['source'] === 'todo_stop_guard',
+          ),
+      ).toBe(false);
+    });
+
+    it('does not publish rejected Todo arguments as a live plan', async () => {
+      const execute = installPendingTodoTool();
+      execute.mockResolvedValue({
+        llmContent: 'Failed to modify todos',
+        returnDisplay:
+          'Error writing todos: Todo dependency graph contains a cycle',
+      });
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) => params.update.sessionUpdate === 'plan',
           ),
       ).toBe(false);
     });

@@ -256,7 +256,9 @@ import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
+  getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestActiveTodos,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -3225,6 +3227,10 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  const approvalPlanTodos = useMemo(
+    () => getLatestActiveTodos(messages),
+    [messages],
+  );
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
   // reference would re-render every todo/plan row regardless of memoization;
@@ -3260,9 +3266,8 @@ export function App({
     todoDetailRef.current = { signature, details };
     return details;
   }, [messages]);
-  const floatingTodos = useStableArray(
-    floatingTodosState.todos,
-    (t) => `${t.id}:${t.status}:${t.content}`,
+  const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
+    JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
@@ -4089,6 +4094,13 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const planAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -4688,17 +4700,15 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
-  const notifySuccess = useCallback(
-    (message: string) => pushToast('success', message),
-    [pushToast],
-  );
-
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -4706,12 +4716,12 @@ export function App({
     connected,
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions,
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -8788,7 +8798,11 @@ export function App({
           )}
           {tasksDialogMessage && (
             <DialogShell
-              title={t('tasks.title')}
+              title={
+                floatingTodos.length > 0
+                  ? t('planExecution.dialogTitle')
+                  : t('tasks.title')
+              }
               size="lg"
               onClose={() => setTasksDialogMessage(null)}
             >
@@ -8797,6 +8811,12 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                planTodos={floatingTodos}
+                agentTools={planAgentTools}
+                onOpenSubagent={(tool) => {
+                  setTasksDialogMessage(null);
+                  openSubagentPanel(tool);
+                }}
                 onOpenMonitor={handleOpenMonitorDetails}
               />
             </DialogShell>
@@ -9956,6 +9976,9 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            onOpen={
+                              showFloatingTodos ? openTasksPanel : undefined
+                            }
                           />
                         </div>
                       )}
@@ -9974,6 +9997,7 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
+                            planTodos={approvalPlanTodos}
                           />
                         </div>
                       )}
@@ -10052,8 +10076,8 @@ export function App({
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
+                          canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
-                          onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
                         {CustomComposerHeader && (
