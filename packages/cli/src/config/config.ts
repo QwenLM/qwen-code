@@ -38,6 +38,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
@@ -112,6 +113,17 @@ const VALID_APPROVAL_MODE_VALUES = [
   'auto',
   'yolo',
 ] as const;
+
+const SKILL_LEVELS: readonly SkillLevel[] = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+];
+
+function isSkillLevel(value: unknown): value is SkillLevel {
+  return SKILL_LEVELS.includes(value as SkillLevel);
+}
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
@@ -1475,6 +1487,22 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+/**
+ * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
+ * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
+ * exits the process on a duplicate id, but that would kill a shared ACP child
+ * and every session on its channel — embedded callers catch this and fail the
+ * single request instead.
+ */
+export class SessionIdConflictError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message: string) {
+    super(message);
+    this.name = 'SessionIdConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1519,6 +1547,13 @@ export async function loadCliConfig(
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
    */
   settingsWatcher?: { stopWatching(): void },
+  /**
+   * When true, a duplicate caller-supplied session id throws
+   * `SessionIdConflictError` instead of calling `process.exit(1)`. Embedded
+   * callers (ACP/daemon) set this so one conflicting `newSession` degrades a
+   * single request rather than terminating the shared child process.
+   */
+  throwOnSessionIdConflict = false,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -1997,6 +2032,9 @@ export async function loadCliConfig(
     );
     if (exists) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
+      if (throwOnSessionIdConflict) {
+        throw new SessionIdConflictError(argv['sessionId'], message);
+      }
       writeStderrLine(message);
       process.exit(1);
     }
@@ -2068,6 +2106,10 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    disabledSkillLevels:
+      bareMode || safeMode || !Array.isArray(settings.skills?.disabledLevels)
+        ? undefined
+        : settings.skills.disabledLevels.filter(isSkillLevel),
     customSkillDirs:
       bareMode || safeMode
         ? undefined

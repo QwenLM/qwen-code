@@ -14,6 +14,7 @@ import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
@@ -113,6 +114,7 @@ const virtualIsStaticItem = (item: VpItem) =>
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const { allExpanded: fullDetail } = useThoughtExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
@@ -385,6 +387,7 @@ export const MainContent = () => {
             embeddedShellFocused={ps.embeddedShellFocused}
             commands={uiState.slashCommands}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+            fullDetail={fullDetail}
           />
         );
       }
@@ -399,6 +402,7 @@ export const MainContent = () => {
           commands={uiState.slashCommands}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
+          fullDetail={fullDetail}
         />
       );
     },
@@ -409,6 +413,7 @@ export const MainContent = () => {
       staticAreaMaxItemHeight,
       uiState.slashCommands,
       sourceCopyOffsetsByHistoryItem,
+      fullDetail,
     ],
   );
 
@@ -484,6 +489,7 @@ export const MainContent = () => {
                 commands={uiState.slashCommands}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
                 thoughtHeadId={thoughtHeadIdByItem.get(h)}
+                fullDetail={fullDetail}
               />
             ),
           ),
@@ -547,6 +553,7 @@ export const MainContent = () => {
                   activeShellPtyId={uiState.activePtyId}
                   embeddedShellFocused={uiState.embeddedShellFocused}
                   sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                  fullDetail={fullDetail}
                 />
               ),
             )}

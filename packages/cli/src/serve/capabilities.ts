@@ -344,6 +344,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // to discover plural modalities because legacy Voice tags describe only
   // the primary runtime and may be absent for a secondary-only setup.
   workspace_qualified_voice: { since: 'v1' },
+  // Workspace-qualified managed-memory routes
+  // (`/workspaces/:workspace/memory/{remember,forget,dream}`). Each
+  // registered workspace gets its own task lane; the primary lane is the
+  // same instance as the singular `/workspace/memory` surface.
+  workspace_qualified_memory: { since: 'v1' },
   // Global extension catalog/mutations plus workspace-qualified activation
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
@@ -587,6 +592,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_qualified_voice',
     // Like qualified ACP, the plural Voice surface is mounted ahead of time
     // but only becomes useful once the daemon has a secondary runtime.
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_memory',
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,

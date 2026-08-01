@@ -6,6 +6,9 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  splitDiffIntoHunks,
+  selectHunkProbes,
+  MAX_HUNK_PROBES,
   isWorkspaceMember,
   planTestEfficacy,
   classifyProbeRun,
@@ -14,9 +17,12 @@ import {
   selectMutants,
   parseAddedLines,
   hasCollocatedNewTest,
+  collocatedProbe,
   fitsAnotherMutantRun,
   probeCreateFailureDetail,
   probeCleanupFailureDetail,
+  findVitestBin,
+  exposeDependencies,
   MAX_MUTANTS,
 } from './test-efficacy.js';
 import {
@@ -26,6 +32,8 @@ import {
   symlinkSync,
   existsSync,
   readFileSync,
+  readdirSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -161,6 +169,80 @@ describe('planTestEfficacy', () => {
     );
     expect(plan.probes).toEqual([]);
     expect(plan.revert).toEqual([]);
+  });
+});
+
+describe('findVitestBin', () => {
+  it('names the search root when vitest cannot be resolved', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'no-vitest-'));
+
+    expect(() => findVitestBin(worktree)).toThrow(
+      `vitest not found searching up from ${worktree}`,
+    );
+  });
+
+  it('names the package when vitest declares no bin', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'vitest-no-bin-'));
+    const vitestDir = join(worktree, 'node_modules', 'vitest');
+    mkdirSync(vitestDir, { recursive: true });
+    writeFileSync(join(vitestDir, 'package.json'), '{}');
+
+    expect(() => findVitestBin(worktree)).toThrow(/declares no "vitest" bin/);
+  });
+
+  it('keeps the real error when vitest is present but hides its package.json', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'vitest-hidden-'));
+    const vitestDir = join(worktree, 'node_modules', 'vitest');
+    mkdirSync(vitestDir, { recursive: true });
+    // An `exports` map with no `./package.json` (and no `./*` wildcard) makes
+    // `require.resolve('vitest/package.json')` throw ERR_PACKAGE_PATH_NOT_EXPORTED.
+    // vitest IS installed here, so the blanket "vitest not found" would be a lie
+    // that sends the reader hunting a missing install; the real error survives.
+    writeFileSync(
+      join(vitestDir, 'package.json'),
+      JSON.stringify({ name: 'vitest', exports: { '.': './index.js' } }),
+    );
+    writeFileSync(join(vitestDir, 'index.js'), '');
+
+    expect(() => findVitestBin(worktree)).toThrow(/not defined by "exports"/);
+  });
+});
+
+describe('exposeDependencies', () => {
+  it('links top-level and scoped packages, counting what it linked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+    const nm = join(root, 'node_modules');
+    mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
+    mkdirSync(join(nm, '@scope', 'inner-pkg'), { recursive: true });
+    // A non-directory entry is skipped — neither linked nor counted as a failure.
+    writeFileSync(join(nm, 'stray-file'), 'x');
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toEqual({ linked: 2, failed: 0 });
+    expect(readdirSync(join(probe, 'node_modules')).sort()).toEqual([
+      '@scope',
+      'plain-pkg',
+    ]);
+    expect(
+      lstatSync(join(probe, 'node_modules', 'plain-pkg')).isSymbolicLink(),
+    ).toBe(true);
+    expect(
+      lstatSync(
+        join(probe, 'node_modules', '@scope', 'inner-pkg'),
+      ).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  it('leaves an already-built probe farm untouched', () => {
+    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+
+    expect(exposeDependencies(probe, root)).toEqual({ linked: 0, failed: 0 });
+    expect(readdirSync(join(probe, 'node_modules'))).toEqual([]);
   });
 });
 
@@ -311,6 +393,112 @@ describe('classifyProbeRun', () => {
       ['a.test.ts'],
     );
     expect(only(got).verdict).toBe('gated');
+  });
+
+  it('matches Windows result paths to repository-relative probes', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const got = classifyProbeRun(
+        0,
+        json({
+          testResults: [
+            {
+              name: 'C:\\w\\packages\\lib\\src\\inert.test.ts',
+              assertionResults: [{ status: 'passed' }],
+            },
+          ],
+        }),
+        ['packages/lib/src/inert.test.ts'],
+      );
+      expect(only(got).verdict).toBe('inert');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('matches Windows result paths case-insensitively', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      // Windows paths are case-insensitive; a drive letter or 8.3 name reported
+      // in different case must still match the git-relative probe, or the file
+      // silently reads `inconclusive`.
+      const got = classifyProbeRun(
+        0,
+        json({
+          testResults: [
+            {
+              name: 'C:\\W\\Packages\\Lib\\src\\Inert.test.ts',
+              assertionResults: [{ status: 'passed' }],
+            },
+          ],
+        }),
+        ['packages/lib/src/inert.test.ts'],
+      );
+      expect(only(got).verdict).toBe('inert');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('keeps POSIX matching case-sensitive', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
+      // Case folding is win32-only: on POSIX case is significant, so a
+      // different-case name is a different file and must NOT satisfy the probe.
+      const got = only(
+        classifyProbeRun(
+          1,
+          json({
+            testResults: [
+              {
+                name: '/w/SRC/A.test.ts',
+                assertionResults: [{ status: 'failed' }],
+              },
+            ],
+          }),
+          ['src/a.test.ts'],
+        ),
+      );
+      expect(got.verdict).toBe('inconclusive');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('does not treat a POSIX backslash filename as a path separator', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
+      // On POSIX a backslash is a legal filename character. The win32-only
+      // normalisation must not run here, or `/w/vendor/other\src/a.test.ts`
+      // would collapse into `/w/vendor/other/src/a.test.ts` and satisfy the
+      // probe `src/a.test.ts` — taking a neighbour's verdict, exactly what the
+      // path-separator boundary exists to prevent.
+      const got = only(
+        classifyProbeRun(
+          1,
+          json({
+            testResults: [
+              {
+                name: '/w/vendor/other\\src/a.test.ts',
+                assertionResults: [{ status: 'failed' }],
+              },
+            ],
+          }),
+          ['src/a.test.ts'],
+        ),
+      );
+      expect(got.verdict).toBe('inconclusive');
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('does not let a gating test cover for an inert one in the same run', () => {
@@ -1057,6 +1245,30 @@ describe('hasCollocatedNewTest', () => {
   });
 });
 
+describe('collocatedProbe', () => {
+  it('returns the collocated test path when one is in the probe set', () => {
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', [
+        'packages/cli/src/other.test.ts',
+        'packages/cli/src/x.test.ts',
+      ]),
+    ).toBe('packages/cli/src/x.test.ts');
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', ['packages/cli/src/x.spec.ts']),
+    ).toBe('packages/cli/src/x.spec.ts');
+  });
+
+  it('returns undefined when no collocated test is probed', () => {
+    // A different directory, or a basename-suffix collision, is not collocated.
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', [
+        'packages/core/src/x.test.ts',
+        'packages/cli/src/xy.test.ts',
+      ]),
+    ).toBeUndefined();
+  });
+});
+
 describe('classifyMutantRun', () => {
   // Verdicts flow through the SAME per-file classifier the revert probe uses,
   // so these fixtures are the vitest-JSON shapes classifyProbeRun already
@@ -1146,5 +1358,276 @@ describe('fitsAnotherMutantRun', () => {
     expect(fitsAnotherMutantRun(60_000, 60_000)).toBe(true);
     expect(fitsAnotherMutantRun(59_999, 60_000)).toBe(false);
     expect(fitsAnotherMutantRun(0, 60_000)).toBe(false);
+  });
+});
+
+describe('splitDiffIntoHunks', () => {
+  const DIFF = [
+    'diff --git a/src/x.ts b/src/x.ts',
+    'index 111..222 100644',
+    '--- a/src/x.ts',
+    '+++ b/src/x.ts',
+    '@@ -1,3 +1,4 @@',
+    ' const a = 1;',
+    '+const added = 2;',
+    ' const b = 3;',
+    ' const c = 4;',
+    '@@ -20,3 +21,3 @@',
+    ' const p = 1;',
+    '-const q = 2;',
+    '+const q = 99;',
+    ' const r = 3;',
+    '',
+  ].join('\n');
+
+  it('returns one self-contained patch per hunk', () => {
+    const hunks = splitDiffIntoHunks(DIFF);
+    expect(hunks.map((h) => h.header)).toEqual([
+      '@@ -1,3 +1,4 @@',
+      '@@ -20,3 +21,3 @@',
+    ]);
+    // Each patch carries the file header, so `git apply` can place it alone.
+    for (const h of hunks) {
+      expect(h.patch).toContain('diff --git a/src/x.ts b/src/x.ts');
+      expect(h.patch).toContain('--- a/src/x.ts');
+      expect(h.patch).toContain('+++ b/src/x.ts');
+      expect(h.patch.endsWith('\n')).toBe(true);
+    }
+    // And ONLY its own hunk — the whole point of splitting.
+    expect(hunks[0].patch).toContain('+const added = 2;');
+    expect(hunks[0].patch).not.toContain('const q = 99;');
+    expect(hunks[1].patch).toContain('+const q = 99;');
+    expect(hunks[1].patch).not.toContain('const added = 2;');
+  });
+
+  it('anchors startLine at the first ADDED line, past the context prefix', () => {
+    // DIFF's first hunk opens with one context line before its `+` (2), the
+    // second with one before its change (22) — anchoring at the header start
+    // pointed findings at untouched context.
+    expect(splitDiffIntoHunks(DIFF).map((h) => h.startLine)).toEqual([2, 22]);
+  });
+
+  it('does not let a "\\ No newline" marker inflate startLine', () => {
+    // The marker corresponds to no file line; counting it as context shifts
+    // startLine off by one per marker, while parseAddedLines already excludes it.
+    const d = [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      '@@ -1,2 +1,2 @@',
+      ' const same = 1;',
+      '-const old = 2;',
+      '\\ No newline at end of file',
+      '+const new = 2;',
+      '\\ No newline at end of file',
+      '',
+    ].join('\n');
+    expect(splitDiffIntoHunks(d).map((h) => h.startLine)).toEqual([2]);
+  });
+
+  it('does not mistake a removed line whose text begins `@@` for a header', () => {
+    // In a unified diff every body line is prefixed, so `-@@ x` is content.
+    const d = [
+      'diff --git a/a.md b/a.md',
+      '--- a/a.md',
+      '+++ b/a.md',
+      '@@ -1,2 +1,2 @@',
+      '-@@ old marker',
+      '+@@ new marker',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].patch).toContain('-@@ old marker');
+  });
+
+  it('gives each hunk ITS OWN file header on a multi-file diff', () => {
+    const d = [
+      'diff --git a/one.ts b/one.ts',
+      '--- a/one.ts',
+      '+++ b/one.ts',
+      '@@ -1,1 +1,1 @@',
+      '-const a = 1;',
+      '+const a = 2;',
+      'diff --git a/two.ts b/two.ts',
+      '--- a/two.ts',
+      '+++ b/two.ts',
+      '@@ -5,1 +5,1 @@',
+      '-const b = 1;',
+      '+const b = 2;',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(2);
+    // The second patch must name the second file, or git applies it to the wrong one.
+    expect(hunks[1].patch).toContain('diff --git a/two.ts b/two.ts');
+    expect(hunks[1].patch).not.toContain('one.ts');
+    expect(hunks[0].patch).not.toContain('two.ts');
+  });
+
+  it('returns nothing for a diff with no hunks (a binary file)', () => {
+    expect(
+      splitDiffIntoHunks(
+        'diff --git a/i.png b/i.png\nBinary files a/i.png and b/i.png differ\n',
+      ),
+    ).toEqual([]);
+    expect(splitDiffIntoHunks('')).toEqual([]);
+  });
+
+  it("does not swallow a binary file into the next file's header", () => {
+    // A binary entry has no `@@` hunks; the boundary scan must stop at the
+    // next `diff --git` rather than running past it into the next file.
+    const d = [
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/src/x.ts b/src/x.ts',
+      '--- a/src/x.ts',
+      '+++ b/src/x.ts',
+      '@@ -1,1 +1,1 @@',
+      '-const a = 1;',
+      '+const a = 2;',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].patch).toContain('diff --git a/src/x.ts b/src/x.ts');
+    expect(hunks[0].patch).not.toContain('img.png');
+  });
+});
+
+describe('selectHunkProbes', () => {
+  const diffOf = (...hunks: Array<[number, number]>) =>
+    [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      ...hunks.map(
+        ([start, len]) => `@@ -${start},${len} +${start},${len} @@\n x`,
+      ),
+      '',
+    ].join('\n');
+
+  const file = (over: Record<string, unknown> = {}) => ({
+    file: 'src/a.ts',
+    diff: diffOf([1, 3], [20, 3]),
+    hasNewTests: false,
+    mutantLines: [] as number[],
+    ...over,
+  });
+
+  it('produces one candidate per hunk', () => {
+    const { selected } = selectHunkProbes([file()]);
+    expect(selected.map((c) => c.startLine)).toEqual([1, 20]);
+    expect(selected.map((c) => c.index)).toEqual([0, 1]);
+  });
+
+  it('skips a hunk a mutant already covers, and keeps the others', () => {
+    // The mutant ran the finer-grained experiment on those lines; a second run
+    // over the whole hunk buys a coarser answer at the same price.
+    const { selected } = selectHunkProbes([file({ mutantLines: [2] })]);
+    expect(selected.map((c) => c.startLine)).toEqual([20]);
+  });
+
+  it('does not overshoot the hunk end into a later, unrelated mutant', () => {
+    // The overlap range is the header's new-side span [start, start+len). The
+    // old code anchored it at the first ADDED line (past leading context) and added
+    // the full new-side length, overshooting the real end by the context-line count
+    // — so a mutant just past the hunk wrongly skipped it and lost probe coverage.
+    const diff = [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      '@@ -1,3 +1,4 @@',
+      ' const a = 1;',
+      '+const added = 2;',
+      ' const b = 3;',
+      ' const c = 4;',
+      '',
+    ].join('\n');
+    // Hunk covers new-side lines 1-4; a mutant at 5 is outside it and must NOT
+    // cause the hunk to be skipped.
+    const { selected } = selectHunkProbes([
+      { file: 'f', diff, hasNewTests: false, mutantLines: [5] },
+    ]);
+    expect(selected).toHaveLength(1);
+  });
+
+  it('puts files whose collocated tests the diff also touches first', () => {
+    const { selected } = selectHunkProbes([
+      file({ file: 'src/plain.ts', diff: diffOf([1, 1]) }),
+      file({ file: 'src/tested.ts', diff: diffOf([1, 1]), hasNewTests: true }),
+    ]);
+    expect(selected.map((c) => c.file)).toEqual([
+      'src/tested.ts',
+      'src/plain.ts',
+    ]);
+  });
+
+  it('COUNTS what the cap drops rather than losing it', () => {
+    // A capped `survived: 0` that read as "every change is covered" is exactly
+    // the false assurance the mutant cap already guards against.
+    const many = Array.from({ length: MAX_HUNK_PROBES + 3 }, (_, i) =>
+      file({ file: `src/f${i}.ts`, diff: diffOf([1, 1]) }),
+    );
+    const { selected, skippedForCap } = selectHunkProbes(many);
+    expect(selected).toHaveLength(MAX_HUNK_PROBES);
+    expect(skippedForCap).toBe(3);
+  });
+
+  it('skips deleted files rather than spending cap slots on them', () => {
+    // A deleted file's hunks are all removals; runOneHunkProbe reads the file
+    // first and returns `inconclusive` every time.
+    const deleted = {
+      file: 'src/gone.ts',
+      diff: [
+        'diff --git a/src/gone.ts b/src/gone.ts',
+        'deleted file mode 100644',
+        '--- a/src/gone.ts',
+        '+++ /dev/null',
+        '@@ -1,3 +0,0 @@',
+        '-const a = 1;',
+        '-const b = 2;',
+        '-const c = 3;',
+        '',
+      ].join('\n'),
+      hasNewTests: false,
+      mutantLines: [] as number[],
+    };
+    const { selected } = selectHunkProbes([deleted, file()]);
+    expect(selected.every((c) => c.file !== 'src/gone.ts')).toBe(true);
+    expect(selected.length).toBeGreaterThan(0);
+  });
+
+  it('skips added files whose reverse-apply deletes the whole file', () => {
+    // An added file's hunk probe reverse-applies to a deletion — guaranteed
+    // inconclusive when a probe imports it, and a file-level statement wearing
+    // a hunk-level message when nothing does.
+    const added = {
+      file: 'src/new.ts',
+      diff: [
+        'diff --git a/src/new.ts b/src/new.ts',
+        'new file mode 100644',
+        '--- /dev/null',
+        '+++ b/src/new.ts',
+        '@@ -0,0 +1,3 @@',
+        '+const a = 1;',
+        '+const b = 2;',
+        '+const c = 3;',
+        '',
+      ].join('\n'),
+      hasNewTests: false,
+      mutantLines: [] as number[],
+    };
+    const { selected } = selectHunkProbes([added, file()]);
+    expect(selected.every((c) => c.file !== 'src/new.ts')).toBe(true);
+    expect(selected.length).toBeGreaterThan(0);
+  });
+
+  it('has nothing to probe when every hunk is mutant-covered', () => {
+    const { selected, skippedForCap } = selectHunkProbes([
+      file({ mutantLines: [2, 21] }),
+    ]);
+    expect(selected).toEqual([]);
+    expect(skippedForCap).toBe(0);
   });
 });

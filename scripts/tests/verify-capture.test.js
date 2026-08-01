@@ -69,17 +69,22 @@ describe('verify-capture helper', () => {
   it('captures a command to a real PNG', () =>
     withDir((dir) => {
       const out = path.join(dir, 'evidence/01-ab.png');
-      const res = run([
-        '--out',
-        out,
-        '--cols',
-        '40',
-        '--title',
-        'A/B: gate flips',
-        '--',
-        'node',
-        harness(dir),
-      ]);
+      const res = run(
+        [
+          '--out',
+          out,
+          '--cols',
+          '40',
+          '--title',
+          'A/B: gate flips',
+          '--',
+          'node',
+          harness(dir),
+        ],
+        {
+          env: { ...process.env, NO_COLOR: 'true' },
+        },
+      );
       expect(res.status).toBe(0);
       // isPng reads from evidence/01-ab.png, so a pass also proves the helper
       // created the parent dir the skill tells the agent to write into.
