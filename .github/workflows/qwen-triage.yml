@@ -91,6 +91,14 @@ jobs:
       # gets a pinned head OID, a pre-execution risk screen, and a full
       # workspace wipe. Empty for every non-verify event.
       verify_trust: '${{ steps.perm.outputs.verify_trust }}'
+      # Whether the verify LANE should run at all. `/verify` sets it, and so
+      # does a `/triage` comment on a PR — triage reads, verify runs, and a
+      # maintainer asking for a review usually wants both. Kept separate from
+      # should_run because the two fail differently: an unreadable author
+      # permission denies an explicit `/verify` outright (it is the input to
+      # the control selection), but must NOT take the triage down with it, so
+      # the piggybacked lane just turns itself off and triage proceeds.
+      verify_lane: '${{ steps.perm.outputs.verify_lane }}'
       # Head OID snapped AT SPONSORSHIP TIME for an external run: the
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
@@ -112,10 +120,25 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
+          # `github.event.issue.pull_request` is an object on PRs and null on
+          # issues; compare against null rather than truthiness so the shell
+          # receives a plain true/false.
+          IS_PR: '${{ github.event.issue.pull_request != null }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
+          # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
+          # typed /verify". They differ only for the piggybacked lane, where
+          # a classification failure must skip verify without denying triage.
+          VERIFY_LANE=false
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            # Automatic per-PR triage deliberately does NOT pull the verify
+            # lane with it. Runner capacity is not the reason — the ECS pool
+            # is maintainer-provided and expandable, and cheaper than the
+            # tokens. The reason is the AGENT budget: a verify run is up to
+            # 110 minutes of model time, and every `synchronize` would spend
+            # one, including the ones that fix a typo. Commenting is what
+            # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -147,9 +170,21 @@ jobs:
               case "$body_lc" in
                 '@qwen-code /verify'|'@qwen-code /verify '*)
                   IS_VERIFY=true
+                  VERIFY_LANE=true
                   principals="$COMMENT_USER"
                   ;;
                 '@qwen-code /tmux'|'@qwen-code /tmux '*) principals="$ISSUE_AUTHOR" ;;
+                '@qwen-code /triage'*)
+                  # /triage on a PR also starts verify, in parallel — the
+                  # two answer different questions and neither waits on the
+                  # other. On a plain ISSUE there is nothing to build, so
+                  # the lane stays off and no author lookup is spent.
+                  # `principals` is unchanged: both lanes already gate on
+                  # the commenter, so this adds a control selection, not a
+                  # new gate.
+                  [ "$IS_PR" = 'true' ] && VERIFY_LANE=true
+                  principals="$COMMENT_USER"
+                  ;;
                 *) principals="$COMMENT_USER" ;;
               esac
               ;;
@@ -220,12 +255,27 @@ jobs:
           # Fail closed on every lookup: an unreadable author permission or
           # an unresolvable head OID denies the run outright — classifying
           # a request we cannot read would silently pick a trust level.
-          if [ "$IS_VERIFY" = true ]; then
+          # For the lane piggybacked on /triage, "fail closed" means the
+          # LANE closes, not the whole run: the commenter asked for a
+          # review, and taking that away because an unrelated API call
+          # flaked would be a worse answer than shipping triage alone.
+          # Either way no code executes unclassified, which is the property
+          # the four external-only controls (head-OID pin, risk screen,
+          # pre- and post-run workspace wipes) depend on.
+          if [ "$VERIFY_LANE" = true ]; then
+            deny_verify() {
+              echo "$1" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$IS_VERIFY" = true ]; then
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "verify_lane=false" >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
             if [ -z "$ISSUE_AUTHOR" ] ||
                ! author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              echo "Could not resolve the PR author's permission for /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              deny_verify "Could not resolve the PR author's permission for the verify lane; skipping it."
             fi
             case "$author_perm" in
               admin|maintain|write)
@@ -234,15 +284,14 @@ jobs:
               *)
                 if ! sponsor_oid="$(gh pr view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid' 2>/dev/null)" ||
                    [ -z "$sponsor_oid" ]; then
-                  echo "Could not snapshot the PR head for a sponsored /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-                  echo "should_run=false" >> "$GITHUB_OUTPUT"
-                  exit 0
+                  deny_verify "Could not snapshot the PR head for a sponsored verify lane; skipping it."
                 fi
                 echo "verify_trust=external" >> "$GITHUB_OUTPUT"
                 echo "verify_head_oid=${sponsor_oid}" >> "$GITHUB_OUTPUT"
-                echo "Sponsored /verify for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
+                echo "Sponsored verify lane for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
+            echo "verify_lane=true" >> "$GITHUB_OUTPUT"
           fi
           echo "should_run=true" >> "$GITHUB_OUTPUT"
 
@@ -1037,6 +1086,24 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -1048,6 +1115,12 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
@@ -1060,9 +1133,10 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
@@ -1828,22 +1902,25 @@ jobs:
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.issue.state == 'open' &&
-      (github.event.comment.body == '@qwen-code /verify' ||
-       startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+      needs.authorize.outputs.verify_lane == 'true' &&
       needs.authorize.outputs.should_run == 'true' &&
       vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
     # One verification per PR at a time, mirroring the tmux job: concurrent
     # runs would share the same self-hosted workspace and clobber each other.
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
     # keep non-runnable triggers out of the shared per-PR group.
+    #
+    # `verify_lane` is the single source of truth for "does this trigger
+    # start verify" — authorize decides it, and the command strings are
+    # matched in exactly one place. Enumerating them here too is what let
+    # the trust classification and the lane trigger drift apart.
     concurrency:
       group: >-
         ${{
           (github.event_name == 'issue_comment' &&
            github.event.issue.pull_request &&
            github.event.issue.state == 'open' &&
-           (github.event.comment.body == '@qwen-code /verify' ||
-            startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+           needs.authorize.outputs.verify_lane == 'true' &&
            needs.authorize.outputs.should_run == 'true' &&
            vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
@@ -2452,6 +2529,24 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2470,6 +2565,12 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
@@ -2493,9 +2594,10 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break

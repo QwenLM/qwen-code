@@ -51,6 +51,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through
@@ -359,7 +360,7 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -1957,9 +1958,27 @@ async function runQwenServeImpl(
           : 'not_scheduled',
     },
   };
+  // Validate before freezing the value into the immutable daemon base env so a
+  // bad scope can never be baked into a runtime, even transiently.
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(
+      optsIn.memoryProjectScope,
+    )
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   preResolveServeFastPathHomeEnvOverrides();
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
+    ...(optsIn.memoryProjectScope !== undefined
+      ? {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
+        }
+      : {}),
   });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
