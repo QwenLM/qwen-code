@@ -393,6 +393,15 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(posted().comments).toEqual([]);
   });
 
+  it('posts the injected CLI version in the review footer', () => {
+    runSubmit(authorized({}), '0.21.2');
+
+    expect(posted().body).toContain('via Qwen Code /review');
+    expect(
+      posted().body.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.2)_'),
+    ).toBe(true);
+  });
+
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied

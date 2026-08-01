@@ -385,6 +385,8 @@ Read the JSON it prints:
 - \`toolchain: "npm"\` → use its \`build[]\` / \`test[]\` results. A failure in a file **the diff changed** is a **Critical** (\`Source: [build]\` or \`[test]\`); a failure in a file it did **not** touch is pre-existing — say so, do not file it against this PR. A non-empty \`timedOut\`, or a failed \`install\`, is environment/infrastructure — informational, never a Critical. On \`ok: true\`, name the workspaces built and the commands run; a return that names no command is a whiff.
 - \`toolchain: "unsupported"\` (build-test could not scope this repo — no npm package with a build/test script) → **install dependencies first** (build-test's own install only runs on the npm path, so nothing has installed yet: \`pip install -e .\`, \`mvn -q -DskipTests package\`'s own fetch, \`cargo fetch\`, \`go mod download\`, etc.), then fall back to **one** build and **one** test command by this precedence, each with a deadline it can meet: \`pom.xml\` → \`{mvn} compile\` / \`{mvn} test -q\`; \`build.gradle\` → \`{gradle} compileJava\` / \`{gradle} test\`; \`Makefile\` → \`make build\`; \`Cargo.toml\` → \`cargo build\` / \`cargo test\`; \`go.mod\` → \`go build ./...\` / \`go test ./...\`; \`pytest.ini\` or \`pyproject.toml\` \`[tool.pytest]\` → \`pytest\`. If none match, read the CI config **from the base branch** (\`git show <base>:<path>\`), never the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.
 
+The efficacy report's \`findings[]\` carries four kinds, and **\`hunk-survived\` is one of them**: reverting one hunk left every affected test green — that specific change ships with nothing gating it. Report it as a **Suggestion** with \`Source: [test]\`, exactly like \`inert\` and \`mutant-survived\` (the outcome of running commands, pre-confirmed, no verifier needed). Read the \`hunks.*\` counters the same way as \`mutants.*\`: \`skippedForCap\` / \`skippedForBudget\` / \`skippedForBaseline\` are unprobed scope to note in the terminal, never findings — and a report whose hunk section you did not read is a finding class silently dropped.
+
 Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
   },
 
@@ -482,6 +484,21 @@ For each finding you were given:
 - **The observation is the verdict, not your reading of it.** The probe *ran* the code, so its output is the confirmation a Critical needs — cite the observed values (\`sendShellCommand called twice with ["git push"]\`). A probe that shows the **correct** outcome is exactly the "quote the contradicting code" that lets you reject a Critical: the code demonstrably does not do what the finding claims. A probe that could not be run, or could not be shown to flip, confirms nothing — fall back to the reading-based verdict and its low-confidence floor.
 
 **Leave the tree as you found it** — delete any probe file and revert any fix you applied for the self-check, so nothing you wrote reaches the diff or the build. A finding you actually probed carries \`Source: [probe]\` with the observed evidence; never tag one you only reasoned about — that source means "a run produced this", and downstream treats it as deterministic.
+
+**When the claim is about a CHANGE in behaviour, one tree cannot settle it — build the other one.** A probe runs the PR's code, which answers "what does it do now". It cannot answer "and what did it do before", and a whole class of finding is exactly that difference: "this changes the output format", "this only adds a field", "this silently drops the error message", "cancelled and failed used to be indistinguishable". Reading the diff to recover the old behaviour is the step that goes wrong quietly — the new lines are always there and always look right, and whether they change what anyone observes routinely turns on code the diff never touches. So when a finding's claim is comparative, get the *before* and measure it:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review base-tree --plan <the plan report> --worktree <this worktree> \\
+  --out <the plan report's directory>/qwen-review-pr-<n>-base-tree.json
+\`\`\`
+
+It builds the merge base in a sibling worktree and reports \`available\` and \`path\`. Then run **the same input** in both trees — the same command, the same fixture, the same script — and compare the observed output byte for byte. The three rules that make this evidence:
+
+- **Same input, same procedure, both sides.** A difference produced by running two different things is not a difference between the two programs. If you had to build or install differently on one side, say so and treat the result as inconclusive.
+- **Quote both outputs.** \`BASE: <what it printed>\` / \`PR: <what it printed>\`. The observation is the verdict; a summary of it is a reading again.
+- **A/B is expensive — spend it on a claim that turns on it.** An install and a build (the command reuses an already-built base tree; shards that race the first build may both pay). A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
+
+A finding an A/B settled carries \`Source: [probe]\` like any other run-produced evidence, with both sides' output quoted. **Do not remove the base tree** — \`cleanup\` sweeps it at the end of the review, and a later finding may need it.
 
 Return, for each finding, one verdict:
 

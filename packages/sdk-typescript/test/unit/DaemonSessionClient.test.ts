@@ -697,6 +697,31 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards mid-turn message removals with encoded ids and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { removed: true }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.removeMidTurnMessage('message with/slash'),
+    ).resolves.toEqual({ removed: true });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages/message%20with%2Fslash',
+    );
+    expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
     const { fetch } = recordingFetch(() =>
       jsonResponse(404, { error: 'not found' }),
