@@ -34,6 +34,7 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     tokensSpent: 0,
     tokenBudgetTotal: null,
     perPhaseTokens: new Map<string | null, number>(),
+    pendingApprovals: [],
     script: '',
     ...overrides,
   };

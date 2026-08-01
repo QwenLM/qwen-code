@@ -6,7 +6,7 @@
 
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -43,6 +43,7 @@ import type {
   MemoryWriteCandidate,
   CronTaskDelivery,
   InvocationContextV1,
+  WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -86,6 +87,7 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
+  wrapUserPromptSubmitContext,
   generateToolUseId,
   MessageBusType,
   MessageDisplayDispatcher,
@@ -96,6 +98,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -175,7 +178,7 @@ import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
-import { normalizeChannelDeliveryText } from '../../serve/channel-delivery.js';
+import { normalizeChannelDeliveryText } from '../../runtime/channel-delivery.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -279,6 +282,10 @@ import {
 } from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const permissionRequestTails = new WeakMap<
+  AgentSideConnection,
+  Promise<void>
+>();
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -917,15 +924,20 @@ function parsePromptChannelDelivery(
 const MAX_NOTIFICATION_QUEUE = 20;
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
-export function isExistingFile(
+export function resolveExistingFile(
   resolved: string,
-  fileExists: (path: string) => boolean = existsSync,
-  statFile: (path: string) => { isFile(): boolean } = statSync,
-): boolean {
+  resolveRealPath: (path: string) => string = realpathSync,
+  statFile: (path: string) => {
+    isFile(): boolean;
+    isDirectory?(): boolean;
+  } = statSync,
+): string | undefined {
   try {
-    return fileExists(resolved) && statFile(resolved).isFile();
+    const canonicalPath = resolveRealPath(resolved);
+    const stats = statFile(canonicalPath);
+    return stats.isFile() || stats.isDirectory?.() ? canonicalPath : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -1307,6 +1319,7 @@ export class Session implements SessionContext {
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
+  private readonly workflowApprovalAbortController = new AbortController();
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1367,6 +1380,131 @@ export class Session implements SessionContext {
     this.installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
+    this.config
+      .getWorkflowRunRegistry?.()
+      .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
+        this.#requestWorkflowApproval(entry.runId, approval, rawArgs, signal),
+      );
+  }
+
+  async #requestWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void> {
+    const registry = this.config.getWorkflowRunRegistry();
+    const externalToolCallId = `workflow:${this.sessionId}:${runId}:${approval.approvalId}`;
+    const confirmationDetails = {
+      ...approval.confirmationDetails,
+      onConfirm: async () => {},
+    } as ToolCallConfirmationDetails;
+    const permissionOptions = toPermissionOptions(confirmationDetails, true);
+    const offeredPermissionOptions = permissionOptions.map((option) => ({
+      ...option,
+    }));
+    const content =
+      confirmationDetails.type === 'edit'
+        ? [
+            ...(confirmationDetails.warnings ?? []).map((warning) => ({
+              type: 'content' as const,
+              content: { type: 'text' as const, text: warning },
+            })),
+            ...(confirmationDetails.fileDiff
+              ? [
+                  {
+                    type: 'content' as const,
+                    content: {
+                      type: 'text' as const,
+                      text: confirmationDetails.fileDiff,
+                    },
+                  },
+                ]
+              : []),
+          ]
+        : buildPermissionRequestContent(confirmationDetails);
+    // Resolves against the parent session's registry; per-agent MCP tools
+    // fall back to the bare tool name (the mcp details still carry serverName).
+    const { title, locations, kind } = this.toolCallEmitter.resolveToolMetadata(
+      approval.name,
+      rawArgs,
+    );
+    const params: RequestPermissionRequest = {
+      sessionId: this.sessionId,
+      options: permissionOptions,
+      toolCall: {
+        toolCallId: externalToolCallId,
+        status: 'pending',
+        title,
+        content,
+        locations,
+        kind,
+        rawInput: rawArgs,
+        _meta: { toolName: approval.name, workflowApproval: true },
+      },
+    };
+    const signal = AbortSignal.any([
+      this.workflowApprovalAbortController.signal,
+      approvalSignal,
+    ]);
+
+    try {
+      const response = await this.#requestPermissionQueued(params, signal);
+      const outcome = resolvePermissionOutcome(
+        response,
+        offeredPermissionOptions,
+      );
+      const resolved = await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        outcome === ToolConfirmationOutcome.ProceedOnce
+          ? outcome
+          : ToolConfirmationOutcome.Cancel,
+        undefined,
+      );
+      await this.#finishWorkflowApprovalToolCall(
+        approval,
+        externalToolCallId,
+        resolved && outcome === ToolConfirmationOutcome.ProceedOnce,
+      );
+    } catch (error) {
+      debugLogger.error('Workflow permission request failed:', error);
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      await this.#finishWorkflowApprovalToolCall(
+        approval,
+        externalToolCallId,
+        false,
+      );
+    }
+  }
+
+  async #finishWorkflowApprovalToolCall(
+    approval: WorkflowApproval,
+    externalToolCallId: string,
+    success: boolean,
+  ): Promise<void> {
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: externalToolCallId,
+        status: success ? 'completed' : 'failed',
+        content: [],
+        _meta: {
+          toolName: approval.name,
+          workflowApproval: true,
+          approvalOutcome: success ? 'approved' : 'denied',
+        },
+      });
+    } catch (error) {
+      debugLogger.warn(
+        'Failed to finalize workflow approval tool call:',
+        error,
+      );
+    }
   }
 
   #prepareTodoStopGuardForPrompt(
@@ -1971,6 +2109,10 @@ export class Session implements SessionContext {
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
+    this.config
+      .getWorkflowRunRegistry?.()
+      .setApprovalRequestCallback(undefined);
+    this.workflowApprovalAbortController.abort(SESSION_DISPOSE_ABORT_REASON);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -2852,10 +2994,15 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
 
-              // Add additional context from hooks to the request
+              // Add additional context from hooks to the request, wrapped in
+              // the reserved tag so it stays distinguishable from
+              // user-authored text (same shape as the interactive path).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (additionalContext) {
-                parts = [...parts, { text: additionalContext }];
+                parts = [
+                  ...parts,
+                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                ];
               }
             }
 
@@ -4415,11 +4562,15 @@ export class Session implements SessionContext {
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
               : `approached the input token limit for ${this.config.getModel()}`;
+          const warningSuffix = compressed.warning
+            ? `\n⚠️ ${compressed.warning}`
+            : '';
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).`;
+            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            warningSuffix;
         }
       } catch (compressionError) {
         if (abortSignal.aborted) {
@@ -6167,8 +6318,15 @@ export class Session implements SessionContext {
     }
   }
 
-  async refreshSkillsFromSettings(): Promise<void> {
-    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+  async refreshSkillsFromSettings(
+    options: {
+      reloadSettings?: boolean;
+      notifyConfigChanged?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (options.reloadSettings ?? true) {
+      this.reloadSkillSettings();
+    }
     const skillManager = this.config.getSkillManager();
     let updateFailed = false;
     let updateError: unknown;
@@ -6178,7 +6336,7 @@ export class Session implements SessionContext {
       updateFailed = true;
       updateError = error;
     }
-    if (skillManager) {
+    if (skillManager && (options.notifyConfigChanged ?? true)) {
       try {
         skillManager.suppressNextSlashReload();
         await skillManager.notifyConfigChanged();
@@ -6191,6 +6349,10 @@ export class Session implements SessionContext {
       }
     }
     if (updateFailed) throw updateError;
+  }
+
+  reloadSkillSettings(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
@@ -6223,6 +6385,40 @@ export class Session implements SessionContext {
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
     return this.client.requestPermission(params);
+  }
+
+  #requestPermissionQueued(
+    params: RequestPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<RequestPermissionResponse> {
+    const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
+    const transportRequest = prior.then(() =>
+      signal.aborted
+        ? requestPermissionWithAbort(this.client, params, signal)
+        : this.client.requestPermission(params),
+    );
+    // Advance the queue when the transport settles OR when the caller's
+    // signal aborts — an orphaned RPC must not wedge later requests.
+    let abortListener: (() => void) | undefined;
+    const tail = Promise.race([
+      transportRequest.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        if (signal.aborted) return resolve();
+        abortListener = () => resolve();
+        signal.addEventListener('abort', abortListener, { once: true });
+      }),
+    ]).finally(() => {
+      if (abortListener) signal.removeEventListener('abort', abortListener);
+    });
+    permissionRequestTails.set(this.client, tail);
+    return requestPermissionWithAbort(
+      { requestPermission: () => transportRequest },
+      params,
+      signal,
+    );
   }
 
   /**
@@ -7131,7 +7327,9 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
       opts?: {
+        errorType?: ToolErrorType;
         recordInvalidToolParams?: boolean;
+        status?: 'error' | 'cancelled';
         stopAfterPermissionCancel?: boolean;
       },
     ) => {
@@ -7148,10 +7346,10 @@ export class Session implements SessionContext {
         responseParts: errorParts,
         metadata: {
           callId,
-          status: 'error',
+          status: opts?.status ?? 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType: opts?.errorType,
         },
       });
       const loopDetected =
@@ -7260,12 +7458,10 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
-          if (policyToolName === ToolNames.MONITOR) {
-            const callIdAware = invocation as {
-              setCallId?: (id: string) => void;
-            };
-            callIdAware.setCallId?.(callId);
-          }
+          const callIdAware = invocation as {
+            setCallId?: (id: string) => void;
+          };
+          callIdAware.setCallId?.(callId);
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its
@@ -7296,6 +7492,7 @@ export class Session implements SessionContext {
                 agentToolAbortController?.abort(USER_CANCEL_ABORT_REASON);
                 onStopAfterPermissionCancel?.();
               },
+              (params, signal) => this.#requestPermissionQueued(params, signal),
             );
 
             // Set up sub-agent tool tracking
@@ -7793,8 +7990,7 @@ export class Session implements SessionContext {
               };
               let outcome: ToolConfirmationOutcome;
               try {
-                output = (await requestPermissionWithAbort(
-                  this.client,
+                output = (await this.#requestPermissionQueued(
                   params,
                   activeToolAbortSignal,
                 )) as RequestPermissionResponse & {
@@ -7984,6 +8180,33 @@ export class Session implements SessionContext {
             if (preHookResult.additionalContext) {
               debugLogger.debug(
                 `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
+              );
+            }
+          }
+
+          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+              },
+            );
+            if (activeToolAbortSignal.aborted) {
+              return earlyErrorResponse(
+                new Error('Tool invocation was cancelled'),
+                toolName,
+                { status: 'cancelled' },
+              );
+            }
+            if (!guardDecision.allowed) {
+              return earlyErrorResponse(
+                new Error(guardDecision.reason),
+                toolName,
+                { errorType: ToolErrorType.EXECUTION_DENIED },
               );
             }
           }
@@ -8281,19 +8504,22 @@ export class Session implements SessionContext {
 
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {
-            const todos = this.planEmitter.extractTodos(
+            const plan = this.planEmitter.extractPlan(
               toolResult.returnDisplay,
-              args,
+              succeeded ? args : undefined,
             );
 
             // Match original logic: emit plan if todos.length > 0 OR if args had todos
-            if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
-              await this.planEmitter.emitPlan(todos ?? []);
+            if (
+              plan &&
+              (plan.todos.length > 0 || Array.isArray(args['todos']))
+            ) {
+              await this.planEmitter.emitPlan(plan, callId);
             }
 
             // Skip tool_call_update event for TodoWriteTool
             // Still log and return function response for LLM
-          } else {
+          } else if (!isTodoWriteTool) {
             // Normal tool handling: emit result using ToolCallEmitter
             await this.toolCallEmitter.emitResult({
               callId,
@@ -8623,7 +8849,7 @@ export class Session implements SessionContext {
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
-    const textPathSpecsToRead = new Set<string>();
+    const textPathSpecsToRead = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -8634,23 +8860,27 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
+            if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),
               pathSpec,
             );
+            const canonicalPath = resolveExistingFile(resolved);
+            if (!canonicalPath) continue;
             const filteringOptions = this.config.getFileFilteringOptions();
             if (
-              path.isAbsolute(pathSpec) &&
-              getSpecificMimeType(resolved)?.startsWith('image/') &&
-              isExistingFile(resolved) &&
+              getSpecificMimeType(canonicalPath)?.startsWith('image/') &&
               this.config
                 .getWorkspaceContext()
-                .isPathWithinWorkspace(pathSpec) &&
+                .isPathWithinWorkspace(canonicalPath) &&
               !this.config
                 .getFileService()
-                .shouldIgnoreFile(pathSpec, filteringOptions)
+                .shouldIgnoreFile(pathSpec, filteringOptions) &&
+              !this.config
+                .getFileService()
+                .shouldIgnoreFile(canonicalPath, filteringOptions)
             ) {
-              textPathSpecsToRead.add(pathSpec);
+              textPathSpecsToRead.set(canonicalPath, pathSpec);
             }
           }
           return { text: part.text };
@@ -8701,18 +8931,65 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
-    const pathSpecsToRead = [
-      ...new Set([
-        ...textPathSpecsToRead,
-        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
-      ]),
-    ];
     const extensionParts = await this.#resolveExtensionMentionParts(
       extensionMentions,
       abortSignal,
     );
     const mcpServerParts =
       this.#resolveMcpServerMentionParts(mcpServerMentions);
+    const revalidatedTextPaths: string[] = [];
+    const validatedPathIdentities = new Map<
+      string,
+      { dev: number; ino: number }
+    >();
+    const candidatePathsToRead = [
+      ...textPathSpecsToRead.entries(),
+      ...atPathCommandParts.flatMap((part) => {
+        const fileUri = part.fileData!.fileUri!;
+        const resolved = path.resolve(this.config.getTargetDir(), fileUri);
+        const canonicalPath = resolveExistingFile(resolved);
+        return canonicalPath ? [[canonicalPath, fileUri] as const] : [];
+      }),
+    ];
+    const filteringOptions =
+      candidatePathsToRead.length > 0
+        ? this.config.getFileFilteringOptions()
+        : undefined;
+    const displayPaths = new Map<string, string>();
+    const acceptedFileUris = new Set<string>();
+    for (const [textPath, displayPath] of candidatePathsToRead) {
+      try {
+        if (
+          resolveExistingFile(textPath) !== textPath ||
+          !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
+          (textPathSpecsToRead.has(textPath) &&
+            !getSpecificMimeType(textPath)?.startsWith('image/')) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(displayPath, filteringOptions) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(textPath, filteringOptions)
+        ) {
+          continue;
+        }
+        const stats = statSync(textPath);
+        revalidatedTextPaths.push(textPath);
+        displayPaths.set(textPath, displayPath);
+        acceptedFileUris.add(displayPath);
+        validatedPathIdentities.set(textPath, {
+          dev: stats.dev,
+          ino: stats.ino,
+        });
+      } catch {
+        // The path changed between validation steps; skip it fail-closed.
+      }
+    }
+    const pathSpecsToRead = [...new Set(revalidatedTextPaths)];
+    const partsToSend = parts.filter(
+      (part) =>
+        !('fileData' in part) || acceptedFileUris.has(part.fileData!.fileUri!),
+    );
 
     if (
       pathSpecsToRead.length === 0 &&
@@ -8721,7 +8998,7 @@ export class Session implements SessionContext {
       mcpServerParts.length === 0
     ) {
       return this.#applyBridgeConversionsIfNeeded(
-        parts,
+        partsToSend,
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8729,7 +9006,7 @@ export class Session implements SessionContext {
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
-        [...parts, ...extensionParts, ...mcpServerParts],
+        [...partsToSend, ...extensionParts, ...mcpServerParts],
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8737,8 +9014,8 @@ export class Session implements SessionContext {
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
-    for (let i = 0; i < parts.length; i++) {
-      const chunk = parts[i];
+    for (let i = 0; i < partsToSend.length; i++) {
+      const chunk = partsToSend[i];
       if ('text' in chunk) {
         initialQueryText += chunk.text;
       } else if ('fileData' in chunk) {
@@ -8776,6 +9053,10 @@ export class Session implements SessionContext {
         ...(preserveUnsupportedImageForBridge
           ? { preserveUnsupportedImageForBridge }
           : {}),
+        ...(validatedPathIdentities.size > 0
+          ? { validatedPathIdentities }
+          : {}),
+        ...(displayPaths.size > 0 ? { displayPaths } : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)

@@ -103,12 +103,15 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -470,6 +473,7 @@ interface ChannelInfo {
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
+  effectiveCwd: string;
   createdAt: string;
   displayName?: string;
   /** Id of the session that spawned this one (via `create_sub_session`).
@@ -493,6 +497,8 @@ interface SessionEntry {
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
   closing: boolean;
+  /** Tail of cwd changes that direct shell commands must not overtake. */
+  cwdChangeQueue: Promise<void>;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -1341,7 +1347,7 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
 // (the analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
@@ -1374,7 +1380,7 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
-  // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
+  // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
@@ -1913,7 +1919,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   >();
   const inFlightExtensionRefreshes = new Map<
     string,
-    { connection: ClientSideConnection; promise: Promise<void> }
+    {
+      connection: ClientSideConnection;
+      promise: Promise<void>;
+      refreshBootstrap: boolean;
+    }
   >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
@@ -2031,6 +2041,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   interface InFlightRestore {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
+    hideInheritedHistory: boolean;
     promise: Promise<BridgeRestoredSession>;
     /**
      * Synchronous reservation slot for callers that coalesce onto this
@@ -2592,6 +2603,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
+    requestedSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2645,17 +2657,33 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           async () => {
             // This legacy-named helper sanitizes and injects trace metadata
             // for any ACP request, not only prompts.
+            const request = telemetry.injectPromptContext({
+              cwd: boundWorkspace,
+              mcpServers: [],
+              ...(requestedSessionId || sourceType
+                ? {
+                    _meta: {
+                      ...sessionSourceRequestMeta(sourceType, sourceId),
+                      ...(requestedSessionId
+                        ? {
+                            [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                          }
+                        : {}),
+                    },
+                  }
+                : {}),
+            });
             const response = await withTimeout(
               ci.connection.newSession(
-                telemetry.injectPromptContext({
-                  cwd: boundWorkspace,
-                  mcpServers: [],
-                  ...(sourceType
-                    ? {
-                        _meta: sessionSourceRequestMeta(sourceType, sourceId),
-                      }
-                    : {}),
-                }),
+                worktree
+                  ? {
+                      ...request,
+                      _meta: {
+                        ...(isRecord(request._meta) ? request._meta : {}),
+                        [WORKTREE_MCP_DEFER_META_KEY]: true,
+                      },
+                    }
+                  : request,
               ),
               initTimeoutMs,
               'newSession',
@@ -3879,6 +3907,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
+      effectiveCwd: workspaceCwd,
       createdAt: new Date().toISOString(),
       ...(options.parentSessionId
         ? { parentSessionId: options.parentSessionId }
@@ -3897,6 +3926,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }),
       recordingDegraded: false,
       closing: false,
+      cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -4391,6 +4421,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const historyReplay =
       action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
+    const hideInheritedHistory =
+      action === 'load' && req.hideInheritedHistory === true;
 
     const existing = byId.get(req.sessionId);
     if (existing) {
@@ -4452,7 +4484,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // missing snapshot. Same-action coalescing is unaffected.
       if (
         action !== inFlight.action ||
-        historyReplay !== inFlight.historyReplay
+        historyReplay !== inFlight.historyReplay ||
+        hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         throw new RestoreInProgressError(
           req.sessionId,
@@ -4584,7 +4617,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
-                ...(historyReplay === 'response' || req.sourceType
+                ...(historyReplay === 'response' ||
+                hideInheritedHistory ||
+                req.sourceType
                   ? {
                       _meta: {
                         ...sessionSourceRequestMeta(
@@ -4601,6 +4636,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                                       req.historyPageSize,
                                   }
                                 : {}),
+                            }
+                          : {}),
+                        ...(hideInheritedHistory
+                          ? {
+                              [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true,
                             }
                           : {}),
                       },
@@ -4846,6 +4886,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
+      hideInheritedHistory,
       promise,
       coalesceState,
     });
@@ -5325,6 +5366,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceId,
         req.worktree,
         req.branch,
+        req.sessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -6226,14 +6268,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const source = parseSessionSource(req.sourceType, req.sourceId);
+      if ('error' in source) {
+        throw new InvalidSessionMetadataError('sourceType', source.error);
+      }
+      const isSideTask = source.sourceType === 'side_task';
 
       let originatorClientId: string | undefined;
       if (context?.clientId !== undefined) {
         originatorClientId = resolveTrustedClientId(entry, context.clientId);
       }
 
-      const branchResult = entry.promptQueue.then(async () => {
-        if (entry.promptActive) {
+      const concurrentSideTask = isSideTask && entry.promptActive;
+      const branchResult = (
+        concurrentSideTask ? Promise.resolve() : entry.promptQueue
+      ).then(async () => {
+        if (entry.promptActive && !isSideTask) {
           throw new BranchWhilePromptActiveError(sessionId);
         }
 
@@ -6258,13 +6308,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         try {
           const ci = await ensureChannel();
           const result = (await withTimeout(
-            ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
-              sessionId,
-              cwd: boundWorkspace,
-              name: req.name,
-            }),
+            ci.connection.extMethod(
+              isSideTask
+                ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
+                : SERVE_CONTROL_EXT_METHODS.sessionBranch,
+              {
+                sessionId,
+                cwd: boundWorkspace,
+                name: req.name,
+              },
+            ),
             initTimeoutMs,
-            'branchSession',
+            isSideTask ? 'createSideTaskSession' : 'branchSession',
           )) as { newSessionId: string; title?: string; displayName?: string };
 
           if (!result || typeof result.newSessionId !== 'string') {
@@ -6280,12 +6335,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
           let restored;
           try {
+            const hideInheritedHistory = req.replayInheritedHistory === false;
             restored = await restoreSession(
               'load',
               {
                 sessionId: result.newSessionId,
                 workspaceCwd: boundWorkspace,
                 clientId: context?.clientId,
+                ...(hideInheritedHistory
+                  ? {
+                      historyReplay: 'response',
+                      hideInheritedHistory: true,
+                    }
+                  : {}),
+                ...source,
               },
               {
                 skipFreshSessionAdmission: true,
@@ -6311,20 +6374,50 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
           const newEntry = byId.get(result.newSessionId);
           if (newEntry) newEntry.displayName = branchDisplayName;
+          let sourcePersisted: boolean | undefined;
+          if (newEntry?.sourceType) {
+            try {
+              const sourceResult = await withTimeout(
+                newEntry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.sessionSource,
+                  {
+                    sessionId: newEntry.sessionId,
+                    sourceType: newEntry.sourceType,
+                    ...(newEntry.sourceId !== undefined
+                      ? { sourceId: newEntry.sourceId }
+                      : {}),
+                  },
+                ),
+                initTimeoutMs,
+                'sessionSource',
+              );
+              sourcePersisted =
+                (sourceResult as { persisted?: boolean } | undefined)
+                  ?.persisted === true;
+            } catch (error) {
+              sourcePersisted = false;
+              writeStderrLine(
+                `qwen serve: source metadata for branched session ${result.newSessionId} was not persisted: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          }
 
-          const eventData = {
-            sourceSessionId: sessionId,
-            newSessionId: result.newSessionId,
-            displayName: branchDisplayName,
-          };
-          const branchEnvelope = {
-            type: 'session_branched' as const,
-            data: eventData,
-            ...(originatorClientId ? { originatorClientId } : {}),
-          };
-          // The branch announcement belongs to the new session only. Publishing
-          // it on the source session would persist in that session's replay ring.
-          newEntry?.events.publish(branchEnvelope);
+          if (!isSideTask) {
+            const eventData = {
+              sourceSessionId: sessionId,
+              newSessionId: result.newSessionId,
+              displayName: branchDisplayName,
+            };
+            const branchEnvelope = {
+              type: 'session_branched' as const,
+              data: eventData,
+              ...(originatorClientId ? { originatorClientId } : {}),
+            };
+            // The branch announcement belongs to the new session only.
+            newEntry?.events.publish(branchEnvelope);
+          }
 
           return {
             ...restored,
@@ -6333,16 +6426,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               sessionId,
               displayName: entry.displayName ?? sessionId.slice(0, 8),
             },
+            ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
           };
         } finally {
           releaseAdmissionOnce();
         }
       });
-      entry.promptQueue = branchResult.then(
-        () => undefined,
-        () => undefined,
-      );
+      if (!concurrentSideTask) {
+        entry.promptQueue = branchResult.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
       return branchResult;
+    },
+
+    async createSideTaskSession(sessionId, req, context) {
+      const result = await this.branchSession(
+        sessionId,
+        {
+          name: req.name,
+          sourceType: 'side_task',
+          sourceId: sessionId,
+          replayInheritedHistory: false,
+        },
+        context,
+      );
+      const { forkedFrom: _forkedFrom, ...sideTask } = result;
+      return {
+        ...sideTask,
+        parentSessionId: sessionId,
+      };
     },
 
     async changeSessionCwd(
@@ -6394,6 +6508,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         // State update inside the queue lambda — always executes when
         // the extMethod settles, regardless of caller timeout.
+        entry.effectiveCwd = extResult.newCwd;
         if (extResult.previousCwd !== extResult.newCwd) {
           entry.events.publish({
             type: 'session_cwd_changed',
@@ -6412,6 +6527,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Queue tail tied to the raw extMethod settlement — subsequent
       // operations wait for the actual cd to finish, not the timeout.
       entry.promptQueue = cdPromise.then(
+        () => undefined,
+        () => undefined,
+      );
+      entry.cwdChangeQueue = cdPromise.then(
         () => undefined,
         () => undefined,
       );
@@ -7104,50 +7223,98 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async refreshExtensionsForAllSessions(data) {
       const sessions = Array.from(byId.values());
+      const bootstrapRefreshConnections = new Set<
+        (typeof sessions)[number]['connection']
+      >();
+      const refreshSession = async (
+        entry: (typeof sessions)[number],
+        refreshBootstrap: boolean,
+      ) => {
+        let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+        if (
+          !inFlight ||
+          inFlight.connection !== entry.connection ||
+          (refreshBootstrap && !inFlight.refreshBootstrap)
+        ) {
+          const promise = (async () => {
+            await entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              {
+                sessionId: entry.sessionId,
+                ...(refreshBootstrap ? {} : { refreshBootstrap: false }),
+              },
+            );
+          })();
+          inFlight = {
+            connection: entry.connection,
+            promise,
+            refreshBootstrap,
+          };
+          inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+          const clear = () => {
+            if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
+              inFlightExtensionRefreshes.delete(entry.sessionId);
+            }
+          };
+          void promise.then(clear, clear);
+        }
+        await Promise.race([
+          withTimeout(
+            inFlight.promise,
+            30_000,
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+      };
 
       const results = await Promise.all(
         sessions.map(async (entry) => {
           const info = channelInfoForEntry(entry);
           if (!info || info.isDying) {
-            return { refreshed: 0, failed: 0 };
+            return {
+              refreshed: 0,
+              failed: 0,
+              entry,
+              refreshBootstrap: false,
+            };
           }
+          const refreshBootstrap = !bootstrapRefreshConnections.has(
+            entry.connection,
+          );
+          bootstrapRefreshConnections.add(entry.connection);
           try {
-            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
-            if (!inFlight || inFlight.connection !== entry.connection) {
-              const promise = (async () => {
-                await entry.connection.extMethod(
-                  SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-                  { sessionId: entry.sessionId },
-                );
-              })();
-              inFlight = { connection: entry.connection, promise };
-              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
-              const clear = () => {
-                if (
-                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
-                ) {
-                  inFlightExtensionRefreshes.delete(entry.sessionId);
-                }
-              };
-              void promise.then(clear, clear);
-            }
-            await Promise.race([
-              withTimeout(
-                inFlight.promise,
-                30_000,
-                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-              ),
-              getTransportClosedReject(entry),
-            ]);
-            return { refreshed: 1, failed: 0 };
+            await refreshSession(entry, refreshBootstrap);
+            return { refreshed: 1, failed: 0, entry, refreshBootstrap };
           } catch (err) {
             writeServeDebugLine(
               `refreshExtensions: session ${entry.sessionId} failed: ` +
                 `${err instanceof Error ? err.message : String(err)}`,
             );
-            return { refreshed: 0, failed: 1 };
+            return { refreshed: 0, failed: 1, entry, refreshBootstrap };
           }
         }),
+      );
+
+      await Promise.all(
+        results
+          .filter((result) => result.failed > 0 && result.refreshBootstrap)
+          .map(async (failedBootstrap) => {
+            const retry = results.find(
+              (result) =>
+                result.refreshed > 0 &&
+                result.entry.connection === failedBootstrap.entry.connection,
+            );
+            if (!retry) return;
+            try {
+              await refreshSession(retry.entry, true);
+            } catch (err) {
+              writeServeDebugLine(
+                `refreshExtensions: bootstrap retry via session ${retry.entry.sessionId} failed: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }),
       );
 
       const refreshed = results.reduce(
@@ -7624,8 +7791,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         return { accepted: false };
       }
-      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
-      return { accepted: true };
+      const messageId = randomUUID();
+      entry.midTurnMessageQueue.push({
+        messageId,
+        text: trimmed,
+        originatorClientId,
+      });
+      return { accepted: true, messageId };
+    },
+
+    removeMidTurnMessage(sessionId, messageId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const index = entry.midTurnMessageQueue.findIndex(
+        (message) =>
+          message.messageId === messageId &&
+          message.originatorClientId === originatorClientId,
+      );
+      if (index === -1) {
+        // A miss is the interesting race (already drained mid-turn, or the
+        // caller's clientId doesn't match the queued originator) — log it
+        // like the enqueue / pending-removal siblings so it shows in daemon logs.
+        writeStderrLine(
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or originator mismatch)`,
+        );
+        return { removed: false };
+      }
+      entry.midTurnMessageQueue.splice(index, 1);
+      return { removed: true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
@@ -7773,7 +7970,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { exitCode: null, output: '', aborted: true };
       }
 
-      const cwd = entry.workspaceCwd;
+      // Race the cwd queue against the caller's abort signal so a shell
+      // command cannot park forever on a changeSessionCwd extMethod that
+      // never settles (agent crash / deadlock / partitioned ACP channel).
+      let abortResolve: (() => void) | undefined;
+      const onAbort = () => abortResolve?.();
+      try {
+        await Promise.race([
+          entry.cwdChangeQueue,
+          new Promise<void>((resolve) => {
+            abortResolve = resolve;
+            if (signal?.aborted) return resolve();
+            signal?.addEventListener('abort', onAbort, { once: true });
+          }),
+        ]);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+      }
+      if (signal?.aborted) {
+        return { exitCode: null, output: '', aborted: true };
+      }
+      const cwd = entry.effectiveCwd;
 
       entry.events.publish({
         type: 'user_shell_command',

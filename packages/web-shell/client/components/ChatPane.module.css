@@ -10,6 +10,15 @@
   overflow: hidden;
 }
 
+.paneEmbedded {
+  border: 0;
+  border-radius: 0;
+}
+
+.paneEmbedded .footer {
+  padding-bottom: 0;
+}
+
 .header {
   display: flex;
   align-items: center;

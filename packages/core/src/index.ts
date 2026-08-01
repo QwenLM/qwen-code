@@ -103,6 +103,7 @@ export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
+export * from './core/tool-invocation-guard.js';
 export * from './core/turn.js';
 export * from './core/turn-interruption.js';
 
@@ -276,7 +277,13 @@ export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
 } from './utils/sync-file-encoding.js';
-export { LargeNonUtf8TextError } from './utils/read-text-range.js';
+export {
+  CursorNotAtLineBoundaryError,
+  LargeNonUtf8TextError,
+  TextScanBudgetExceededError,
+} from './utils/read-text-range.js';
+export type { ReadTextRangeResult } from './utils/read-text-range.js';
+export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
@@ -642,6 +649,13 @@ export {
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
+export {
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
+  wrapUserPromptSubmitContext,
+  isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
+} from './hooks/user-prompt-submit-context.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

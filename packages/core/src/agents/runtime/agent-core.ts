@@ -115,6 +115,34 @@ import {
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
 
+const EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS = 8;
+const EXECUTION_ALLOWLIST_ERROR_MAX_CHARS = 240;
+
+function summarizeExecutionAllowlist(
+  executionAllowedTools: readonly string[],
+): string | undefined {
+  if (executionAllowedTools.length === 0) {
+    return undefined;
+  }
+
+  const visibleTools = executionAllowedTools.slice(
+    0,
+    EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS,
+  );
+  let summary = visibleTools
+    .map((toolName) => JSON.stringify(toolName))
+    .join(', ');
+  const wasClipped = summary.length > EXECUTION_ALLOWLIST_ERROR_MAX_CHARS;
+  if (wasClipped) {
+    summary = `${summary.slice(0, EXECUTION_ALLOWLIST_ERROR_MAX_CHARS - 3)}...`;
+  }
+  const omittedCount = executionAllowedTools.length - visibleTools.length;
+  if (omittedCount > 0) {
+    return `${summary} (+${omittedCount} more)`;
+  }
+  return wasClipped ? `${summary} (truncated)` : summary;
+}
+
 /**
  * Result of a single reasoning loop invocation.
  */
@@ -138,6 +166,8 @@ import {
  *   it delete or rewrite the active team.
  * - Plan lifecycle tools are owned by the caller/main session. A subagent
  *   should return its plan to the caller instead of entering or exiting mode.
+ * - Todo state is also parent-owned because subagents share the session's
+ *   persisted Todo sidecar.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -153,6 +183,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
+  ToolNames.TODO_WRITE,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
@@ -214,6 +245,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.TODO_WRITE,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
@@ -342,6 +374,10 @@ export class AgentCore {
   readonly modelConfig: ModelConfig;
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
+  private readonly executionAllowedTools?: readonly string[];
+  private readonly executionAllowedExactTools?: ReadonlySet<string>;
+  private readonly executionAllowedMcpPatterns?: readonly string[];
+  private readonly executionAllowlistErrorSummary?: string;
   /**
    * Event emitter for this agent. Always present — if the caller doesn't
    * pass one, AgentCore allocates its own so the observable state below
@@ -421,6 +457,22 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
+    if (toolConfig?.executionAllowedTools !== undefined) {
+      this.executionAllowedTools = Object.freeze([
+        ...toolConfig.executionAllowedTools,
+      ]);
+      this.executionAllowedExactTools = new Set(
+        this.executionAllowedTools.filter(
+          (toolName) => !toolName.includes('*'),
+        ),
+      );
+      this.executionAllowedMcpPatterns = Object.freeze(
+        this.executionAllowedTools.filter((toolName) => toolName.includes('*')),
+      );
+      this.executionAllowlistErrorSummary = summarizeExecutionAllowlist(
+        this.executionAllowedTools,
+      );
+    }
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
     this.runtimeView = runtimeView;
@@ -1388,6 +1440,62 @@ export class AgentCore {
     );
   }
 
+  private isToolExecutionAllowed(toolName: string): boolean {
+    if (this.executionAllowedTools === undefined) {
+      return true;
+    }
+    if (this.executionAllowedExactTools?.has(toolName)) {
+      return true;
+    }
+    if (!toolName.startsWith('mcp__')) {
+      return false;
+    }
+
+    // Match MCP patterns against the registry's raw server/tool identity.
+    // Comparing provider-sanitized prefixes can merge distinct server names
+    // such as "repo.bad" and "repo/bad", so it is unsafe for an allowlist.
+    const registeredTool = this.runtimeContext
+      .getToolRegistry()
+      .getTool(toolName) as
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
+    if (
+      typeof registeredTool?.serverName !== 'string' ||
+      typeof registeredTool.serverToolName !== 'string'
+    ) {
+      return false;
+    }
+
+    const serverName = registeredTool.serverName;
+    const serverToolName = registeredTool.serverToolName;
+    const serverPattern = `mcp__${serverName}`;
+    const rawToolName = `${serverPattern}__${serverToolName}`;
+    if (
+      this.executionAllowedExactTools?.has(serverPattern) ||
+      this.executionAllowedExactTools?.has(rawToolName)
+    ) {
+      return true;
+    }
+
+    return this.executionAllowedMcpPatterns!.some((pattern) => {
+      if (pattern === 'mcp__*') {
+        return true;
+      }
+      if (!pattern.startsWith('mcp__')) {
+        return false;
+      }
+      if (!pattern.endsWith('*')) {
+        return false;
+      }
+
+      const toolPatternPrefix = `${serverPattern}__`;
+      return (
+        pattern.startsWith(toolPatternPrefix) &&
+        serverToolName.startsWith(pattern.slice(toolPatternPrefix.length, -1))
+      );
+    });
+  }
+
   /**
    * Processes a list of function calls via CoreToolScheduler.
    *
@@ -1429,8 +1537,10 @@ export class AgentCore {
       ]),
     );
 
-    // Build allowed tool names set for filtering
-    const allowedToolNames = new Set(toolsList.map((t) => t.name));
+    // The model-visible declarations and the execution allowlist are separate:
+    // forks keep the parent's declaration prefix for cache sharing while
+    // optionally narrowing which declared tools may actually run.
+    const declaredToolNames = new Set(toolsList.map((t) => t.name));
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       uniqueFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
@@ -1461,12 +1571,21 @@ export class AgentCore {
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
-      if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
+      let errorMessage: string | undefined;
+      if (!declaredToolNames.has(fc.name)) {
+        errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
           ? getSubagentPlanToolUnavailableMessage(toolName)
           : isLeaderOnlyToolUnavailableInSubagent(toolName)
             ? getLeaderOnlyToolUnavailableMessage(toolName)
             : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+      } else if (!this.isToolExecutionAllowed(toolName)) {
+        errorMessage =
+          this.executionAllowlistErrorSummary !== undefined
+            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
+            : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
+      }
+
+      if (errorMessage) {
         const functionResponsePart = {
           functionResponse: {
             id: callId,

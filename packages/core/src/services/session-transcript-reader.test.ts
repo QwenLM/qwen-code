@@ -494,6 +494,51 @@ describe('SessionTranscriptReader', () => {
     expect(page.nextCursorState).toBeUndefined();
   });
 
+  it('does not page into inherited side-task context', async () => {
+    const inheritedUser = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    const inheritedAssistant = {
+      ...record('parent-a1', 'parent-u1', 'parent answer'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-a1',
+      },
+    };
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'parent-session',
+      },
+    };
+    await writeRecords([
+      sessionSource,
+      inheritedUser,
+      inheritedAssistant,
+      record('side-u1', 'parent-a1', 'side prompt'),
+      record('side-a1', 'side-u1', 'side answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'side-u1',
+      'side-a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
@@ -685,6 +730,54 @@ describe('SessionTranscriptReader', () => {
         }),
       }),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // Windows derives Stats.ino from a 64-bit file index that exceeds 2^53, so
+    // a safe-integer gate would reject every cursor there. The large inode must
+    // survive shape validation and reach the identity match (which then fails
+    // against the real file), rather than being rejected as a non-safe integer.
+    const bigIno = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(bigIno)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: { dev: 1, ino: bigIno },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('still rejects a non-safe-integer byte offset in a cursor', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // snapshotSize/position are arithmetic operands and stay safe-integer even
+    // though dev/ino were relaxed for Windows.
+    const unsafeOffset = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(unsafeOffset)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          snapshotSize: unsafeOffset,
+        }),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
   it('rejects cursors whose position is past the active chain', async () => {
@@ -1178,7 +1271,6 @@ describe('SessionTranscriptReader', () => {
     });
 
     it('pages backward through records without a normal user turn start', async () => {
-
       await writeRecords([
         record('a1', null, 'orphan assistant reply'),
         record('u1', 'a1', 'second prompt'),

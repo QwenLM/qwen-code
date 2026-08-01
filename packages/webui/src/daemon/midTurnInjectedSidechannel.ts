@@ -61,6 +61,7 @@ export function publishSidechannelMidTurnInjected(
     {
       sessionId: data.sessionId,
       messages: [...data.messages],
+      ...(data.messageIds ? { messageIds: [...data.messageIds] } : {}),
       ...(data.originatorClientId
         ? { originatorClientId: data.originatorClientId }
         : {}),
@@ -147,6 +148,16 @@ export function parseSidechannelMidTurnInjected(
       typeof message === 'string' && message.length > 0,
   );
   if (stringMessages.length === 0) return undefined;
+  const messageIds = dataRecord['messageIds'];
+  const stringMessageIds =
+    Array.isArray(messageIds) &&
+    messageIds.length === messages.length &&
+    stringMessages.length === messages.length &&
+    messageIds.every(
+      (messageId) => typeof messageId === 'string' && messageId.length > 0,
+    )
+      ? (messageIds as string[])
+      : undefined;
   // `originatorClientId` lives on the SSE envelope (top-level), not in `data` —
   // the daemon publishes one frame per originator so consumers dedupe only
   // their own queue.
@@ -154,6 +165,7 @@ export function parseSidechannelMidTurnInjected(
   return {
     sessionId,
     messages: stringMessages,
+    ...(stringMessageIds ? { messageIds: stringMessageIds } : {}),
     ...(typeof originatorClientId === 'string' ? { originatorClientId } : {}),
   };
 }

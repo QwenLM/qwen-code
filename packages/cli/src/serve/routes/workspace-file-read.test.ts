@@ -147,6 +147,61 @@ describe('GET /file', () => {
     });
   });
 
+  it('pages a large file over HTTP with nextCursor', async () => {
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const body = lines.join('\n');
+    await fsp.writeFile(path.join(h.workspace, 'paged.log'), body);
+
+    const first = await request(h.app)
+      .get('/file?path=paged.log&limit=500')
+      .set('Host', loopbackHost());
+    expect(first.status).toBe(200);
+    expect(first.body.hasMore).toBe(true);
+    expect(typeof first.body.nextCursor).toBe('string');
+
+    const pages: string[] = [first.body.content];
+    let cursor: string | null = first.body.nextCursor;
+    let guard = 0;
+    while (cursor) {
+      if (guard++ > 50) throw new Error('paging did not terminate');
+      const next = await request(h.app)
+        .get(
+          `/file?path=paged.log&limit=500&cursor=${encodeURIComponent(cursor)}`,
+        )
+        .set('Host', loopbackHost());
+      expect(next.status).toBe(200);
+      pages.push(next.body.content);
+      cursor = next.body.nextCursor;
+    }
+    expect(pages.join('\n')).toBe(body);
+  });
+
+  it('rejects a malformed cursor with 400', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'c.txt'), 'a\nb\n');
+    const res = await request(h.app)
+      .get('/file?path=c.txt&cursor=not-a-cursor')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects cursor combined with line', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'cl.txt'), 'a\nb\nc\n');
+    const first = await request(h.app)
+      .get('/file?path=cl.txt&limit=1')
+      .set('Host', loopbackHost());
+    const res = await request(h.app)
+      .get(
+        `/file?path=cl.txt&line=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      )
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
   it('returns a bounded line window for text above MAX_READ_BYTES', async () => {
     const { MAX_READ_BYTES } = await import('../fs/policy.js');
     const lines = Array.from(
@@ -173,23 +228,20 @@ describe('GET /file', () => {
     expect(res.body.hash).toBeUndefined();
   });
 
-  it.each(['', '&line=2', '&maxBytes=1024', '&line=2&maxBytes=1024'])(
-    'keeps oversized reads without a finite limit behind the snapshot cap (%s)',
-    async (query) => {
-      const { MAX_READ_BYTES } = await import('../fs/policy.js');
-      await fsp.writeFile(
-        path.join(h.workspace, 'large-no-limit.txt'),
-        'x'.repeat(MAX_READ_BYTES + 1),
-      );
+  it('keeps an oversized read without a window behind the snapshot cap', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    await fsp.writeFile(
+      path.join(h.workspace, 'large-no-window.txt'),
+      'x'.repeat(MAX_READ_BYTES + 1),
+    );
 
-      const res = await request(h.app)
-        .get(`/file?path=large-no-limit.txt${query}`)
-        .set('Host', loopbackHost());
+    const res = await request(h.app)
+      .get('/file?path=large-no-window.txt')
+      .set('Host', loopbackHost());
 
-      expect(res.status).toBe(413);
-      expect(res.body.errorKind).toBe('file_too_large');
-    },
-  );
+    expect(res.status).toBe(413);
+    expect(res.body.errorKind).toBe('file_too_large');
+  });
 
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
@@ -226,6 +278,23 @@ describe('GET /file', () => {
     const res = await request(h.app)
       .get('/file?path=bin.dat')
       .set('Host', loopbackHost());
+    expect(res.status).toBe(422);
+    expect(res.body.errorKind).toBe('binary_file');
+  });
+
+  it('returns 422 binary_file for large non-UTF-8 text even with a finite limit', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    expect(body.length).toBeGreaterThan(MAX_READ_BYTES);
+    await fsp.writeFile(path.join(h.workspace, 'large-utf16.txt'), body);
+
+    const res = await request(h.app)
+      .get('/file?path=large-utf16.txt&line=1&limit=20')
+      .set('Host', loopbackHost());
+
     expect(res.status).toBe(422);
     expect(res.body.errorKind).toBe('binary_file');
   });

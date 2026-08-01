@@ -307,11 +307,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       providerName: this.genAiProviderName,
       outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
     });
-    try {
-      llmSpan.setAttribute('llm_request.stream', false);
-    } catch {
-      /* best-effort */
-    }
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
@@ -442,7 +437,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
     });
     try {
-      llmSpan.setAttribute('llm_request.stream', true);
+      llmSpan.setAttribute('gen_ai.request.stream', true);
     } catch {
       /* best-effort */
     }
@@ -465,13 +460,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     const startTime = Date.now();
     const session = this.startCaptureSession();
 
-    let stream: AsyncGenerator<GenerateContentResponse>;
+    let streamRequest: {
+      stream: AsyncGenerator<GenerateContentResponse>;
+      requestIssuedAtMs: number;
+    };
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
         stream: true,
         source: 'generateContentStream',
       });
-      stream = await context.with(spanContext, async () => {
+      streamRequest = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
             this.toContents(req.contents),
@@ -479,9 +477,14 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
           );
         }
-        return session.wrap(() =>
-          this.wrapped.generateContentStream(req, userPromptId),
-        );
+        return session.wrap(async () => {
+          const requestIssuedAtMs = performance.now();
+          const stream = await this.wrapped.generateContentStream(
+            req,
+            userPromptId,
+          );
+          return { stream, requestIssuedAtMs };
+        });
       });
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -515,23 +518,23 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     }
+    const { stream, requestIssuedAtMs } = streamRequest;
 
-    let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    if (this.openaiLogger) {
-      try {
-        resolvedRequest = await session.resolve(req);
-      } catch (loggingError) {
-        debugLogger.warn('Failed to resolve OpenAI request:', loggingError);
-      }
-    }
+    const openaiRequestPromise = this.openaiLogger
+      ? session.resolve(req).catch((loggingError: unknown) => {
+          debugLogger.warn('Failed to resolve OpenAI request:', loggingError);
+          return undefined;
+        })
+      : undefined;
 
     return context.with(spanContext, () =>
       this.loggingStreamWrapper(
         stream,
         startTime,
+        requestIssuedAtMs,
         userPromptId,
         req.model,
-        resolvedRequest,
+        openaiRequestPromise,
         llmSpan,
         spanContext,
         req.config?.abortSignal,
@@ -566,9 +569,12 @@ export class LoggingContentGenerator implements ContentGenerator {
   private async *loggingStreamWrapper(
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
+    requestIssuedAtMs: number,
     userPromptId: string,
     model: string,
-    openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
+    openaiRequestPromise?: Promise<
+      OpenAI.Chat.ChatCompletionCreateParams | undefined
+    >,
     span?: Span,
     spanContext?: Context,
     abortSignal?: AbortSignal,
@@ -604,13 +610,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
-    // TTFT (time to first token): wall-clock from generateContentStream
-    // dispatch to the first stream chunk containing user-visible content.
+    // Internal first-visible-output timing: wall-clock from the existing
+    // generateContentStream startTime to the first chunk containing
+    // user-visible content. This is distinct from the standard first-chunk
+    // timer above.
     // Method-local closure variable — NEVER an instance field — because
     // LoggingContentGenerator is shared across concurrent generateContentStream
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
     // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
     let ttftMs: number | undefined;
+    let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
     // again (the helper would no-op, but more importantly we skip the
@@ -668,6 +677,21 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     try {
       for await (const response of stream) {
+        if (!firstChunkObserved && !spanEndedByTimeout) {
+          firstChunkObserved = true;
+          try {
+            const timeToFirstChunk =
+              Math.max(0, performance.now() - requestIssuedAtMs) / 1000;
+            if (Number.isFinite(timeToFirstChunk)) {
+              span?.setAttribute(
+                'gen_ai.response.time_to_first_chunk',
+                timeToFirstChunk,
+              );
+            }
+          } catch {
+            // OTel errors must not interrupt the consumer.
+          }
+        }
         lastResponse = response;
         if (!firstResponseId && response.responseId) {
           firstResponseId = response.responseId;
@@ -751,6 +775,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             ttftMs,
           ),
         );
+        const openaiRequest = await openaiRequestPromise;
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
             openaiRequest,
@@ -779,6 +804,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
           ),
         );
+        const openaiRequest = await openaiRequestPromise;
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
             openaiRequest,

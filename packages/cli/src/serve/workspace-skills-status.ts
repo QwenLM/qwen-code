@@ -31,12 +31,16 @@
  */
 
 import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
-import type { Config, CredentialStore } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  CredentialStore,
+  SkillLevel,
+} from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { mapSkillConfigToStatus } from './workspace-skills-mapping.js';
+import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 
 export interface WorkspaceSkillsStatusProvider {
@@ -49,6 +53,13 @@ export interface WorkspaceSkillsStatusProviderOptions {
   workspaceTrusted?: boolean;
 }
 
+const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
+  'project',
+  'user',
+  'extension',
+  'bundled',
+]);
+
 /**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
  * as a `Pick` (rather than casting an inline object literal) type-checks the
@@ -60,7 +71,11 @@ export interface WorkspaceSkillsStatusProviderOptions {
  */
 type SkillManagerConfigShim = Pick<
   Config,
-  'isSafeMode' | 'getBareMode' | 'getProjectRoot' | 'getActiveExtensions'
+  | 'isSafeMode'
+  | 'getBareMode'
+  | 'getProjectRoot'
+  | 'getActiveExtensions'
+  | 'getDisabledSkillLevels'
 >;
 
 export function createWorkspaceSkillsStatusProvider(
@@ -91,8 +106,29 @@ async function buildWorkspaceSkillsStatus(
   workspaceTrusted: boolean = true,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
+    const settings = loadSettings(workspaceCwd, {
+      consumeCorruptionEnvVars: false,
+      credentialStore,
+      skipLoadEnvironment: !workspaceTrusted,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
+    });
     let skillManager = managers.get(workspaceCwd);
     if (!skillManager) {
+      // Mirror the CLI guard in loadCliConfig: safe mode nullifies
+      // disabledSkillLevels so the child session loads all bundled skills.
+      const rawLevels =
+        !workspaceTrusted || isSafeModeEnv()
+          ? undefined
+          : settings.merged.skills?.disabledLevels;
+      const disabledLevels = new Set<SkillLevel>(
+        Array.isArray(rawLevels)
+          ? rawLevels.filter(
+              (v): v is SkillLevel =>
+                typeof v === 'string' && VALID_SKILL_LEVELS.has(v),
+            )
+          : [],
+      );
       const shim: SkillManagerConfigShim = {
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
@@ -105,19 +141,12 @@ async function buildWorkspaceSkillsStatus(
         // Extension skills need active-extension context that only the child
         // has; omit them here and let the session snapshot surface them.
         getActiveExtensions: () => [],
+        getDisabledSkillLevels: () => disabledLevels,
       };
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disablements = resolveSkillSettings(
-      loadSettings(workspaceCwd, {
-        consumeCorruptionEnvVars: false,
-        credentialStore,
-        skipLoadEnvironment: !workspaceTrusted,
-        skipWorkspaceSettings: !workspaceTrusted,
-        workspaceTrusted,
-      }),
-    ).disablements;
+    const disablements = resolveSkillSettings(settings).disablements;
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,

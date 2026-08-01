@@ -128,6 +128,12 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /**
+   * Immutable launch-time execution policy for a restricted fork.
+   * Legacy absence allows every tool except the mandatory interaction-tool
+   * exclusion; an empty list means deny-all.
+   */
+  executionAllowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */

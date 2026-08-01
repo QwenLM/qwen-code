@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   runBuildTest,
+  trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
@@ -452,6 +453,82 @@ describe('runBuildTest', () => {
   const okExec: NonNullable<Parameters<typeof runBuildTest>[0]['exec']> = (
     command,
   ) => ({ command, exitCode: 0, seconds: 1, timedOut: false, output: '' });
+
+  it('rescues the runner summary from a trimmed middle', () => {
+    // A failing suite's tail is all failure details and npm epilogue, which
+    // pushes the one-line `Tests  3 failed | 1132 passed` summary into the
+    // omitted middle — measured live on PR #8176, where the count check then
+    // found no summary anywhere in the kept report. Tested against trimOutput
+    // directly: the injected exec seam used elsewhere bypasses the trim, which
+    // is exactly how the gap shipped.
+    const summary = 'Tests  3 failed | 1132 passed (1135)';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${summary}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(summary);
+    expect(trimmed).toContain('runner summaries kept');
+    // The colored form a real pipe delivers is rescued too.
+    const colored = `Tests\x1b[2m  \x1b[22m\x1b[31m3 failed\x1b[39m | 1132 passed`;
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
+
+  it('caps the rescue so hostile prose cannot void the trim', () => {
+    // 40k lines matching the summary shape made the trim a no-op (1.6MB in,
+    // 1.6MB out) — the rescue saves a handful of lines, never the middle.
+    const hostile =
+      'head\n' +
+      Array.from({ length: 5000 }, (_, i) => `Test ${i} passed thing`).join(
+        '\n',
+      ) +
+      '\n' +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(hostile);
+    expect(trimmed.length).toBeLessThan(hostile.length / 4);
+  });
+
+  it('buildOnly builds the same set but runs NO tests', () => {
+    // For the merge-base tree an A/B probe compares against: base's suite was
+    // green before this PR existed, so running it measures nothing about the
+    // diff and doubles the cost of the one thing the probe does need — a
+    // compiled tree to run against.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const args = {
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    };
+    const withTests = runBuildTest(args);
+    const buildOnly = runBuildTest({ ...args, buildOnly: true });
+
+    expect(withTests.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+    ]);
+    expect(buildOnly.test).toEqual([]);
+    // The build itself is untouched — same set, same commands, same verdict.
+    expect(buildOnly.buildSet).toEqual(withTests.buildSet);
+    expect(buildOnly.build.map((b) => b.command)).toEqual(
+      withTests.build.map((b) => b.command),
+    );
+    expect(buildOnly.ok).toBe(true);
+    // And the note must not claim tests it did not run.
+    expect(buildOnly.note).toContain('build-only');
+    expect(buildOnly.note).not.toContain('ran the tests');
+  });
 
   it('scopes the build to the changed workspace and its dependents', () => {
     writeFileSync(
