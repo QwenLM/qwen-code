@@ -406,7 +406,13 @@ jobs:
                   "write_file(**/justfile)",
                   "write_file(**/.justfile)",
                   "write_file(**/taskfile.yml)",
-                  "write_file(**/taskfile.yaml)"
+                  "write_file(**/taskfile.yaml)",
+                  "write_file(**/tsconfig.json)",
+                  "write_file(**/tsconfig.*.json)",
+                  "write_file(**/eslint.config.*)",
+                  "write_file(**/eslint.legacy-filenames.*)",
+                  "write_file(**/vitest.config.*)",
+                  "write_file(**/node_modules/**)"
                 ]
               },
               "tools": {
