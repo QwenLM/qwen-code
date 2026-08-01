@@ -16,6 +16,19 @@ const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
+const repoRoot = path.resolve(packageRoot, '../..');
+
+function resolveNightlyBuildNumber(packageVersion) {
+  if (!packageVersion.includes('-nightly.')) return undefined;
+  const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
+  if (configured) return Number(configured);
+  return Number(
+    execFileSync('git', ['rev-list', '--count', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim(),
+  );
+}
 
 describe('toChromeManifestVersion', () => {
   it('preserves a stable semantic version', () => {
@@ -102,7 +115,10 @@ describe('toChromeManifestVersion', () => {
       );
 
       expect(manifest.version).toBe(
-        toChromeManifestVersion(packageJson.version),
+        toChromeManifestVersion(
+          packageJson.version,
+          resolveNightlyBuildNumber(packageJson.version),
+        ),
       );
       expect(manifest.version_name).toBe(packageJson.version);
     } finally {
