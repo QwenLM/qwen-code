@@ -312,6 +312,48 @@ describe('runTestDelta', () => {
     expect(r.note).not.toContain('timed out');
   });
 
+  it('never hands a command outside the emitter grammar to a shell', () => {
+    // The report is a file this reads and then executes from with shell:true.
+    // A workspace token is a DIRECTORY, and a directory is a name a pull
+    // request chooses — so the grammar, not the reader, is the boundary.
+    const ran: string[] = [];
+    const r = runWith(
+      [
+        cmd({
+          command: 'npm test --workspace="packages/x";touch /tmp/pwned;"',
+          output: 'FAIL src/a.test.ts',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(ran).toEqual([]);
+    expect(r.entries).toEqual([]);
+    expect(r.netNew).toEqual([]);
+    expect(r.note).toContain('not the shape');
+    expect(r.note).toContain('judge them by the diff');
+  });
+
+  it('reruns both shapes build-test actually emits', () => {
+    const ran: string[] = [];
+    runWith(
+      [
+        cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
+        cmd({
+          command: 'npm test --workspace="packages/core"',
+          output: 'FAIL src/b.test.ts',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(ran).toEqual(['npm test', 'npm test --workspace="packages/core"']);
+  });
+
   it('prefers the failing set the run measured over re-parsing trimmed output', () => {
     // The base rerun parses its own raw text; `output` is only the bounded copy
     // that lands in the report. Re-parsing it would lose whatever the trim's
