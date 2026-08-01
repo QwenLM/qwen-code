@@ -4899,9 +4899,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     release(); // spawn resolves AFTER destroy
-    await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain(sessionId);
-    expect(removeSession).toHaveBeenCalledWith(sessionId);
+    await vi.waitFor(() => {
+      expect(bridge.killed).toContain(sessionId);
+      expect(removeSession).toHaveBeenCalledWith(sessionId);
+    });
     removeSession.mockRestore();
   });
 
@@ -4922,8 +4923,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     release();
-    await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain('sess-1');
+    await vi.waitFor(() => {
+      expect(bridge.killed).toContain('sess-1');
+    });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
   });
 
