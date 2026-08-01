@@ -230,7 +230,7 @@ describe('mermaid image renderer', () => {
       '\u001b]1337;File=inline=1;width=40;height=10;',
     );
     expect(encodeKittyImage(PNG_1X1, 40, 10)).toContain(
-      '\u001b_Ga=T,f=100,c=40,r=10,',
+      '\u001b_Ga=T,f=100,q=2,C=1,c=40,r=10,',
     );
     expect(encodeKittyVirtualImage(PNG_1X1, 42, 40, 10)).toContain(
       '\u001b_Ga=T,f=100,i=42,q=2,U=1,c=40,r=10,',

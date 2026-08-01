@@ -94,6 +94,23 @@ export const TerminalImage: React.FC<TerminalImageProps> = ({
       </MaxSizedBox>
     );
   }
+  if (result.kind === 'kitty-direct') {
+    return (
+      <Box flexDirection="column" width={contentWidth} flexShrink={0}>
+        <Box>
+          <Text terminalControl selectable={false}>
+            {result.sequence}
+          </Text>
+          <Text> </Text>
+        </Box>
+        {Array.from({ length: result.rows - 1 }, (_, index) => (
+          <Box key={index}>
+            <Text> </Text>
+          </Box>
+        ))}
+      </Box>
+    );
+  }
   return (
     <MaxSizedBox
       maxHeight={availableTerminalHeight}
