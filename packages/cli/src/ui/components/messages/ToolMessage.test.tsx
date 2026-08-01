@@ -70,6 +70,18 @@ vi.mock('../AnsiOutput.js', () => ({
   },
 }));
 
+vi.mock('../TerminalImage.js', () => ({
+  TerminalImage: ({
+    data,
+  }: {
+    data: { filePath: string; mimeType: string };
+  }) => (
+    <Text>
+      MockTerminalImage:{data.filePath}:{data.mimeType}
+    </Text>
+  ),
+}));
+
 // Mock child components or utilities if they are complex or have side effects
 vi.mock('../GeminiRespondingSpinner.js', () => ({
   GeminiRespondingSpinner: ({
@@ -325,6 +337,25 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('test-tool');
     expect(output).toContain('MockMarkdown:Test result'); // not collapsed
+  });
+
+  it('renders structured terminal image results through TerminalImage', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="DisplayImage"
+        resultDisplay={{
+          type: 'terminal_image',
+          filePath: '/workspace/chart.png',
+          mimeType: 'image/png',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain(
+      'MockTerminalImage:/workspace/chart.png:image/png',
+    );
   });
 
   it('renders tool results directly below the header row when forced', () => {
