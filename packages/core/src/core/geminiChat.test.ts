@@ -9443,6 +9443,176 @@ describe('GeminiChat', async () => {
     },
   );
 
+  it.each(['preparation', 'function call'] as const)(
+    'retries when a %s interrupts a partial JSON protocol leak',
+    async (middleChunkType) => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const leakedText =
+        JSON.stringify([{ name: 'read_file', file_path: 'a.ts' }]) +
+        '\n</parameter>\n</function>\n';
+      const splitAt = 12;
+      let middleResponse: GenerateContentResponse;
+      if (middleChunkType === 'preparation') {
+        middleResponse = {
+          candidates: [{ content: { parts: [] } }],
+        } as unknown as GenerateContentResponse;
+        setToolCallPreparations(middleResponse, [
+          { callId: 'call-1', toolName: 'read_file' },
+        ]);
+      } else {
+        middleResponse = {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { file_path: 'a.ts' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      }
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamResponse(
+            {
+              candidates: [
+                {
+                  content: { parts: [{ text: leakedText.slice(0, splitAt) }] },
+                },
+              ],
+            } as unknown as GenerateContentResponse,
+            middleResponse,
+            stopResponse([{ text: leakedText.slice(splitAt) }]),
+          ),
+        )
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-interrupted-json-tool-protocol-leak',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Successful final response',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Successful final response' },
+      ]);
+    },
+  );
+
+  it.each([true, false])(
+    'preserves leading JSON when a tool call ends without a finish reason (tool call first: %s)',
+    async (toolCallFirst) => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const response = JSON.stringify([{ name: 'example', value: 1 }]);
+      const splitAt = 12;
+      const functionCallPart = {
+        functionCall: {
+          id: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+      };
+      const functionCallResponse = {
+        candidates: [{ content: { parts: [functionCallPart] } }],
+      } as unknown as GenerateContentResponse;
+      const textResponses = [
+        response.slice(0, splitAt),
+        response.slice(splitAt),
+      ].map(
+        (text) =>
+          ({
+            candidates: [{ content: { parts: [{ text }] } }],
+          }) as unknown as GenerateContentResponse,
+      );
+      const responses = toolCallFirst
+        ? [functionCallResponse, ...textResponses]
+        : [textResponses[0]!, functionCallResponse, textResponses[1]!];
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(streamResponse(...responses));
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        `prompt-id-json-tool-call-no-finish-${toolCallFirst}`,
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(chatWithRecording.getHistory().at(-1)?.parts).toEqual(
+        emittedParts,
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedParts = recordAssistantTurn.mock.calls[0]?.[0]
+        .message as Part[];
+      for (const parts of [emittedParts, recordedParts]) {
+        expect(parts.filter((part) => part.functionCall)).toEqual([
+          functionCallPart,
+        ]);
+        expect(
+          parts
+            .filter((part) => part.text)
+            .map((part) => part.text)
+            .join(''),
+        ).toBe(response);
+      }
+    },
+  );
+
   it.each([false, true])(
     'keeps leading JSON before a later structured tool call (preparation: %s)',
     async (withPreparation) => {

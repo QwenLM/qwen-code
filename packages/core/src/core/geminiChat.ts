@@ -1268,10 +1268,6 @@ class LeadingProtocolTagLeakDetector {
     return this.release();
   }
 
-  releaseJsonCandidate(): string {
-    return this.state === 'json' ? this.finish() : '';
-  }
-
   private release(): string {
     const output = this.buffer;
     this.state = 'clean';
@@ -4157,16 +4153,6 @@ export class GeminiChat {
               ),
             })),
           );
-          const content = chunk.candidates?.[0]?.content;
-          if (content) {
-            const text = protocolTagDetector.releaseJsonCandidate();
-            if (text) {
-              content.parts = [
-                ...takePendingProtocolParts(),
-                ...(content.parts ?? []),
-              ];
-            }
-          }
         }
 
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
@@ -4205,12 +4191,7 @@ export class GeminiChat {
                 continue;
               }
               if (typeof part.text !== 'string' || part.thought) {
-                const text = part.thought
-                  ? ''
-                  : protocolTagDetector.releaseJsonCandidate();
-                if (text) {
-                  outputParts.push(...takePendingProtocolParts(), part);
-                } else if (
+                if (
                   pendingProtocolParts.length > 0 ||
                   protocolTagDetector.leaked
                 ) {
@@ -4344,6 +4325,7 @@ export class GeminiChat {
 
         if (
           !chunk.candidates?.length ||
+          preparations.length > 0 ||
           !protocolTextWasSuppressed ||
           !protocolTagDetector.blockingOutput
         ) {
@@ -4352,6 +4334,32 @@ export class GeminiChat {
       }
     } catch (e) {
       streamError = e;
+    }
+
+    if (
+      streamError === null &&
+      pendingProtocolParts.length > 0 &&
+      (hasToolCall ||
+        pendingProtocolParts.some((part) => part.functionCall !== undefined))
+    ) {
+      protocolTagDetector.finish();
+      if (protocolTagDetector.leaked) {
+        pendingProtocolParts = [];
+      } else {
+        const parts = normalizeModelToolCallIds(
+          takePendingProtocolParts(),
+          usedToolCallIds,
+          rawToolCallIdsInCurrentTurn,
+          reservedToolCallIds,
+        );
+        const chunk = {
+          candidates: [{ content: { role: 'model', parts } }],
+        } as GenerateContentResponse;
+        syncFunctionCallsField(chunk, parts);
+        hasToolCall ||= parts.some((part) => part.functionCall);
+        allModelParts.push(...parts);
+        yield chunk;
+      }
     }
 
     let thoughtContentPart: Part | undefined;
