@@ -7454,12 +7454,10 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
-          if (policyToolName === ToolNames.MONITOR) {
-            const callIdAware = invocation as {
-              setCallId?: (id: string) => void;
-            };
-            callIdAware.setCallId?.(callId);
-          }
+          const callIdAware = invocation as {
+            setCallId?: (id: string) => void;
+          };
+          callIdAware.setCallId?.(callId);
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its
@@ -8502,19 +8500,22 @@ export class Session implements SessionContext {
 
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {
-            const todos = this.planEmitter.extractTodos(
+            const plan = this.planEmitter.extractPlan(
               toolResult.returnDisplay,
-              args,
+              succeeded ? args : undefined,
             );
 
             // Match original logic: emit plan if todos.length > 0 OR if args had todos
-            if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
-              await this.planEmitter.emitPlan(todos ?? []);
+            if (
+              plan &&
+              (plan.todos.length > 0 || Array.isArray(args['todos']))
+            ) {
+              await this.planEmitter.emitPlan(plan, callId);
             }
 
             // Skip tool_call_update event for TodoWriteTool
             // Still log and return function response for LLM
-          } else {
+          } else if (!isTodoWriteTool) {
             // Normal tool handling: emit result using ToolCallEmitter
             await this.toolCallEmitter.emitResult({
               callId,

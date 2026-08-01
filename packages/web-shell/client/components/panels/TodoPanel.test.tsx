@@ -36,6 +36,17 @@ const todo = (id: string, status: TodoItem['status']): TodoItem => ({
 });
 
 describe('TodoPanel bottom status items', () => {
+  it('opens plan execution from the progress control', () => {
+    const onOpen = vi.fn();
+    const container = render(
+      <TodoPanel todos={[todo('1', 'in_progress')]} onOpen={onOpen} />,
+    );
+
+    const button = container.querySelector('button[aria-label="Step 1 / 1"]');
+    act(() => (button as HTMLButtonElement).click());
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
   it('renders status items beside todo progress with a separator', () => {
     const onClick = vi.fn();
     const container = render(

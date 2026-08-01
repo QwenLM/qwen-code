@@ -10,6 +10,7 @@ interface TodoPanelProps {
   todos: TodoItem[];
   title?: string;
   statusItems?: readonly WebShellBottomStatusItem[];
+  onOpen?: () => void;
 }
 
 function getStatusClass(status: TodoItem['status']): string {
@@ -27,6 +28,7 @@ export const TodoPanel = memo(function TodoPanel({
   todos,
   title,
   statusItems = [],
+  onOpen,
 }: TodoPanelProps) {
   const { t } = useI18n();
   if (todos.length === 0 && statusItems.length === 0) return null;
@@ -64,7 +66,28 @@ export const TodoPanel = memo(function TodoPanel({
       tabIndex={0}
     >
       <div className={styles.summary} aria-label={summaryAriaLabel}>
-        {hasTodos && (
+        {hasTodos && onOpen ? (
+          <button
+            type="button"
+            className={styles.progressButton}
+            aria-label={summaryAriaLabel}
+            onClick={onOpen}
+          >
+            <span
+              className={styles.progressRing}
+              style={{ '--todo-progress': String(progress) } as CSSProperties}
+              aria-hidden="true"
+            />
+            <span className={styles.stepText}>
+              <span className={styles.fullText}>
+                {t('todo.stepProgress', { current: stepIndex, total })}
+              </span>
+              <span className={styles.compactText}>
+                {t('todo.stepFraction', { current: stepIndex, total })}
+              </span>
+            </span>
+          </button>
+        ) : hasTodos ? (
           <>
             <span
               className={styles.progressRing}
@@ -80,7 +103,7 @@ export const TodoPanel = memo(function TodoPanel({
               </span>
             </span>
           </>
-        )}
+        ) : null}
         {statusItems.map((item, index) => (
           <span key={item.id} className={styles.statusSegmentWrap}>
             {(total > 0 || index > 0) && (

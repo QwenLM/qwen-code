@@ -273,7 +273,13 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
+      latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestTodoPanelTodos: [] as Array<{
+        id: string;
+        blockedBy?: string[];
+      }>,
+      latestTodoPanelOnOpen: null as (() => void) | null,
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
@@ -287,6 +293,8 @@ const {
           }) => Promise<boolean>)
         | null,
       latestTasksStatusProps: null as {
+        planTodos?: Array<{ id: string }>;
+        agentTools?: Array<{ callId: string }>;
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
@@ -416,7 +424,6 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt: vi.fn(),
-    insertQueuedPrompt: vi.fn(),
     editQueuedPrompt: vi.fn(),
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -855,7 +862,19 @@ vi.doMock('./components/StreamingStatus', async () => {
   };
 });
 mockComponent('./components/ToastHost', 'ToastHost');
-mockComponent('./components/panels/TodoPanel', 'TodoPanel');
+vi.doMock('./components/panels/TodoPanel', async () => {
+  const React = await import('react');
+  return {
+    TodoPanel: (props: {
+      todos: Array<{ id: string; blockedBy?: string[] }>;
+      onOpen?: () => void;
+    }) => {
+      testState.latestTodoPanelTodos = props.todos;
+      testState.latestTodoPanelOnOpen = props.onOpen ?? null;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
@@ -1117,8 +1136,12 @@ mockComponent('./components/messages/AuthMessage', 'AuthMessage');
 vi.doMock('./components/messages/ToolApproval', async () => {
   const React = await import('react');
   return {
-    ToolApproval: (props: { keyboardActive?: boolean }) => {
+    ToolApproval: (props: {
+      keyboardActive?: boolean;
+      planTodos?: Array<{ id: string }>;
+    }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
+      testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
       });
@@ -1143,6 +1166,8 @@ vi.doMock('./components/messages/TasksStatusMessage', async () => {
   const React = await import('react');
   return {
     TasksStatusMessage: (props: {
+      planTodos?: Array<{ id: string }>;
+      agentTools?: Array<{ callId: string }>;
       onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     }) => {
       testState.latestTasksStatusProps = props;
@@ -2096,7 +2121,7 @@ async function triggerAutoRecap(): Promise<{
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string } = {},
+  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -2108,7 +2133,7 @@ function makePendingPermissionBlock(
     title: 'Run ls',
     toolCall: {
       toolCallId: 'tc-1',
-      kind: isAskUser ? 'other' : 'execute',
+      kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
       _meta: { toolName },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
@@ -2198,12 +2223,15 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
+  testState.latestToolApprovalPlanTodos = [];
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestTodoPanelTodos = [];
+  testState.latestTodoPanelOnOpen = null;
+  testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
-  testState.latestTasksStatusProps = null;
   testState.settings = [];
   testState.latestSettingsState = null;
   testState.latestScheduledTasksProps = null;
@@ -2318,6 +2346,118 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('App plan todos', () => {
+  it('passes the active workflow to an exit-plan approval', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
+    ];
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+      }),
+    ];
+
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
+    ).toEqual(['prepare', 'ship']);
+  });
+
+  it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual(['prepare']);
+
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: [],
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
+  });
+
+  it('opens the workflow dialog with plan todos and linked agents', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(
+      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
+    ).toEqual(['work']);
+    expect(
+      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
+    ).toEqual(['agent-call']);
+  });
 });
 
 describe('App composer footer renderer', () => {

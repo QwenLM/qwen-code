@@ -3814,14 +3814,14 @@ describe('DaemonClient', () => {
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(200, { accepted: true }),
+        jsonResponse(200, { accepted: true, messageId: 'mid-1' }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
       );
-      expect(result).toEqual({ accepted: true });
+      expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
@@ -3895,6 +3895,26 @@ describe('DaemonClient', () => {
       await expect(
         client.enqueueMidTurnMessage('s-1', 'hi'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('removeMidTurnMessage', () => {
+    it('DELETEs the encoded message id with client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeMidTurnMessage('s/1', 'mid/1', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual({ removed: true });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages/mid%2F1',
+      );
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
   });
 
