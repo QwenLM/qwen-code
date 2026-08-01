@@ -9,7 +9,9 @@ import fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isAbortError } from '../utils/errors.js';
 import { isFfmpegAvailable, isFfprobeAvailable } from './ffmpeg.js';
 import {
   extensionForVideoMime,
@@ -235,4 +237,62 @@ export async function processVideoForOmniDelivery(
     recognized,
     deduped,
   };
+}
+
+/** Read-result shape consumed by fileUtils.processSingleFileContent for
+ * media Parts (structurally mirrors ProcessedFileReadResult's media case
+ * without importing fileUtils, which would create a cycle). */
+export interface OmniVideoReadResult {
+  llmContent:
+    | string
+    | { fileData: { fileUri: string; mimeType: string; displayName: string } };
+  returnDisplay: string;
+  error?: string;
+  errorType?: ToolErrorType;
+}
+
+/**
+ * fileUtils-facing wrapper: run the S1 delivery pipeline and shape the
+ * outcome as a file-read result. Fails closed on delivery errors (no
+ * inline fallback); rethrows user aborts so the caller's abort handling
+ * applies.
+ */
+export async function readVideoViaOmniDelivery(params: {
+  filePath: string;
+  config: Config;
+  displayName: string;
+  relativePathForDisplay: string;
+  signal?: AbortSignal;
+}): Promise<OmniVideoReadResult> {
+  const { filePath, config, displayName, relativePathForDisplay, signal } =
+    params;
+  try {
+    const delivery = await processVideoForOmniDelivery(
+      filePath,
+      config,
+      signal,
+    );
+    return {
+      llmContent: {
+        fileData: {
+          fileUri: delivery.fileUri,
+          mimeType: delivery.mimeType,
+          displayName,
+        },
+      },
+      returnDisplay: `Read video file (omni upload): ${relativePathForDisplay}`,
+    };
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err;
+    // Fail closed: no silent fallback to inline base64 — a fallback would
+    // resurrect the 10MB cap surprise and mislead the user into thinking
+    // the model saw the original video.
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      llmContent: `[Omni video delivery failed for ${displayName}: ${message}]`,
+      returnDisplay: `Failed to deliver video via omni upload: ${relativePathForDisplay}`,
+      error: `Omni video delivery failed: ${filePath}: ${message}`,
+      errorType: ToolErrorType.READ_CONTENT_FAILURE,
+    };
+  }
 }

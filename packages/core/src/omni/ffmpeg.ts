@@ -42,22 +42,14 @@ function execCommand(
   });
 }
 
-let ffmpegAvailable: boolean | undefined;
-let ffprobeAvailable: boolean | undefined;
-let ffmpegAvailablePromise: Promise<boolean> | undefined;
-let ffprobeAvailablePromise: Promise<boolean> | undefined;
+/** Availability cache: binary name → settled result or in-flight probe.
+ * Concurrent callers share one probe subprocess per binary. */
+const availabilityCache = new Map<string, boolean | Promise<boolean>>();
 
-async function probeBinary(
-  binary: string,
-  getCached: () => boolean | undefined,
-  setCached: (v: boolean) => void,
-  getInflight: () => Promise<boolean> | undefined,
-  setInflight: (p: Promise<boolean> | undefined) => void,
-): Promise<boolean> {
-  const cached = getCached();
-  if (cached !== undefined) return cached;
-  const inflight = getInflight();
-  if (inflight) return inflight;
+async function probeBinary(binary: string): Promise<boolean> {
+  const cached = availabilityCache.get(binary);
+  if (typeof cached === 'boolean') return cached;
+  if (cached) return cached;
 
   const probe = (async () => {
     try {
@@ -68,16 +60,19 @@ async function probeBinary(
     } catch {
       return false;
     }
-  })()
-    .then((result) => {
-      setCached(result);
+  })().then(
+    (result) => {
+      availabilityCache.set(binary, result);
       return result;
-    })
-    .finally(() => {
-      setInflight(undefined);
-    });
+    },
+    () => {
+      // Never cache a rejection — allow the next caller to retry.
+      availabilityCache.delete(binary);
+      return false;
+    },
+  );
 
-  setInflight(probe);
+  availabilityCache.set(binary, probe);
   return probe;
 }
 
@@ -86,13 +81,7 @@ async function probeBinary(
  * lifetime; concurrent callers share one probe subprocess.
  */
 export async function isFfmpegAvailable(): Promise<boolean> {
-  return probeBinary(
-    'ffmpeg',
-    () => ffmpegAvailable,
-    (v) => (ffmpegAvailable = v),
-    () => ffmpegAvailablePromise,
-    (p) => (ffmpegAvailablePromise = p),
-  );
+  return probeBinary('ffmpeg');
 }
 
 /**
@@ -100,21 +89,12 @@ export async function isFfmpegAvailable(): Promise<boolean> {
  * lifetime; concurrent callers share one probe subprocess.
  */
 export async function isFfprobeAvailable(): Promise<boolean> {
-  return probeBinary(
-    'ffprobe',
-    () => ffprobeAvailable,
-    (v) => (ffprobeAvailable = v),
-    () => ffprobeAvailablePromise,
-    (p) => (ffprobeAvailablePromise = p),
-  );
+  return probeBinary('ffprobe');
 }
 
 /** Reset availability caches. Used by tests only. */
 export function resetFfmpegCachesForTests(): void {
-  ffmpegAvailable = undefined;
-  ffprobeAvailable = undefined;
-  ffmpegAvailablePromise = undefined;
-  ffprobeAvailablePromise = undefined;
+  availabilityCache.clear();
 }
 
 /**

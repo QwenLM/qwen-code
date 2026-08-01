@@ -59,7 +59,8 @@ export function sniffVideoMimeType(header: Buffer): string | null {
 }
 
 /** Map a detected video MIME type to the canonical file extension used for
- * content-addressed object names. */
+ * content-addressed object names. Covers exactly the MIME types
+ * `sniffVideoMimeType` can emit. */
 export function extensionForVideoMime(mimeType: string): string {
   switch (mimeType) {
     case 'video/mp4':
@@ -68,8 +69,6 @@ export function extensionForVideoMime(mimeType: string): string {
       return '.mov';
     case 'video/webm':
       return '.webm';
-    case 'video/x-matroska':
-      return '.mkv';
     case 'video/x-msvideo':
       return '.avi';
     default:

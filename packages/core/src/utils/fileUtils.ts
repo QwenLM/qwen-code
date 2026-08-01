@@ -1535,35 +1535,16 @@ export async function processSingleFileContent(
       case 'audio':
       case 'video': {
         if (fileType === 'video' && omniModule) {
-          try {
-            const delivery = await omniModule.processVideoForOmniDelivery(
-              filePath,
-              config,
-              signal,
-            );
-            return {
-              llmContent: {
-                fileData: {
-                  fileUri: delivery.fileUri,
-                  mimeType: delivery.mimeType,
-                  displayName,
-                },
-              },
-              returnDisplay: `Read video file (omni upload): ${relativePathForDisplay}`,
-            };
-          } catch (err) {
-            if (isAbortError(err)) throw err;
-            // Fail closed: no silent fallback to inline base64 — a fallback
-            // would resurrect the 10MB cap surprise and mislead the user
-            // into thinking the model saw the original video.
-            const message = err instanceof Error ? err.message : String(err);
-            return {
-              llmContent: `[Omni video delivery failed for ${displayName}: ${message}]`,
-              returnDisplay: `Failed to deliver video via omni upload: ${relativePathForDisplay}`,
-              error: `Omni video delivery failed: ${filePath}: ${message}`,
-              errorType: ToolErrorType.READ_CONTENT_FAILURE,
-            };
-          }
+          // Delegated to the omni module: fail-closed delivery via the
+          // DashScope upload channel; user aborts are rethrown and land in
+          // this function's outer abort handling.
+          return await omniModule.readVideoViaOmniDelivery({
+            filePath,
+            config,
+            displayName,
+            relativePathForDisplay,
+            signal,
+          });
         }
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');

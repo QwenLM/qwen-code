@@ -9,6 +9,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { hashFileSha256 } from './recognition.js';
 
 /** Result of promoting a file into the content-addressed object store. */
 export interface PutObjectResult {
@@ -16,22 +17,6 @@ export interface PutObjectResult {
   objectPath: string;
   /** True when an identical object already existed (dedup hit). */
   deduped: boolean;
-}
-
-async function hashFile(
-  filePath: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const hash = createHash('sha256');
-  await pipeline(
-    createReadStream(filePath, signal ? { signal } : {}),
-    async (source) => {
-      for await (const chunk of source) {
-        hash.update(chunk as Buffer);
-      }
-    },
-  );
-  return hash.digest('hex');
 }
 
 /** Reject paths that exist but are not what the store expects (symlinks,
@@ -149,7 +134,7 @@ export class OmniObjectStore {
     const existing = await fs.lstat(objectPath).catch(() => undefined);
     if (existing) {
       if (existing.isFile() && !existing.isSymbolicLink()) {
-        const existingHash = await hashFile(objectPath, signal);
+        const existingHash = await hashFileSha256(objectPath, signal);
         if (existingHash === sha256) {
           return { objectPath, deduped: true };
         }
@@ -182,7 +167,7 @@ export class OmniObjectStore {
       if (
         winner?.isFile() &&
         !winner.isSymbolicLink() &&
-        (await hashFile(objectPath).catch(() => undefined)) === sha256
+        (await hashFileSha256(objectPath).catch(() => undefined)) === sha256
       ) {
         return { objectPath, deduped: true };
       }

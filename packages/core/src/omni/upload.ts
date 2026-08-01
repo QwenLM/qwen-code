@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { openAsBlob } from 'node:fs';
 import path from 'node:path';
+import { combineAbortSignals } from '../utils/abortController.js';
 
 /** Prefix all DashScope instant-upload URLs share. */
 export const OSS_URL_PREFIX = 'oss://';
@@ -58,14 +59,6 @@ function uploadsOriginFromBaseUrl(baseUrl: string | undefined): string {
   } catch {
     return DEFAULT_ORIGIN;
   }
-}
-
-function combineSignals(
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-): AbortSignal {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 /**
@@ -131,11 +124,14 @@ export class DashScopeUploader {
     url.searchParams.set('model', model);
 
     let res: Response;
+    const combined = combineAbortSignals([signal], {
+      timeoutMs: GET_POLICY_TIMEOUT_MS,
+    });
     try {
       res = await this.fetchFn(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: combineSignals(GET_POLICY_TIMEOUT_MS, signal),
+        signal: combined.signal,
       });
     } catch (err) {
       rethrowIfAborted(err, signal);
@@ -144,6 +140,8 @@ export class DashScopeUploader {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    } finally {
+      combined.cleanup();
     }
     if (!res.ok) {
       throw new Error(
@@ -211,11 +209,14 @@ export class DashScopeUploader {
     form.append('file', blob, path.basename(filePath));
 
     let res: Response;
+    const combined = combineAbortSignals([signal], {
+      timeoutMs: UPLOAD_TIMEOUT_MS,
+    });
     try {
       res = await this.fetchFn(policy.upload_host, {
         method: 'POST',
         body: form,
-        signal: combineSignals(UPLOAD_TIMEOUT_MS, signal),
+        signal: combined.signal,
       });
     } catch (err) {
       rethrowIfAborted(err, signal);
@@ -224,6 +225,8 @@ export class DashScopeUploader {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    } finally {
+      combined.cleanup();
     }
     if (!res.ok) {
       throw new Error(
