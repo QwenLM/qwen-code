@@ -55,13 +55,27 @@ function daemonDown(): Partial<SpawnSyncReturns<string>> {
   };
 }
 
-/** Route probe results per command so a test can mix healthy and broken. */
+/**
+ * Route probe results per command so a test can mix healthy and broken.
+ *
+ * The stub validates argv and the timeout, not just the command name. Both are
+ * load-bearing and neither is observable from the selection result: `version`
+ * contacts the daemon while `--version` only prints the client build, so a
+ * probe that drifted to `--version` would call every broken runtime healthy and
+ * silently restore the original bug with the selection assertions still green.
+ * The timeout is the only bound on a wedged daemon that accepts connections and
+ * never answers.
+ */
 function probes(byCommand: Record<string, Partial<SpawnSyncReturns<string>>>) {
-  spawnSync.mockImplementation((cmd: string) => {
-    const result = byCommand[cmd];
-    if (!result) throw new Error(`unexpected probe of '${cmd}'`);
-    return result;
-  });
+  spawnSync.mockImplementation(
+    (cmd: string, args: string[], options: { timeout?: number }) => {
+      const result = byCommand[cmd];
+      if (!result) throw new Error(`unexpected probe of '${cmd}'`);
+      expect(args).toEqual(['version']);
+      expect(options?.timeout).toBeGreaterThan(0);
+      return result;
+    },
+  );
 }
 
 function installed(...commands: string[]) {
@@ -88,6 +102,13 @@ describe('loadSandboxConfig sandbox command selection', () => {
     const config = await loadSandboxConfig({}, { sandbox: true });
 
     expect(config?.command).toBe('podman');
+    // Pin the probe argument at the call site as well: `docker version` is what
+    // reaches the daemon, and it is the reason the fallback fires at all.
+    expect(spawnSync).toHaveBeenCalledWith(
+      'docker',
+      ['version'],
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
   });
 
   it('still prefers docker when it is usable', async () => {
