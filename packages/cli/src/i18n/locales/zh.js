@@ -2551,6 +2551,8 @@ export default {
   'Skipped archive collisions: {{count}}': '已跳过归档冲突：{{count}}',
   'Archive candidates:': '待归档技能：',
   'Skipped archive collisions:': '已跳过的归档冲突：',
+  'Skipped rename errors: {{count}}': '已跳过重命名错误：{{count}}',
+  'Skipped rename errors:': '已跳过的重命名错误：',
   '{{verb}}: {{count}}': '{{verb}}：{{count}}',
   'Would archive': '将归档',
   Archived: '已归档',

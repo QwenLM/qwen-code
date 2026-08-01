@@ -2271,6 +2271,9 @@ export default {
     "Collisions d'archivage ignorées : {{count}}",
   'Archive candidates:': "Candidates à l'archivage :",
   'Skipped archive collisions:': "Collisions d'archivage ignorées :",
+  'Skipped rename errors: {{count}}':
+    'Erreurs de renommage ignorées : {{count}}',
+  'Skipped rename errors:': 'Erreurs de renommage ignorées :',
   '{{verb}}: {{count}}': '{{verb}} : {{count}}',
   'Would archive': 'Seraient archivées',
   Archived: 'Archivées',

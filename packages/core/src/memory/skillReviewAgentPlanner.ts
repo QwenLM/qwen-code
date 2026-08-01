@@ -339,10 +339,10 @@ export async function listExistingSkillDirNames(
   return names.sort();
 }
 
-async function listReservedSkillDirNames(
+async function listArchivedSkillDirNames(
   projectRoot: string,
 ): Promise<string[]> {
-  const names = new Set(await listExistingSkillDirNames(projectRoot));
+  const names: string[] = [];
   try {
     const entries = await fs.readdir(getArchivedSkillsRoot(projectRoot), {
       withFileTypes: true,
@@ -355,13 +355,13 @@ async function listReservedSkillDirNames(
         (entry.isDirectory() || entry.isSymbolicLink()) &&
         SKILL_NAME_PATTERN.test(entry.name)
       ) {
-        names.add(entry.name);
+        names.push(entry.name);
       }
     }
   } catch {
     // An unavailable archive contributes no reserved names.
   }
-  return [...names].sort();
+  return names.sort();
 }
 
 /**
@@ -375,11 +375,23 @@ async function listReservedSkillDirNames(
  */
 export async function buildTaskPrompt(projectRoot: string): Promise<string> {
   const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listReservedSkillDirNames(projectRoot);
+  const [active, archived] = await Promise.all([
+    listExistingSkillDirNames(projectRoot),
+    listArchivedSkillDirNames(projectRoot),
+  ]);
   const existingLine =
-    existing.length === 0
+    active.length === 0 && archived.length === 0
       ? '(no skills exist yet — any name is available)'
-      : `Existing or archived skill directory names (do NOT reuse for write_file; use \`edit\` only to update an active skill): ${existing.join(', ')}`;
+      : [
+          active.length > 0
+            ? `Active skill directory names (use \`edit\` to update): ${active.join(', ')}`
+            : undefined,
+          archived.length > 0
+            ? `Archived skill directory names (do NOT reuse for write_file): ${archived.join(', ')}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n');
   return [
     `Project skills directory: \`${skillsRoot}\``,
     '',

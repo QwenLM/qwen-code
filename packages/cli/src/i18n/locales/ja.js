@@ -2035,6 +2035,8 @@ export default {
     'スキップしたアーカイブ先の競合：{{count}}',
   'Archive candidates:': 'アーカイブ候補：',
   'Skipped archive collisions:': 'スキップしたアーカイブ先の競合：',
+  'Skipped rename errors: {{count}}': 'スキップした名前変更エラー：{{count}}',
+  'Skipped rename errors:': 'スキップした名前変更エラー：',
   '{{verb}}: {{count}}': '{{verb}}：{{count}}',
   'Would archive': 'アーカイブ予定',
   Archived: 'アーカイブ済み',

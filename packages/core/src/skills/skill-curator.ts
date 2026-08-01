@@ -130,6 +130,7 @@ export interface AutoSkillCuratorRunResult {
   reactivated: string[];
   archived: string[];
   skippedCollisions: string[];
+  skippedErrors: string[];
 }
 
 export type AutoSkillCuratorAutomaticResult =
@@ -173,7 +174,11 @@ function emptyState(): AutoSkillCuratorState {
 }
 
 function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  return (
+    error != null &&
+    typeof error === 'object' &&
+    (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }
 
 function parseTimestamp(value: unknown): number | undefined {
@@ -511,7 +516,7 @@ async function rollbackMoves(
   moved: Array<{ source: string; destination: string }>,
 ): Promise<string[]> {
   const errors: string[] = [];
-  for (const move of moved.reverse()) {
+  for (const move of [...moved].reverse()) {
     try {
       await fs.rename(move.destination, move.source);
     } catch (error) {
@@ -537,6 +542,7 @@ async function runLocked(
     reactivated: [],
     archived: [],
     skippedCollisions: [],
+    skippedErrors: [],
   };
   const moved: Array<{ source: string; destination: string }> = [];
 
@@ -581,7 +587,12 @@ async function runLocked(
         } catch (error) {
           if (!isMissing(error)) throw error;
         }
-        await fs.rename(current.directoryPath, destination);
+        try {
+          await fs.rename(current.directoryPath, destination);
+        } catch {
+          result.skippedErrors.push(scanned.directoryName);
+          continue;
+        }
         moved.push({ source: current.directoryPath, destination });
         record.state = 'archived';
         record.archivedAt = nowIso;
@@ -596,6 +607,29 @@ async function runLocked(
         record.state = 'active';
         delete record.archivedAt;
         result.reactivated.push(scanned.directoryName);
+      }
+    }
+    // Prune records whose directory exists in neither root so the state
+    // file does not grow without bound in long-lived projects. Check raw
+    // directory presence (not eligibility) so an ineligible-but-present
+    // directory keeps its record.
+    const listDirs = async (root: string): Promise<Set<string>> => {
+      try {
+        const entries = await fs.readdir(root, { withFileTypes: true });
+        return new Set(
+          entries.filter((e) => e.isDirectory()).map((e) => e.name),
+        );
+      } catch {
+        return new Set();
+      }
+    };
+    const [liveDirs, archiveDirs] = await Promise.all([
+      listDirs(paths.skillsRoot),
+      listDirs(paths.archiveRoot),
+    ]);
+    for (const dirName of Object.keys(state.skills)) {
+      if (!liveDirs.has(dirName) && !archiveDirs.has(dirName)) {
+        delete state.skills[dirName];
       }
     }
     state.lastRunAt = nowIso;
@@ -632,6 +666,7 @@ async function previewRun(
     reactivated: [],
     archived: [],
     skippedCollisions: [],
+    skippedErrors: [],
   };
   const nowMs = now.getTime();
   for (const skill of skills) {
@@ -696,6 +731,9 @@ export async function maybeRunAutoSkillCurator(
     if (!state.lastRunAt) {
       const nowIso = now.toISOString();
       const skills = await scanManagedSkills(lockedPaths.skillsRoot);
+      if (skills.length === 0 && Object.keys(state.skills).length === 0) {
+        return { status: 'seeded', checked: 0 };
+      }
       for (const skill of skills) {
         const existing = state.skills[skill.directoryName];
         state.skills[skill.directoryName] = {
@@ -780,6 +818,11 @@ export async function setAutoSkillPinned(
   pinned: boolean,
   now: Date = new Date(),
 ): Promise<void> {
+  if (!isManagedDirectoryName(directoryName)) {
+    throw new Error(
+      `Managed auto-skill not found: ${JSON.stringify(directoryName)}.`,
+    );
+  }
   await withCuratorLock(projectRoot, async (paths) => {
     const managed = await readManagedSkill(paths.skillsRoot, directoryName);
     if (!managed) {
@@ -840,7 +883,9 @@ export async function restoreArchivedAutoSkill(
 ): Promise<void> {
   await withCuratorLock(projectRoot, async (paths) => {
     if (!isManagedDirectoryName(directoryName)) {
-      throw new Error(`Archived auto-skill not found: ${directoryName}.`);
+      throw new Error(
+        `Archived auto-skill not found: ${JSON.stringify(directoryName)}.`,
+      );
     }
     const archiveRootStat = await fs.lstat(paths.archiveRoot).catch((error) => {
       if (isMissing(error)) return undefined;

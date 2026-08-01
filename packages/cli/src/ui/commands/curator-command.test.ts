@@ -81,6 +81,7 @@ describe('curator command', () => {
       reactivated: [],
       archived: ['auto-skill-old'],
       skippedCollisions: ['auto-skill-collision'],
+      skippedErrors: [],
     });
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
@@ -107,6 +108,7 @@ describe('curator command', () => {
       reactivated: [],
       archived: ['auto-skill-old'],
       skippedCollisions: [],
+      skippedErrors: [],
     });
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
@@ -126,6 +128,7 @@ describe('curator command', () => {
       reactivated: [],
       archived: [],
       skippedCollisions: [],
+      skippedErrors: [],
     });
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
@@ -146,6 +149,7 @@ describe('curator command', () => {
       reactivated: [],
       archived: ['auto-skill-old'],
       skippedCollisions: [],
+      skippedErrors: [],
     });
     mocks.refreshCache.mockRejectedValue(new Error('refresh exploded'));
     const runCommand = curatorCommand.subCommands!.find(
@@ -290,6 +294,7 @@ describe('curator command', () => {
         reactivated: [],
         archived: [],
         skippedCollisions: [],
+        skippedErrors: [],
       });
       const runCommand = curatorCommand.subCommands!.find(
         (command) => command.name === 'run',

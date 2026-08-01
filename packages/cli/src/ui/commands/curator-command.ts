@@ -109,6 +109,9 @@ function formatRun(result: AutoSkillCuratorRunResult): string {
     t('Skipped archive collisions: {{count}}', {
       count: String(result.skippedCollisions.length),
     }),
+    t('Skipped rename errors: {{count}}', {
+      count: String(result.skippedErrors.length),
+    }),
   ];
   if (result.archived.length > 0) {
     lines.push(
@@ -119,7 +122,16 @@ function formatRun(result: AutoSkillCuratorRunResult): string {
   }
   if (result.skippedCollisions.length > 0) {
     lines.push('', t('Skipped archive collisions:'));
-    lines.push(...result.skippedCollisions.map((name) => `  ${name}`));
+    lines.push(
+      ...result.skippedCollisions.map(
+        (name) =>
+          `  ${name} — remove or rename .qwen/archived-skills/${name} to re-archive`,
+      ),
+    );
+  }
+  if (result.skippedErrors.length > 0) {
+    lines.push('', t('Skipped rename errors:'));
+    lines.push(...result.skippedErrors.map((name) => `  ${name}`));
   }
   return lines.join('\n');
 }

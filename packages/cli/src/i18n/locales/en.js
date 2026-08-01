@@ -2766,6 +2766,8 @@ export default {
     'Skipped archive collisions: {{count}}',
   'Archive candidates:': 'Archive candidates:',
   'Skipped archive collisions:': 'Skipped archive collisions:',
+  'Skipped rename errors: {{count}}': 'Skipped rename errors: {{count}}',
+  'Skipped rename errors:': 'Skipped rename errors:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Would archive',
   Archived: 'Archived',

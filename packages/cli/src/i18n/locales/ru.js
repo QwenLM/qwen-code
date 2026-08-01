@@ -2242,6 +2242,9 @@ export default {
     'Пропущено конфликтов архивирования: {{count}}',
   'Archive candidates:': 'Кандидаты на архивирование:',
   'Skipped archive collisions:': 'Пропущенные конфликты архивирования:',
+  'Skipped rename errors: {{count}}':
+    'Пропущено ошибок переименования: {{count}}',
+  'Skipped rename errors:': 'Пропущенные ошибки переименования:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Будет архивировано',
   Archived: 'Архивировано',

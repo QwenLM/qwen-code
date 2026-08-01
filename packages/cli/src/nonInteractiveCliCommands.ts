@@ -459,7 +459,7 @@ export const handleSlashCommand = async (
       return hookResult.blockedResult;
     }
     for (const skill of successfulSkillCommands) {
-      await recordAutoSkillCommandUsage(config, skill);
+      void recordAutoSkillCommandUsage(config, skill);
     }
 
     return {
@@ -604,7 +604,7 @@ export const handleSlashCommand = async (
       return hookResult.blockedResult;
     }
     recordSkillCommandInvocation(true);
-    await recordAutoSkillCommandUsage(config, commandToExecute);
+    void recordAutoSkillCommandUsage(config, commandToExecute);
     return handleCommandResult(
       { ...result, content: hookResult.content },
       outputHistoryItems,

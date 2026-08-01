@@ -2254,6 +2254,9 @@ export default {
     'Colisões de arquivamento ignoradas: {{count}}',
   'Archive candidates:': 'Candidatas ao arquivamento:',
   'Skipped archive collisions:': 'Colisões de arquivamento ignoradas:',
+  'Skipped rename errors: {{count}}':
+    'Erros de renomeação ignorados: {{count}}',
+  'Skipped rename errors:': 'Erros de renomeação ignorados:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Seriam arquivadas',
   Archived: 'Arquivadas',

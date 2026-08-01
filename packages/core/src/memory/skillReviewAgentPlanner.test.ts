@@ -402,7 +402,7 @@ describe('buildTaskPrompt', () => {
     const prompt = await buildTaskPrompt(projectRoot);
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
-    expect(prompt).toMatch(/do NOT reuse/i);
+    expect(prompt).toMatch(/Active skill directory names/i);
   });
 
   it('lists archived directory names as reserved', async () => {

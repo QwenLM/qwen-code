@@ -2349,6 +2349,8 @@ export default {
   'Skipped archive collisions: {{count}}': '已略過封存衝突：{{count}}',
   'Archive candidates:': '待封存技能：',
   'Skipped archive collisions:': '已略過的封存衝突：',
+  'Skipped rename errors: {{count}}': '已略過重新命名錯誤：{{count}}',
+  'Skipped rename errors:': '已略過的重新命名錯誤：',
   '{{verb}}: {{count}}': '{{verb}}：{{count}}',
   'Would archive': '將封存',
   Archived: '已封存',

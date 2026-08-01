@@ -939,7 +939,7 @@ export const useSlashCommandProcessor = (
                 success: succeeded,
               });
               if (succeeded) {
-                await recordAutoSkillCommandUsage(config, skill);
+                void recordAutoSkillCommandUsage(config, skill);
               }
             }
           }
@@ -1263,7 +1263,7 @@ export const useSlashCommandProcessor = (
                     updateItem(invocationItemId, { sentToModel: true });
                   }
                   recordSkillCommandInvocation(true);
-                  await recordAutoSkillCommandUsage(config, commandToExecute);
+                  void recordAutoSkillCommandUsage(config, commandToExecute);
                   return {
                     type: 'submit_prompt',
                     content,

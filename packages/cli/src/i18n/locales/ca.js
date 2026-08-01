@@ -2788,6 +2788,9 @@ export default {
     "Col·lisions d'arxivament omeses: {{count}}",
   'Archive candidates:': "Candidates a l'arxivament:",
   'Skipped archive collisions:': "Col·lisions d'arxivament omeses:",
+  'Skipped rename errors: {{count}}':
+    'Errors de canvi de nom omesos: {{count}}',
+  'Skipped rename errors:': 'Errors de canvi de nom omesos:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': "S'arxivarien",
   Archived: 'Arxivades',

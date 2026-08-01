@@ -876,4 +876,131 @@ describe('auto-skill curator', () => {
       'auto-skill-dup',
     );
   });
+
+  it('isolates a per-skill rename failure and still persists state', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifestA = await writeSkill('auto-skill-a', 'auto-skill', old);
+    const manifestB = await writeSkill('auto-skill-b', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'a', level: 'project', filePath: manifestA },
+      old,
+    );
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'b', level: 'project', filePath: manifestB },
+      old,
+    );
+
+    // Make the archive root a file so rename into it fails for the first
+    // skill, then fix it so the second succeeds.
+    const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
+    await fs.mkdir(archiveRoot, { recursive: true });
+    // Block rename for auto-skill-a by placing a file at its destination.
+    await fs.writeFile(path.join(archiveRoot, 'auto-skill-a'), 'blocker');
+
+    const result = await runAutoSkillCurator(projectRoot, { now });
+
+    // auto-skill-a hits a collision (lstat succeeds → skippedCollisions).
+    expect(result.skippedCollisions).toContain('auto-skill-a');
+    // auto-skill-b archives normally.
+    expect(result.archived).toContain('auto-skill-b');
+    // State was persisted (lastRunAt is set).
+    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+    expect(status.lastRunAt).toBeDefined();
+  });
+
+  it('reports skippedErrors when rename fails transiently', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-err', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'err', level: 'project', filePath: manifest },
+      old,
+    );
+
+    // Seed state so the curator proceeds past the seeding branch.
+    await runAutoSkillCurator(projectRoot, {
+      now: new Date(now.getTime() - 95 * DAY_MS),
+    });
+
+    // Ensure the archive root exists, then remove write permission from the
+    // skills root so rename (which needs write on the source parent) fails
+    // with EACCES while lstat on the destination still succeeds.
+    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+    const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
+    await fs.mkdir(archiveRoot, { recursive: true });
+    await fs.chmod(skillsRoot, 0o555);
+
+    try {
+      const result = await runAutoSkillCurator(projectRoot, { now });
+      expect(result.skippedErrors).toContain('auto-skill-err');
+      expect(result.archived).not.toContain('auto-skill-err');
+      const status = await getAutoSkillCuratorStatus(projectRoot, now);
+      expect(status.lastRunAt).toBeDefined();
+    } finally {
+      await fs.chmod(skillsRoot, 0o755);
+    }
+  });
+
+  it('prunes records whose directory exists in neither root', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-gone', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'gone', level: 'project', filePath: manifest },
+      old,
+    );
+
+    // Seed state with the skill present.
+    await runAutoSkillCurator(projectRoot, {
+      now: new Date(now.getTime() - 95 * DAY_MS),
+    });
+
+    // Delete the skill directory by hand.
+    await fs.rm(path.join(projectRoot, '.qwen', 'skills', 'auto-skill-gone'), {
+      recursive: true,
+      force: true,
+    });
+
+    // Run again — the record should be pruned.
+    await runAutoSkillCurator(projectRoot, { now });
+
+    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
+    expect(state.skills['auto-skill-gone']).toBeUndefined();
+  });
+
+  it('does not create a state file when no auto-skills exist', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    await fs.mkdir(path.join(projectRoot, '.qwen', 'skills'), {
+      recursive: true,
+    });
+
+    const result = await maybeRunAutoSkillCurator(projectRoot, now);
+
+    expect(result.status).toBe('seeded');
+    if (result.status === 'seeded') {
+      expect(result.checked).toBe(0);
+    }
+    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+    await expect(fs.lstat(statePath)).rejects.toThrow();
+  });
+
+  it('sanitizes directory names in pin error messages', async () => {
+    const evil = 'auto-skill-evil\u001b[31m';
+    await expect(setAutoSkillPinned(projectRoot, evil, true)).rejects.toThrow(
+      JSON.stringify(evil),
+    );
+  });
+
+  it('sanitizes directory names in restore error messages', async () => {
+    const evil = 'auto-skill-evil\u001b[31m';
+    await expect(restoreArchivedAutoSkill(projectRoot, evil)).rejects.toThrow(
+      JSON.stringify(evil),
+    );
+  });
 });

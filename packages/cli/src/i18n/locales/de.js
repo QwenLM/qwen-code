@@ -2268,6 +2268,9 @@ export default {
     'Übersprungene Archivierungskonflikte: {{count}}',
   'Archive candidates:': 'Archivierungskandidaten:',
   'Skipped archive collisions:': 'Übersprungene Archivierungskonflikte:',
+  'Skipped rename errors: {{count}}':
+    'Übersprungene Umbenennungsfehler: {{count}}',
+  'Skipped rename errors:': 'Übersprungene Umbenennungsfehler:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Würde archivieren',
   Archived: 'Archiviert',
