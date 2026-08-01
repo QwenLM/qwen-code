@@ -137,6 +137,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     imageModelMode?: boolean;
     persistScope?: 'workspace' | 'user';
   }) => void;
@@ -1072,6 +1073,36 @@ export const useSlashCommandProcessor = (
                     });
                   }
                   return { type: 'handled' };
+                case 'goal_control': {
+                  // A causeless result (a `status` read, or a `clear` when no
+                  // Goal is active) emits no runtime broadcast, so it must render
+                  // its own card even mid-turn. Mutations broadcast a GoalState
+                  // event the active stream renders, so they defer to it while a
+                  // turn is running.
+                  const rendersHere =
+                    result.cause === undefined ||
+                    commandContext.ui.isIdleRef.current;
+                  if (rendersHere) {
+                    const snapshot = result.response.snapshot;
+                    if (snapshot.goal || result.cause === 'clear') {
+                      addItem(
+                        {
+                          type: MessageType.GOAL_STATE,
+                          snapshot,
+                          ...(result.cause ? { cause: result.cause } : {}),
+                        },
+                        Date.now(),
+                      );
+                    } else {
+                      addMessage({
+                        type: MessageType.INFO,
+                        content: 'No Goal set.',
+                        timestamp: new Date(),
+                      });
+                    }
+                  }
+                  return { type: 'handled' };
+                }
                 case 'dialog':
                   switch (result.dialog) {
                     case 'arena_start':
@@ -1124,6 +1155,12 @@ export const useSlashCommandProcessor = (
                     case 'vision-model':
                       actions.openModelDialog({
                         visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'compaction-model':
+                      actions.openModelDialog({
+                        compactionModelMode: true,
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };
