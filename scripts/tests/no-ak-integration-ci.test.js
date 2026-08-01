@@ -83,6 +83,7 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
     );
+    expect(gateStep).toContain('timeout-minutes: 20');
     expect(gateStep).toContain(
       "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
     );
