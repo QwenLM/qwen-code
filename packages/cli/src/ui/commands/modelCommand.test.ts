@@ -2779,6 +2779,79 @@ describe('modelCommand', () => {
       );
     });
 
+    it('persists the main model to user scope for --default --global', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const mockGenerator = {
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen-max',
+      };
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
+      const result = await modelCommand.action!(
+        ctx,
+        '--default --global qwen-max',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(global default)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen-max',
+      );
+    });
+
+    it('persists the main model for the trailing-flag form qwen-max --default', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const mockGenerator = {
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen-max',
+      };
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
+      const result = await modelCommand.action!(ctx, 'qwen-max --default');
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(default)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'model.name',
+        'qwen-max',
+      );
+    });
+
     it('should not include persistScope when no scope flag is given', async () => {
       const ctx = setupContext();
       const result = await modelCommand.action!(ctx, '');
