@@ -574,6 +574,17 @@ jobs:
           ESCAPED=$(printf '%s' "$OPENAI_MODEL" | sed -e 's/[&/\]/\\&/g')
           sed -i "s/qwen3\.7-max/${ESCAPED}/g" "$TARGET"
 
+      - name: 'Ensure qwen CLI'
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen already installed:"
+            qwen --version
+          else
+            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+            qwen --version
+          fi
+
       - name: 'Run Qwen Triage'
         id: 'triage'
         uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
