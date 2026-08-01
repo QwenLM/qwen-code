@@ -120,8 +120,14 @@ export function optimizeMultilineEraseLines(output: string): string {
 
 export function installTerminalRedrawOptimizer(
   stdout: NodeJS.WriteStream,
+  env: NodeJS.ProcessEnv = process.env,
 ): () => void {
-  if (process.env['QWEN_CODE_LEGACY_ERASE_LINES'] === '1') {
+  // QWEN_CODE_LEGACY_ERASE_LINES:
+  //   '1' — force-disable the optimizer (existing escape hatch)
+  //   '0' — force-enable even on WSL/Windows Terminal, for terminals that
+  //         handle ConPTY's batched cursor moves correctly (new in #7897)
+  //   unset/anything else — use platform defaults below
+  if (env['QWEN_CODE_LEGACY_ERASE_LINES'] === '1') {
     return () => {};
   }
 
@@ -129,11 +135,11 @@ export function installTerminalRedrawOptimizer(
   // (Windows Console Pseudo Terminal) processes differently from individual
   // per-line erases — the cursor ends up at the wrong row, and each streaming
   // frame overlaps remnants of the previous one, causing duplicate text.
-  // Skip the optimizer when WSL or Windows Terminal is detected. #7634.
+  // Skip the optimizer when WSL or Windows Terminal is detected, unless the
+  // user explicitly force-enables it. #7634.
   if (
-    process.env['WSL_DISTRO_NAME'] ||
-    process.env['WSL_INTEROP'] ||
-    process.env['WT_SESSION']
+    env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' &&
+    (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP'] || env['WT_SESSION'])
   ) {
     return () => {};
   }

@@ -38,6 +38,8 @@ describe('terminalSupportsSynchronizedOutput', () => {
     [{ TERM_PROGRAM: 'Apple_Terminal' }, false],
     [{ TERM_PROGRAM: 'JetBrains-JediTerm' }, false],
     [{ TERM_PROGRAM: 'WezTerm', TMUX: '/tmp/tmux' }, false],
+    // Multiplexer guard wins over the WT_SESSION detection (#7897):
+    [{ WT_SESSION: 'console-12345', TMUX: '/tmp/tmux' }, false],
     [{ TERM_PROGRAM: 'WezTerm', SSH_TTY: '/dev/pts/1' }, false],
     [{ TERM_PROGRAM: 'WezTerm', SSH_CLIENT: '127.0.0.1 1 2' }, false],
     [{ TERM_PROGRAM: 'WezTerm', QWEN_CODE_SYNCHRONIZED_OUTPUT: '0' }, false],
@@ -147,7 +149,9 @@ describe('installSynchronizedOutput', () => {
       return true;
     }) as NodeJS.WriteStream['write'];
     const stdout = createStdout(write);
-    const restoreRedrawOptimizer = installTerminalRedrawOptimizer(stdout);
+    // Pass an empty env so WSL/Windows Terminal detection does not skip
+    // the optimizer when the test itself runs on WSL (#7897).
+    const restoreRedrawOptimizer = installTerminalRedrawOptimizer(stdout, {});
     const restoreSynchronizedOutput = installSynchronizedOutput(stdout, {
       TERM_PROGRAM: 'WezTerm',
     });

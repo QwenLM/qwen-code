@@ -133,36 +133,38 @@ describe('installTerminalRedrawOptimizer', () => {
     expect(stdout.write).toBe(write);
   });
 
-  it('is skipped on WSL via WSL_DISTRO_NAME (#7634)', () => {
-    vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
+  it.each([
+    ['WSL_DISTRO_NAME', 'Ubuntu'],
+    ['WSL_INTEROP', '/run/WSL/123_interop'],
+    ['WT_SESSION', 'console-12345'],
+  ])('is skipped when %s is set (#7634)', (name, value) => {
+    const env = { [name]: value };
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    const restore = installTerminalRedrawOptimizer(stdout);
+    const restore = installTerminalRedrawOptimizer(stdout, env);
 
     expect(stdout.write).toBe(write);
     restore();
     expect(stdout.write).toBe(write);
   });
 
-  it('is skipped on Windows Terminal via WT_SESSION (#7634)', () => {
-    vi.stubEnv('WT_SESSION', 'console-12345');
+  it('can be force-enabled on WSL via QWEN_CODE_LEGACY_ERASE_LINES=0 (#7634)', () => {
+    const env = {
+      WSL_DISTRO_NAME: 'Ubuntu',
+      QWEN_CODE_LEGACY_ERASE_LINES: '0',
+    };
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    const restore = installTerminalRedrawOptimizer(stdout);
+    const restore = installTerminalRedrawOptimizer(stdout, env);
 
-    expect(stdout.write).toBe(write);
+    // Three-line erase-up sequence triggers the optimizer's batching.
+    const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
+    stdout.write(input);
+    expect(write).toHaveBeenCalledWith(
+      `${ESC}2A${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${ESC}2A${CURSOR_LEFT}`,
+      undefined,
+      undefined,
+    );
     restore();
-    expect(stdout.write).toBe(write);
-  });
-
-  it('is skipped on WSL via WSL_INTEROP (#7634)', () => {
-    vi.stubEnv('WSL_INTEROP', '/run/WSL/123_interop');
-    const write = vi.fn(() => true);
-    const stdout = { write } as unknown as NodeJS.WriteStream;
-    const restore = installTerminalRedrawOptimizer(stdout);
-
-    expect(stdout.write).toBe(write);
-    restore();
-    expect(stdout.write).toBe(write);
   });
 });
