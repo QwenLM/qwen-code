@@ -872,7 +872,7 @@
           "minimum": 0
         },
         "agentMaxTurns": {
-          "description": "Max turns for background dream and skill-review agents. Unset uses each agent's built-in default (8); 0 disables the turn limit.",
+          "description": "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
           "type": "number",
           "minimum": 0
         },

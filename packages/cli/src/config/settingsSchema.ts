@@ -1933,7 +1933,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max turns for background dream and skill-review agents. Unset uses each agent's built-in default (8); 0 disables the turn limit.",
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
         showInDialog: false,
       },
       enableTeamMemory: {

@@ -1254,8 +1254,9 @@ export interface ConfigParameters {
    */
   memoryAgentTimeoutMinutes?: number;
   /**
-   * Max turns for background memory agents (dream and skill review). Unset
-   * means each agent uses its built-in default; 0 disables the turn limit.
+   * Max turns for background memory agents (extraction, dream, remember, and
+   * skill review). Unset means each agent uses its built-in default; 0
+   * disables the turn limit.
    */
   memoryAgentMaxTurns?: number;
   /**
@@ -6725,9 +6726,9 @@ export class Config {
   }
 
   /**
-   * Max turns for background memory agents (dream and skill review). Resolves
-   * the `memory.agentMaxTurns` setting. Unset means each agent's built-in
-   * default; 0 disables the turn limit.
+   * Max turns for background memory agents. Resolves the
+   * `memory.agentMaxTurns` setting. Unset means each agent's built-in default;
+   * 0 disables the turn limit.
    */
   getMemoryAgentMaxTurns(): number | undefined {
     return this.memoryAgentMaxTurns;

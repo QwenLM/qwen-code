@@ -387,19 +387,23 @@ describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
   });
 });
 
-describe('runSkillReviewByAgent timeout wiring', () => {
+describe('runSkillReviewByAgent limit wiring', () => {
   let tempDir: string;
   let projectRoot: string;
 
   function makeConfig(
-    timeoutMinutes: number | undefined,
-    maxTurns: number | undefined = undefined,
+    options: {
+      timeoutMinutes?: number;
+      maxTurns?: number;
+    } = {},
   ): Config {
     return {
       getProjectRoot: () => projectRoot,
       getPermissionManager: () => undefined,
-      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(timeoutMinutes),
-      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(maxTurns),
+      getMemoryAgentTimeoutMinutes: vi
+        .fn()
+        .mockReturnValue(options.timeoutMinutes),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(options.maxTurns),
     } as unknown as Config;
   }
 
@@ -421,7 +425,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('uses the configured memory agent timeout when no timeoutMs param is passed', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
     });
@@ -433,7 +437,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('uses the configured memory agent turn limit when maxTurns is omitted', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(undefined, 25),
+      config: makeConfig({ maxTurns: 25 }),
       projectRoot,
       history: [],
     });
@@ -445,7 +449,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('lets an explicit timeoutMs param override the configured value', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
       timeoutMs: 60_000,
@@ -458,7 +462,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('falls back to the built-in default when neither is set', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(undefined),
+      config: makeConfig(),
       projectRoot,
       history: [],
     });
