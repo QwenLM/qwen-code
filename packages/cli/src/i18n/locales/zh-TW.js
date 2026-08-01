@@ -2010,6 +2010,7 @@ export default {
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
+  'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

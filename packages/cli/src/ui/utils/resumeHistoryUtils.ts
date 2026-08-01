@@ -19,6 +19,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
+  parseGoalStateRecordPayloadV2,
   stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -34,6 +35,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 
 /**
  * Projects a plain user record to its display text.
@@ -295,6 +297,21 @@ function convertToHistoryItems(
     }
 
     if (record.type === 'system') {
+      if (record.subtype === 'goal_state') {
+        const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+        if (payload && shouldDisplayGoalStateCause(payload.cause)) {
+          if (currentToolGroup.length > 0) {
+            items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+            currentToolGroup = [];
+          }
+          items.push({
+            type: 'goal_state',
+            snapshot: payload.snapshot,
+            cause: payload.cause,
+          });
+        }
+        continue;
+      }
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
         if (currentToolGroup.length > 0) {
@@ -343,6 +360,7 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        if (record.subtype === 'goal_runtime') break;
         // Restore notification items (background agent completions and cron fires)
         if (record.subtype === 'notification' || record.subtype === 'cron') {
           const payload = record.systemPayload as

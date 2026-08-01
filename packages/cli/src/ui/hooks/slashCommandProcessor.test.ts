@@ -211,6 +211,7 @@ describe('useSlashCommandProcessor', () => {
     setIsProcessing = vi.fn(),
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
+    isIdleRef = { current: true },
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -228,7 +229,7 @@ describe('useSlashCommandProcessor', () => {
         vi.fn(), // toggleVimEnabled
         false, // isProcessing
         setIsProcessing,
-        { current: true }, // isIdleRef
+        isIdleRef,
         vi.fn(), // setGeminiMdFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
@@ -450,6 +451,167 @@ describe('useSlashCommandProcessor', () => {
 
       expect(mockAddItem).toHaveBeenCalledWith(
         { type: MessageType.WARNING, text: 'Check diagnostics.' },
+        expect.any(Number),
+      );
+    });
+
+    it('renders an idle Goal control response as a Goal state item', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-ui',
+          revision: 1,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-ui' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'set', objective: 'Ship the TUI' },
+          response: { snapshot },
+          cause: 'create',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal Ship the TUI');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+          cause: 'create',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('leaves a mid-turn Goal control response to the active stream', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+          cause: 'clear',
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.GOAL_STATE }),
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn /goal status card since it emits no broadcast', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-status',
+          revision: 2,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-status' },
+          turnCount: 1,
+          activeTimeMs: 5,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'status' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn causeless /goal clear with no active goal', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'No Goal set.' },
         expect.any(Number),
       );
     });

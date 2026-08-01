@@ -12,6 +12,7 @@ import {
   useRef,
   useLayoutEffect,
   type Dispatch,
+  type RefObject,
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
@@ -70,6 +71,7 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
+  type GoalTurnHost,
 } from '@qwen-code/qwen-code-core';
 import {
   applyCollapsePolicyAndSummary,
@@ -139,7 +141,7 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
-import { restoreGoalFromHistory } from './utils/restoreGoal.js';
+import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -193,7 +195,8 @@ import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import {
   useMessageQueue,
-  type QueuedSubmission,
+  type QueuedUserSubmission,
+  type UseMessageQueueReturn,
 } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
@@ -335,6 +338,172 @@ export function shouldDrainMessageQueue({
     !dialogsVisible &&
     messageQueueLength > 0
   );
+}
+
+export function useQueuedSubmissionDrain({
+  config,
+  isConfigInitialized,
+  streamingState,
+  isProcessing,
+  dialogsVisible,
+  pendingSubmissionCount,
+  getPendingSubmissionCount,
+  popNextSubmission,
+  enqueueGoalTurn,
+  restoreMessages,
+  submitQuery,
+  submissionInFlightRef,
+  submissionSettledRevision,
+}: {
+  config: Config;
+  isConfigInitialized: boolean;
+  streamingState: StreamingState;
+  isProcessing: boolean;
+  dialogsVisible: boolean;
+  pendingSubmissionCount: number;
+  getPendingSubmissionCount: UseMessageQueueReturn['getPendingSubmissionCount'];
+  popNextSubmission: UseMessageQueueReturn['popNextSubmission'];
+  enqueueGoalTurn: UseMessageQueueReturn['enqueueGoalTurn'];
+  restoreMessages: UseMessageQueueReturn['restoreMessages'];
+  submitQuery: ReturnType<typeof useGeminiStream>['submitQuery'];
+  submissionInFlightRef: RefObject<boolean>;
+  submissionSettledRevision: number;
+}) {
+  const goalRuntimeSessionId = config.getSessionId();
+  const [goalQueueRevision, setGoalQueueRevision] = useState(0);
+  useEffect(() => {
+    try {
+      return config.getGoalRuntime().subscribe(() => {
+        setGoalQueueRevision((revision) => revision + 1);
+      });
+    } catch {
+      return undefined;
+    }
+  }, [config, goalRuntimeSessionId]);
+
+  const queueDrainingRef = useRef(false);
+  const admissionFailureRef = useRef<{
+    pendingSubmissionCount: number;
+    goalQueueRevision: number;
+    streamingState: StreamingState;
+    isProcessing: boolean;
+  } | null>(null);
+  const [queueDrainNonce, setQueueDrainNonce] = useState(0);
+  useEffect(() => {
+    if (queueDrainingRef.current || submissionInFlightRef.current) return;
+    const admissionFailure = admissionFailureRef.current;
+    if (admissionFailure) {
+      if (pendingSubmissionCount === 0) {
+        admissionFailureRef.current = null;
+      } else if (
+        pendingSubmissionCount <= admissionFailure.pendingSubmissionCount &&
+        goalQueueRevision === admissionFailure.goalQueueRevision &&
+        streamingState === admissionFailure.streamingState &&
+        isProcessing === admissionFailure.isProcessing
+      ) {
+        return;
+      } else {
+        admissionFailureRef.current = null;
+      }
+    }
+    if (
+      !shouldDrainMessageQueue({
+        isConfigInitialized,
+        streamingState,
+        isProcessing,
+        dialogsVisible,
+        messageQueueLength: pendingSubmissionCount,
+      })
+    ) {
+      return;
+    }
+
+    let goalControlMode: Parameters<typeof popNextSubmission>[0] = 'normal';
+    try {
+      const status = config.getGoalRuntime().getSnapshot().goal?.status;
+      // Only an actively-running Goal holds ordinary input: while a Goal turn
+      // is in flight the message can't be delivered, so it queues (criterion
+      // #2). In paused/blocked/usage_limited nothing is running, so the queue
+      // drains normally — holding input there stranded it until /goal clear.
+      if (status === 'active') {
+        goalControlMode = 'priority';
+      }
+    } catch {
+      // Goal persistence can be disabled for this session.
+    }
+    const submission = popNextSubmission(goalControlMode);
+    if (submission === null) return;
+
+    queueDrainingRef.current = true;
+    let admissionFailed = false;
+    const markAdmissionFailed = () => {
+      admissionFailed = true;
+      admissionFailureRef.current = {
+        pendingSubmissionCount: getPendingSubmissionCount(),
+        goalQueueRevision,
+        streamingState,
+        isProcessing,
+      };
+    };
+    const request =
+      submission.kind === 'goal'
+        ? submitQuery(
+            submission.continuationContext,
+            SendMessageType.Goal,
+            undefined,
+            {
+              goal: submission,
+              onAdmissionFailed: () => {
+                enqueueGoalTurn(submission);
+                markAdmissionFailed();
+              },
+            },
+          )
+        : submitQuery(
+            submission.modelText,
+            SendMessageType.UserQuery,
+            undefined,
+            {
+              userAdmission: { turnKey: submission.turnKey },
+              ...(submission.submittedPrompt === undefined
+                ? {}
+                : { submittedPrompt: submission.submittedPrompt }),
+              onAdmissionFailed: () => {
+                restoreMessages(
+                  [submission.modelText],
+                  submission.submittedPrompt,
+                );
+                markAdmissionFailed();
+              },
+            },
+          );
+    void Promise.resolve(request)
+      .catch((error) => {
+        debugLogger.warn('Queued submission failed during admission', error);
+      })
+      .finally(() => {
+        queueDrainingRef.current = false;
+        if (!admissionFailed) {
+          setQueueDrainNonce((nonce) => nonce + 1);
+        }
+      });
+  }, [
+    config,
+    dialogsVisible,
+    enqueueGoalTurn,
+    goalQueueRevision,
+    getPendingSubmissionCount,
+    isConfigInitialized,
+    isProcessing,
+    pendingSubmissionCount,
+    popNextSubmission,
+    queueDrainNonce,
+    restoreMessages,
+    streamingState,
+    submissionInFlightRef,
+    submissionSettledRevision,
+    submitQuery,
+  ]);
 }
 
 export function getSpeculativeToolResult(response: unknown): {
@@ -718,6 +887,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      await waitForGoalRuntime(config);
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(currentWarnings, config.getWarnings()),
       );
@@ -770,13 +940,6 @@ export const AppContainer = (props: AppContainerProps) => {
         ).length;
         if (userTurnCount > 0) {
           seedPromptCount(userTurnCount);
-        }
-
-        // Re-arm any `/goal` that was active when the prior session ended.
-        try {
-          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
-        } catch {
-          // Restore is best-effort — never block resume on it.
         }
 
         const recovered = await config.loadPausedBackgroundAgents(
@@ -1038,7 +1201,10 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<QueuedSubmission | null>(null);
+  const restoredSubmissionRef = useRef<Pick<
+    QueuedUserSubmission,
+    'modelText' | 'submittedPrompt'
+  > | null>(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -1840,8 +2006,35 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
-  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const midTurnDrainRef = useRef<UseMessageQueueReturn['drainQueue'] | null>(
+    null,
+  );
   const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  const goalQueueRef = useRef<
+    | (Pick<
+        UseMessageQueueReturn,
+        | 'peekNextUserBatchKey'
+        | 'claimDirectUserAdmission'
+        | 'claimGoalTurn'
+        | 'hasQueuedUserMessages'
+        | 'getPendingSubmissionCount'
+      > & {
+        waitForReservationSettlement: () => Promise<void>;
+        submissionInFlightRef: RefObject<boolean>;
+        onSubmissionSettled: () => void;
+      })
+    | null
+  >(null);
+  const goalReservationSettlementRef = useRef<Promise<void>>(Promise.resolve());
+  const submissionInFlightRef = useRef(false);
+  const [submissionSettledRevision, setSubmissionSettledRevision] = useState(0);
+  const onSubmissionSettled = useCallback(() => {
+    setSubmissionSettledRevision((revision) => revision + 1);
+  }, []);
+  const waitForReservationSettlement = useCallback(
+    () => goalReservationSettlementRef.current,
+    [],
+  );
 
   const {
     streamingState,
@@ -1850,6 +2043,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
+    preemptGoalTurn,
     retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
@@ -1882,6 +2076,7 @@ export const AppContainer = (props: AppContainerProps) => {
     availableTerminalHeightRef,
     terminalWidthRef,
     midTurnRestoreRef,
+    goalQueueRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 
@@ -1991,48 +2186,90 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     messageQueue,
+    pendingSubmissionCount,
     addMessage,
+    enqueueGoalTurn,
+    peekNextUserBatchKey,
+    hasQueuedUserMessages,
+    getPendingSubmissionCount,
+    claimGoalTurn,
+    claimDirectUserAdmission,
+    removeGoalTurns,
+    popNextSubmission,
     popAllMessages,
     restoreMessages,
     drainQueue,
-    popNextTurn,
   } = useMessageQueue();
 
-  const submitUserQuery = useCallback(
-    (submission: QueuedSubmission) =>
-      submitQuery(
-        submission.modelText,
-        SendMessageType.UserQuery,
-        undefined,
-        submission.submittedPrompt === undefined
-          ? undefined
-          : { submittedPrompt: submission.submittedPrompt },
-      ),
-    [submitQuery],
+  midTurnDrainRef.current = drainQueue;
+  midTurnRestoreRef.current = restoreMessages;
+  goalQueueRef.current = {
+    peekNextUserBatchKey,
+    claimDirectUserAdmission,
+    claimGoalTurn,
+    hasQueuedUserMessages,
+    getPendingSubmissionCount,
+    waitForReservationSettlement,
+    submissionInFlightRef,
+    onSubmissionSettled,
+  };
+
+  const releaseQueuedGoalReservations = useCallback(
+    (turnKeys: string[]) => {
+      let runtime;
+      try {
+        runtime = config.getGoalRuntime();
+      } catch {
+        return;
+      }
+      const previousSettlement = goalReservationSettlementRef.current;
+      const settlement = previousSettlement.then(async () => {
+        await Promise.all(
+          turnKeys.map((turnKey) => runtime.releaseTurn(turnKey)),
+        );
+      });
+      goalReservationSettlementRef.current = settlement.catch((error) => {
+        debugLogger.warn(
+          `Failed to release queued Goal turns: ${getErrorMessage(error)}`,
+        );
+      });
+    },
+    [config],
   );
 
   const popAllQueuedMessages = useCallback((): string | null => {
+    const goalTurnKeys = removeGoalTurns();
+    if (goalTurnKeys.length > 0) {
+      releaseQueuedGoalReservations(goalTurnKeys);
+    }
     const submission = popAllMessages();
     if (submission === null) return null;
     restoredSubmissionRef.current = submission;
     submittedPromptProvenanceUnavailableRef.current = false;
     return submission.modelText;
-  }, [popAllMessages]);
+  }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
 
-  // Bridge message queue to mid-turn drain via ref.
-  // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popNextTurn even before React re-renders.
-  midTurnDrainRef.current = drainQueue;
-  midTurnRestoreRef.current = restoreMessages;
+  useEffect(() => {
+    const host: GoalTurnHost = {
+      startGoalTurn: async (input) => {
+        enqueueGoalTurn(input);
+      },
+      preemptGoalTurn: (reason) => {
+        removeGoalTurns();
+        preemptGoalTurn(reason);
+      },
+    };
+    return config.bindGoalTurnHost(host);
+  }, [config, enqueueGoalTurn, preemptGoalTurn, removeGoalTurns]);
 
-  // Connect remote input watcher to submitQuery for bidirectional sync.
-  // When an external process writes a command to the input-file,
-  // the watcher calls submitQuery as if the user typed it in the TUI.
   const remoteInput = useRemoteInput();
   useEffect(() => {
     if (!remoteInput) return;
-    remoteInput.setSubmitFn((text: string) => submitQuery(text));
-  }, [remoteInput, submitQuery]);
+    remoteInput.setSubmitFn((text: string) => {
+      addMessage(text);
+      return true;
+    });
+  }, [addMessage, remoteInput]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -2272,9 +2509,15 @@ export const AppContainer = (props: AppContainerProps) => {
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
-        void submitUserQuery({
-          modelText: submittedValue,
-          submittedPrompt,
+        void Promise.resolve(
+          submitQuery(
+            submittedValue,
+            SendMessageType.UserQuery,
+            undefined,
+            submittedPrompt === undefined ? undefined : { submittedPrompt },
+          ),
+        ).catch((error) => {
+          debugLogger.warn('Failed to admit /btw submission', error);
         });
         return;
       }
@@ -2398,9 +2641,15 @@ export const AppContainer = (props: AppContainerProps) => {
         !isProcessing &&
         isSlashCommand(submittedValue)
       ) {
-        void submitUserQuery({
-          modelText: submittedValue,
-          submittedPrompt,
+        void Promise.resolve(
+          submitQuery(
+            submittedValue,
+            SendMessageType.UserQuery,
+            undefined,
+            submittedPrompt === undefined ? undefined : { submittedPrompt },
+          ),
+        ).catch((error) => {
+          debugLogger.warn('Failed to admit slash command', error);
         });
         return;
       }
@@ -2412,7 +2661,7 @@ export const AppContainer = (props: AppContainerProps) => {
       agentViewState,
       streamingState,
       isProcessing,
-      submitUserQuery,
+      submitQuery,
       handleSlashCommand,
       slashCommands,
       config,
@@ -2477,6 +2726,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Always drain the queue back into the buffer (claude-code parity:
       // popAllEditable preserves queued text on every cancel path, including
       // tool-execution cancels — never silently drop the user's queued work).
+      const goalTurnKeys = removeGoalTurns();
+      if (goalTurnKeys.length > 0) {
+        releaseQueuedGoalReservations(goalTurnKeys);
+      }
       const popped = popAllMessages();
       if (popped) {
         restoredSubmissionRef.current = popped;
@@ -2487,6 +2740,18 @@ export const AppContainer = (props: AppContainerProps) => {
             ? `${popped.modelText}\n${currentText}`
             : popped.modelText,
         );
+      }
+
+      // A cancelled Goal continuation turn appended its synthetic prompt to
+      // the chat history but has no UI user item (lastTurnUserItem is null),
+      // so the auto-restore branch below bails out before its orphan strip
+      // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
+      // merges the user's NEXT real message into the "no new real user input"
+      // preamble. Safe even if the turn already produced a model response:
+      // the strip only pops trailing user entries, and a responded prompt is
+      // not trailing.
+      if (info?.wasGoalTurn) {
+        geminiClient?.stripOrphanedUserEntriesFromHistory?.();
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -2650,6 +2915,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       buffer,
       popAllMessages,
+      releaseQueuedGoalReservations,
+      removeGoalTurns,
       historyManager,
       logger,
       geminiClient,
@@ -3971,42 +4238,21 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
   ]);
 
-  // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
-  // after each submission settles so multi-step queues drain end-to-end.
-  const queueDrainingRef = useRef(false);
-  const [queueDrainNonce, setQueueDrainNonce] = useState(0);
-  useEffect(() => {
-    if (queueDrainingRef.current) return;
-    if (
-      !shouldDrainMessageQueue({
-        isConfigInitialized,
-        streamingState,
-        isProcessing,
-        dialogsVisible,
-        messageQueueLength: messageQueue.length,
-      })
-    ) {
-      return;
-    }
-    // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const submission = popNextTurn();
-    if (submission === null) return;
-
-    queueDrainingRef.current = true;
-    Promise.resolve(submitUserQuery(submission)).finally(() => {
-      queueDrainingRef.current = false;
-      setQueueDrainNonce((n) => n + 1);
-    });
-  }, [
+  useQueuedSubmissionDrain({
+    config,
     isConfigInitialized,
     streamingState,
     isProcessing,
     dialogsVisible,
-    messageQueue,
-    popNextTurn,
-    submitUserQuery,
-    queueDrainNonce,
-  ]);
+    pendingSubmissionCount,
+    getPendingSubmissionCount,
+    popNextSubmission,
+    enqueueGoalTurn,
+    restoreMessages,
+    submitQuery,
+    submissionInFlightRef,
+    submissionSettledRevision,
+  });
 
   const nightly = props.version.includes('nightly');
 

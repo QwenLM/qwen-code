@@ -148,6 +148,7 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
+  terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
 }

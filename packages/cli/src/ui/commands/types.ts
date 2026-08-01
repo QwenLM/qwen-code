@@ -8,6 +8,8 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
+  GoalStateResponse,
+  GoalStateCause,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -137,6 +139,21 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+}
+
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+  cause?: GoalStateCause;
 }
 
 /**
@@ -269,6 +286,7 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
+  | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn;
 
