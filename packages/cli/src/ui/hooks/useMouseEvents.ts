@@ -19,6 +19,7 @@ import {
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
+import { useMouseTrackingEnabled } from './use-mouse-tracking-enabled.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
@@ -161,7 +162,7 @@ export function useMouseEvents(
   // Respect the ui.mouseTracking setting: when explicitly disabled, skip SGR
   // mouse tracking so the terminal can handle right-click context menus and
   // OSC 8 hyperlink clicks natively. Defaults to true when unset.
-  const mouseTrackingEnabled = settings?.merged.ui?.mouseTracking !== false;
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
 
   // Never write SGR mouse-mode escapes (?1002h ?1006h) unless stdout is a TTY.
   // `isRawModeSupported` only reflects stdin; with stdout piped/redirected

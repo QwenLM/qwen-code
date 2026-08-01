@@ -292,57 +292,5 @@ describe('useMouseEvents', () => {
       );
       expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
     });
-
-    it('releases and re-acquires the mode when toggled at runtime (requiresRestart: false)', () => {
-      // The settings object is mutable so a rerender can flip the value
-      // without remounting, mirroring SettingsDialog's requiresRestart:false
-      // immediate-save path. That path keeps the merged-settings identity
-      // stable, so subscribers outside the dialog only re-render (and the
-      // refcounted mode only converges) when the dialog closes and the tree
-      // re-renders; the manual rerender() below stands in for that close-time
-      // re-render rather than proving the flip lands instantly.
-      const live = { mouseTracking: true };
-      const liveWrapper = ({ children }: { children: React.ReactNode }) => (
-        <SettingsContext.Provider
-          value={
-            {
-              merged: {
-                ui: {
-                  useTerminalBuffer: true,
-                  mouseTracking: live.mouseTracking,
-                },
-              },
-            } as unknown as LoadedSettings
-          }
-        >
-          <KeypressProvider kittyProtocolEnabled={false}>
-            {children}
-          </KeypressProvider>
-        </SettingsContext.Provider>
-      );
-
-      const { rerender, unmount } = renderHook(
-        () => useMouseEvents(() => {}, { isActive: true, bypassVpGate: true }),
-        { wrapper: liveWrapper },
-      );
-      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
-
-      // Flip off at runtime: the mode is actually released, not just
-      // "not acquired".
-      stdout.write.mockClear();
-      live.mouseTracking = false;
-      rerender();
-      expect(stdout.write).toHaveBeenCalledWith(DISABLE_MOUSE);
-
-      // Flip back on: re-acquired.
-      stdout.write.mockClear();
-      live.mouseTracking = true;
-      rerender();
-      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
-
-      stdout.write.mockClear();
-      unmount();
-      expect(stdout.write).toHaveBeenCalledWith(DISABLE_MOUSE);
-    });
   });
 });

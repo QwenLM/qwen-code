@@ -452,7 +452,7 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.type).toBe('boolean');
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
-      expect(mouseTracking.requiresRestart).toBe(false);
+      expect(mouseTracking.requiresRestart).toBe(true);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {
