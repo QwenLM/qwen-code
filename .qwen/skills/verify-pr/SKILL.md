@@ -193,7 +193,12 @@ differs only by the change under test; the verdict is the pair of counts.
   object, and astral inputs, and lossy results (e.g. `String({})` →
   `"[object Object]"`) are called out in Findings even when every scripted
   assertion passes. A fix that holds only for the reported input shape is a
-  finding, not a pass.
+  finding, not a pass. (This overlaps the next bullet, and the overlap is
+  deliberate: the sibling-sweep text below is the one rule in this file with
+  a measured before/after behind it, so it stays byte-identical to the
+  instrument the arms actually read. Consolidating the pair means editing
+  that instrument, which is a change to make with a fresh measurement, not
+  on the way past.)
 - **A fix that closes one instance of a bug class gets its siblings
   swept.** When the mechanism is a parser, sanitizer, matcher, or state
   machine, the reported input is one door into a room with several:
@@ -328,6 +333,18 @@ differs only by the change under test; the verdict is the pair of counts.
   — lazily-created backing files (`ensureConversationFile()` writes nothing
   until the first prompt) leave a window in which a just-created entity is
   invisible to any existence check that looks on disk.
+- **A capability has two ends — check the one that accepts, not only the one
+  that issues.** Where the PR gates who may _mint_ a credential, token,
+  cookie, or permit, find the code that _accepts_ it and check that the same
+  condition guards it. The two drift because they are written at different
+  times by different concerns, and the tell is that the tests are named after
+  the gated end, which makes the ungated end look covered. Measured example:
+  a cookie→`Authorization` bridge was correctly gated to a desktop shell on
+  the minting side, while the accepting middleware was mounted
+  unconditionally — so every server instance treated that cookie as a
+  bearer. Bound it as usual: no exploit was demonstrated, but `SameSite`
+  does not separate `127.0.0.1:<other-port>` from the daemon's port, because
+  for an IP host the "site" ignores the port.
 - **Measure the blast radius on bystanders, not just on the caller.** When a
   failure path can take down shared infrastructure, the interesting number
   is what happened to everything else: an unrelated session going
@@ -374,6 +391,25 @@ differs only by the change under test; the verdict is the pair of counts.
   fix first. This is the same ordering as the concurrency rule above, where
   a race that fabricates a result outranks one that crashes: a wrong answer
   nobody is told about outranks a failure that announces itself.
+- **"Nothing found" and "could not measure" must be different values — then
+  check what consumes them.** A single sentinel covering both turns a broken
+  probe into a confident negative, and the damage is done by the consumer,
+  not the flag. Measured example: an `emptyDiff` flag was set both when a PR
+  genuinely had no changes and when the diff **capture failed**, and the
+  downstream skill responded to it by recommending the PR be closed as
+  superseded — so a transient fetch error could close live work. Trace every
+  such flag to its readers and say what each does with it; the same rule the
+  verdict contract already applies to this report (a harness that failed is
+  `inconclusive`, never `merge-ready` and never `findings`) applies to the
+  code under test.
+- **A validity control must run before the artifact it invalidates is
+  built.** When the PR adds a sanity check — a control arm, a baseline
+  probe, a health assertion — find where in the sequence it runs relative to
+  the output it is supposed to suppress. Measured example: a re-classifier
+  that demotes findings from a dead harness ran _after_ the findings list
+  was assembled, so a harness proven dead still filed `mutant-survived`
+  against the author. Order is the whole property here: a control that runs
+  late is not a weaker control, it is not a control at all.
 
 ### Scoping from the report and the plan
 
