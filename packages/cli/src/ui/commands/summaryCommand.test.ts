@@ -101,6 +101,24 @@ describe('summaryCommand custom export path', () => {
     }
   });
 
+  it('overwrites a hand-written file at the default path', async () => {
+    const qwenDir = path.join(projectRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenDir, 'PROJECT_SUMMARY.md'),
+      'hand-written notes',
+      'utf8',
+    );
+    const result = await run('');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(
+      path.join(qwenDir, 'PROJECT_SUMMARY.md'),
+      'utf8',
+    );
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).not.toContain('hand-written notes');
+  });
+
   it('writes a relative file path as-is', async () => {
     const result = await run('notes.md');
     expect(await fileExists(path.join(projectRoot, 'notes.md'))).toBe(true);
@@ -153,85 +171,136 @@ describe('summaryCommand custom export path', () => {
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
-  it('allows a symlink that resolves inside the project root', async () => {
-    // Symlink creation typically requires elevated privileges on Windows.
-    if (process.platform === 'win32') {
-      return;
-    }
-    await fs.mkdir(path.join(projectRoot, 'real-dir'));
-    await fs.symlink(
-      path.join(projectRoot, 'real-dir'),
-      path.join(projectRoot, 'internal-link'),
-    );
-    const result = await run('internal-link/summary.md');
-    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
-    expect(
-      await fileExists(path.join(projectRoot, 'real-dir', 'summary.md')),
-    ).toBe(true);
-  });
-
-  it('rejects a path that escapes the project root via a symlink', async () => {
-    // Symlink creation typically requires elevated privileges on Windows.
-    if (process.platform === 'win32') {
-      return;
-    }
-    const outside = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'summary-outside-'),
-    );
-    try {
-      await fs.symlink(outside, path.join(projectRoot, 'link'));
-      const result = await run('link/leak.md');
-      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-      expect(result.content).toContain('within the project root');
-      expect(await fileExists(path.join(outside, 'leak.md'))).toBe(false);
-      expect(runSideQuery).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(outside, { recursive: true, force: true });
-    }
-  });
-
-  it('rejects a broken symlink whose target is outside the project root', async () => {
-    if (process.platform === 'win32') {
-      return;
-    }
-    const outsideTarget = path.join(
-      os.tmpdir(),
-      `summary-broken-${Date.now()}`,
-      'leak.md',
-    );
-    await fs.symlink(outsideTarget, path.join(projectRoot, 'broken-link'));
-    const result = await run('broken-link');
-    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-    expect(result.content).toContain('within the project root');
-    expect(await fileExists(outsideTarget)).toBe(false);
-    expect(runSideQuery).not.toHaveBeenCalled();
-  });
-
-  it('rejects a directory whose appended default filename is a symlink escaping the project root', async () => {
-    if (process.platform === 'win32') {
-      return;
-    }
-    const outside = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'summary-outside-'),
-    );
-    try {
-      const docsDir = path.join(projectRoot, 'docs');
-      await fs.mkdir(docsDir);
+  it.skipIf(process.platform === 'win32')(
+    'allows a symlink that resolves inside the project root',
+    async () => {
+      await fs.mkdir(path.join(projectRoot, 'real-dir'));
       await fs.symlink(
-        path.join(outside, 'evil-target.md'),
-        path.join(docsDir, 'PROJECT_SUMMARY.md'),
+        path.join(projectRoot, 'real-dir'),
+        path.join(projectRoot, 'internal-link'),
       );
-      const result = await run('docs');
+      const result = await run('internal-link/summary.md');
+      expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+      expect(
+        await fileExists(path.join(projectRoot, 'real-dir', 'summary.md')),
+      ).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a path that escapes the project root via a symlink',
+    async () => {
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'summary-outside-'),
+      );
+      try {
+        await fs.symlink(outside, path.join(projectRoot, 'link'));
+        const result = await run('link/leak.md');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+        expect(result.content).toContain('within the project root');
+        expect(await fileExists(path.join(outside, 'leak.md'))).toBe(false);
+        expect(runSideQuery).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a broken symlink whose target is outside the project root',
+    async () => {
+      const outsideTarget = path.join(
+        os.tmpdir(),
+        `summary-broken-${Date.now()}`,
+        'leak.md',
+      );
+      await fs.symlink(outsideTarget, path.join(projectRoot, 'broken-link'));
+      const result = await run('broken-link');
       expect(result).toMatchObject({ type: 'message', messageType: 'error' });
       expect(result.content).toContain('within the project root');
-      expect(await fileExists(path.join(outside, 'evil-target.md'))).toBe(
-        false,
-      );
+      expect(await fileExists(outsideTarget)).toBe(false);
       expect(runSideQuery).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(outside, { recursive: true, force: true });
-    }
-  });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a multi-link symlink chain that escapes the project root',
+    async () => {
+      const outsideTarget = path.join(
+        os.tmpdir(),
+        `summary-chain-${Date.now()}`,
+        'evil.md',
+      );
+      // link1 -> link2 (relative, inside root), link2 -> outside (absolute,
+      // broken). The old single-readlink check saw only the inside-root link2
+      // and passed containment; the full-chain walk reaches the outside target.
+      await fs.symlink('link2', path.join(projectRoot, 'link1'));
+      await fs.symlink(outsideTarget, path.join(projectRoot, 'link2'));
+      const result = await run('link1');
+      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(result.content).toContain('within the project root');
+      expect(await fileExists(outsideTarget)).toBe(false);
+      expect(runSideQuery).not.toHaveBeenCalled();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symlink with a relative target escaping the project root',
+    async () => {
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'summary-outside-'),
+      );
+      try {
+        // Git stores symlink targets verbatim, so a committed
+        // `ln -s ../outside/leak.md` recreates a relative target on checkout.
+        await fs.symlink(
+          path.join('..', path.basename(outsideDir), 'leak.md'),
+          path.join(projectRoot, 'rel-link'),
+        );
+        const result = await run('rel-link');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+        expect(result.content).toContain('within the project root');
+        expect(runSideQuery).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a directory whose appended default filename is a symlink escaping the project root',
+    async () => {
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'summary-outside-'),
+      );
+      try {
+        const docsDir = path.join(projectRoot, 'docs');
+        await fs.mkdir(docsDir);
+        await fs.symlink(
+          path.join(outside, 'evil-target.md'),
+          path.join(docsDir, 'PROJECT_SUMMARY.md'),
+        );
+        const result = await run('docs');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+        expect(result.content).toContain('within the project root');
+        expect(await fileExists(path.join(outside, 'evil-target.md'))).toBe(
+          false,
+        );
+        expect(runSideQuery).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not create the target directory when generation fails', async () => {
     vi.mocked(runSideQuery).mockRejectedValueOnce(new Error('rate limit'));
@@ -259,6 +328,22 @@ describe('summaryCommand custom export path', () => {
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
+  it('refuses to overwrite a file that merely mentions Summary Metadata in prose', async () => {
+    const target = path.join(projectRoot, 'DESIGN.md');
+    await fs.writeFile(
+      target,
+      'The summary file ends with a `## Summary Metadata` footer.\n',
+      'utf8',
+    );
+    const result = await run('DESIGN.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('already exists');
+    expect(await fs.readFile(target, 'utf8')).toContain(
+      '`## Summary Metadata`',
+    );
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
   it('overwrites a previously generated summary', async () => {
     const target = path.join(projectRoot, 'summary.md');
     await fs.writeFile(
@@ -272,4 +357,13 @@ describe('summaryCommand custom export path', () => {
     expect(written).toContain('SUMMARY BODY');
     expect(written).not.toContain('old body');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'creates a custom-path summary with mode 0o600',
+    async () => {
+      await run('private-notes.md');
+      const stat = await fs.stat(path.join(projectRoot, 'private-notes.md'));
+      expect(stat.mode & 0o777).toBe(0o600);
+    },
+  );
 });

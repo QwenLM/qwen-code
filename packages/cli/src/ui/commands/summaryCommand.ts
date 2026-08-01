@@ -42,22 +42,31 @@ const realpathNearestExisting = async (targetPath: string): Promise<string> => {
   }
 };
 
-// A broken symlink (target absent) makes realpathNearestExisting walk up the
-// lexical path and miss the escape — detect symlinks at the leaf itself.
+// Follows the full symlink chain at filePath (with cycle detection) and
+// verifies the final target is contained within realProjectRoot. A broken
+// chain whose terminal target is absent still resolves via
+// realpathNearestExisting, catching multi-hop escapes.
 const assertLeafNotSymlinkEscape = async (
   filePath: string,
   realProjectRoot: string,
 ): Promise<void> => {
-  const stat = await fsPromises.lstat(filePath).catch(() => null);
-  if (stat?.isSymbolicLink()) {
-    const linkTarget = await fsPromises.readlink(filePath);
-    const resolvedTarget = path.isAbsolute(linkTarget)
-      ? linkTarget
-      : path.resolve(path.dirname(filePath), linkTarget);
-    const realTarget = await realpathNearestExisting(resolvedTarget);
-    if (!isSubpath(realProjectRoot, realTarget)) {
+  let current = filePath;
+  const seen = new Set<string>();
+  for (;;) {
+    const linkStat = await fsPromises.lstat(current).catch(() => null);
+    if (!linkStat?.isSymbolicLink()) break;
+    if (seen.has(current)) {
       throw new Error(t('Summary path must be within the project root.'));
     }
+    seen.add(current);
+    const linkTarget = await fsPromises.readlink(current);
+    current = path.isAbsolute(linkTarget)
+      ? linkTarget
+      : path.resolve(path.dirname(current), linkTarget);
+  }
+  const realTarget = await realpathNearestExisting(current);
+  if (!isSubpath(realProjectRoot, realTarget)) {
+    throw new Error(t('Summary path must be within the project root.'));
   }
 };
 
@@ -181,15 +190,22 @@ export const summaryCommand: SlashCommand = {
     const resolveSummaryTarget = async (): Promise<{
       summaryPath: string;
       filePathForDisplay: string;
+      isDefaultTarget: boolean;
+      realProjectRoot: string;
     }> => {
       const projectRoot = config.getProjectRoot();
       const customPath = args?.trim();
 
       if (!customPath) {
         const qwenDir = path.join(projectRoot, '.qwen');
+        // The default target always overwrites: regenerating the summary is
+        // the command's purpose, and .qwen/PROJECT_SUMMARY.md is a generated
+        // artifact — not user prose the overwrite guard protects.
         return {
           summaryPath: path.join(qwenDir, 'PROJECT_SUMMARY.md'),
           filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
+          isDefaultTarget: true,
+          realProjectRoot: await fsPromises.realpath(projectRoot),
         };
       }
 
@@ -245,7 +261,7 @@ export const summaryCommand: SlashCommand = {
         const existing = await fsPromises
           .readFile(summaryPath, 'utf8')
           .catch(() => '');
-        if (!existing.includes('## Summary Metadata')) {
+        if (!/\n---\n\n## Summary Metadata\n/.test(existing)) {
           throw new Error(
             t(
               'Summary path already exists and is not a generated summary: {{path}}',
@@ -255,12 +271,22 @@ export const summaryCommand: SlashCommand = {
         }
       }
 
-      return { summaryPath, filePathForDisplay };
+      return {
+        summaryPath,
+        filePathForDisplay,
+        isDefaultTarget: false,
+        realProjectRoot,
+      };
     };
 
     const saveSummaryToDisk = async (
       markdownSummary: string,
-      target: { summaryPath: string; filePathForDisplay: string },
+      target: {
+        summaryPath: string;
+        filePathForDisplay: string;
+        isDefaultTarget: boolean;
+        realProjectRoot: string;
+      },
     ): Promise<{
       filePathForDisplay: string;
       fullPath: string;
@@ -273,11 +299,22 @@ export const summaryCommand: SlashCommand = {
 **Update time**: ${new Date().toISOString()}
 `;
 
+      // Re-check the leaf right before writing to narrow the TOCTOU window
+      // between resolveSummaryTarget (pre-LLM) and the write (post-LLM).
+      await assertLeafNotSymlinkEscape(
+        target.summaryPath,
+        target.realProjectRoot,
+      );
+
       await fsPromises.mkdir(path.dirname(target.summaryPath), {
         recursive: true,
-        mode: 0o700,
+        ...(target.isDefaultTarget ? { mode: 0o700 } : {}),
       });
-      await fsPromises.writeFile(target.summaryPath, summaryContent, 'utf8');
+      await fsPromises.writeFile(target.summaryPath, summaryContent, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      await fsPromises.chmod(target.summaryPath, 0o600).catch(() => undefined);
 
       return {
         filePathForDisplay: target.filePathForDisplay,
