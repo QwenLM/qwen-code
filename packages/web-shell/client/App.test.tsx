@@ -6611,6 +6611,23 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('discards an automatic recap after resuming a session by command', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/resume session-3');
+      recap.resolve({
+        sessionId: 'session-1',
+        recap: 'Previous session recap',
+      });
+      await recap.promise;
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3');
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
   it('discards an automatic recap after clearing the screen', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {

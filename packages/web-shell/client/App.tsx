@@ -5411,6 +5411,7 @@ export function App({
       return;
     }
     autoRecapVersionRef.current += 1;
+    lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
 
@@ -5792,6 +5793,9 @@ export function App({
       const version = autoRecapVersionRef.current;
       sessionActions.recapSession().then(
         (result) => {
+          // result.sessionId only pins the daemon wire contract (the daemon
+          // echoes the id back), not a real race; the epoch/connection checks
+          // catch those. Kept so it is not simplified away as redundant.
           if (
             autoRecapVersionRef.current !== version ||
             connectionRef.current.sessionId !== sessionId ||
