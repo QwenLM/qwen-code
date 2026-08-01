@@ -491,16 +491,23 @@ export const modelCommand: SlashCommand = {
         : scopeOverride === SettingScope.User
           ? t(' (global)')
           : '';
-    const defaultSuffix = persistDefault ? scopeSuffix || t(' (default)') : '';
+    const defaultSuffix = persistDefault
+      ? scopeOverride === SettingScope.Workspace
+        ? t(' (this project default)')
+        : scopeOverride === SettingScope.User
+          ? t(' (global default)')
+          : t(' (default)')
+      : '';
+    const leadingFlag = args.trim().split(/\s/)[0];
     if (
       persistDefault &&
-      /(?:^|\s)--(?:fast|voice|vision)(?:\s|$)/.test(args)
+      ['--fast', '--voice', '--vision', '--image'].includes(leadingFlag)
     ) {
       return {
         type: 'message',
         messageType: 'error',
         content: t(
-          '--default only applies to the main model. Use --fast, --voice, or --vision without --default.',
+          '--default only applies to the main model. Use --fast, --voice, --vision, or --image without --default.',
         ),
       };
     }
@@ -529,7 +536,7 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      if (persistDefault && !settings) {
+      if (!settings) {
         return {
           type: 'message',
           messageType: 'error',
@@ -1036,6 +1043,16 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t('Model') + ': ' + effectiveModelName + defaultSuffix,
+      };
+    }
+
+    if (persistDefault && context.executionMode !== 'interactive') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          '--default requires a model ID in non-interactive mode. Use: /model --default <model-id>',
+        ),
       };
     }
 

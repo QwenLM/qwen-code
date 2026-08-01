@@ -2493,7 +2493,7 @@ describe('modelCommand', () => {
       );
       expect(result).toMatchObject({
         type: 'message',
-        content: expect.stringContaining('(this project)'),
+        content: expect.stringContaining('(this project default)'),
       });
       expect(setValue).toHaveBeenCalledWith(
         SettingScope.Workspace,
@@ -2508,6 +2508,83 @@ describe('modelCommand', () => {
       expect(result).toEqual({
         type: 'dialog',
         dialog: 'model',
+      });
+    });
+
+    it('should reject --default combined with --fast', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default --fast');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default only applies to the main model',
+        ),
+      });
+    });
+
+    it('should reject --default combined with --image', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default --image');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default only applies to the main model',
+        ),
+      });
+    });
+
+    it('should not reject --default when prompt text contains --vision', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(undefined);
+      const result = await modelCommand.action!(
+        ctx,
+        '--default qwen-max what does --vision do',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Cannot combine --default'),
+      });
+    });
+
+    it('should reject bare --default in non-interactive mode', async () => {
+      const ctx = setupContext();
+      ctx.executionMode = 'non_interactive';
+      const result = await modelCommand.action!(ctx, '--default');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default requires a model ID in non-interactive mode',
+        ),
+      });
+    });
+
+    it('should open model picker with persistDefault for bare /model --default', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'model',
+        persistDefault: true,
       });
     });
   });
