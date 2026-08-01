@@ -13,7 +13,7 @@ import {
   type CompactionTriggerReason,
   CompressionStatus,
 } from '../core/turn.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, outputClampMargin } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
@@ -46,8 +46,53 @@ const debugLogger = createDebugLogger('COMPRESSION');
  * Hard cap on the compression sideQuery output (summary text only, since
  * thinking is disabled). Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
  * (autoCompact.ts:30) which is based on p99.99 of real compaction outputs.
+ *
+ * This is a CEILING, not a guaranteed budget: on small `contextWindowSize`
+ * deployments (or when the force-compress/hard tier fires because the prompt
+ * has already grown past `effectiveWindow`), `promptTokens + this value` can
+ * exceed the model's total context window, causing the backend to reject the
+ * side-query request outright with a 400 before the model generates anything.
+ * See `computeCompactionOutputBudget` for the dynamic clamp applied at the
+ * actual call site.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
+
+/**
+ * Safety margin subtracted from the remaining window when dynamically sizing
+ * the compression side-query's `maxOutputTokens` (see
+ * `computeCompactionOutputBudget`). Covers the gap between the caller's
+ * (possibly char/4-estimated) prompt token count and the backend's real
+ * tokenizer count — the same kind of estimation slack `estimatePromptTokens`
+ * already accounts for on the trigger side, but needed again here on the
+ * request-construction side.
+ *
+ * 2026-07-28: kept as the historical/minimum value for reference, but
+ * `computeCompactionOutputBudget` now uses `outputClampMargin(window)`
+ * instead of this flat constant directly. A real production failure showed
+ * a flat 1000 isn't enough: `estimatedPromptTokens` here can itself be the
+ * caller's own char/4-based estimate (e.g. the hard-tier rescue's cheap-gate
+ * value, which is deliberately left un-inflated there — safe to under-count
+ * for a trigger decision, see `estimatePromptTokens`'s `conservative` param),
+ * and that under-count is dangerous once it feeds an output-budget calc. One
+ * real case fed a 43,549-token estimate into this function while the
+ * backend's true tokenizer count was 50,951 (a 7,402-token gap, far past
+ * this flat margin), computing a budget large enough to reproduce the exact
+ * 400-then-empty-summary failure this function exists to prevent.
+ * `outputClampMargin` (`max(10_000, 5% of window)`) is the same
+ * window-scaled margin already used by the main-turn clamp
+ * (`clampOutputTokensToWindow`), so both request-construction sites now
+ * share one safety-margin policy instead of drifting apart.
+ */
+export const COMPACT_OUTPUT_SAFETY_MARGIN = 1_000;
+
+/**
+ * If the dynamically computed output budget would fall below this, the
+ * remaining window is too small for a side-query to produce anything useful
+ * (thinking is off, so this is genuinely all the model has to write a dense
+ * multi-section summary in) — the caller should treat this as a distinct
+ * failure mode rather than sending a doomed request.
+ */
+export const COMPACT_MIN_OUTPUT_TOKENS = 2_000;
 
 /**
  * Default proportional auto-compaction threshold — the preferred trigger and an
@@ -194,6 +239,42 @@ export function computeThresholds(
   return { warn, auto, hard, effectiveWindow };
 }
 
+/**
+ * Dynamically sizes the compression side-query's `maxOutputTokens`.
+ *
+ * `COMPACT_MAX_OUTPUT_TOKENS` is a ceiling tuned from real-world p99.99
+ * compaction output length, not a guaranteed allowance. On small
+ * `contextWindowSize` deployments — or whenever force-compress/hard-tier
+ * fires because the prompt has already grown past `effectiveWindow` — the
+ * request `promptTokens + COMPACT_MAX_OUTPUT_TOKENS` can exceed the model's
+ * total context window. When that happens the backend rejects the side-query
+ * outright with a 400 before the model generates anything, and the caller
+ * previously had no way to tell that apart from the model genuinely
+ * producing an empty summary (both landed on `COMPRESSION_FAILED_EMPTY_SUMMARY`).
+ *
+ * This clamps the requested output budget to what can actually still fit,
+ * so the side-query either gets a request that fits the window, or the
+ * caller can detect ahead of time that there isn't enough room left to be
+ * worth sending one at all (see `COMPACT_MIN_OUTPUT_TOKENS`).
+ *
+ * @param window - the model's total context window (same input as
+ *   `computeThresholds`).
+ * @param promptTokens - best available estimate of the side-query prompt's
+ *   token count (i.e. what's actually being sent, not just the pre-trigger
+ *   `originalTokenCount` — include any pending tool result if applicable).
+ * @returns the `maxOutputTokens` to request, clamped to
+ *   `[0, COMPACT_MAX_OUTPUT_TOKENS]`. Callers should treat a result below
+ *   `COMPACT_MIN_OUTPUT_TOKENS` as "not enough room for a useful summary"
+ *   rather than sending the side-query anyway.
+ */
+export function computeCompactionOutputBudget(
+  window: number,
+  promptTokens: number,
+): number {
+  const remaining = window - promptTokens - outputClampMargin(window);
+  return Math.max(0, Math.min(COMPACT_MAX_OUTPUT_TOKENS, remaining));
+}
+
 export type CompactTrigger = 'manual' | 'auto';
 
 export interface CompressOptions {
@@ -334,6 +415,13 @@ export class ChatCompressionService {
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);
+    // Hoisted out of the `!force` branch below: the force/hard-tier path
+    // (which skips that branch entirely) also needs this to dynamically
+    // size the side-query's maxOutputTokens later (see
+    // computeCompactionOutputBudget call near the runSideQuery site).
+    const contextLimit =
+      config.getContentGeneratorConfig()?.contextWindowSize ??
+      DEFAULT_TOKEN_LIMIT;
 
     // Cheap gates first — these don't need the curated history. Forward
     // originalTokenCount on NOOP (matching the threshold-gate branch below)
@@ -355,9 +443,6 @@ export class ChatCompressionService {
       // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
       // to be reserved out of the window here (this replaced the
       // #5957/#6266 reservedOutputTokens machinery).
-      const contextLimit =
-        config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -517,6 +602,42 @@ export class ChatCompressionService {
         );
     }
 
+    // Dynamically size the side-query's output budget: a fixed
+    // COMPACT_MAX_OUTPUT_TOKENS can push promptTokens + maxOutputTokens past
+    // the model's context window on smaller deployments (see
+    // computeCompactionOutputBudget doc comment), causing the backend to
+    // reject the request outright with a 400 before the model generates
+    // anything — indistinguishable downstream from a genuinely empty
+    // summary. Bail out before sending a request that's guaranteed to fail.
+    const estimatedPromptTokens =
+      estimateContentTokens(
+        slim.slimmedHistory,
+        slimmingConfig.imageTokenEstimate,
+      ) + 1_000; // compression system prompt + kick-off turn, per the comment at line ~853
+    const compressionOutputBudget = computeCompactionOutputBudget(
+      contextLimit,
+      estimatedPromptTokens,
+    );
+    if (compressionOutputBudget < COMPACT_MIN_OUTPUT_TOKENS) {
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] skipping side-query: only ${compressionOutputBudget} ` +
+            `output tokens left in window (contextLimit=${contextLimit}, ` +
+            `estimatedPromptTokens=${estimatedPromptTokens}), below ` +
+            `COMPACT_MIN_OUTPUT_TOKENS=${COMPACT_MIN_OUTPUT_TOKENS}`,
+        );
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+        },
+      };
+    }
+
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       skipOutputLanguagePreference: true,
@@ -551,7 +672,7 @@ export class ChatCompressionService {
       // inconsistent (Anthropic/OpenAI count it separately, Gemini varies by model).
       config: {
         thinkingConfig: { includeThoughts: false },
-        maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
+        maxOutputTokens: compressionOutputBudget,
       },
       abortSignal: signal ?? new AbortController().signal,
       promptId,
