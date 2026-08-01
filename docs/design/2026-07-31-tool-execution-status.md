@@ -87,6 +87,9 @@ non-interactive modes copy the new scalar without exposing it in user-facing
 JSON output. A call cancelled before tool resolution can omit `tool` and
 `invocation` from the public `CancelledToolCall` variant, so consumers of that
 variant must guard those fields before use.
+When such a pre-resolution cancel is emitted through telemetry, `tool_type`
+defaults to `"native"` because the tool identity is not yet resolved; this
+is a known skew in the `tool_type` dimension for pre-validation cancels.
 
 Per-call terminal errors no longer reject the scheduler's public entry
 points. `CoreToolScheduler.schedule()` and `handleConfirmationResponse()`

@@ -7445,11 +7445,11 @@ export class Session implements SessionContext {
         },
       });
       const loopDetected =
-        opts?.recordInvalidToolParams === true &&
+        opts.recordInvalidToolParams === true &&
         !activeToolAbortSignal.aborted &&
         // A permission cancellation is the user declining, not the model
         // re-sending invalid params, so it must not feed loop detection.
-        !opts?.stopAfterPermissionCancel &&
+        !opts.stopAfterPermissionCancel &&
         recordDaemonInvalidToolParams(
           this.config,
           promptId,
@@ -7459,7 +7459,7 @@ export class Session implements SessionContext {
         );
       return {
         parts: errorParts,
-        stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
+        stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
       };
     };
