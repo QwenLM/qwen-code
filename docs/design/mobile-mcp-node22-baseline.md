@@ -71,3 +71,20 @@ Node.js 18 and 20 consumers must upgrade their runtime before installing the
 next mobile-mcp release. Rolling back the runtime baseline would also require a
 supported MCP SDK dependency path that does not restore the vulnerable Hono 1.x
 tree; forcing Hono 2 beneath MCP SDK 1.26.0 is not supported.
+
+Because the `engines` bump is breaking for consumers, the next mobile-mcp
+release tag should be a minor bump rather than a patch.
+
+## Follow-up work
+
+Two deferred items are intentionally out of scope for this security change and
+are recorded here so they do not evaporate:
+
+- Align the monorepo workspace on a single Zod copy, then delete the
+  `sdkInputSchema` cast in `src/server.ts` that bridges the workspace's split
+  Zod resolution.
+- Add a mobile-mcp CI job that runs `tsc --noEmit` and the non-device
+  Playwright suites, closing the coverage gap that predates this change.
+
+These items do not yet have a tracking issue; one should be opened and linked
+here.
