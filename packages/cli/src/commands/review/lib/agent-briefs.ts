@@ -39,7 +39,9 @@ export type RoleId =
   | '1b'
   | '1c'
   | '2'
-  | '3'
+  | '3a'
+  | '3b'
+  | '3c'
   | '4'
   | '5'
   | '6a'
@@ -245,21 +247,73 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - **A second parser for a format someone else authoritatively parses.** When the diff implements its own model of another system's syntax — a sanitizer's fence scanner over markdown GitHub will parse, an escaper's tokenizer, a validator's URL splitter — the finding to hunt is an INPUT THE TWO PARSE DIFFERENTLY: every divergence is a bypass, because the sanitizer transforms what it saw while the authoritative parser renders what IS. Probe the corners the model simplifies (nesting, container prefixes, things that change meaning mid-stream: a fence opener inside a raw-HTML block, a quote inside an attribute) — and probe the sharpest corner FIRST: **the format's own delimiters inside a payload**. A non-greedy, no-escaping extractor fed a value that legitimately contains its close tag terminates the match early and truncates SILENTLY — a measured live case wrote a truncated file with no warning when the content contained a literal \`</parameter>\`. State the divergent input concretely — "these disagree somewhere" is not a finding.`,
   },
 
-  '3': {
+  // Code quality was one agent holding six unrelated checks — reuse, sibling
+  // symmetry, altitude, abstraction fit, conventions, dead code — and it is the
+  // same shape this file already refuses elsewhere. The invariant agents were split
+  // three ways on measured evidence (PR #6457's `QQChannel.ts`: one agent holding
+  // the whole eight-item checklist found **one** of the five invariant-class
+  // defects in that file; the same model split three ways found **all five**),
+  // because a long checklist is not a task an agent does six times — it is a task
+  // it does once, well, and then stops. Nothing about that finding is specific to
+  // invariants. The quality checklist is split on the same reasoning, along the
+  // seam where the questions genuinely differ: *does this code already exist*
+  // (3a), *is it at the right depth* (3b), and *does it match what surrounds it*
+  // (3c). Each slice is short enough to be walked to the end.
+  '3a': {
     reviewsCode: true,
-    label: 'Agent 3: Code quality',
-    publicLabel: 'the code-quality pass',
-    publicLabelZh: '代码质量检查',
+    label: 'Agent 3a: Reuse & duplication',
+    publicLabel: 'the reuse and duplication pass',
+    publicLabelZh: '复用与重复代码检查',
     readsDiff: true,
-    brief: `You are **Agent 3: Code Quality**. Review the diff for:
+    brief: `You are **Agent 3a: Reuse & Duplication**. One question, walked to the end: **does the codebase already have this?**
 
-- Style consistency with the surrounding codebase; naming conventions
-- **Duplication and missed reuse.** When the diff re-implements something the codebase already has, grep the shared/utility modules and the files adjacent to the change, and **name the existing helper it should call instead**. A duplication finding that does not name the thing being duplicated is not a finding.
-- **Sibling consistency — a guard one path has and its twin lacks.** When one member of a family of parallel paths carries a validation, guard, cleanup, or shape-check — sibling loaders, the handlers of a route table, the pair of functions that build the same command — check that **every** sibling carries it too. A lone exception is usually accidental, and the missing half is a latent **asymmetric failure**: harmless until the one input that path sees. Name the divergent sibling and the guard it is missing. When the missing guard is a validation on **untrusted input** (one \`gitCheckout\` validates its ref, its sibling does not), that is not a style nit — hand it to the security pass as a likely bug, not a consistency note.
-- Over-engineering and unnecessary abstraction
-- **Altitude** — is each change implemented at the right depth, or is it a fragile bandaid? A special case layered onto shared infrastructure to make one caller work is a sign the fix is not deep enough: prefer generalizing the underlying mechanism. The mirror image — a new abstraction serving a single call site — is over-engineering. **Name the depth the change should live at.**
-- Missing or misleading comments; dead code
-- **Documentation parity with siblings.** When the diff adds a user-facing surface — a CLI flag, a slash-command option, a settings key — check whether its SIBLINGS are documented, and where. Three of four sibling selectors having a docs entry is a house convention the fourth just broke; a surface whose behaviour can silently change (a fallback, an automatic swap, an emitted warning) undocumented is a user staring at a message with nowhere to look it up. This is deliberately a **parity** check, not a docs mandate: the finding names the sibling precedent and the file it lives in (\`--fast\` and \`--vision\` are in \`docs/…/commands.md\`; the new \`--compaction\` is not), so "add docs" arrives as the codebase's own standard, not this reviewer's. No documented sibling, no finding. Severity: Suggestion.`,
+For every non-trivial block of logic the diff **adds** — a helper, a parse, a normalisation, a retry loop, a comparison, a format — go and look before accepting it as new:
+
+- \`grep_search\` the shared/utility modules, then the files adjacent to the change, then the rest of the package. Search for the *behaviour* (a distinctive literal, an error message, a regex, a field name), not only for a plausible function name — a duplicate rarely reuses the original's naming.
+- **Name the existing helper it should call instead**, with its path. A duplication finding that does not name the thing being duplicated is not a finding — it is a suspicion, and it will be rejected downstream.
+- Check the diff against **itself**, too: the same block pasted into two files in one pull request is duplication that has no older original to find.
+- A near-miss counts. When the existing helper does 90% of the job, say which 10% differs and whether the difference is deliberate — a copy made to change one line is how two implementations start drifting apart.
+
+Also report **dead code this diff leaves behind**: a function, branch, export, constant or import that nothing reaches once the change lands. Trace it (\`grep_search\` for the symbol) rather than assuming — the caller may live in a file the diff does not touch.
+
+Not your dimension: whether the change is at the right depth (3b owns altitude and abstraction fit) and whether it matches surrounding conventions (3c). Duplication that *should* be resolved by generalising a shared mechanism is still yours — name the duplication and say so; 3b will independently rule on the depth.`,
+  },
+
+  '3b': {
+    reviewsCode: true,
+    label: 'Agent 3b: Altitude & abstraction fit',
+    publicLabel: 'the altitude and abstraction pass',
+    publicLabelZh: '修复层次与抽象合理性检查',
+    readsDiff: true,
+    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth?**
+
+Altitude is the failure that reads as correct at every individual line and is wrong as a whole. For each change ask where the problem it addresses actually lives, and compare that to where the fix was written:
+
+- **Too shallow — a bandaid on a symptom.** A special case layered onto shared infrastructure so that one caller works; a guard at the call site for a value the producer should never have emitted; a string patched after the fact by the code that consumed it. The tell is a change that would have to be repeated for the next caller. **Name the depth it should live at**, and the mechanism that should have been generalised.
+- **Too shallow in the other direction — the wrong owner.** The defect is upstream (another module, another service, the data's producer) and the diff compensates for it downstream. Say whose bug it is.
+- **Too deep — over-engineering.** A new abstraction, indirection layer, options object, or configuration point serving exactly one call site; a generalisation for a second case that does not exist. The cost is real and concrete: every future reader pays for the indirection, and the shape is fixed by a single example that may be unrepresentative.
+- **Blast radius.** When a change to shared infrastructure exists to serve one caller, name the *other* callers it now also affects, and what it means for them.
+
+Every finding needs the concrete cost, not an aesthetic judgement: what breaks next, what has to be repeated, who else is affected. "This should be more general" with no named next caller is not a finding.
+
+Not your dimension: whether the code already exists elsewhere (3a) or matches local conventions (3c).`,
+  },
+
+  '3c': {
+    reviewsCode: true,
+    label: 'Agent 3c: Consistency & clarity',
+    publicLabel: 'the consistency and clarity pass',
+    publicLabelZh: '一致性与可读性检查',
+    readsDiff: true,
+    brief: `You are **Agent 3c: Consistency & Clarity**. One question, walked to the end: **does this change match what surrounds it?**
+
+- **Sibling consistency — a guard one path has and its twin lacks.** This is the highest-value check in your slice; do it first and do it exhaustively. When one member of a family of parallel paths carries a validation, guard, cleanup, or shape-check — sibling loaders, the handlers of a route table, the two functions that build the same command, the arms of a switch — check that **every** sibling carries it too. A lone exception is usually accidental, and the missing half is a latent **asymmetric failure**: harmless until the one input that path sees. Name the divergent sibling and the guard it is missing. When the missing guard is a validation on **untrusted input** (one \`gitCheckout\` validates its ref, its sibling does not), that is not a consistency note — file it as the likely bug it is.
+- **Convention drift.** Naming, error-construction, logging, option-passing, module layout: does the new code do it the way the files around it do? Cite the surrounding example you are comparing against. A convention you cannot point at in this codebase is an external style preference, and those are not findings here.
+- **Misleading names and comments.** A comment that describes behaviour the code no longer has, a name that says the opposite of what the function does, a parameter whose name implies a unit or ordering the code does not honour. These are findings because they misinform the next reader; a merely *absent* comment is not, unless the logic is genuinely confusing.
+- **Needless complexity in the added code.** A condition that is always true, a branch that duplicates its sibling's body, a nested ternary or callback chain with a flat equivalent, state kept that is only ever written. Say what the simpler form is.
+- **Documentation parity with siblings.** When the diff adds a user-facing surface — a CLI flag, a slash-command option, a settings key — check whether its SIBLINGS are documented, and where. Three of four sibling selectors having a docs entry is a house convention the fourth just broke; a surface whose behaviour can silently change (a fallback, an automatic swap, an emitted warning) undocumented is a user staring at a message with nowhere to look it up. This is deliberately a **parity** check, not a docs mandate: the finding names the sibling precedent and the file it lives in (\`--fast\` and \`--vision\` are in \`docs/…/commands.md\`; the new \`--compaction\` is not), so "add docs" arrives as the codebase's own standard, not this reviewer's. No documented sibling, no finding. Severity: Suggestion.
+
+Not your dimension: whether the code already exists elsewhere (3a) or whether the fix is at the right depth (3b). Formatting a formatter would normalise is not a finding for anyone.`,
   },
 
   '4': {

@@ -58,6 +58,7 @@ describe('reviewCommand', () => {
       'presubmit',
       'test-efficacy',
       'test-plan',
+      'findings',
       'compose-review',
       'submit',
       'cleanup',

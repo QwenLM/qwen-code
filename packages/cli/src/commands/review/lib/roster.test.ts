@@ -74,7 +74,9 @@ describe('requiredAgents — Step 3A', () => {
         '1a',
         '1c',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
         '6a',
@@ -99,7 +101,7 @@ describe('requiredAgents — Step 3A', () => {
     expect(med).not.toContain('6b');
     expect(med).not.toContain('6c');
     expect(med).toEqual(
-      expect.arrayContaining(['0', '1a', '2', '3', '4', '5', '7']),
+      expect.arrayContaining(['0', '1a', '2', '3a', '3b', '3c', '4', '5', '7']),
     );
     // High, and the default (no effort recorded), still demand them.
     expect(keys({ ...PR, effort: 'high' })).toEqual(
@@ -264,7 +266,18 @@ describe('requiredAgents — Step 3B', () => {
   });
 
   it('does not demand the dimension agents — a chunk agent owns them for its lines', () => {
-    for (const dim of ['1a', '2', '3', '4', '5', '6a', '6b', '6c']) {
+    for (const dim of [
+      '1a',
+      '2',
+      '3a',
+      '3b',
+      '3c',
+      '4',
+      '5',
+      '6a',
+      '6b',
+      '6c',
+    ]) {
       expect(keys(BIG)).not.toContain(dim);
     }
   });
