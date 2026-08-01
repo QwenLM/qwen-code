@@ -6563,6 +6563,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 
@@ -9569,6 +9570,7 @@ describe('runQwenServe startup observability', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 
