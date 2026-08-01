@@ -74,6 +74,18 @@ function startFakeToolServer(toolName: string, input: Record<string, unknown>) {
   }, FAKE_SERVER_OPTIONS);
 }
 
+/** True when any user message in the request body contains `text`. */
+function userMessageContains(
+  body: Record<string, unknown>,
+  text: string,
+): boolean {
+  const messages =
+    (body['messages'] as Array<{ role: string; content: unknown }>) ?? [];
+  return messages.some(
+    (m) => m.role === 'user' && JSON.stringify(m.content).includes(text),
+  );
+}
+
 /**
  * Factory function that creates a streaming input with a control point.
  * After the first message is yielded, the generator waits for a resume signal,
@@ -415,8 +427,16 @@ describe('Permission Control (E2E)', () => {
 
     it('should block write tools after changing permission mode from yolo to plan', async () => {
       const fileName = 'plan-after-switch.txt';
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex === 1) {
+      let toolCallServed = false;
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        // Serve the tool call on the first request whose user messages
+        // mention the target file, so internal SDK requests (memory, etc.)
+        // cannot shift it into the wrong turn.
+        if (
+          !toolCallServed &&
+          userMessageContains(body, `Create ${fileName}`)
+        ) {
+          toolCallServed = true;
           return {
             toolCalls: [
               fakeToolCall('write_file', {
@@ -522,8 +542,13 @@ describe('Permission Control (E2E)', () => {
     it('should auto-approve write tools after changing permission mode to auto-edit', async () => {
       let callbackInvoked = false;
       const fileName = 'auto-edit-after-switch.txt';
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex === 1) {
+      let toolCallServed = false;
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        if (
+          !toolCallServed &&
+          userMessageContains(body, `Create ${fileName}`)
+        ) {
+          toolCallServed = true;
           return {
             toolCalls: [
               fakeToolCall('write_file', {
@@ -1074,11 +1099,11 @@ describe('Permission Control (E2E)', () => {
         'should block run_shell_command in plan mode',
         async () => {
           const fakeServer = await startFakeToolServer('run_shell_command', {
-            command: 'echo hello',
+            command: 'touch plan-shell-blocked.txt',
           });
 
           const q = query({
-            prompt: 'Run echo hello.',
+            prompt: 'Run touch plan-shell-blocked.txt.',
             options: {
               ...SHARED_TEST_OPTIONS,
               ...fakeModelOptions(fakeServer.baseUrl),
