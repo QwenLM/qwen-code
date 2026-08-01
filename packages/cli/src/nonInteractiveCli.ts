@@ -84,6 +84,12 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import {
+  formatAudioBridgeNotice,
+  hasAudioParts,
+  runAudioBridge,
+  shouldPreserveUnsupportedAudioForBridge,
+} from './services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -835,6 +841,8 @@ export async function runNonInteractive(
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
+            preserveUnsupportedAudioForBridge:
+              shouldPreserveUnsupportedAudioForBridge(config, settings),
           });
 
           if (!shouldProceed || !processedQuery) {
@@ -918,13 +926,31 @@ export async function runNonInteractive(
       let initialParts = normalizePartList(initialPartList);
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
-      const emitVisionNotice = (subtype: string, notice: string) => {
+      const emitBridgeNotice = (subtype: string, notice: string) => {
         if (outputFormat === OutputFormat.TEXT) {
           process.stderr.write(`${notice}\n`);
         } else {
           adapter.emitSystemMessage(subtype, { notice });
         }
       };
+      if (inlineModelOverride === undefined && hasAudioParts(initialParts)) {
+        const audioBridgeResult = await runAudioBridge({
+          config,
+          settings,
+          parts: initialParts,
+          signal: abortController.signal,
+        });
+        if (
+          audioBridgeResult.status !== 'skipped' ||
+          audioBridgeResult.egressCount > 0
+        ) {
+          emitBridgeNotice(
+            'audio_bridge',
+            formatAudioBridgeNotice(audioBridgeResult),
+          );
+        }
+        initialParts = audioBridgeResult.parts;
+      }
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
@@ -944,7 +970,7 @@ export async function runNonInteractive(
               .resolveForModel(fullTurnModelOverride.slice(0, -1), {
                 failClosed: true,
               });
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_routing',
               formatFullTurnVisionNotice(fullTurnModel),
             );
@@ -960,7 +986,7 @@ export async function runNonInteractive(
               bridgeResult.status !== 'skipped' ||
               bridgeResult.egressOccurred
             ) {
-              emitVisionNotice(
+              emitBridgeNotice(
                 'vision_bridge',
                 formatVisionBridgeNotice(bridgeResult),
               );
@@ -975,7 +1001,7 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_bridge_failed',
               'Vision bridge failed; proceeding without the image(s).',
             );

@@ -1501,6 +1501,32 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('does not support audio input');
     });
 
+    it('keeps audio inline when preserveUnsupportedAudio is true', async () => {
+      const audioBytes = Buffer.from('fake audio data');
+      const audioPath = path.join(tempRootDir, 'clip.mp3');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/mpeg');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/mpeg',
+          displayName: 'clip.mp3',
+        },
+      });
+      expect(result.returnDisplay).toContain('Read audio file');
+    });
+
     it('keeps supported audio bytes unchanged', async () => {
       const audioPath = path.join(tempRootDir, 'clip.mp3');
       const audioBytes = Buffer.from('fake audio data');

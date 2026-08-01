@@ -172,6 +172,33 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
 
+  it('preserves unsupported audio for the audio bridge', async () => {
+    const audioPath = await createTestFile(
+      path.join(testRootDir, 'recording.wav'),
+      'fake wav data',
+    );
+
+    const result = await handleAtCommand({
+      query: `listen to @${audioPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 126,
+      signal: abortController.signal,
+      preserveUnsupportedAudioForBridge: true,
+    });
+
+    const parts = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+      : [result.processedQuery];
+    expect(parts).toContainEqual({
+      inlineData: {
+        data: Buffer.from('fake wav data').toString('base64'),
+        mimeType: 'audio/wav',
+        displayName: 'recording.wav',
+      },
+    });
+  });
+
   it.skipIf(process.platform === 'win32')(
     'reads a file symlink through its canonical target type',
     async () => {

@@ -52,6 +52,7 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
+const mockRunAudioBridge = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -115,6 +116,14 @@ const mockDualOutput = vi.hoisted(() => ({
 vi.mock('../../services/review-worktree-lease.js', () => ({
   cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
 }));
+
+vi.mock('../../services/audio-bridge-service.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/audio-bridge-service.js')
+    >();
+  return { ...actual, runAudioBridge: mockRunAudioBridge };
+});
 
 vi.mock('../../dualOutput/DualOutputContext.js', () => ({
   useDualOutput: mockUseDualOutput,
@@ -334,6 +343,7 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockRunAudioBridge.mockReset();
     mockCleanupReviewWorktreeLeases.mockReset();
     mockUseDualOutput.mockReset().mockReturnValue(null);
   });
@@ -727,6 +737,48 @@ describe('useGeminiStream', () => {
 
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'submittedPrompt',
+    );
+  });
+
+  it('converts attached audio before sending it to the primary model', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'machine transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [{ text: 'listen' }, audioPart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'machine transcript' },
+    ]);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Converted 1 audio file(s)'),
+      }),
+      expect.any(Number),
     );
   });
 

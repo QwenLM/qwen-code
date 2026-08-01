@@ -965,6 +965,11 @@ export interface ProcessSingleFileContentOptions {
    */
   preserveUnsupportedImage?: boolean;
   /**
+   * When true, keep audio inline for a text-only model so a caller can
+   * transcribe it before the primary-model request.
+   */
+  preserveUnsupportedAudio?: boolean;
+  /**
    * Prepare PDF page images for `read_file` to transcribe through the vision
    * bridge. Unlike `preserveUnsupportedImage`, this never changes how ordinary
    * image files are handled.
@@ -1053,6 +1058,7 @@ export async function processSingleFileContent(
     limit,
     pages,
     preserveUnsupportedImage = false,
+    preserveUnsupportedAudio = false,
     preparePdfForVisionBridge = false,
     signal,
     largePdfBehavior = 'error',
@@ -1278,12 +1284,10 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        // On the interactive @-resolution path, the caller can keep image parts
-        // inline so the vision bridge can transcribe them downstream for a
-        // text-only model. Other media (audio/video) are always skipped.
-        const bridgeWillHandleImage =
-          modality === 'image' && preserveUnsupportedImage;
-        if (!bridgeWillHandleImage) {
+        const bridgeWillHandleMedia =
+          (modality === 'image' && preserveUnsupportedImage) ||
+          (modality === 'audio' && preserveUnsupportedAudio);
+        if (!bridgeWillHandleMedia) {
           const message = unsupportedModalityMessage(modality, displayName);
           debugLogger.warn(
             `Model '${config.getModel()}' does not support ${modality} input. ` +
@@ -1295,7 +1299,7 @@ export async function processSingleFileContent(
           };
         }
         debugLogger.debug(
-          `Preserving unsupported image for vision bridge: ${relativePathForDisplay}`,
+          `Preserving unsupported ${modality} for bridge: ${relativePathForDisplay}`,
         );
       }
     }

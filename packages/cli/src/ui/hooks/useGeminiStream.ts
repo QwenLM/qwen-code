@@ -124,6 +124,12 @@ import {
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
+import {
+  formatAudioBridgeNotice,
+  hasAudioParts,
+  runAudioBridge,
+  shouldPreserveUnsupportedAudioForBridge,
+} from '../../services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -1174,6 +1180,47 @@ export const useGeminiStream = (
     [addItem, config],
   );
 
+  const applyBridgeConversionsIfNeeded = useCallback(
+    async (
+      parts: PartListUnion | null,
+      timestamp: number,
+      signal: AbortSignal,
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      let nextParts = parts;
+      if (
+        nextParts !== null &&
+        hasAudioParts(nextParts) &&
+        !modelOverrideRef.current?.endsWith('\0') &&
+        !inlineModelOverrideActiveRef.current
+      ) {
+        const result = await runAudioBridge({
+          config,
+          settings,
+          parts: nextParts,
+          signal,
+        });
+        if (result.status !== 'skipped' || result.egressCount > 0) {
+          addItem(
+            {
+              type:
+                result.status === 'failed'
+                  ? MessageType.ERROR
+                  : MessageType.INFO,
+              text: formatAudioBridgeNotice(result),
+            },
+            timestamp,
+          );
+        }
+        if (signal.aborted) {
+          return { parts: null, shouldProceed: false };
+        }
+        nextParts = result.parts;
+      }
+      return applyVisionBridgeIfNeeded(nextParts, timestamp, signal);
+    },
+    [addItem, applyVisionBridgeIfNeeded, config, settings],
+  );
+
   const prepareQueryForGemini = useCallback(
     async (
       query: PartListUnion,
@@ -1289,7 +1336,7 @@ export const useGeminiStream = (
                 }
               }
 
-              const bridgeResult = await applyVisionBridgeIfNeeded(
+              const bridgeResult = await applyBridgeConversionsIfNeeded(
                 localQueryToSendToGemini,
                 userMessageTimestamp,
                 abortSignal,
@@ -1371,6 +1418,8 @@ export const useGeminiStream = (
             messageId: userMessageTimestamp,
             signal: abortSignal,
             addItem,
+            preserveUnsupportedAudioForBridge:
+              shouldPreserveUnsupportedAudioForBridge(config, settings),
           });
 
           if (!atCommandResult.shouldProceed) {
@@ -1379,7 +1428,7 @@ export const useGeminiStream = (
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
 
-        const bridgeResult = await applyVisionBridgeIfNeeded(
+        const bridgeResult = await applyBridgeConversionsIfNeeded(
           localQueryToSendToGemini,
           userMessageTimestamp,
           abortSignal,
@@ -1410,7 +1459,8 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
-      applyVisionBridgeIfNeeded,
+      applyBridgeConversionsIfNeeded,
+      settings,
     ],
   );
 
@@ -2648,6 +2698,8 @@ export const useGeminiStream = (
                   onDebugMessage,
                   messageId: timestamp + index,
                   signal: atCommandSignal,
+                  preserveUnsupportedAudioForBridge:
+                    shouldPreserveUnsupportedAudioForBridge(config, settings),
                 }),
             );
             const shouldSkipMessage =
@@ -2706,7 +2758,7 @@ export const useGeminiStream = (
           }
         }
 
-        const bridgeResult = await applyVisionBridgeIfNeeded(
+        const bridgeResult = await applyBridgeConversionsIfNeeded(
           resolvedQuery,
           timestamp + index,
           signal,
@@ -2780,10 +2832,11 @@ export const useGeminiStream = (
     },
     [
       addItem,
-      applyVisionBridgeIfNeeded,
+      applyBridgeConversionsIfNeeded,
       config,
       handleSlashCommand,
       onDebugMessage,
+      settings,
     ],
   );
 

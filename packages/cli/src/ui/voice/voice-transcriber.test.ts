@@ -589,6 +589,30 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it('allows non-private IPv4-translated IPv6 DNS records', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:0:c612:40' }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects private IPv4-translated IPv6 DNS records', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:0:c0a8:101' }),
+      ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
   it('rejects voice model hosts when DNS safety lookup fails', async () => {
     await expect(
       transcribeVoiceAudio(

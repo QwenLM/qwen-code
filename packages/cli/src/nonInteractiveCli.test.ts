@@ -61,7 +61,13 @@ import {
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const runAudioBridgeSpy = vi.hoisted(() => vi.fn());
 vi.mock('./ui/hooks/atCommandProcessor.js');
+vi.mock('./services/audio-bridge-service.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('./services/audio-bridge-service.js')>();
+  return { ...original, runAudioBridge: runAudioBridgeSpy };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -226,6 +232,7 @@ describe('runNonInteractive', () => {
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     runVisionBridgeSpy.mockReset();
+    runAudioBridgeSpy.mockReset();
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetDebugResponses = vi.fn().mockReturnValue([]);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -436,6 +443,10 @@ describe('runNonInteractive', () => {
     { text: 'inspect this image' },
     { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
   ];
+  const headlessAudioParts: Part[] = [
+    { text: 'listen to this audio' },
+    { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+  ];
   const finishedEvents: ServerGeminiStreamEvent[] = [
     {
       type: GeminiEventType.Finished,
@@ -507,6 +518,51 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('converts headless audio before sending it to a text-only model', async () => {
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'machine transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'listen @recording.wav',
+      'prompt-audio-bridge',
+    );
+
+    expect(runAudioBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockSettings,
+      parts: headlessAudioParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'machine transcript' }],
+      expect.any(AbortSignal),
+      'prompt-audio-bridge',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Converted 1 audio file(s)'),
+    );
   });
 
   it('registers and clears the stream-json workflow approval channel', async () => {

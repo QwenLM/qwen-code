@@ -158,6 +158,21 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
   ].join('.');
 }
 
+function readIpv4TranslatedIpv6(host: string): string | undefined {
+  const match = host.match(/^::ffff:0:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!match) {
+    return undefined;
+  }
+  const value =
+    (Number.parseInt(match[1]!, 16) << 16) | Number.parseInt(match[2]!, 16);
+  return [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ].join('.');
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
@@ -176,6 +191,10 @@ function isPrivateNetworkIp(hostname: string): boolean {
   const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
   if (normalizedIpv4Compatible) {
     return isPrivateNetworkIp(normalizedIpv4Compatible);
+  }
+  const normalizedIpv4Translated = readIpv4TranslatedIpv6(host);
+  if (normalizedIpv4Translated) {
+    return isPrivateNetworkIp(normalizedIpv4Translated);
   }
   if (host.startsWith('::ffff:')) {
     return true;

@@ -4414,7 +4414,7 @@ describe('Session', () => {
       }
     });
 
-    it('routes ACP audio prompts through the voice bridge for text-only primary models', async () => {
+    it('routes ACP audio prompts through the audio bridge for text-only primary models', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
         .fn()
@@ -4465,7 +4465,7 @@ describe('Session', () => {
       );
     });
 
-    it('does not run the voice bridge when the primary model supports audio', async () => {
+    it('does not run the audio bridge when the primary model supports audio', async () => {
       mockConfig.getEffectiveInputModalities = vi
         .fn()
         .mockReturnValue({ audio: true });
@@ -4570,7 +4570,7 @@ describe('Session', () => {
       );
     });
 
-    it('rejects oversized ACP audio before decoding for the voice bridge', async () => {
+    it('rejects oversized ACP audio before decoding for the audio bridge', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
       process.env[ENV_KEY] = String(20 * 1024 * 1024);
@@ -4610,7 +4610,7 @@ describe('Session', () => {
       );
     });
 
-    it('falls back to text-only parts when voice bridge transcription fails', async () => {
+    it('falls back to text-only parts when audio bridge transcription fails', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
         .fn()
@@ -5116,6 +5116,59 @@ describe('Session', () => {
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves unsupported audio @ paths for the audio bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-audio-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      transcribeVoiceAudioSpy.mockResolvedValue('audio transcript');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+            validatedPathIdentities: expect.any(Map),
+          }),
+        );
+        expect(textParts(firstSentMessage())).toContainEqual(
+          expect.stringContaining('audio transcript'),
+        );
+        expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+          false,
+        );
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -7145,7 +7198,7 @@ describe('Session', () => {
         });
 
         const audioFallbackPart = {
-          text: '[Voice bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
+          text: '[Audio bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
         };
         const midTurnParts: Part[] = [
           {
