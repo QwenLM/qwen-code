@@ -246,15 +246,17 @@ export class CdpBrowserEmulator {
     if (sessionId === TAB_SESSION_ID) {
       if (method === 'Target.setAutoAttach') {
         this.autoAttachActive = params?.['autoAttach'] !== false;
-        this.cb.reply({
-          method: 'Target.attachedToTarget',
-          sessionId: TAB_SESSION_ID,
-          params: {
-            targetInfo: this.pageTargetInfo(),
-            sessionId: PAGE_SESSION_ID,
-            waitingForDebugger: false,
-          },
-        });
+        if (this.autoAttachActive) {
+          this.cb.reply({
+            method: 'Target.attachedToTarget',
+            sessionId: TAB_SESSION_ID,
+            params: {
+              targetInfo: this.pageTargetInfo(),
+              sessionId: PAGE_SESSION_ID,
+              waitingForDebugger: false,
+            },
+          });
+        }
         return this.cb.reply({ id, sessionId, result: {} });
       }
       // ack other tab-session commands (e.g. Runtime.runIfWaitingForDebugger).
@@ -263,7 +265,7 @@ export class CdpBrowserEmulator {
 
     // ── page session: forward to the real tab via the extension ──
     if (
-      sessionId === PAGE_SESSION_ID ||
+      (sessionId === PAGE_SESSION_ID && this.autoAttachActive) ||
       this.attachedPageSessions.has(sessionId)
     ) {
       try {

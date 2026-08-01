@@ -197,6 +197,11 @@ async function tick() {
       showWelcome(status, allowOriginCommand(chrome.runtime.id));
     }
   } catch {
+    if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
+      framedMisses += 1;
+      return;
+    }
+    framedMisses = 0;
     showWelcome(
       { state: 'down', shellReady: false, warning: null },
       allowOriginCommand(chrome.runtime.id),

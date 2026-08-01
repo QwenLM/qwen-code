@@ -94,6 +94,13 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       result: { type: 'number', value: 2 },
     }));
     await emu.handleFromClient({
+      id: 5,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
       id: 6,
       method: 'Runtime.evaluate',
       params: { expression: '1+1' },
@@ -194,6 +201,13 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       throw { code: -32000, message: 'Not allowed' };
     });
     await emu.handleFromClient({
+      id: 6,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
       id: 7,
       method: 'Page.captureScreenshot',
       sessionId: 'qwen-cdp-page-session',
@@ -248,11 +262,40 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       params: { autoAttach: false, flatten: true },
       sessionId: 'qwen-cdp-tab-session',
     });
+    expect(
+      replies.filter((r) => r.method === 'Target.attachedToTarget'),
+    ).toHaveLength(0);
     replies.length = 0;
     emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r-off' });
     expect(
       replies.filter((reply) => reply.sessionId === 'qwen-cdp-page-session'),
     ).toHaveLength(0);
+  });
+
+  it('rejects page-session commands when autoAttach is false', async () => {
+    const { emu, replies, forwardToTab } = setup();
+    await emu.handleFromClient({
+      id: 35,
+      method: 'Target.setAutoAttach',
+      params: { autoAttach: false, flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 36,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1' },
+      sessionId: 'qwen-cdp-page-session',
+    });
+    expect(forwardToTab).not.toHaveBeenCalled();
+    expect(replies[0]).toMatchObject({
+      id: 36,
+      sessionId: 'qwen-cdp-page-session',
+      error: {
+        code: -32000,
+        message: 'Unknown CDP session: qwen-cdp-page-session',
+      },
+    });
   });
 
   it('skips the auto-attach session when no setAutoAttach handshake occurred', async () => {
