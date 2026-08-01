@@ -22,6 +22,7 @@ if (!command) {
 const child = spawn(command, ['--wsEndpoint', endpoint], {
   stdio: ['pipe', 'pipe', 'pipe'],
 });
+child.stdin.on('error', () => {});
 let stderr = '';
 let buffer = '';
 let nextId = 1;
@@ -95,6 +96,7 @@ const verifyCurrentPage = async (expectedUrl) => {
   const verifier = spawn(command, ['--wsEndpoint', endpoint], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  verifier.stdin.on('error', () => {});
   let verifierBuffer = '';
   let verifierStderr = '';
   const verifierResponses = new Map();
