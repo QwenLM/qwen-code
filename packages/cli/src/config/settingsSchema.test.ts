@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
+  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
@@ -350,6 +351,22 @@ describe('SettingsSchema', () => {
         getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
       ).toBe(true);
       expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
     });
 
     it('should have consistent default values for boolean settings', () => {

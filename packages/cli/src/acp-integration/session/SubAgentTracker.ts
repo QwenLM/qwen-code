@@ -26,6 +26,7 @@ import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
   RequestPermissionRequest,
+  RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
@@ -36,6 +37,11 @@ import {
 } from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
+
+type PermissionRequester = (
+  params: RequestPermissionRequest,
+  signal: AbortSignal,
+) => Promise<RequestPermissionResponse>;
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.
@@ -66,6 +72,10 @@ export class SubAgentTracker {
     parentToolCallId: string,
     subagentType: string,
     private readonly onPermissionCancel?: () => void,
+    private readonly permissionRequester: PermissionRequester = (
+      params,
+      signal,
+    ) => requestPermissionWithAbort(this.client, params, signal),
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -229,11 +239,7 @@ export class SubAgentTracker {
 
       try {
         // Request permission from client
-        const output = await requestPermissionWithAbort(
-          this.client,
-          params,
-          abortSignal,
-        );
+        const output = await this.permissionRequester(params, abortSignal);
         const outcome = resolvePermissionOutcome(
           output,
           offeredPermissionOptions,

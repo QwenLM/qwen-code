@@ -1253,6 +1253,113 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('cascade-strips a signed thinking block when its sibling tool_use is orphaned in the same pass', () => {
+      // A thinking block's signature is computed over the full sibling
+      // content of its turn. If a sibling tool_use is stripped as an
+      // orphan, the signature no longer matches and replaying it 400s:
+      // "thinking blocks in the latest assistant message cannot be
+      // modified". So the thinking block must go with it.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { text: 'Let me help' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'never mind' }] },
+        ],
+      });
+
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg!.content).toEqual([
+        { type: 'text', text: 'Let me help' },
+      ]);
+    });
+
+    it('does not cascade-strip thinking when a sibling tool_use survives alongside an orphaned one', () => {
+      // Partial-orphan case: turn = [thinking, tool_use A, tool_use B],
+      // only A's result comes back -- B is a genuine orphan and is
+      // stripped, but A survives. The thinking sibling must stay too: it's
+      // still needed to satisfy Anthropic's manual-mode "final turn must
+      // begin with thinking when a tool_use is present" rule, and
+      // cascading here would trade one 400 for another.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'a', name: 'tool', args: {} } },
+              { functionCall: { id: 'b', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'a',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      const blocks = assistantMsg!.content as Array<{ type: string }>;
+      expect(blocks[0]?.type).toBe('thinking');
+      expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
+      expect(blocks).toHaveLength(2);
+    });
+
+    it('drops the whole message and merges surrounding user turns when a cascade empties out the turn entirely', () => {
+      // The bot review's flagged coverage gap: the only existing cascade
+      // test leaves a surviving `text` block, so `finalBlocks` is never
+      // empty and the `else` drop branch in cleanOrphanedToolCalls is
+      // never exercised. Here the turn's only blocks are a signed thinking
+      // part and an orphaned tool_use, so after the cascade strips both,
+      // finalBlocks is empty and the whole assistant message must be
+      // dropped -- and the surrounding user messages must merge.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'before' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'after' }] },
+        ],
+      });
+
+      expect(messages.some((m) => m.role === 'assistant')).toBe(false);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.role).toBe('user');
+      expect(messages[0]!.content).toEqual([
+        { type: 'text', text: 'before' },
+        {
+          type: 'text',
+          text: 'after',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
     it('cleans orphaned tool_result blocks without matching tool_use', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -1291,6 +1398,107 @@ describe('AnthropicContentConverter', () => {
             },
           ],
         },
+      ]);
+    });
+
+    it('drops a duplicate tool_result sharing a tool_use_id within one message', () => {
+      // Anthropic rejects a message with two tool_result blocks for the
+      // same tool_use_id ("each `tool_use` block must have a single
+      // result" -- HTTP 400). This can happen when a tool call's result
+      // is recorded twice in history.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toHaveLength(3);
+      const toolResults = (
+        messages[2]!.content as Array<{ type: string; tool_use_id?: string }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0]).toMatchObject({
+        tool_use_id: 'dup',
+        content: 'first',
+      });
+    });
+
+    it('drops a duplicate tool_result for one id while keeping a different id in the same message', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'dup', name: 'tool', args: {} } },
+              { functionCall: { id: 'other', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'other',
+                  name: 'tool',
+                  response: { output: 'other-result' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const toolResults = (
+        messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+          content?: string;
+        }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults.map((b) => [b.tool_use_id, b.content])).toEqual([
+        ['dup', 'first'],
+        ['other', 'other-result'],
       ]);
     });
 
@@ -1499,6 +1707,134 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'y',
             content: 'second',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops a duplicate tool_result for the same id across two consecutive user messages', () => {
+      // cleanOrphanedToolCalls only dedupes tool_result blocks within a
+      // single message; mergeConsecutiveUserMessages runs afterward and
+      // can combine two originally-separate user messages that each
+      // independently carried a (individually valid) tool_result for the
+      // same tool_use_id. Without a second dedup pass at the merge site,
+      // the merged message would resurface the exact "two tool_result
+      // blocks for one tool_use_id" shape Anthropic rejects.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+              { text: 'a follow-up note' },
+            ],
+          },
+        ],
+      });
+
+      // Full merged content, not just the filtered tool_result blocks --
+      // confirms the non-tool_result sibling from the second message
+      // survives the merge and still sorts after the (deduped) results.
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'dup', content: 'first' },
+          {
+            type: 'text',
+            text: 'a follow-up note',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops duplicate tool_result blocks across three consecutive user messages', () => {
+      // Pins that the merge-site dedup accumulates across the whole
+      // `combined` array on every iteration, not just pairwise between
+      // the two most recently merged messages -- with three originally
+      // separate user turns each carrying a tool_result for the same
+      // tool_use_id, only the first should survive.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup3', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'third' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'dup3',
+            content: 'first',
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -1820,6 +2156,77 @@ describe('AnthropicContentConverter', () => {
       ).toThrow('proxy omitted the thinking signature');
     });
 
+    it('fails locally, rather than silently dropping the block, when an EMPTY-text unsigned thinking block belongs to a non-latest step of an active tool-use loop', () => {
+      // Regression guard for pipeline ordering: dropEmptyTextThinkingBlocks
+      // must run AFTER this check, not before. An empty-text thinking
+      // block with no signature is unsigned by the same definition this
+      // active-loop check uses -- if the empty-text guard ran first it
+      // would delete the block before this check ever saw it, silently
+      // swallowing exactly the proxy bug this throw exists to surface
+      // (the same pass-ordering hazard identified against the removed
+      // PATCH-B heuristic).
+      //
+      // Needs a two-step loop: a single assistant turn is always "the
+      // latest", and dropEmptyTextThinkingBlocks unconditionally exempts
+      // the latest turn regardless of ordering, so a one-step fixture
+      // can't distinguish the two orderings. Step 1's empty-text thinking
+      // must be on a NON-latest turn that is still part of the unbroken
+      // tool_use/tool_result chain reaching the end of history.
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tool' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: '', thought: true },
+                  { functionCall: { id: 't1', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+              {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'signed reasoning',
+                    thought: true,
+                    thoughtSignature: 'sig',
+                  },
+                  { functionCall: { id: 't2', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't2',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+
     it('drops unsigned thinking from a completed tool-use turn', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
@@ -1912,6 +2319,95 @@ describe('AnthropicContentConverter', () => {
           { dropUnsignedAssistantThinking: true },
         ),
       ).toThrow('proxy omitted the thinking signature');
+    });
+  });
+
+  describe('dropEmptyTextThinkingBlocks', () => {
+    it('leaves a signed, non-empty thinking block on a non-latest turn untouched', () => {
+      // A broader cross-turn heuristic here (detecting "this turn's
+      // tool_use went stale in an earlier trim" and downgrading its
+      // thinking to text) was removed after review: it couldn't
+      // distinguish that state from "this turn was always thinking-only",
+      // and live verification showed it rewriting turns that were never
+      // actually invalid. Only an empty-text thinking block is
+      // unconditionally invalid regardless of tool_use presence; a
+      // populated, signed thinking block is left exactly as-is.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                text: 'stale reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const olderAssistant = messages[1];
+      expect(olderAssistant.role).toBe('assistant');
+      expect(olderAssistant.content).toEqual([
+        { type: 'thinking', thinking: 'stale reasoning', signature: 'sig' },
+      ]);
+    });
+
+    it('drops an empty redacted_thinking-derived turn entirely (defensive, no plaintext fallback)', () => {
+      // convertAnthropicResponseToGemini represents a redacted_thinking
+      // block as `{ text: '', thought: true }` (its opaque `data` doesn't
+      // survive the Gemini-Part round trip -- see that method's doc). When
+      // this round-trips back through processContent it becomes an
+      // empty-text `thinking` block on the wire, which this defensive
+      // guard drops outright, dropping the whole message since nothing
+      // else survives.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true }],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0].content).toEqual([
+        { type: 'text', text: 'Sure, here you go.' },
+      ]);
+    });
+
+    it('leaves the latest assistant turn untouched even with empty-text thinking', () => {
+      // The latestAssistantIdx short-circuit fires before the empty-text
+      // filter runs at all, so this must hold regardless of content -- use
+      // an actually-empty-text block (matching the title) rather than a
+      // populated one, so this test would fail if the exemption were ever
+      // narrowed to "non-empty-text latest turns only".
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true, thoughtSignature: 'sig' }],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'sig' },
+      ]);
     });
   });
 
