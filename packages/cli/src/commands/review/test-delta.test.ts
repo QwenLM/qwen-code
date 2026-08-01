@@ -52,16 +52,33 @@ describe('failingFilesOf', () => {
     expect(failingFilesOf(out)).toEqual(['src/x.test.ts']);
   });
 
-  it('reads the workspace-prefixed FAIL shape', () => {
-    // vitest workspace runs prefix the project name: `FAIL  |@scope/pkg| src/…`.
+  it('keeps the workspace project token IN the identity', () => {
+    // Dropping it collapsed same-named files across workspaces, so a PR-caused
+    // failure in one package could read as pre-existing because another package
+    // has a file by the same name.
     const out = ' FAIL  |@qwen-code/qwen-code| src/commands/x.test.ts > case';
-    expect(failingFilesOf(out)).toEqual(['src/commands/x.test.ts']);
+    expect(failingFilesOf(out)).toEqual([
+      '@qwen-code/qwen-code::src/commands/x.test.ts',
+    ]);
+  });
+
+  it("normalises paths against each run's own root before comparing", () => {
+    // The two sides run in DIFFERENT roots; comparing absolute paths verbatim
+    // made every pre-existing failure a fabricated netNew.
+    expect(
+      failingFilesOf(' FAIL  /wt/pr/src/a.test.ts > flaky', '/wt/pr'),
+    ).toEqual(['src/a.test.ts']);
+    expect(
+      failingFilesOf(' FAIL  /wt/base/src/a.test.ts > flaky', '/wt/base'),
+    ).toEqual(['src/a.test.ts']);
   });
 
   it('reads a Windows path shape', () => {
     // A missed parse is an unattributed failure, not a loud error.
+    // Backslashes normalise to `/` so a Windows path compares with its
+    // POSIX-printed twin on the other side.
     expect(failingFilesOf(' FAIL  C:\\repo\\src\\x.test.ts > case')).toEqual([
-      'C:\\repo\\src\\x.test.ts',
+      'C:/repo/src/x.test.ts',
     ]);
   });
 

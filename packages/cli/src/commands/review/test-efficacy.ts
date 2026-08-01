@@ -145,36 +145,45 @@ export function planTestEfficacy(
 
 export type MutantVerdict = 'killed' | 'survived' | 'inconclusive';
 
-export interface MutantCandidate {
+/**
+ * A candidate the probe will run. The two shapes are a union so an operator
+ * without its replacement line is UNREPRESENTABLE: `runOneMutant` takes the
+ * ACTION from `mutated` and the verdict WORDING from `operator`, so a
+ * half-populated candidate would delete a line while reporting "with its
+ * `?? fallback` dropped".
+ */
+export type MutantCandidate = DeletionMutant | ReplacementMutant;
+
+export interface ReplacementMutant extends MutantBase {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  /** The full replacement LINE (untrimmed). Required by construction. */
+  mutated: string;
+}
+
+/** What both mutant shapes carry. */
+export interface MutantBase {
   file: string;
   /** 1-based line number in the post-change file. */
   line: number;
   /** The statement's text, trimmed — quoted back verbatim in the report. */
   statement: string;
-  /**
-   * Which experiment this candidate runs. Absent (legacy) or `'delete'`: the
-   * line is deleted. The other operators REPLACE the line with `mutated`:
-   *
-   *   - `'coalesce'` — drop a `?? fallback`. What survives it: the fallback is
-   *     the only thing standing between a config miss and a worse default (a
-   *     live re-verification found the one guard against a regression's return
-   *     living in a `?? getModel()` nothing tested).
-   *   - `'guard-true'` — replace a comparison-bearing `if` condition with
-   *     `true`. What survives it: no test pins when the guard must NOT fire —
-   *     the same re-verification found a fix's own skip-condition shipping
-   *     untested.
-   *   - `'term-drop'` — drop a `+ UPPER_CONST` term. What survives it: a
-   *     reserve/limit term in an estimate is unpinned.
-   */
-  operator?: 'delete' | 'coalesce' | 'guard-true' | 'term-drop';
-  /** The full replacement LINE (untrimmed), for the replacement operators. */
-  mutated?: string;
 }
 
-export interface MutantResult extends MutantCandidate {
+/**
+ * The legacy shape: the line is DELETED. `operator` is absent (or `'delete'`)
+ * and there is no replacement line — see the union above for why that is
+ * enforced by the type rather than by a convention.
+ */
+export interface DeletionMutant extends MutantBase {
+  operator?: 'delete';
+  mutated?: undefined;
+}
+
+/** An intersection, not `extends`: the candidate is a union now. */
+export type MutantResult = MutantCandidate & {
   verdict: MutantVerdict;
   detail: string;
-}
+};
 
 /**
  * At most this many deletion mutants per run. Every mutant is a full vitest run
@@ -645,7 +654,9 @@ export function replacementMutantsOf(
   // every branch: `if (ready)` survivors are noise, `if (a !== b)` survivors
   // mean nothing pins when the guard must not fire. The condition must close on
   // this line (balanced parens), or `true` would splice mid-expression.
-  const ifm = /^((?:}\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
+  // `}` optional before `else`: a brace-less `else if (a !== b)` is the same
+  // guard shape and was silently skipped.
+  const ifm = /^((?:}?\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
   if (ifm) {
     let depth = 1;
     let condEnd = -1;
@@ -666,7 +677,9 @@ export function replacementMutantsOf(
       // comparison: it ends in `>` followed by a space, and the loose class
       // made every predicate guard a candidate — the `if (ready)` noise this
       // gate exists to exclude.
-      /[!=]==|(?<![=!<>])[<>]=?(?!=)\s/.test(ifm[2].slice(0, condEnd))
+      // The trailing `\s` was accidental asymmetry with `[!=]==`, which has
+      // none: `if (a<b)` is the same guard, just unformatted.
+      /[!=]==|(?<![=!<>])[<>]=?(?![=>])/.test(ifm[2].slice(0, condEnd))
     ) {
       return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
     }
