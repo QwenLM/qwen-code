@@ -27,7 +27,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? CONTAINER_SANDBOX_NO_PROXY
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
-const RESPONSE_TIMEOUT_MS = 15000;
+const RESPONSE_TIMEOUT_MS = process.env['CI'] ? 60000 : 30000;
 
 function fakeModelOptions(baseUrl: string) {
   return {

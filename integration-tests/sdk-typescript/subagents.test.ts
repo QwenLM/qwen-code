@@ -125,7 +125,12 @@ describe('Subagents (E2E)', () => {
     const testFile = helper.getPath('test.txt');
     let sentReadFile = false;
     let subagentToolNames: string[] = [];
-    fakeResponse = ({ body, requestIndex }) => {
+    let streamingRequestIndex = 0;
+    fakeResponse = ({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      const requestIndex = streamingRequestIndex++;
       if (requestIndex === 0) {
         return {
           toolCalls: [
@@ -183,7 +188,11 @@ describe('Subagents (E2E)', () => {
         }
       }
 
-      expect(fakeServer.requests[0]?.body['tools']).toEqual(
+      expect(
+        fakeServer.requests.find(({ body }) => body['stream'] === true)?.body[
+          'tools'
+        ],
+      ).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             function: expect.objectContaining({
