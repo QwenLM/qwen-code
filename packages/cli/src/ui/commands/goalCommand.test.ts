@@ -66,11 +66,23 @@ function makeRuntime(
   return { dispatch, getSnapshot, runtime };
 }
 
-function makeContext(runtime: GoalRuntime, { trusted = true } = {}) {
+function makeContext(
+  runtime: GoalRuntime,
+  {
+    trusted = true,
+    executionMode = 'interactive',
+  }: {
+    trusted?: boolean;
+    executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  } = {},
+) {
   const getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
   const isTrustedFolder = vi.fn(() => trusted);
   const config = { getGoalRuntimeReady, isTrustedFolder } as unknown as Config;
-  const context = createMockCommandContext({ services: { config } });
+  const context = createMockCommandContext({
+    executionMode,
+    services: { config },
+  });
   return { context, getGoalRuntimeReady, isTrustedFolder };
 }
 
@@ -140,22 +152,49 @@ describe('goalCommand', () => {
     ]);
   });
 
-  it.each(['pause', 'resume', 'edit revised'] as const)(
-    'rejects /goal %s in non-interactive mode',
-    async (args) => {
-      const context = createMockCommandContext({
+  it.each([
+    [
+      'edit revised',
+      {
+        action: 'edit',
+        objective: 'revised',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 4,
+      },
+    ],
+    [
+      'pause',
+      {
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 4,
+      },
+    ],
+    [
+      'resume',
+      {
+        action: 'resume',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 4,
+      },
+    ],
+  ] as const)(
+    'uses the canonical runtime for non-interactive /goal %s',
+    async (args, expectedRequest) => {
+      const { dispatch, runtime } = makeRuntime(goalSnapshot());
+      const { context } = makeContext(runtime, {
         executionMode: 'non_interactive',
       });
+
       const result = await goalCommand.action!(context, args);
-      expect(result).toMatchObject({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringMatching(/only available in interactive mode/i),
-      });
+
+      expect(dispatch).toHaveBeenCalledWith(expectedRequest);
+      expect(result).toMatchObject({ type: 'goal_control' });
+      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
     },
   );
 
-  it('strips the set keyword before forwarding to the legacy path in non-interactive mode', async () => {
+  it('strips the set keyword before forwarding to the legacy ACP path', async () => {
     mockRegisterGoalHook.mockReturnValue({
       condition: 'Ship it',
       setAt: Date.now(),
@@ -167,7 +206,7 @@ describe('goalCommand', () => {
       getHookSystem: () => ({}),
     } as unknown as Config;
     const context = createMockCommandContext({
-      executionMode: 'non_interactive',
+      executionMode: 'acp',
       services: { config },
     });
 
@@ -179,7 +218,7 @@ describe('goalCommand', () => {
   });
 
   it.each(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])(
-    'sets a literal %j objective instead of clearing in non-interactive mode',
+    'sets a literal %j objective instead of clearing in legacy ACP mode',
     async (keyword) => {
       mockRegisterGoalHook.mockReturnValue({
         condition: keyword,
@@ -192,7 +231,7 @@ describe('goalCommand', () => {
         getHookSystem: () => ({}),
       } as unknown as Config;
       const context = createMockCommandContext({
-        executionMode: 'non_interactive',
+        executionMode: 'acp',
         services: { config },
       });
 
@@ -206,7 +245,7 @@ describe('goalCommand', () => {
     },
   );
 
-  it('still clears on a bare clear keyword in non-interactive mode', async () => {
+  it('still clears on a bare clear keyword in legacy ACP mode', async () => {
     mockUnregisterGoalHook.mockReturnValue({
       condition: 'Old goal',
       iterations: 2,
@@ -219,7 +258,7 @@ describe('goalCommand', () => {
       getHookSystem: () => ({}),
     } as unknown as Config;
     const context = createMockCommandContext({
-      executionMode: 'non_interactive',
+      executionMode: 'acp',
       services: { config },
     });
 
