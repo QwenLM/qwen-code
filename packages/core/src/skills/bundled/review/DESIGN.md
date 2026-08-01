@@ -2,7 +2,7 @@
 
 > Architecture decisions, trade-offs, and rejected alternatives for the `/review` skill.
 
-## Why 12 agents + 1 verify + iterative reverse, not 1 agent?
+## Why 14 agents + 1 verify + iterative reverse, not 1 agent?
 
 **Considered:**
 
@@ -10,11 +10,12 @@
 - **5 parallel agents (original design):** Each agent focuses on one dimension. Higher coverage through forced diversity of perspective. Limited by combined Correctness+Security and a single undirected pass — recall ceiling left findings on the table that the user only discovered in subsequent /review rounds.
 - **9 parallel agents:** 6 review dimensions (Correctness, Security, Code Quality, Performance, Test Coverage, Undirected) + Build & Test. Undirected runs as 3 personas in parallel.
 - **10 parallel agents:** The 9-agent design plus Issue Fidelity & Root-Cause Ownership, which compares linked issue evidence against the PR's claimed fix before accepting a client-side change.
-- **12 parallel agents (current):** The 10-agent design with Correctness split into three procedural walks — 1a line-by-line scan, 1b removed-behavior audit, 1c cross-file tracer — plus up to 2 optional diff-specialized finders (Agent 8) when one domain dominates the diff.
+- **12 parallel agents:** The 10-agent design with Correctness split into three procedural walks — 1a line-by-line scan, 1b removed-behavior audit, 1c cross-file tracer — plus up to 2 optional diff-specialized finders (Agent 8) when one domain dominates the diff.
+- **14 parallel agents (current):** The 12-agent design with Code Quality split into three checklist slices on the same evidence that split Correctness and the invariant checklist — 3a reuse & duplication, 3b altitude & abstraction fit, 3c consistency & clarity. One agent holding a six-item quality checklist finishes one item (measured on PR #6457: one agent with an eight-item checklist found 1 of 5 defects; the same model split three ways found all 5).
 
-**Decision:** 12 agents. The marginal cost (12x vs 1x) is acceptable because:
+**Decision:** 14 agents. The marginal cost (14x vs 1x) is acceptable because:
 
-1. All 12 agents are submitted in one response and run concurrently up to the runtime's tool-call cap (default 10, `QWEN_CODE_MAX_TOOL_CONCURRENCY`) — wall time is bounded by roughly two waves at worst, still far below twelve sequential agents
+1. All 14 agents are submitted in one response and run concurrently up to the runtime's tool-call cap (default 10, `QWEN_CODE_MAX_TOOL_CONCURRENCY`) — wall time is bounded by roughly two waves at worst, still far below fourteen sequential agents
 2. Dimensional focus produces higher recall (fewer missed issues)
 3. Three undirected personas (attacker / 3am-oncall / maintainer) catch cross-dimensional issues that a single undirected agent's prompt-induced bias would miss
 4. Issue Fidelity prevents a common false approval mode: a PR can be internally well-tested while solving only the author's mistaken diagnosis, not the linked issue's original failure
@@ -30,7 +31,7 @@ Test gaps are a systematic blind spot. Review agents focused on bugs in the new 
 
 ### Why a dedicated Issue Fidelity agent
 
-Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (11 agents instead of 12).
+Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (13 agents instead of 14).
 
 The agent also enforces the root-cause ownership gate: a client-side parser/sanitizer workaround for malformed upstream output is not acceptable as a root-cause fix unless a maintainer explicitly asked for that defensive mitigation.
 
@@ -100,11 +101,11 @@ The original design gave one agent the whole diff plus a growing cumulative find
 
 ### Why the topology gate counts source lines, not diff lines
 
-Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by ten lenses (the diff-reading dimension agents: twelve minus Issue Fidelity and Build & Test).
+Diff size is a bad proxy for review risk, because tests dominate it. Across this repo's last 40 merged PRs the median diff is **41% test code**, and 14 of the 40 are more than half tests. A gate on raw diff lines sends a change of 173 production lines that ships 489 lines of new tests into the territory fan-out, where the production code ends up owned by a single chunk agent — while under the dimension fan-out it would have been read by twelve lenses (the diff-reading dimension agents: fourteen minus Issue Fidelity and Build & Test).
 
-Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 3200` as an attention bound: past that point asking ten diff-reading lenses each to swallow the whole diff dilutes all of them, and the chunk topology's base cost (`ceil(diffLines / 400) + 4`, counting the whole-diff agents that read the diff — Build & Test reads none) crosses twelve about there. It is not a promise of fewer calls — a heavy file adds three invariant agents and a dominant domain up to two specialized finders — but of one accountable reader per line instead of ten diluted ones. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
+Territory fan-out is worth it when there is a lot of _risky_ code to divide, not a lot of _lines_. So the gate is `srcDiffLines > 500`, with a second clause `diffLines > 3200` as an attention bound: past that point asking the thirteen diff-reading lenses each to swallow the whole diff dilutes all of them, and the chunk topology's base cost (`ceil(diffLines / 400) + 4`, counting the whole-diff agents that read the diff — Build & Test reads none) crosses that count nearer 3 600. The gate stays at 3 200 rather than moving with the roster — fanning out slightly before the crossover errs toward one accountable reader per line, and a gate that drifts every time a dimension is split or merged is a gate nobody can reason about. It is not a promise of fewer calls — a heavy file adds three invariant agents and a dominant domain up to two specialized finders — but of one accountable reader per line instead of thirteen diluted ones. On the 40-PR sample the second clause never fires; it exists for a changeset dominated by tests or generated files.
 
-Re-gating moved 6 of those 40 PRs from 3B back to 3A and cost 22 extra agents in total across all 40 — about 5% — measured under the earlier 10-agent 3A roster; under the current 12-agent roster the same six PRs cost 2 more each, ~34 extra (~7%). It buys those six PRs ten review lenses on their production code instead of one.
+Re-gating moved 6 of those 40 PRs from 3B back to 3A and cost 22 extra agents in total across all 40 — about 5% — measured under the earlier 10-agent 3A roster; under the current 14-agent roster the same six PRs cost 4 more each, ~46 extra (~10%). It buys those six PRs twelve review lenses on their production code instead of one.
 
 Chunking itself is unchanged: the plan still tiles every line, tests and generated files included. Only the count of reviewers and their brief change. `heavy` is likewise restricted to `source` files — the invariant checklist asks about fields, timers, collections, and error taxonomies, and a rewritten test file has none of those.
 
@@ -397,6 +398,40 @@ Three deliberate limits:
 - **It is per-finding, not per-review.** A cold checkout means an install and a build — the honest price, and why the command's idempotent fast path reuses an already-built tree instead of letting concurrent verifiers each pay it (or worse, sweep it out from under each other mid-A/B). Paid on a review with a comparative claim it is cheap for what it settles; paid on every review it is a tax most of them get nothing for. So it lives in the verifier's brief as an option, next to the probe, on the same terms.
 - **Unavailable is never a finding.** No merge base, a merge base that may be stale (`baseFetchFailed` — an A/B against the wrong base attributes the base branch's own commits to this PR, the two-dot-diff error in another shape), or a base tree that will not compile: each is a fact about the harness. The base failing to build says nothing whatsoever about the PR, and a review that filed it as one would be reporting on its own infrastructure.
 
+## Why rendering claims get a real renderer — and only with a user-designated scratch repo
+
+A sanitizer PR's guarantees are claims about GitHub: what its comment pipeline decodes, what its allowlist strips, when its notification path fires. A live verification measured the gap between the model and the authority exactly where it hurts: an `@` → `&#64;` defusal that every local reading called sound, because GitHub decodes character references _before_ the mention filter runs — a fact no local markdown library reproduces and the real renderer demonstrated in one posted comment (the mention registered, the subscription fired). Judging a sanitizer against a local model of GitHub is the same parser-divergence failure the sanitizer itself is being reviewed for.
+
+So the verifier gets the authority itself — under three constraints that keep it from eroding the write ban:
+
+- **User-designated, or nothing.** The capability exists only when `QWEN_REVIEW_SCRATCH_REPO` names a repo the user chose for disposable posts. There is no default, no fallback, no "any repo I can write to": the review does not pick its own outward write destination, ever.
+- **Payload-minimal.** What gets posted is the markdown shape under test, never the report, the diff, or anything naming the PR or its authors — a scratch post that leaked review content would be a disclosure, not a measurement.
+- **Honest without it.** Absent the setting, a rendering claim caps at low confidence / `cannot tell`. The alternative — "confirmed" off a local approximation — is precisely the false assurance the live case measured.
+
+Step 7's write ban names the carve-out explicitly rather than relying on "the scratch repo is not the PR": the ban's strength is that a compressor cannot narrow it, so an exception it does not name is an exception a compressed run cannot trust.
+
+## Why extract-step exists, and why it stubs nothing
+
+The strongest workflow verification in this repo's review history ran the real composer step from both arms with a stubbed `gh` and byte-compared outputs against a real posted comment. Everything judgment-shaped in that harness — what to stub, what input to feed, what to diff — stays with the verifier. What moves into code is the half that is mechanical and quietly error-prone by hand: finding the right job, the right step among same-named siblings, and carrying the settings whose values change the script's behaviour. The command emits the script **verbatim** plus metadata: the `${{ … }}` sites (listed, never evaluated — any value this command inserted would be an invention), the env (as comments, never half-substituted exports — an unbound variable should fail loudly), and a heuristic list of invoked commands as the stubbing starting point. Combined with `base-tree`, the two arms of the by-hand harness are now two invocations.
+
+Three details of that mechanical half are worth naming, because each was a way the command could have been quietly wrong about the script it claims to reproduce verbatim:
+
+- **`env:`, `shell:` and `working-directory:` are three-level settings** — workflow, job, step, nearest wins — and only the step level appears in the step's own text. Reading step level alone would reproduce by machine the transcription error the command exists to remove; measured on this repo's own workflows, **195 of 434 `run:` steps inherit env from an outer level**, so it would have been wrong about 45% of them. The metadata carries the merged result plus the level each key came from, ordered nearest-first so a step's own vars are not buried under an inherited block.
+- **A `shell:` declared as `bash` is not the runner's default `bash`.** The default is `bash -e {0}`; declaring `shell: bash` (at any level) makes it `bash --noprofile --norc -eo pipefail {0}`. A pipeline whose middle stage fails aborts under one and not the other, so the emitted header carries `set -eo pipefail` or `set -e` accordingly — a distinction that decides whether the extraction measures the same script the runner ran.
+- **The header must be inert, line by line.** A `env:` value can be a YAML block scalar; commenting only the entry's first line left its continuation lines in command position, and under the header's own `set -e` the step died in its preamble before its body ran. Four steps in this repo produced exactly that. The test oracle asserts the property directly — the file is the header plus the body verbatim, and every line before the body is a comment or a named directive — rather than filtering the output for lines that look executable, a filter that could not tell the header's `set -e` from one the body legitimately contains.
+
+## Why the round-3 lenses are prose, not detectors
+
+Seven lenses joined the briefs from one verification round, and each is a judgment with a crisp trigger rather than a decidable predicate — which is what separates a brief lens from a subcommand here:
+
+- **A borrowed idiom, missing what made it work at home.** The `&#64;` rewrite was lifted from a workflow where the _code ancestor_ did the protecting; the entity was belt-and-braces, and only the braces were copied. The check — read the source context of a lifted defensive construct, name what it provided — requires understanding which surrounding condition was load-bearing.
+- **A second parser is a divergence hunt.** A sanitizer's model of markdown against GitHub's parse: every input the two read differently is a bypass. Finding the divergent input is the work; a tool can only confirm one once named.
+- **A `fixed` ruling on a divergence-class defect is a ruling about the family.** Round 6 of the same verification closed the fence-shaped entrance into a raw-HTML block and left the code-span entrance beside it open — same divergence, adjacent syntax. The re-check bar in Step 6 now says it outright: enumerate the sibling entrances before ruling `fixed`, report a still-open sibling as a new finding, and keep the two rulings separate (the original's `fixed` stands when its own input is closed). Judgment again: knowing which inputs are "the same mechanism" is the understanding a detector cannot supply.
+- **A threshold fix's coverage is a number, and the number wants measuring.** A ratio-guard fix verified live was covering exactly half of its linked issue's reported shapes — provable only by holding the issue's own preamble fixed and binary-searching the payload size where recovery flips (~473 chars). The recipe (fix the variables, scan the guarded one, put the boundary next to the issue's report) is in the verifier's brief; choosing which variable to scan is the judgment half.
+- **The sharpest parser-differential corner is the format's own delimiters as payload.** A no-escaping extractor fed a value containing its close tag truncates silently — measured live as a file written truncated with no warning. Named explicitly in the lens so the first probe is the strongest one.
+- **A deliberate-design defence covers the states it argues, not the gate it shares.** An input-hold correct and argued for the _active_ state silently froze three idle states nothing had argued for — the sibling-entrance rule applied to a state machine. The documented-intent step now says it: enumerate the states a shared gate serves, and treat every unargued one on its own merits.
+- **Mechanism-pinning tests, and oracles that mirror the implementation.** A test asserting `&#64;` appears pins the mechanism while the guarantee fails; a fold-balance test whose helper re-implements the sanitizer's own scanner shares its blind spot by construction. Both shapes need the reviewer to ask what the _effect_ assertion would be and where an independent oracle would come from.
+
 ## Why test failures are attributed by measurement, and why the delta is over file sets
 
 Agent 7's brief has always carried a path rule: a failure in a file the diff changed is a Critical, one in a file it did not touch is pre-existing. It was the best rule available when the review had one tree, and it misclassifies in both directions — an environment-sensitive test failing in a touched file gets filed as a Critical the PR did not cause, and a PR that breaks a test in an untouched file (the exact shape the base-tree section above is about) gets waved through. The first live run of this pipeline hit the benign half: three env-sensitive core failures the model had to _reason_ into "pre-existing, not in diff", correctly but on judgment.
@@ -523,11 +558,11 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 **Considered:**
 
-- **Always-full (original):** every `/review` runs the full pipeline. Right for a PR verdict; wrong for a 5-line pre-commit sanity check — 12 agents, sharded verification, and ≥2 reverse-audit rounds to re-derive what one reader could see in a single pass.
+- **Always-full (original):** every `/review` runs the full pipeline. Right for a PR verdict; wrong for a 5-line pre-commit sanity check — 14 agents, sharded verification, and ≥2 reverse-audit rounds to re-derive what one reader could see in a single pass.
 - **A `--quick` boolean:** two modes, but "quick" hides what is and isn't checked (rules? cross-file? build?).
-- **Three levels (chosen):** **low** = one orchestrator pass over the chunk plan, hunk-visible bugs only, ≤8 findings. **medium** = the finder angles (1a, 1b, 1c, quality/altitude, performance, conventions) run **sequentially in the orchestrator's own context** — inline sequencing, not subagents, is what makes the level cheap — ≤12 findings. **high** = the full pipeline, unchanged.
+- **Three levels (chosen):** **low** = 3-6 directed angles (per `plan.budget.inlineAngles`) plus a gap sweep, all in the orchestrator's own context over the chunk plan — hunk-visible bugs only, ≤10 unverified findings. **medium** = the high pipeline minus its most expensive passes: the parallel finder fan-out over a reduced dimension set (no adversarial personas, no Agent 8), build & test, and a single verification pass — verified findings, Approve capped at Comment, no reverse audit. **high** = the full pipeline, unchanged.
 
-**Guardrails, because a quick pass is recall-limited by construction.** "Quick pass" means **low and medium together** — they differ in depth (one diff pass vs. sequential finder angles; ≤8 vs. ≤12 findings) but share every guardrail below, because what the guardrails defend against is the same at both: findings that no verifier ever checked.
+**Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
 
 - Labeled **unverified**; no Approve/Request-changes verdict is emitted. A verdict is a claim the pipeline earns in Steps 4–5; a quick pass claims findings, not absence of findings.
 - Never posts to the PR: `--comment` forces high, and a "post comments" follow-up after a quick pass is declined.
@@ -538,18 +573,18 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 ## LLM call budget
 
-**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 15-21 calls (typically 15-17):**
+**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 17-23 calls (typically 17-19):**
 
-| Stage                   | Calls               | Why                                                                                                                                                                                                                                      |
-| ----------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Review agents           | 12 (+0-2)           | issue fidelity + 3 procedural correctness walks (1a/1b/1c) + security/quality/perf/tests + 3 undirected personas + build&test, plus 0-2 diff-specialized finders; cross-repo skips Agents 7 and 1c (10), non-PR skips Agent 0 (11)       |
-| Sharded verification    | `ceil(F/8)`         | F = findings; typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                                     |
-| Iterative reverse audit | 2-5                 | loop ends after two consecutive dry rounds; 5-round hard cap                                                                                                                                                                             |
-| **Total**               | **~15-21 (~13-20)** | Row maxima do not co-occur on typical runs (~15-17 is common), but the honest sum of ranges is 15-21 same-repo, 13-20 cross-repo/local. **Low/medium effort: 0 subagent calls** — the inline pass runs in the orchestrator's own context |
+| Stage                   | Calls               | Why                                                                                                                                                                                                                                                                       |
+| ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Review agents           | 14 (+0-2)           | issue fidelity + 3 procedural correctness walks (1a/1b/1c) + security + 3 quality slices (3a/3b/3c) + perf/tests + 3 undirected personas + build&test, plus 0-2 diff-specialized finders; cross-repo skips Agents 7 and 1c (12), non-PR skips Agent 0 (13)                |
+| Sharded verification    | `ceil(F/8)`         | F = findings; typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                                                                      |
+| Iterative reverse audit | 2-5                 | loop ends after two consecutive dry rounds; 5-round hard cap                                                                                                                                                                                                              |
+| **Total**               | **~17-23 (~15-22)** | Row maxima do not co-occur on typical runs (~17-19 is common), but the honest sum of ranges is 17-23 same-repo, 15-22 cross-repo/local. **Low effort: 0 subagent calls** — the angle rotation runs in the orchestrator's own context; medium launches its reduced fan-out |
 
 **Large diffs (> 500 source lines OR > 3200 total diff lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + `5..7` whole-diff agents + `3H` invariant agents (H = heavy files) + `ceil(F/8)` verify (F = findings) + `rounds × chunks` reverse audit.** The reverse audit dominates: it fans out one auditor per chunk per round, and the stop rule needs two consecutive dry rounds (hard cap 5). PR #6457 (5801 diff lines, 19 chunks, 1 heavy file) costs ~27-29 first-wave calls, then `19 × (2..5) = 38-95` reverse auditors — ~66-126 calls total depending on how long the audit keeps finding; ~70 is the clean-run floor, and the count scales with chunks and findings, not a fixed ceiling.
 
-That is roughly 4x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents (the roster of the day; twelve now) on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls were redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not ~70 calls vs ~17: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
+That is roughly 4x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents (the roster of the day; fourteen now) on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls were redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not ~70 calls vs ~17: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
 
 Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Ours biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
 
@@ -633,22 +668,22 @@ The convergence concern that motivated the summary is real but narrower than it 
 
 For a PR with 15 findings:
 
-| Approach                                            | LLM calls            | Notes                                                                                                |
-| --------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
-| Copilot (1 agent)                                   | 1                    | Lowest cost, lowest coverage                                                                         |
-| Gemini (2 LLM tasks)                                | 2                    | Good cost, medium coverage                                                                           |
-| Our design (5 agents, N verify)                     | 21                   | 5+15+1 — too expensive                                                                               |
-| Our design (5 agents, batch verify, single reverse) | 7                    | 5+1+1 — original design                                                                              |
-| Our design (9 agents, iterative reverse)            | 11-13                | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                 |
-| Our design (10 agents)                              | 12-14                | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                     |
-| Our design (12 agents + effort levels, current)     | 15-21 high / 0 quick | 12(+0-2)+ceil(F/8)+(2-5) under 3A; low/medium run inline with no subagents — cost scales with intent |
-| Claude /ultrareview                                 | 5-20                 | Cloud-hosted, cost on Anthropic                                                                      |
+| Approach                                            | LLM calls          | Notes                                                                                                                   |
+| --------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Copilot (1 agent)                                   | 1                  | Lowest cost, lowest coverage                                                                                            |
+| Gemini (2 LLM tasks)                                | 2                  | Good cost, medium coverage                                                                                              |
+| Our design (5 agents, N verify)                     | 21                 | 5+15+1 — too expensive                                                                                                  |
+| Our design (5 agents, batch verify, single reverse) | 7                  | 5+1+1 — original design                                                                                                 |
+| Our design (9 agents, iterative reverse)            | 11-13              | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                                    |
+| Our design (10 agents)                              | 12-14              | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                                        |
+| Our design (14 agents + effort levels, current)     | 17-23 high / 0 low | 14(+0-2)+ceil(F/8)+(2-5) under 3A; low runs inline with no subagents, 3-6 angles by diff size — cost scales with intent |
+| Claude /ultrareview                                 | 5-20               | Cloud-hosted, cost on Anthropic                                                                                         |
 
 ## Future optimization: Fork Subagent
 
 > Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
 
-**Current problem:** Each of the ~15-21 LLM calls (12-14 review + sharded verify + 2-5 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~780K-1.1M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 12-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low/medium runs spawn no subagents at all.)
+**Current problem:** Each of the ~17-23 LLM calls (14-16 review + sharded verify + 2-5 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~880K-1.2M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 14-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low runs spawn no subagents at all, and medium spawns the reduced fan-out.)
 
 **Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
 
@@ -656,13 +691,13 @@ For a PR with 15 findings:
 Current (independent subagents):
   Agent 1: [50K system] + [2K task]  = 52K
   Agent 2: [50K system] + [2K task]  = 52K
-  ...× 15-21 agents                 = ~780K-1.1M total input tokens
+  ...× 17-23 agents                 = ~880K-1.2M total input tokens
 
 With Fork + prompt cache sharing:
   Cached prefix: [50K system + conversation history]  (cached once)
   Fork 1: [cache hit] + [2K delta]   = ~2K effective
   Fork 2: [cache hit] + [2K delta]   = ~2K effective
-  ...× 15-21 forks                  = ~50K cached + ~30-42K delta = ~80-92K total
+  ...× 17-23 forks                  = ~50K cached + ~34-46K delta = ~84-96K total
 ```
 
 **Additional benefits for /review:**
