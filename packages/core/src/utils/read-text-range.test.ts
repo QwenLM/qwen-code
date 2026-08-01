@@ -12,6 +12,7 @@ import { iconvEncode } from './iconvHelper.js';
 import {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
+  detectLineEndingFromContent,
   readTextCursorWindowFromHandle,
   readTextRange,
   readTextRangeFromHandle,
@@ -993,5 +994,15 @@ describe('readTextCursorWindowFromHandle', () => {
       expect(spans[spans.length - 1][1]).toBe(size);
       expect(pages.join('\n')).toBe(body);
     });
+  });
+});
+
+describe('detectLineEndingFromContent', () => {
+  it('reports crlf for small CRLF content', () => {
+    expect(detectLineEndingFromContent('line1\r\nline2\r\n')).toBe('crlf');
+  });
+
+  it('reports lf when no CRLF is present', () => {
+    expect(detectLineEndingFromContent('line1\nline2\n')).toBe('lf');
   });
 });
