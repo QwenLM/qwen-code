@@ -16,7 +16,7 @@ describe('channel registry', () => {
     ]);
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
-    ).toEqual(['dingtalk', 'wecom', 'feishu']);
+    ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(
