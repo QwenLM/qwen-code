@@ -408,9 +408,22 @@ jobs:
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           npm run test:ci
 
-      - name: 'Run no-AK integration smoke tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'pull_request' }}"
-        run: 'npm run test:integration:no-ak:sandbox:none'
+      - name: 'Run required no-AK integration gate'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        env:
+          HOME: '${{ runner.temp }}/qwen-no-ak-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
+          OPENAI_API_KEY: ''
+          OPENAI_BASE_URL: ''
+          OPENAI_MODEL: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          QWEN_MODEL: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          mkdir -p "${HOME}"
+          npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
         if: |-
