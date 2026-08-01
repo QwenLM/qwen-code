@@ -84,13 +84,18 @@ export class WorkflowRunner {
       ? await journal?.load()
       : undefined;
     const controller = createChildAbortController(options.signal);
+    const registry = config.getWorkflowRunRegistry?.();
     const dispatch =
       options.dispatch ??
-      createProductionDispatch(config, controller.signal, (outputTokens) =>
-        budget.recordSpent(outputTokens),
+      createProductionDispatch(
+        config,
+        controller.signal,
+        (outputTokens) => budget.recordSpent(outputTokens),
+        registry
+          ? (emitter) => registry.bridgeApprovalEvents(runId, emitter)
+          : undefined,
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
-    const registry = config.getWorkflowRunRegistry?.();
     const entry = registry?.register({
       runId,
       meta: null,

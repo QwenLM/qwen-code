@@ -51,12 +51,17 @@ import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
+  readdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
   lstatSync,
   existsSync,
+  statSync,
+  symlinkSync,
+  type Stats,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
@@ -762,10 +767,27 @@ export function classifyProbeRun(
     // `testResults[].name` is absolute; the probe path is repo-relative. Match
     // on a path-separator boundary, so `src/a.test.ts` cannot be satisfied by
     // `/w/vendor/other-src/a.test.ts` — a bare `endsWith` would take the wrong
-    // file's verdict and never say so.
-    const result = byFile.find(
-      (r) => (r.name ?? '').endsWith(`/${file}`) || r.name === file,
-    );
+    // file's verdict and never say so. Normalise `\` to `/` only on Windows:
+    // there backslash IS a separator, but on POSIX it is a legal filename
+    // character, so normalising it unconditionally would let
+    // `/w/vendor/other\src/a.test.ts` satisfy `src/a.test.ts` — the very false
+    // match the boundary exists to prevent. Fold case on Windows as well: its
+    // paths are case-insensitive, so a drive letter or 8.3 name reported in a
+    // different case would otherwise miss and read `inconclusive` — the same
+    // wrong-verdict silence, in the other direction. Never fold on POSIX, where
+    // case is significant.
+    const probe =
+      process.platform === 'win32'
+        ? file.replace(/\\/g, '/').toLowerCase()
+        : file;
+    const result = byFile.find((r) => {
+      const raw = r.name ?? '';
+      const name =
+        process.platform === 'win32'
+          ? raw.replace(/\\/g, '/').toLowerCase()
+          : raw;
+      return name.endsWith(`/${probe}`) || name === probe;
+    });
     const assertions = result?.assertionResults ?? [];
     const failed = assertions.filter((a) => a.status === 'failed').length;
     const passed = assertions.filter((a) => a.status === 'passed').length;
@@ -832,6 +854,44 @@ function gitOut(cwd: string, ...args: string[]): string {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
   }
   return (r.stdout ?? '').trim();
+}
+
+/**
+ * Resolve the vitest CLI entry the probe runs with.
+ *
+ * Spawning `process.execPath` against vitest's own entry — not `npx` — sidesteps
+ * `npx.cmd` and shell quoting on Windows entirely. The entry is read from
+ * vitest's `bin` field rather than a hard-coded `vitest.mjs`: `package.json`
+ * pins a caret range, so a minor bump can move the bin target. A miss must also
+ * explain itself — name the search root and what was sought — because the throw
+ * lands in the probe's catch and an unexplained `inconclusive` is the one failure
+ * shape a review must not have. `createRequire` anchored at the worktree does the
+ * same up-tree walk Node uses for the probe's own imports, so it also survives
+ * non-hoisted layouts.
+ */
+export function findVitestBin(worktree: string): string {
+  const req = createRequire(join(worktree, 'noop.js'));
+  let pkgPath: string;
+  try {
+    pkgPath = req.resolve('vitest/package.json');
+  } catch (error) {
+    // Only a genuine MODULE_NOT_FOUND is "vitest not found". A present vitest
+    // whose `exports` no longer exposes `./package.json` throws
+    // ERR_PACKAGE_PATH_NOT_EXPORTED — a different problem with a different fix;
+    // folding it into "not found" sends the reader hunting a missing install.
+    if ((error as { code?: string }).code === 'MODULE_NOT_FOUND') {
+      throw new Error(`vitest not found searching up from ${worktree}`);
+    }
+    throw error;
+  }
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+    bin?: { vitest?: string };
+  };
+  const bin = pkg.bin?.vitest;
+  if (!bin) {
+    throw new Error(`vitest package at ${pkgPath} declares no "vitest" bin`);
+  }
+  return join(dirname(pkgPath), bin);
 }
 
 /**
@@ -934,6 +994,70 @@ export function probeCleanupFailureDetail(
   return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
 }
 
+export function exposeDependencies(
+  probeTree: string,
+  dependencyRoot: string,
+): { linked: number; failed: number } {
+  const done = { linked: 0, failed: 0 };
+  if (probeTree === dependencyRoot) return done;
+  const source = join(dependencyRoot, 'node_modules');
+  const target = join(probeTree, 'node_modules');
+  if (!existsSync(source) || existsSync(target)) return done;
+  mkdirSync(target);
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
+    const sourceEntry = join(source, entry.name);
+    const targetEntry = join(target, entry.name);
+    // Every per-entry step is guarded: this is best-effort, so one locked or
+    // concurrently-unlinked entry must not throw out of the probe run (which
+    // would mark every probe `inconclusive`). What cannot be linked is counted
+    // and disclosed by the caller — never silently dropped.
+    let sourceStats: Stats;
+    try {
+      sourceStats = lstatSync(sourceEntry);
+    } catch {
+      done.failed++;
+      continue;
+    }
+    if (sourceStats.isSymbolicLink()) {
+      try {
+        if (!statSync(sourceEntry).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+    } else if (!sourceStats.isDirectory()) {
+      continue;
+    }
+    if (entry.name.startsWith('@')) {
+      let pkgs: string[];
+      try {
+        mkdirSync(targetEntry);
+        pkgs = readdirSync(sourceEntry);
+      } catch {
+        done.failed++;
+        continue;
+      }
+      for (const pkg of pkgs) {
+        try {
+          symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+          done.linked++;
+        } catch {
+          done.failed++;
+        }
+      }
+    } else {
+      try {
+        symlinkSync(sourceEntry, targetEntry, linkType);
+        done.linked++;
+      } catch {
+        done.failed++;
+      }
+    }
+  }
+  return done;
+}
+
 /**
  * One vitest run over the probe files, classified per file. Shared by the
  * baseline run, every mutant run, and the revert probe — the same suite, the
@@ -950,27 +1074,35 @@ function runProbeSuite(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): {
   perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
   ms: number;
+  exposed: { linked: number; failed: number };
 } {
   const started = now();
   const timeout =
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
       : PROBE_RUN_TIMEOUT_MS;
-  const r = spawnSync('npx', ['vitest', 'run', '--reporter=json', ...probes], {
-    cwd: probeTree,
-    encoding: 'utf8',
-    timeout,
-    // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-    // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-    // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const exposed = exposeDependencies(probeTree, dependencyRoot);
+  const r = spawnSync(
+    process.execPath,
+    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+    {
+      cwd: probeTree,
+      encoding: 'utf8',
+      timeout,
+      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
   // `r.error` is set — and `r.status` is null — when the process never ran
-  // (npx missing) or was killed (the timeout above fires SIGTERM). Ignoring
-  // it reports those as "the runner produced no parseable JSON", which
+  // (vitest entry missing or unresolvable) or was killed (the timeout above
+  // fires SIGTERM). Ignoring it reports those as "the runner produced no
+  // parseable JSON", which
   // blames the runner's output for a run that produced none.
   if (r.error) throw r.error;
   if (r.signal) {
@@ -986,6 +1118,7 @@ function runProbeSuite(
       `${r.stderr ?? ''}`,
     ),
     ms: now() - started,
+    exposed,
   };
 }
 
@@ -1249,6 +1382,7 @@ export function runOneMutant(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   const original = readFileSync(abs, 'utf8');
@@ -1267,7 +1401,13 @@ export function runOneMutant(
   lines.splice(mutant.line - 1, 1);
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
-    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
+    const { perFile } = runProbeSuite(
+      probeTree,
+      probes,
+      deadlineAt,
+      now,
+      dependencyRoot,
+    );
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
@@ -1389,6 +1529,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // disclosure with another.
   const noteMutants = (note: string) => {
     mutantsNote = mutantsNote ? `${mutantsNote}; ${note}` : note;
+  };
+  // A partial dependency farm lets vitest spawn but fails every probe's
+  // imports, reading red for a reason that is not the tests. Disclose it rather
+  // than let the report blame the suite for links that never arrived.
+  const noteDependencyFarm = (exposed: {
+    linked: number;
+    failed: number;
+  }): void => {
+    if (exposed.failed > 0) {
+      noteMutants(
+        `dependency farm incomplete: exposed ${exposed.linked}/${
+          exposed.linked + exposed.failed
+        } dependencies into the probe tree (${
+          exposed.failed
+        } failed to link) — probe results may not be evidence`,
+      );
+    }
   };
 
   if (probes.length > 0 && revert.length > 0) {
@@ -1528,7 +1685,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
         const mutantDeadline =
           startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
-        const baseline = runProbeSuite(probeTree, probes, mutantDeadline, now);
+        const baseline = runProbeSuite(
+          probeTree,
+          probes,
+          mutantDeadline,
+          now,
+          worktree,
+        );
+        noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
         // it: against a file already red the mutant is "killed" by failures it
         // did not cause, and a file that collected nothing proves nothing. Gate
@@ -1557,7 +1721,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               break;
             }
             mutantResults.push(
-              runOneMutant(probeTree, c, greenProbes, mutantDeadline, now),
+              runOneMutant(
+                probeTree,
+                c,
+                greenProbes,
+                mutantDeadline,
+                now,
+                worktree,
+              ),
             );
           }
 
@@ -1634,10 +1805,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
-        results.push(
-          ...runProbeSuite(probeTree, probes, startedAt + TOTAL_BUDGET_MS, now)
-            .perFile,
+        const revertRun = runProbeSuite(
+          probeTree,
+          probes,
+          startedAt + TOTAL_BUDGET_MS,
+          now,
+          worktree,
         );
+        noteDependencyFarm(revertRun.exposed);
+        results.push(...revertRun.perFile);
       } catch (e) {
         // The probe could not be set up or run. That is not evidence about any
         // test — record it and keep going, so the report (and the unreachable
