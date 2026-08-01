@@ -134,15 +134,14 @@ const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 // must stay in sync.
 const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
 
-function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
-  if (getToolCallPreparations(response).length === 0) return false;
-
-  const hasCandidateOutput = response.candidates?.some(
-    (candidate) =>
-      Boolean(candidate.finishReason) ||
-      (candidate.content?.parts?.length ?? 0) > 0,
+function hasCandidateOutput(response: GenerateContentResponse): boolean {
+  return Boolean(
+    response.candidates?.some(
+      (candidate) =>
+        Boolean(candidate.finishReason) ||
+        (candidate.content?.parts?.length ?? 0) > 0,
+    ),
   );
-  return !hasCandidateOutput && !response.usageMetadata;
 }
 
 /**
@@ -1182,17 +1181,10 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const JSON_TOOL_CALL_PREFIXES = [
-  '[{"name":',
-  '[{"prompt":',
-  '[{"subagent_type":',
-  '[{"run_in_background":',
-] as const;
-const TOOL_CALL_CLOSING_TAGS = /<\/parameter>\s*<\/function>\s*$/i;
+const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>(?:\s|$)/i;
 
 class LeadingProtocolTagLeakDetector {
-  private state: 'detecting' | 'json' | 'json-tool' | 'clean' | 'leaked' =
-    'detecting';
+  private state: 'detecting' | 'json' | 'clean' | 'leaked' = 'detecting';
   private buffer = '';
 
   accept(text: string): string {
@@ -1200,12 +1192,9 @@ class LeadingProtocolTagLeakDetector {
     if (this.state === 'leaked') return '';
 
     this.buffer += text;
-    if (this.state === 'json-tool') return '';
+    if (this.state === 'json') return '';
     const candidate = this.buffer.trimStart().toLowerCase();
     if (!candidate) return '';
-    if (this.state === 'json') {
-      return this.acceptJsonCandidate(candidate);
-    }
     if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
       return '';
     }
@@ -1220,20 +1209,25 @@ class LeadingProtocolTagLeakDetector {
         return '';
       }
     }
-    if (candidate.startsWith('[')) {
+    if (candidate.startsWith('{')) {
       this.state = 'json';
-      return this.acceptJsonCandidate(candidate);
+      return '';
+    }
+    if (candidate.startsWith('[')) {
+      const normalized = candidate.replace(/\s/g, '');
+      if (normalized === '[') return '';
+      if (normalized.startsWith('[{')) {
+        this.state = 'json';
+        return '';
+      }
     }
 
     return this.release();
   }
 
   finish(): string {
-    if (this.state === 'json' || this.state === 'json-tool') {
-      if (
-        this.state === 'json-tool' &&
-        TOOL_CALL_CLOSING_TAGS.test(this.buffer)
-      ) {
+    if (this.state === 'json') {
+      if (LEAKED_TOOL_CALL_TAGS.test(this.buffer)) {
         this.state = 'leaked';
         this.buffer = '';
         return '';
@@ -1254,25 +1248,7 @@ class LeadingProtocolTagLeakDetector {
   }
 
   releaseJsonCandidate(): string {
-    return this.state === 'json' || this.state === 'json-tool'
-      ? this.release()
-      : '';
-  }
-
-  private acceptJsonCandidate(candidate: string): string {
-    const normalized = candidate.replace(/\s/g, '');
-    if (
-      JSON_TOOL_CALL_PREFIXES.some((prefix) => prefix.startsWith(normalized))
-    ) {
-      return '';
-    }
-    if (
-      JSON_TOOL_CALL_PREFIXES.some((prefix) => normalized.startsWith(prefix))
-    ) {
-      this.state = 'json-tool';
-      return '';
-    }
-    return this.release();
+    return this.state === 'json' ? this.release() : '';
   }
 
   private release(): string {
@@ -2562,7 +2538,7 @@ export class GeminiChat {
 
             lastFinishReason = undefined;
             for await (const chunk of stream) {
-              if (!isToolCallPreparationOnly(chunk)) {
+              if (hasCandidateOutput(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;
               }
@@ -3399,7 +3375,7 @@ export class GeminiChat {
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
-                      !isToolCallPreparationOnly(event.value);
+                      hasCandidateOutput(event.value);
                     if (emittedUserVisibleOutput) {
                       currentFallbackYieldedAnyChunk = true;
                       fallbackStreamYieldedAnyChunk = true;
@@ -4113,10 +4089,9 @@ export class GeminiChat {
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
-    const takePendingProtocolParts = (text: string): Part[] => {
+    const takePendingProtocolParts = (): Part[] => {
       const parts = pendingProtocolParts;
       pendingProtocolParts = [];
-      if (parts.length === 0) return text ? [{ text }] : [];
       const released: Part[] = [];
       for (const part of parts) {
         const previous = released.at(-1);
@@ -4166,7 +4141,7 @@ export class GeminiChat {
             const text = protocolTagDetector.releaseJsonCandidate();
             if (text) {
               content.parts = [
-                ...takePendingProtocolParts(text),
+                ...takePendingProtocolParts(),
                 ...(content.parts ?? []),
               ];
             }
@@ -4183,11 +4158,11 @@ export class GeminiChat {
           const candidate = chunk.candidates?.[0];
           let content = candidate?.content;
           if (candidate?.finishReason && !content?.parts) {
-            const text = protocolTagDetector.finish();
+            protocolTagDetector.finish();
             if (protocolTagDetector.leaked) {
               pendingProtocolParts = [];
             } else {
-              const parts = takePendingProtocolParts(text);
+              const parts = takePendingProtocolParts();
               if (parts.length > 0) {
                 content = {
                   ...content,
@@ -4213,7 +4188,7 @@ export class GeminiChat {
                   ? ''
                   : protocolTagDetector.releaseJsonCandidate();
                 if (text) {
-                  outputParts.push(...takePendingProtocolParts(text), part);
+                  outputParts.push(...takePendingProtocolParts(), part);
                 } else if (
                   pendingProtocolParts.length > 0 ||
                   protocolTagDetector.leaked
@@ -4227,7 +4202,7 @@ export class GeminiChat {
               const text = protocolTagDetector.accept(part.text);
               if (text) {
                 if (pendingProtocolParts.length > 0) {
-                  outputParts.push(...takePendingProtocolParts(''), part);
+                  outputParts.push(...takePendingProtocolParts(), part);
                 } else {
                   outputParts.push({ ...part, text });
                 }
@@ -4238,11 +4213,11 @@ export class GeminiChat {
             }
             content.parts = outputParts;
             if (candidate?.finishReason) {
-              const text = protocolTagDetector.finish();
+              protocolTagDetector.finish();
               if (protocolTagDetector.leaked) {
                 pendingProtocolParts = [];
               } else {
-                content.parts.push(...takePendingProtocolParts(text));
+                content.parts.push(...takePendingProtocolParts());
               }
             }
             content.parts = normalizeModelToolCallIds(
@@ -4346,7 +4321,11 @@ export class GeminiChat {
           }
         }
 
-        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
+        if (
+          !chunk.candidates?.length ||
+          !protocolTextWasSuppressed ||
+          !protocolTagDetector.blockingOutput
+        ) {
           yield chunk;
         }
       }

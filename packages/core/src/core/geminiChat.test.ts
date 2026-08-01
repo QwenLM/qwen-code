@@ -6480,7 +6480,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
-    it('tries the next fallback when a fallback emits only preparation metadata', async () => {
+    it('continues fallback after usage and preparation metadata', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',
@@ -6537,7 +6537,14 @@ describe('GeminiChat', async () => {
       );
       vi.mocked(
         mockContentGenerator.generateContentStream,
-      ).mockRejectedValueOnce(capacityError);
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            usageMetadata: { promptTokenCount: 10, totalTokenCount: 10 },
+          } as GenerateContentResponse;
+          throw capacityError;
+        })(),
+      );
       const preparationResponse = {
         candidates: [{ content: { parts: [] } }],
       } as unknown as GenerateContentResponse;
@@ -6586,6 +6593,13 @@ describe('GeminiChat', async () => {
       expect(
         events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
       ).toHaveLength(2);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.usageMetadata?.promptTokenCount === 10,
+        ),
+      ).toBe(true);
       expect(
         events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
       ).toEqual([
@@ -9264,94 +9278,109 @@ describe('GeminiChat', async () => {
     ]);
   });
 
-  it('retries a JSON tool protocol leak before emitting or persisting it', async () => {
-    const recordAssistantTurn = vi.fn();
-    const chatWithRecording = new GeminiChat(
-      mockConfig,
-      config,
-      [],
-      {
-        recordAssistantTurn,
-        recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
-      uiTelemetryService,
-    );
-    const leakedJson = JSON.stringify([
-      {
-        prompt: 'Create the node.',
-        name: 'create_node',
-        subagent_type: 'general-purpose',
-        run_in_background: true,
-      },
-      {
-        name: 'read_ref',
-        prompt: 'Read the reference.',
-        subagent_type: 'general-purpose',
-        run_in_background: true,
-      },
-    ]);
-    vi.mocked(mockContentGenerator.generateContentStream)
-      .mockResolvedValueOnce(
-        streamResponse(
-          {
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    { text: '...', thought: true },
-                    { text: leakedJson.slice(0, 40) },
-                  ],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse,
-          {
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    {
-                      text:
-                        leakedJson.slice(40) + '\n</parameter>\n</function>\n',
-                    },
-                  ],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse,
-          {
-            candidates: [{ finishReason: 'STOP' }],
-          } as unknown as GenerateContentResponse,
-        ),
-      )
-      .mockResolvedValueOnce(
-        streamResponse(stopResponse([{ text: 'Successful final response' }])),
+  it.each([
+    {
+      name: 'array with a different first argument key',
+      leakedJson: JSON.stringify([
+        {
+          file_path: 'a.ts',
+          prompt: 'Create the node.',
+          name: 'create_node',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+        {
+          name: 'read_ref',
+          prompt: 'Read the reference.',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+      ]),
+      trailingText: '',
+      finishWithContent: false,
+    },
+    {
+      name: 'single object with trailing prose',
+      leakedJson: JSON.stringify({ command: 'ls', name: 'run_shell_command' }),
+      trailingText: '\nLet me continue.',
+      finishWithContent: true,
+    },
+  ])(
+    'retries a JSON tool protocol leak: $name',
+    async ({ leakedJson, trailingText, finishWithContent }) => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
       );
+      const leakedText =
+        leakedJson + '\n</parameter>\n</function>\n' + trailingText;
+      const leakedResponses = [
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: '...', thought: true },
+                  { text: leakedText.slice(0, 40) },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse,
+        {
+          candidates: [
+            {
+              content: { parts: [{ text: leakedText.slice(40) }] },
+              ...(finishWithContent ? { finishReason: 'STOP' as const } : {}),
+            },
+          ],
+        } as unknown as GenerateContentResponse,
+      ];
+      if (!finishWithContent) {
+        leakedResponses.push({
+          candidates: [{ finishReason: 'STOP' }],
+        } as unknown as GenerateContentResponse);
+      }
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(streamResponse(...leakedResponses))
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
 
-    const stream = await chatWithRecording.sendMessageStream(
-      'test-model',
-      { message: 'test' },
-      'prompt-id-json-tool-protocol-leak',
-    );
-    const events: StreamEvent[] = [];
-    for await (const event of stream) events.push(event);
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-json-tool-protocol-leak',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
 
-    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
-    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
-      true,
-    );
-    const emittedParts = events
-      .filter((event) => event.type === StreamEventType.CHUNK)
-      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
-    expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
-    expect(chatWithRecording.getLastModelMessageText()).toBe(
-      'Successful final response',
-    );
-    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
-      { text: 'Successful final response' },
-    ]);
-  });
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Successful final response',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Successful final response' },
+      ]);
+    },
+  );
 
   it.each([
     [JSON.stringify([{ name: 'example', value: 1 }]), 8, 1],
@@ -9424,6 +9453,9 @@ describe('GeminiChat', async () => {
       setToolCallPreparations(preparationResponse, [
         { callId: 'call-1', toolName: 'read_file' },
       ]);
+      const usageResponse = {
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      } as GenerateContentResponse;
       const responses = [
         {
           candidates: [
@@ -9432,6 +9464,7 @@ describe('GeminiChat', async () => {
             },
           ],
         } as unknown as GenerateContentResponse,
+        usageResponse,
       ];
       if (withPreparation) responses.push(preparationResponse);
       responses.push(
@@ -9463,6 +9496,14 @@ describe('GeminiChat', async () => {
       const emittedPreparations = events
         .filter((event) => event.type === StreamEventType.CHUNK)
         .flatMap((event) => getToolCallPreparations(event.value));
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.usageMetadata?.promptTokenCount === 10 &&
+            event.value.usageMetadata.candidatesTokenCount === 2,
+        ),
+      ).toBe(true);
       expect(emittedPreparations).toEqual(
         withPreparation ? [{ callId: 'call-1', toolName: 'read_file' }] : [],
       );
