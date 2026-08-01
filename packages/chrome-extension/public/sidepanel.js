@@ -167,8 +167,9 @@ function showShell(baseUrl, token, status) {
     postShellAuth(baseUrl, token);
   }
   els.iframe.classList.remove('hidden');
-  els.warning.textContent = status.warning || '';
-  els.warning.classList.toggle('hidden', !status.warning);
+  const warning = status.warning || '';
+  if (els.warning.textContent !== warning) els.warning.textContent = warning;
+  els.warning.classList.toggle('hidden', !warning);
 }
 
 /**

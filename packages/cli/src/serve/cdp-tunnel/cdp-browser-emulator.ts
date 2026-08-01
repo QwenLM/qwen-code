@@ -69,7 +69,6 @@ export interface CdpTabInfo {
 }
 
 export class CdpBrowserEmulator {
-  readonly pageSessionId = PAGE_SESSION_ID;
   private readonly attachedPageSessions = new Set<string>();
   private nextPageSessionId = 1;
   private autoAttachActive = false;
@@ -264,6 +263,10 @@ export class CdpBrowserEmulator {
     }
 
     // ── page session: forward to the real tab via the extension ──
+    // Forwarding is unconditional for PAGE_SESSION_ID even before the
+    // auto-attach handshake, because the lazy-attach path (cdp-reverse-link.ts)
+    // sends page commands without a prior Target.setAutoAttach. Event delivery
+    // in emitTabEvent IS gated on autoAttachActive — the asymmetry is deliberate.
     if (
       sessionId === PAGE_SESSION_ID ||
       this.attachedPageSessions.has(sessionId)
