@@ -9915,6 +9915,69 @@ describe('GeminiChat', async () => {
     }
   });
 
+  it('retries leaked JSON without a finish reason via the post-stream leak guard', async () => {
+    vi.useFakeTimers();
+    try {
+      const leakedText =
+        JSON.stringify([{ name: 'read_file', file_path: 'a.ts' }]) +
+        '\n\n</parameter>\n</function>\n';
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamResponse(
+            {
+              candidates: [{ content: { parts: [{ text: leakedText }] } }],
+            } as unknown as GenerateContentResponse,
+            {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call-1',
+                          name: 'read_file',
+                          args: { file_path: 'a.ts' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse,
+          ),
+        )
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-json-leak-no-finish-reason',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts).toEqual([{ text: 'Successful final response' }]);
+      expect(chat.getHistory().at(-1)?.parts).toEqual(emittedParts);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries a protocol-tagged turn even when the leaked attempt also contains a tool call', async () => {
     vi.useFakeTimers();
     try {
