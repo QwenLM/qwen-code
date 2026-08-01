@@ -3081,6 +3081,27 @@ describe('fileUtils', () => {
       ).rejects.toThrow(/abort/i);
     });
 
+    it('reports lineEnding and truncatedByBytes on an unbounded read', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'alpha\r\nbravo\r\ncharlie\r\n',
+      );
+
+      const whole = await readFileWithLineAndLimit({
+        path: testTextFilePath,
+        limit: Number.POSITIVE_INFINITY,
+      });
+      const range = await readFileWithLineAndLimit({
+        path: testTextFilePath,
+        limit: 3,
+      });
+
+      expect(whole.lineEnding).toBe('crlf');
+      expect(whole.truncatedByBytes).toBe(false);
+      expect(whole.lineEnding).toBe(range.lineEnding);
+      expect(whole.truncatedByBytes).toBe(range.truncatedByBytes);
+    });
+
     it('should use provided stats when reading with line and byte limits', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
       const stats = actualNodeFs.statSync(testTextFilePath);

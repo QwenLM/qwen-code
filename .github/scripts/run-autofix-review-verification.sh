@@ -68,6 +68,21 @@ run_check() {
     reject_fix "${label}"
   fi
 }
+assert_verification_tree() {
+  if [[ "$(git rev-parse HEAD)" != "${VERIFICATION_HEAD}" ]]; then
+    reject_fix 'HEAD changed during deterministic verification'
+  fi
+  if [[ -n "$(git status --porcelain)" ]]; then
+    git status --short >> "${GATE_LOG}"
+    reject_fix 'workspace became dirty during deterministic verification'
+  fi
+}
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >> "${GATE_LOG}"
+  reject_fix 'workspace is dirty before deterministic verification'
+fi
+VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
@@ -87,6 +102,7 @@ run_check 'settings schema is stale on the agent-committed fix' \
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
 run_check 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # No new commit. That is only legitimate as a deliberate no-action.
@@ -145,4 +161,6 @@ else
       npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
 fi
+assert_verification_tree
+echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"

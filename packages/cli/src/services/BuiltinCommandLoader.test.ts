@@ -201,6 +201,9 @@ describe('BuiltinCommandLoader', () => {
 
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
+
+    const curatorCmd = commands.find((c) => c.name === 'curator');
+    expect(curatorCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {
