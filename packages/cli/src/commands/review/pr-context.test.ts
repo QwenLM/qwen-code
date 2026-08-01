@@ -1052,6 +1052,57 @@ describe('latestOwnLedger', () => {
 });
 
 describe('renderLedgerSection', () => {
+  /** Live cell separators, counted the way markdown reads them. */
+  const liveSeparators = (row: string) => {
+    let n = 0;
+    for (let i = 0; i < row.length; i++) {
+      if (row[i] === '\\') {
+        i++;
+        continue;
+      }
+      if (row[i] === '|') n++;
+    }
+    return n;
+  };
+
+  it('escapes the BACKSLASH before the pipe, so neither can forge a row', () => {
+    // `\\|` in a title became `\\\\|`, which markdown reads as an escaped
+    // backslash followed by a LIVE separator — the forged row the escaping
+    // exists to prevent, produced by the escaping.
+    for (const title of ['plain', 'a | b', 'back\\| slash', 'trail\\']) {
+      const row = renderLedgerSection({
+        v: 1,
+        round: 1,
+        findings: [{ id: 'R1-1', sev: 'C', file: 'a.ts', line: 2, title }],
+      })
+        .split('\n')
+        .find((l) => l.startsWith('| R1-1'))!;
+      expect(liveSeparators(row)).toBe(5);
+    }
+  });
+
+  it('says so when the ledger is PARTIAL, and stays silent when it is not', () => {
+    // The size cap can drop entries. A truncated list rendered under "every
+    // entry below is owed a ruling" reads as complete, and the next round
+    // retires what it cannot see.
+    const partial = renderLedgerSection({
+      v: 1,
+      round: 3,
+      findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+      dropped: 7,
+    });
+    expect(partial).toContain('PARTIAL');
+    expect(partial).toContain('7 further finding(s)');
+    expect(partial).toMatch(/Absence below is not evidence/);
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 3,
+        findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('PARTIAL');
+  });
+
   it('renders a work-list table that names the ruling owed per entry', () => {
     const md = renderLedgerSection({
       v: 1,

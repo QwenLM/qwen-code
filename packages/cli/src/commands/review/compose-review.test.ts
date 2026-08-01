@@ -3127,6 +3127,32 @@ describe('testPlanGate — Test Plan rulings, disclosed but never capping', () =
 });
 
 describe('buildLedger', () => {
+  it('gives a text-less finding a locating title instead of an empty one', () => {
+    // A comment that is nothing but its severity marker used to yield an empty
+    // title, and an empty title jams the review rather than merely degrading
+    // the entry: the next round is told every ledger entry is owed a ruling,
+    // has no claim to rule on, answers `cannot tell`, and that is
+    // `cannot-tell-existing-critical` — a cap that nothing between rounds can
+    // lift. Keep the entry (the Critical really was posted) and hand over the
+    // one handle there is.
+    const l = buildLedger(
+      2,
+      [{ path: 'packages/cli/src/a.ts', line: 42, body: '**[Critical]**' }],
+      ['   '],
+    );
+    expect(l.findings[0].title).toContain('packages/cli/src/a.ts:42');
+    expect(l.findings[0].title).not.toBe('');
+    expect(l.findings[1].title).toContain('the review body');
+    // A finding that DID carry text is untouched.
+    expect(
+      buildLedger(
+        2,
+        [{ path: 'a.ts', line: 1, body: '**[Critical]** real claim' }],
+        [],
+      ).findings[0].title,
+    ).toBe('real claim');
+  });
+
   it('numbers findings round-scoped, inline first then body Criticals', () => {
     const l = buildLedger(
       3,
