@@ -5206,6 +5206,7 @@ export class CoreToolScheduler {
             : 'modelOverride' in toolResult
               ? { modelOverride: toolResult.modelOverride }
               : {}),
+          ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
           ...(processedImages.visionBridgeNotice !== undefined
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),

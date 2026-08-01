@@ -4579,11 +4579,15 @@ export class Session implements SessionContext {
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
               : `approached the input token limit for ${this.config.getModel()}`;
+          const warningSuffix = compressed.warning
+            ? `\n⚠️ ${compressed.warning}`
+            : '';
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).`;
+            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            warningSuffix;
         }
       } catch (compressionError) {
         if (abortSignal.aborted) {
