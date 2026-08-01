@@ -380,6 +380,7 @@ describe('Session', () => {
     getChat: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
     setHistory: ReturnType<typeof vi.fn>;
     truncateHistory: ReturnType<typeof vi.fn>;
   };
@@ -541,6 +542,9 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      stripOrphanedUserEntriesFromHistory: vi.fn(() =>
+        mockChat.stripOrphanedUserEntriesFromHistory(),
+      ),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
     };
@@ -1870,9 +1874,9 @@ describe('Session', () => {
       mockChat.getHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
-      mockChat.stripOrphanedUserEntriesFromHistory = vi
-        .fn()
-        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
       // No token limit, so we reach the send; the send then throws.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
       mockChat.sendMessageStream = vi
@@ -1889,7 +1893,12 @@ describe('Session', () => {
         'send blew up',
       );
 
-      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(
+        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+      ).toHaveBeenCalled();
+      expect(
+        mockChat.stripOrphanedUserEntriesFromHistory,
+      ).not.toHaveBeenCalled();
       expect(mockChat.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({
           role: 'user',
@@ -1898,6 +1907,26 @@ describe('Session', () => {
           ]),
         }),
       );
+    });
+
+    it('uses the client history wrapper when a daemon retry strips an orphan', async () => {
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [{ type: 'text', text: 'retry this turn' }],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.retry': true },
+      } as Parameters<typeof session.prompt>[0]);
+
+      expect(
+        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChat.stripOrphanedUserEntriesFromHistory,
+      ).not.toHaveBeenCalled();
     });
 
     it('rejects (accepted:false) when a prompt is already in flight', async () => {

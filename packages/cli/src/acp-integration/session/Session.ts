@@ -2886,8 +2886,9 @@ export class Session implements SessionContext {
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                  this.config
+                    .getGeminiClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -2900,7 +2901,9 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
               this.config
