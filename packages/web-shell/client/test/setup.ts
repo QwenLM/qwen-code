@@ -6,8 +6,34 @@ import { vi } from 'vitest';
 
 const globalWithDom = globalThis as typeof globalThis & {
   Element?: typeof Element;
+  Range?: typeof Range;
   ResizeObserver?: typeof ResizeObserver;
 };
+
+function createEmptyDOMRect(): DOMRect {
+  if (typeof DOMRect === 'function') {
+    return new DOMRect(0, 0, 0, 0);
+  }
+
+  return {
+    bottom: 0,
+    height: 0,
+    left: 0,
+    right: 0,
+    top: 0,
+    width: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function createEmptyDOMRectList(): DOMRectList {
+  return {
+    length: 0,
+    item: () => null,
+  } as DOMRectList;
+}
 
 if (typeof globalWithDom.ResizeObserver === 'undefined') {
   globalWithDom.ResizeObserver = class ResizeObserverStub {
@@ -22,6 +48,23 @@ if (
   !globalWithDom.Element.prototype.scrollIntoView
 ) {
   globalWithDom.Element.prototype.scrollIntoView = () => {};
+}
+
+// jsdom implements getClientRects()/getBoundingClientRect() on Element but not
+// on Range. CodeMirror's `measureTextSize` calls them on a text Range from a
+// `requestAnimationFrame` measure pass, so in jsdom that async callback throws
+// `TypeError: getClientRects is not a function`. Vitest surfaces it as an
+// *unhandled error* that fails the whole run (exit 1) even when every test
+// passes — and because it depends on rAF timing, it's flaky. Return empty
+// geometry (CodeMirror already handles the no-layout case).
+if (typeof globalWithDom.Range !== 'undefined') {
+  const rangePrototype = globalWithDom.Range.prototype as Range & {
+    getBoundingClientRect?: () => DOMRect;
+    getClientRects?: () => DOMRectList;
+  };
+
+  rangePrototype.getBoundingClientRect ??= createEmptyDOMRect;
+  rangePrototype.getClientRects ??= createEmptyDOMRectList;
 }
 
 if (typeof navigator !== 'undefined' && !navigator.clipboard) {

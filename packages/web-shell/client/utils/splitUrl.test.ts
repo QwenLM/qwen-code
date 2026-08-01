@@ -1,11 +1,18 @@
+// @vitest-environment jsdom
 /**
  * @license
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { buildSplitUrl, parseSplitSessionIds } from './splitUrl';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  buildSplitUrl,
+  clearSplitSessions,
+  loadSplitSessions,
+  parseSplitSessionIds,
+  saveSplitSessions,
+} from './splitUrl';
 
 describe('buildSplitUrl', () => {
   it('opens the split for the given sessions on the same origin', () => {
@@ -24,10 +31,16 @@ describe('buildSplitUrl', () => {
     expect(url).toContain('split=s1%2Cs2');
   });
 
-  it('resets the path so no single-session deep-link competes', () => {
+  it('strips the session deep-link so no single session competes', () => {
     expect(
       new URL(buildSplitUrl(['a'], 'https://host/session/x')).pathname,
     ).toBe('/');
+  });
+
+  it('preserves the deployment base path while stripping the session', () => {
+    expect(
+      new URL(buildSplitUrl(['a'], 'https://host/app/session/x')).pathname,
+    ).toBe('/app');
   });
 
   it('carries the daemon token in the fragment when provided', () => {
@@ -65,5 +78,41 @@ describe('parseSplitSessionIds', () => {
 
   it('trims and drops blank ids', () => {
     expect(parseSplitSessionIds('?split=a,,%20b%20,')).toEqual(['a', 'b']);
+  });
+});
+
+describe('split session persistence (sessionStorage)', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('round-trips the saved session set', () => {
+    saveSplitSessions(['s1', 's2', 's3']);
+    expect(loadSplitSessions()).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('returns an empty array when nothing is saved', () => {
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
+  it('dedupes, drops blanks, and caps at MAX_SPLIT_PANES (6)', () => {
+    saveSplitSessions(['a', 'a', '', 'b', 'c', 'd', 'e', 'f', 'g']);
+    expect(loadSplitSessions()).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('clears the saved set', () => {
+    saveSplitSessions(['s1', 's2']);
+    clearSplitSessions();
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
+  it('falls back to [] on malformed stored JSON', () => {
+    sessionStorage.setItem('qwen-webshell-split-sessions', '{not json');
+    expect(loadSplitSessions()).toEqual([]);
+  });
+
+  it('falls back to [] when the stored value is not an array', () => {
+    sessionStorage.setItem('qwen-webshell-split-sessions', '"s1"');
+    expect(loadSplitSessions()).toEqual([]);
   });
 });

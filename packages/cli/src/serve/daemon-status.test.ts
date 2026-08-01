@@ -6,7 +6,11 @@
 
 import type { RequestHandler } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AcpHttpHandle } from './acp-http/index.js';
+import type {
+  AcpHttpConnectionDiagnostic,
+  AcpHttpHandle,
+  AcpHttpSnapshot,
+} from './acp-http/index.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -20,6 +24,7 @@ import {
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
+import type { DaemonLogger } from './daemon-logger.js';
 
 const BASE_WORKSPACE = '/work/status';
 
@@ -29,6 +34,8 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
+    maxJournalEvents: 10_000,
+    maxJournalBytes: 8 * 1024 * 1024,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -44,6 +51,76 @@ afterEach(() => {
 });
 
 describe('buildDaemonStatusResponse', () => {
+  it('uses one logger snapshot and exposes summary/full log diagnostics', async () => {
+    const getStatus = vi.fn(() => ({
+      runId: '0123456789abcdef0123456789abcdef',
+      mode: 'stable' as const,
+      health: 'ok' as const,
+      issues: [] as const,
+      droppedRecords: 2,
+      droppedBytes: 42,
+    }));
+    const daemonLog = {
+      getStatus,
+      getDaemonId: () => 'daemon:123',
+      getLogPath: () => '/runtime/debug/daemon/daemon.log',
+    } as unknown as DaemonLogger;
+
+    const summary = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ daemonLog }),
+    );
+    expect(getStatus).toHaveBeenCalledOnce();
+    expect(summary.daemon).toMatchObject({
+      runId: '0123456789abcdef0123456789abcdef',
+      logMode: 'stable',
+      logHealth: 'ok',
+    });
+    expect(summary.daemon).not.toHaveProperty('logPath');
+    expect(summary.daemon).not.toHaveProperty('logIssues');
+
+    getStatus.mockClear();
+    const full = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({ daemonLog }),
+    );
+    expect(getStatus).toHaveBeenCalledOnce();
+    expect(full.daemon).toMatchObject({
+      logPath: '/runtime/debug/daemon/daemon.log',
+      logIssues: [],
+      logDroppedRecords: 2,
+      logDroppedBytes: 42,
+    });
+  });
+
+  it('rolls degraded logger health into a path-free warning', async () => {
+    const daemonLog = {
+      getStatus: () => ({
+        runId: '0123456789abcdef0123456789abcdef',
+        mode: 'stderr-only' as const,
+        health: 'degraded' as const,
+        issues: ['init_failed'] as const,
+        droppedRecords: 0,
+        droppedBytes: 0,
+      }),
+      getDaemonId: () => 'daemon:123',
+      getLogPath: () => '/secret/path',
+    } as unknown as DaemonLogger;
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ daemonLog }),
+    );
+
+    expect(response.status).toBe('warning');
+    expect(response.issues).toContainEqual({
+      code: 'daemon_log_degraded',
+      severity: 'warning',
+      message:
+        'Daemon file logging is degraded; inspect full status for details.',
+    });
+    expect(JSON.stringify(response.issues)).not.toContain('/secret/path');
+  });
+
   it('includes maxTotalSessions in daemon status limits', async () => {
     const options = makeOptions();
     options.opts.maxTotalSessions = 50;
@@ -142,6 +219,7 @@ describe('buildDaemonStatusResponse', () => {
         {
           workspaceId: 'secondary',
           workspaceCwd: '/work/secondary',
+          displayName: 'Secondary workspace',
           primary: false,
           trusted: true,
           bridge: secondaryBridge,
@@ -154,6 +232,21 @@ describe('buildDaemonStatusResponse', () => {
     expect(primarySnapshot).toHaveBeenCalledTimes(1);
     expect(secondarySnapshot).toHaveBeenCalledTimes(1);
     expect(response.runtime.sessions.active).toBe(3);
+    expect(response.workspaces).toEqual([
+      {
+        id: 'primary',
+        cwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/work/secondary',
+        displayName: 'Secondary workspace',
+        primary: false,
+        trusted: true,
+      },
+    ]);
   });
 
   it('reports every runtime issue code from daemon counters', async () => {
@@ -192,6 +285,48 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'rate_limit_hits' }),
       ]),
     });
+  });
+
+  it('reports aggregate workspace-attributed ACP diagnostics in full status', async () => {
+    const primaryDiagnostic = makeAcpDiagnostic(null, BASE_WORKSPACE, true);
+    const secondaryDiagnostic = makeAcpDiagnostic(
+      'secondary-id',
+      '/work/secondary',
+      false,
+    );
+    const primaryRegistrySnapshot = {
+      connectionCount: 1,
+      connectionCap: 10,
+      connectionStreams: 1,
+      sessionStreams: 0,
+      sseStreams: 0,
+      wsStreams: 1,
+      pendingClientRequests: 0,
+      connections: [primaryDiagnostic],
+    };
+
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        acpSnapshot: primaryRegistrySnapshot,
+        acpAggregate: {
+          connectionCount: 2,
+          connectionStreams: 2,
+          sessionStreams: 0,
+          sseStreams: 0,
+          wsStreams: 2,
+          pendingClientRequests: 0,
+          mounts: [],
+          connections: [primaryDiagnostic, secondaryDiagnostic],
+        },
+      }),
+    );
+
+    expect(response.runtime.transport.acp.connections).toBe(2);
+    expect(response.full?.acpConnections).toEqual([
+      primaryDiagnostic,
+      secondaryDiagnostic,
+    ]);
   });
 
   it('embeds runtime.metrics.series when getMetricsSeries is provided, and omits it otherwise', async () => {
@@ -251,6 +386,135 @@ describe('buildDaemonStatusResponse', () => {
         },
       },
     });
+  });
+
+  it('reports and diagnoses non-primary channel workers', async () => {
+    const options = makeOptions({
+      channelWorkerSnapshot: {
+        enabled: false,
+        state: 'disabled',
+        channels: [],
+      },
+    });
+    options.workspaceRegistry = {
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: options.bridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: options.bridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'failed',
+        channels: ['telegram'],
+        error: 'secondary failed',
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        primary: false,
+      },
+    ];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.channelWorkers).toEqual(
+      options.getChannelWorkerSnapshots(),
+    );
+    expect(response).toMatchObject({
+      status: 'error',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'error',
+          section: 'runtime.channelWorkers',
+          message: expect.stringContaining('/work/secondary'),
+        }),
+      ]),
+    });
+  });
+
+  it('preserves partial startup failures for multi-workspace workers', async () => {
+    const options = makeOptions({
+      channelWorkerSnapshot: {
+        enabled: false,
+        state: 'disabled',
+        channels: [],
+      },
+    });
+    options.workspaceRegistry = {
+      list: () => [{ bridge: options.bridge }, { bridge: options.bridge }],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    const secondary = {
+      enabled: true,
+      state: 'running' as const,
+      channels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
+      startupFailures: [
+        {
+          channel: 'feishu',
+          phase: 'connect' as const,
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+      workspaceId: 'secondary',
+      workspaceCwd: '/work/secondary',
+      primary: false,
+    };
+    options.getChannelWorkerSnapshots = () => [secondary];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.channelWorkers).toEqual([secondary]);
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_partial_connect',
+          section: 'runtime.channelWorkers',
+          message: expect.stringContaining('/work/secondary'),
+        }),
+      ]),
+    });
+  });
+
+  it('omits channelWorkers for single-workspace and empty multi-workspace snapshots', async () => {
+    const single = makeOptions();
+    single.getChannelWorkerSnapshots = () => [
+      {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+      },
+    ];
+    expect(
+      (await buildDaemonStatusResponse('summary', single)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
+
+    const multi = makeOptions();
+    multi.workspaceRegistry = {
+      list: () => [{ bridge: multi.bridge }, { bridge: multi.bridge }],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    multi.getChannelWorkerSnapshots = () => [];
+    expect(
+      (await buildDaemonStatusResponse('summary', multi)).runtime
+        .channelWorkers,
+    ).toBeUndefined();
   });
 
   it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
@@ -324,6 +588,14 @@ describe('buildDaemonStatusResponse', () => {
           state: 'running',
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          startupFailures: [
+            {
+              channel: 'feishu',
+              phase: 'connect',
+              code: 'ECONNREFUSED',
+              message: 'connection refused',
+            },
+          ],
           pid: 1234,
           restartCount: 1,
           lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
@@ -348,6 +620,14 @@ describe('buildDaemonStatusResponse', () => {
           state: 'running',
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          startupFailures: [
+            {
+              channel: 'feishu',
+              phase: 'connect',
+              code: 'ECONNREFUSED',
+              message: 'connection refused',
+            },
+          ],
           pid: 1234,
         },
       },
@@ -783,9 +1063,36 @@ describe('buildDaemonStatusResponse', () => {
   });
 });
 
+function makeAcpDiagnostic(
+  workspaceId: string | null,
+  workspaceCwd: string,
+  primary: boolean,
+): AcpHttpConnectionDiagnostic {
+  return {
+    connectionIdPrefix: primary ? 'primary' : 'secondary',
+    fromLoopback: true,
+    destroyed: false,
+    lastActiveMs: 0,
+    ownedSessionCount: 0,
+    sessionBindingCount: 0,
+    closingSessionCount: 0,
+    pendingClientRequests: 0,
+    connectionStreamOpen: true,
+    sessionStreams: 0,
+    sseStreams: 0,
+    wsStreams: 1,
+    bufferedConnectionFrames: 0,
+    bufferedSessionFrames: 0,
+    workspaceId,
+    workspaceCwd,
+    primary,
+  };
+}
+
 interface MakeOptionsInput {
   bridgeSnapshot?: BridgeDaemonStatusSnapshot;
   acpSnapshot?: ReturnType<AcpHttpHandle['registry']['getSnapshot']>;
+  acpAggregate?: AcpHttpSnapshot;
   rateLimitHits?: Record<RateLimitTier, number>;
   rateLimitEnabled?: boolean;
   mcpStatus?: unknown;
@@ -811,6 +1118,7 @@ interface MakeOptionsInput {
   lastActivityAt?: number | null;
   totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
+  daemonLog?: DaemonLogger;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -852,10 +1160,29 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     bridge,
     workspace,
     qwenCodeVersion: 'test',
+    daemonLog: input.daemonLog,
     ...(input.acpSnapshot
       ? {
           acpHandle: {
             registry: { getSnapshot: () => input.acpSnapshot },
+            getSnapshot: () =>
+              input.acpAggregate ?? {
+                connectionCount: input.acpSnapshot!.connectionCount,
+                connectionStreams: input.acpSnapshot!.connectionStreams,
+                sessionStreams: input.acpSnapshot!.sessionStreams,
+                sseStreams: input.acpSnapshot!.sseStreams,
+                wsStreams: input.acpSnapshot!.wsStreams,
+                pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+                mounts: [
+                  {
+                    workspaceId: null,
+                    primary: true,
+                    connectionCount: input.acpSnapshot!.connectionCount,
+                    wsStreams: input.acpSnapshot!.wsStreams,
+                  },
+                ],
+                connections: [],
+              },
           } as unknown as AcpHttpHandle,
         }
       : {}),

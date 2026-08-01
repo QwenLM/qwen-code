@@ -10,7 +10,25 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
+import {
+  sendUntrustedWorkspaceResponse,
+  sendWorkspaceRuntimeUnavailable,
+} from '../workspace-route-runtime.js';
+import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
+
+export function requirePrimarySessionRuntime(
+  workspaceRegistry: WorkspaceRegistry,
+  res: Response,
+): WorkspaceRuntime | undefined {
+  const entry = workspaceRegistry.primaryEntry;
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
+  if (runtime) {
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
+    return runtime;
+  }
+  sendWorkspaceRuntimeUnavailable(res, entry);
+  return undefined;
+}
 
 export function requireSessionRuntime(opts: {
   sessionId: string;
@@ -28,13 +46,14 @@ export function requireSessionRuntime(opts: {
     daemonLog,
     details = {},
   } = opts;
-  if (workspaceRegistry.list().length === 1) {
-    return workspaceRegistry.primary;
+  if (workspaceRegistry.listEntries().length === 1) {
+    return requirePrimarySessionRuntime(workspaceRegistry, res);
   }
 
   const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
   if (resolution.kind === 'found') {
     const runtime = resolution.runtime;
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       daemonLog?.warn('session routing failed', {
         route,

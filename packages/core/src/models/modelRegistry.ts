@@ -229,28 +229,38 @@ export class ModelRegistry {
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
+      ...(model.registryBaseUrl !== undefined
+        ? { registryBaseUrl: model.registryBaseUrl }
+        : {}),
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
+      visionOnly: model.visionOnly,
+      imageOnly: model.imageOnly,
     }));
   }
 
   /**
    * Get model configuration by authType and modelId.
-   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
+   * When baseUrl is provided, looks up the exact composite key, then a plain
+   * entry whose resolved default baseUrl matches.
    * When baseUrl is omitted, tries the plain id first (backward compatible),
    * then scans all entries for the first match by model id.
    */
   getModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return undefined;
 
-    if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+    if (baseUrl !== undefined) {
+      const exact = models.get(modelRegistryKey(modelId, baseUrl ?? undefined));
+      if (exact) return exact;
+      if (baseUrl === null) return undefined;
+      const plain = models.get(modelId);
+      return plain?.baseUrl === baseUrl ? plain : undefined;
     }
 
     // Try plain id key first (models registered without explicit baseUrl)
@@ -266,7 +276,7 @@ export class ModelRegistry {
 
   /**
    * Check if model exists for given authType.
-   * When baseUrl is provided, checks the exact composite key.
+   * When baseUrl is provided, checks the exact endpoint or matching default.
    * When baseUrl is omitted, checks plain id and scans by model id.
    */
   hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {
@@ -276,7 +286,7 @@ export class ModelRegistry {
   /**
    * Get default model for an authType.
    * For qwen-oauth, returns the coder model.
-   * For others, returns the first configured model.
+   * For others, returns the first configured primary-capable model.
    */
   getDefaultModelForAuthType(
     authType: AuthType,
@@ -286,7 +296,7 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values())[0];
+    return Array.from(models.values()).find((model) => !model.imageOnly);
   }
 
   /**
@@ -315,6 +325,7 @@ export class ModelRegistry {
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
     };
@@ -329,9 +340,15 @@ export class ModelRegistry {
         `Model config in authType '${authType}' missing required field: id`,
       );
     }
-    if (config.fastOnly && config.voiceOnly) {
+    const selectorOnlyCount = [
+      config.fastOnly,
+      config.voiceOnly,
+      config.visionOnly,
+      config.imageOnly,
+    ].filter(Boolean).length;
+    if (selectorOnlyCount > 1) {
       debugLogger.warn(
-        `Model "${config.id}" in authType "${authType}" has both fastOnly and voiceOnly set. It will be unreachable in all model selectors.`,
+        `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
   }

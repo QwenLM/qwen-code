@@ -33,7 +33,7 @@ function appHarness(opts?: {
     }));
 
   registerChannelWebhookRoutes(app, {
-    channelsConfig: {
+    getChannelsConfig: () => ({
       'dingtalk-main': {
         webhooks: {
           sources: {
@@ -50,7 +50,7 @@ function appHarness(opts?: {
           },
         },
       },
-    },
+    }),
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     enqueueWebhookTask,

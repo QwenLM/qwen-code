@@ -7,6 +7,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import React from 'react';
 import { initCommand } from './initCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { type CommandContext } from './types.js';
@@ -70,6 +71,23 @@ describe('initCommand', () => {
       }),
     );
     // Assert: Ensure no file was written yet
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it(`should preserve ${DEFAULT_CONTEXT_FILENAME} if the confirmation prompt cannot be built`, async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('# Existing content');
+    vi.spyOn(React, 'createElement').mockImplementationOnce(() => {
+      throw new Error('prompt unavailable');
+    });
+
+    const result = await initCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: `Unexpected error preparing ${DEFAULT_CONTEXT_FILENAME}: prompt unavailable`,
+    });
     expect(fs.writeFileSync).not.toHaveBeenCalled();
   });
 

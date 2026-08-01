@@ -9,6 +9,28 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
 
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  return new Error(String(error));
+}
+
+/**
+ * Module-level store for the last rendering error. The cleanup chain in
+ * startInteractiveUI.tsx reads this after `instance.unmount()` leaves the
+ * alternate screen, so the message can be echoed to the *main* screen buffer
+ * where it survives after the process exits. Without this, VP / alternate-
+ * screen mode discards the fallback UI on teardown and the user sees nothing.
+ */
+let lastRenderError: Error | undefined;
+
+export function consumeLastRenderError(): Error | undefined {
+  const err = lastRenderError;
+  lastRenderError = undefined;
+  return err;
+}
+
 interface ErrorBoundaryProps {
   children: ReactNode;
   /**
@@ -19,6 +41,14 @@ interface ErrorBoundaryProps {
   fallback?: (error: Error, reset: () => void) => ReactNode;
   /** Optional side-effecting hook for logging the error. */
   onError?: (error: Error, info: ErrorInfo) => void;
+  /**
+   * When true, the caught error is stored in the module-level
+   * `lastRenderError` so the cleanup chain in startInteractiveUI.tsx can
+   * echo it to stderr after leaving the alternate screen. Only the fatal
+   * top-level boundary should set this; non-fatal boundaries (e.g. the
+   * transcript view) recover and the app continues.
+   */
+  recordForExitEcho?: boolean;
 }
 
 interface ErrorBoundaryState {
@@ -38,12 +68,16 @@ export class ErrorBoundary extends Component<
 > {
   override state: ErrorBoundaryState = { error: null };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error };
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return { error: normalizeError(error) };
   }
 
-  override componentDidCatch(error: Error, info: ErrorInfo): void {
-    this.props.onError?.(error, info);
+  override componentDidCatch(error: unknown, info: ErrorInfo): void {
+    const normalized = normalizeError(error);
+    if (this.props.recordForExitEcho) {
+      lastRenderError = normalized;
+    }
+    this.props.onError?.(normalized, info);
   }
 
   private readonly reset = () => {

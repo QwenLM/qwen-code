@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 80 * 1024 * 1024;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 96 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
@@ -318,6 +318,11 @@ function writeDistPackageJson(rootDir, distDir) {
       '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
       '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
       '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+      // sharp is a native module externalized in esbuild. Declaring sharp alone
+      // is sufficient: its own optionalDependencies pull in the matching @img
+      // platform binary for every OS/arch npm installs onto, so the platform
+      // packages are not pinned here (pinning them drifts on a sharp bump).
+      sharp: '0.34.5',
     },
     engines: rootPackageJson.engines,
   };

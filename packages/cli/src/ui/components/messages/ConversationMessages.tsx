@@ -17,14 +17,18 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
-import { wrapToVisualLines } from '../../utils/textUtils.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { ErrorBoundary } from '../shared/ErrorBoundary.js';
+import { ICON } from '../../constants.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
-export const THINKING_ICON = '∴ ';
-export const THINKING_ICON_PENDING = '∵ ';
+const debugLogger = createDebugLogger('THINK_RENDER');
 
-export const toggleKeyHint =
-  process.platform === 'darwin' ? 'option+t' : 'alt+t';
+export const THINKING_ICON = `${ICON.THEREFORE} `;
+export const THINKING_ICON_PENDING = `${ICON.BECAUSE} `;
+
+export const toggleKeyHint = 'ctrl+o';
 
 interface UserMessageProps {
   text: string;
@@ -128,7 +132,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
       marginTop={marginTop}
       alignSelf={alignSelf}
     >
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>
@@ -157,7 +161,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
 
   return (
     <Box flexDirection="row">
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>
@@ -239,7 +243,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="◆"
+    prefix={ICON.DIAMOND}
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
@@ -263,29 +267,47 @@ export const AssistantMessageContent: React.FC<
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="◆"
+    basePrefix={ICON.DIAMOND}
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
 
-const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
-function tailVisualLines(
-  text: string,
-  width: number,
-  maxLines: number,
-): string {
-  const charBudget = maxLines * width * 2;
-  let sliceStart = Math.max(0, text.length - charBudget);
-  if (sliceStart > 0) {
-    const nl = text.indexOf('\n', sliceStart);
-    if (nl !== -1 && nl < text.length - 1) {
-      sliceStart = nl + 1;
-    }
-  }
-  const lines = wrapToVisualLines(text.slice(sliceStart), width);
-  return lines.slice(-maxLines).join('\n');
-}
+const ThinkBody: React.FC<{
+  text: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+}> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
+  if (!expanded) return null;
+
+  return (
+    <Box paddingLeft={2} flexDirection="column">
+      <ErrorBoundary
+        fallback={(err) => (
+          <Text color={theme.text.secondary} dimColor>
+            {sanitizeTerminalText(err.message)}
+          </Text>
+        )}
+        onError={(error, info) => {
+          debugLogger.error(
+            `[THINK_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+          );
+        }}
+      >
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - 2}
+          textColor={theme.text.secondary}
+        />
+      </ErrorBoundary>
+    </Box>
+  );
+};
 
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
@@ -298,12 +320,15 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 }) => {
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+  const completedLabel =
+    durationMs == null
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? t('Thought briefly')
+        : `${t('Thought for')} ${formatDuration(durationMs)}`;
 
   if (!isPending && !expanded) {
-    const label =
-      durationMs != null
-        ? `${t('Thought for')} ${formatDuration(durationMs)}`
-        : t('Thinking');
+    const label = completedLabel ?? t('Thinking');
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
       : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
@@ -315,54 +340,28 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     );
   }
 
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box flexDirection="column">
-        <Text dimColor italic>
-          {THINKING_ICON_PENDING}
-          {t('Thinking')}…{durationSuffix}
-        </Text>
-        <Box paddingLeft={2}>
-          <Text dimColor wrap="truncate">
-            {display}
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
+  const label = isPending
+    ? `${t('Thinking')}…${durationSuffix}`
+    : (completedLabel ?? `${t('Thinking')}…`);
+  const collapseHint =
+    !isPending && expanded
+      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+      : '';
 
-  const expandedLabel =
-    durationMs != null
-      ? `${t('Thought for')} ${formatDuration(durationMs)}`
-      : `${t('Thinking')}…`;
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {THINKING_ICON}
-        {expandedLabel}{' '}
-        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
+        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {label}
+        {collapseHint}
       </Text>
-      <Box paddingLeft={2} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={false}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - 2}
-          textColor={theme.text.secondary}
-        />
-      </Box>
+      <ThinkBody
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+      />
     </Box>
   );
 };
@@ -373,42 +372,12 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
   expanded = false,
   availableTerminalHeight,
   contentWidth,
-}) => {
-  if (!isPending && !expanded) {
-    return null;
-  }
-
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box paddingLeft={2}>
-        <Text dimColor wrap="truncate">
-          {display}
-        </Text>
-      </Box>
-    );
-  }
-
-  return (
-    <Box paddingLeft={2} flexDirection="column">
-      <MarkdownDisplay
-        text={text}
-        isPending={false}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - 2}
-        textColor={theme.text.secondary}
-      />
-    </Box>
-  );
-};
+}) => (
+  <ThinkBody
+    text={text}
+    isPending={isPending}
+    expanded={expanded}
+    availableTerminalHeight={availableTerminalHeight}
+    contentWidth={contentWidth}
+  />
+);

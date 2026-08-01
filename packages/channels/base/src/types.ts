@@ -1,9 +1,10 @@
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
-export type SessionScope = 'user' | 'thread' | 'single';
+export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 export type DmPolicy = 'disabled' | 'open';
@@ -74,6 +75,9 @@ export interface ChannelConfig {
   /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */
   dispatchMode?: DispatchMode;
 
+  /** Poll interval in ms for polling adapters. Default: 60000. */
+  pollInterval?: number;
+
   /** Enable block streaming — emit completed blocks as separate messages. */
   blockStreaming?: 'on' | 'off';
   /** Chunk size bounds for block streaming. */
@@ -100,6 +104,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
@@ -115,6 +120,12 @@ export interface Envelope {
   imageMimeType?: string;
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
+  /**
+   * Contextual metadata (e.g. issue type, title, URL) kept separate from `text`
+   * so slash-command parsing operates on the comment body alone. Appended to
+   * the prompt after command parsing, sanitized via sanitizePromptText.
+   */
+  metadata?: string;
   /**
    * Marks an envelope whose `text` ALREADY carries its `[sender]` attribution, so
    * handleInbound must NOT re-prefix it. Set in two places: on a synthetic
@@ -135,11 +146,113 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
+export interface ObservedChannelIdentity {
+  id: string;
+  label: string;
+}
+
+export interface ObservedChannelContactObservation {
+  user: ObservedChannelIdentity;
+  group?: ObservedChannelIdentity;
+  topic?: ObservedChannelIdentity;
+}
+
+export interface ObservedChannelContact extends ObservedChannelIdentity {
+  channelName: string;
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelRelatedContact extends ObservedChannelIdentity {
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelTopic extends ObservedChannelRelatedContact {
+  users: ObservedChannelRelatedContact[];
+}
+
+export interface ObservedChannelGroup extends ObservedChannelContact {
+  users: ObservedChannelRelatedContact[];
+  topics: ObservedChannelTopic[];
+}
+
+export interface ObservedChannelContactGraph {
+  users: ObservedChannelContact[];
+  groups: ObservedChannelGroup[];
+}
+
+export interface ChannelPromptOwner {
+  kind: 'channel_user';
+  id: string;
+}
+
+export type UserInputPresentationResult =
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' };
+
+export type UserInputSettlementReason =
+  | 'resolved_outside_presenter'
+  | 'cancelled'
+  | 'run_cancelled';
+
+export type ChannelUserInputResponse = RequestPermissionResponse & {
+  answers?: Record<string, string>;
+};
+
+export interface ChannelUserQuestion {
+  answerKey: string;
+  header: string;
+  question: string;
+  options: Array<{
+    label: string;
+    description: string;
+  }>;
+  multiSelect: boolean;
+}
+
+export interface ChannelUserInputRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  questions: ChannelUserQuestion[];
+  submitOptionId: string;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export interface ChannelOutputSegmentContext {
+  channelName: string;
+  sessionId: string;
+  runId: string;
+  segmentId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  messageId?: string;
+}
+
+export type ChannelOutputSegmentEndReason =
+  | 'response_boundary'
+  | 'input_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ChannelProactiveTarget {
+  channelName: string;
+  type: 'user' | 'chat';
+  id: string;
+}
+
 export interface ChannelTaskLifecycleBase {
   channelName: string;
   chatId: string;
   sessionId: string;
   messageId?: string;
+  runId?: string;
+  owner?: ChannelPromptOwner;
   identity: ChannelRuntimeIdentity;
   memoryScope: ChannelRuntimeMemoryScope;
 }
@@ -197,32 +310,94 @@ export interface ChannelMemoryTarget {
   threadId?: string;
 }
 
-export interface ChannelMemoryWriteResult {
-  changed: boolean;
-  filePath?: string;
+export interface ChannelMemoryEntry {
+  id: string;
+  text: string;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
 }
 
 export interface ChannelMemoryCallbacks {
   readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
-  appendChannelMemory(
+  getChannelMemoryRevision?(target: ChannelMemoryTarget): Promise<string>;
+  listChannelMemoryEntries(
     target: ChannelMemoryTarget,
-    text: string,
-  ): Promise<ChannelMemoryWriteResult>;
-  clearChannelMemory(
+  ): Promise<ChannelMemoryEntry[]>;
+  addChannelMemoryEntries(
     target: ChannelMemoryTarget,
-  ): Promise<ChannelMemoryWriteResult>;
+    texts: readonly string[],
+    createdBy?: string,
+  ): Promise<{
+    changed: boolean;
+    added: ChannelMemoryEntry[];
+    duplicateIds: string[];
+  }>;
+  updateChannelMemoryEntry(
+    target: ChannelMemoryTarget,
+    mutation: { id: string; text: string; expectedText?: string },
+  ): Promise<{ changed: boolean; entry?: ChannelMemoryEntry }>;
+  removeChannelMemoryEntries(
+    target: ChannelMemoryTarget,
+    mutation: {
+      ids: readonly string[];
+      expectedTextById?: Readonly<Record<string, string>>;
+    },
+  ): Promise<{ changed: boolean; removed: ChannelMemoryEntry[] }>;
+  clearChannelMemory(target: ChannelMemoryTarget): Promise<{
+    changed: boolean;
+  }>;
 }
 
-export interface ChannelMemoryIntentClassifierResult {
-  intent: 'remember' | 'list' | 'clear_all' | 'none';
-  memory?: string;
-  confidence: number;
-}
+export type ChannelMemoryIntentClassifierResult =
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
+  | { intent: 'list'; targetIds?: string[]; confidence: number }
+  | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
+  | {
+      intent: 'update';
+      targetIds: string[];
+      memory: string;
+      confidence: number;
+    }
+  | { intent: 'clear_all' | 'none'; confidence: number };
 
 export interface ChannelMemoryIntentClassifier {
   classifyChannelMemoryIntent(
     text: string,
+    entries?: readonly ChannelMemoryEntry[],
   ): Promise<ChannelMemoryIntentClassifierResult>;
+}
+
+export type ChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum';
+
+export interface ChannelConfigFieldDescriptor {
+  key: string;
+  label: string;
+  kind: ChannelConfigFieldKind;
+  required?: boolean;
+  envResolvable?: boolean;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  description?: string;
+}
+
+export interface ChannelManagementDescriptor {
+  fields: readonly ChannelConfigFieldDescriptor[];
 }
 
 /**
@@ -245,6 +420,12 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Serializable metadata for safe configuration management. */
+  management?: ChannelManagementDescriptor;
+
+  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  defaultSessionScope?: SessionScope;
 
   /** Create a channel adapter instance. */
   createChannel(

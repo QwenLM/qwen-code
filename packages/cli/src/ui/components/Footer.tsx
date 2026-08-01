@@ -22,15 +22,38 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
-import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import {
+  GoalPill,
+  isLiveGoalSnapshot,
+  useFooterGoalState,
+} from './GoalPill.js';
 import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
+import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { StreamingState } from '../types.js';
+
+import type { PasteProgress } from '../contexts/KeypressContext.js';
+
+const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
+  progress,
+}) => {
+  const { receivedBytes } = progress;
+  const kb = receivedBytes / 1024;
+  const label = kb >= 1 ? `${kb.toFixed(0)} KB` : `${receivedBytes} B`;
+
+  return (
+    <Text dimColor>
+      {t('Pasting…')} {label}
+    </Text>
+  );
+};
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
@@ -82,6 +105,8 @@ export const Footer: React.FC = () => {
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+  ) : pasteProgress.active ? (
+    <PasteProgressBar progress={pasteProgress} />
   ) : uiState.rewindEscPending ? (
     <Text color={theme.text.secondary}>
       {t('Press Esc again to rewind conversation.')}
@@ -105,6 +130,16 @@ export const Footer: React.FC = () => {
       {t('IDE connection unavailable: {{message}}', {
         message: uiState.startupIdeConnectionStatus.message,
       })}
+    </Text>
+  ) : uiState.streamingState === StreamingState.Responding ? (
+    <Text color={theme.text.secondary}>
+      {t('Enter to steer · Ctrl+Q to queue')}
+      {showAutoAcceptIndicator !== undefined && (
+        <>
+          {' · '}
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+        </>
+      )}
     </Text>
   ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
@@ -152,9 +187,12 @@ export const Footer: React.FC = () => {
   // Goal pill: only present in `rightItems` when a goal is active so the
   // divider chain stays tight; the pill itself does the live elapsed-time
   // refresh internally.
-  const goalActive = useFooterGoalState() !== undefined;
-  if (goalActive) {
-    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  const goalState = useFooterGoalState();
+  if (isLiveGoalSnapshot(goalState)) {
+    rightItems.push({
+      key: 'goal',
+      node: <GoalPill snapshot={goalState} />,
+    });
   }
   const cronTaskCount = useFooterCronTaskCount();
   if (cronTaskCount > 0) {

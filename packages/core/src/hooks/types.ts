@@ -40,6 +40,8 @@ export enum HookEventName {
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
   Stop = 'Stop',
+  // MessageDisplay - Fires repeatedly as the assistant's reply streams, before Stop
+  MessageDisplay = 'MessageDisplay',
   // SubagentStart - When a subagent (Task tool call) is started
   SubagentStart = 'SubagentStart',
   // SubagentStop - Right before a subagent (Task tool call) concludes its response
@@ -50,6 +52,8 @@ export enum HookEventName {
   PostCompact = 'PostCompact',
   // SessionEnd - When a session is ending
   SessionEnd = 'SessionEnd',
+  // SessionDelete - After an explicitly selected session is deleted
+  SessionDelete = 'SessionDelete',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
   // When a tool call is denied before a permission dialog is displayed
@@ -255,6 +259,8 @@ export type HookDecision = 'ask' | 'block' | 'deny' | 'approve' | 'allow';
  */
 export interface HookInput {
   session_id: string;
+  source_type?: string;
+  source_id?: string;
   transcript_path: string;
   cwd: string;
   hook_event_name: string;
@@ -822,7 +828,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, and content_length.
+   * response_parts, result_display, error, error_type, content_length, and
+   * vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }
@@ -852,6 +859,7 @@ export interface PostToolBatchOutput extends HookOutput {
  */
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
+  submitted_prompt?: string;
 }
 
 /**
@@ -969,6 +977,35 @@ export interface StopOutput extends HookOutput {
 }
 
 /**
+ * MessageDisplay hook input
+ *
+ * Fires repeatedly as the assistant's reply streams (before `Stop`, which fires
+ * once at the end of the turn). `message_id` is stable for the whole streamed
+ * message; `displayed_text` is CUMULATIVE (the full text so far, not a delta),
+ * so hook authors never need to reassemble chunks themselves. `is_final` is
+ * true on the last firing for this message, so a hook script knows to flush
+ * (e.g. speak the tail of a buffered reply) rather than wait for more text
+ * that will never arrive.
+ */
+export interface MessageDisplayInput extends HookInput {
+  message_id: string;
+  displayed_text: string;
+  is_final: boolean;
+}
+
+/**
+ * MessageDisplay hook output
+ *
+ * Fire-and-forget, no control effects (no blocking/permission semantics) —
+ * purely observational, like `Notification`/`PostCompact`.
+ */
+export interface MessageDisplayOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'MessageDisplay';
+  };
+}
+
+/**
  * SessionStart source types
  */
 export enum SessionStartSource {
@@ -1033,6 +1070,13 @@ export interface SessionEndOutput extends HookOutput {
     hookEventName: 'SessionEnd';
     additionalContext?: string;
   };
+}
+
+/**
+ * SessionDelete hook input
+ */
+export interface SessionDeleteInput extends HookInput {
+  deleted_session_id: string;
 }
 
 /**
@@ -1146,7 +1190,7 @@ export interface SubagentStopOutput extends HookOutput {
 
 /**
  * StopFailure error types
- * Fires instead of Stop when an API error ended the turn
+ * Fires instead of Stop when an API error or loop detection ended the turn
  */
 export type StopFailureErrorType =
   | 'rate_limit'
@@ -1155,6 +1199,7 @@ export type StopFailureErrorType =
   | 'invalid_request'
   | 'server_error'
   | 'max_output_tokens'
+  | 'loop_detected'
   | 'unknown';
 
 /**
@@ -1234,6 +1279,7 @@ export interface TodoItem {
   id: string;
   content: string;
   status: TodoStatus;
+  blockedBy?: string[];
 }
 
 /**

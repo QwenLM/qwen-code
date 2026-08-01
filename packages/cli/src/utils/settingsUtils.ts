@@ -347,6 +347,11 @@ export function validateSettingValue(
         return `Value must be one of: ${allowed}`;
       }
       break;
+    case 'object':
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return 'Value must be an object';
+      }
+      break;
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }
@@ -635,7 +640,7 @@ export function getDisplayValue(
 
   // Special handling for outputLanguage 'auto' value
   if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
-    valueString = t('Auto (detect from system)');
+    valueString = t('Auto (follow user input)');
   } else if (definition?.type === 'enum' && definition.options) {
     const option = definition.options?.find((option) => option.value === value);
     if (option?.label) {

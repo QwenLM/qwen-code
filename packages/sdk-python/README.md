@@ -286,6 +286,39 @@ The `context` argument includes `cancel_event`, `suggestions`, and
 `can_use_tool` must be an `async def` callback accepting
 `(tool_name, tool_input, context)`. `stderr` must accept a single `str`.
 
+### Handling `ask_user_question`
+
+When the model needs a decision from the user it calls the built-in
+`ask_user_question` tool. This flows through the same `can_use_tool`
+callback: `tool_input` carries a `questions` list, and you return the
+collected answers via `updatedInput["answers"]`. `answers` is a dict keyed
+by the question's index (as a string), where each value is the label of the
+chosen option (or free-form text when the user picks "Other").
+
+```python
+async def can_use_tool(tool_name, tool_input, context):
+    if tool_name == "ask_user_question":
+        questions = tool_input["questions"]
+
+        # Present the questions to the user however your app sees fit,
+        # then build an index-keyed map of their answers.
+        answers = {}
+        for index, question in enumerate(questions):
+            answers[str(index)] = await prompt_user_to_choose(question)
+
+        # Return the answers through updatedInput["answers"] — the CLI
+        # forwards them to the tool so the model receives the decisions.
+        return {
+            "behavior": "allow",
+            "updatedInput": {**tool_input, "answers": answers},
+        }
+
+    return {"behavior": "allow", "updatedInput": tool_input}
+```
+
+If you return `allow` without any `answers`, the tool reports that no answer
+was provided; return `deny` to signal the user declined.
+
 ## Runtime Controls
 
 Control methods can be called while a session is active:

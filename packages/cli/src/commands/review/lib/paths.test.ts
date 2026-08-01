@@ -1,0 +1,79 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect } from 'vitest';
+import { basename, dirname, join, resolve } from 'node:path';
+import {
+  tmpFile,
+  probeWorktreePath,
+  worktreePath,
+  PARSE_ARGS_REPORT,
+} from './paths.js';
+
+describe('PARSE_ARGS_REPORT', () => {
+  it('is the literal path the skill tees to in Step 0', () => {
+    // The skill's Step 0 hard-codes `.qwen/tmp/qwen-review-parse-args.json` in
+    // its tee command. If this constant drifts from that literal the fallback
+    // silently stops reading the report and the original bug returns.
+    expect(PARSE_ARGS_REPORT).toBe(
+      join('.qwen', 'tmp', 'qwen-review-parse-args.json'),
+    );
+  });
+});
+
+describe('tmpFile — target is a single safe component', () => {
+  it('keeps ordinary labels intact', () => {
+    expect(tmpFile('pr-6771', 'diff.txt')).toContain(
+      'qwen-review-pr-6771-diff.txt',
+    );
+    expect(tmpFile('local', 'plan.json')).toContain(
+      'qwen-review-local-plan.json',
+    );
+  });
+
+  it('flattens a file-path target so its parent is not a missing directory', () => {
+    // `src/foo.ts` used to make `.qwen/tmp/qwen-review-src/foo.ts-diff.txt`, whose
+    // `src/` parent nobody created — ENOENT.
+    const p = tmpFile('src/foo.ts', 'diff.txt');
+    expect(p).not.toContain('src/foo.ts');
+    expect(dirname(p)).toBe(join('.qwen', 'tmp'));
+    // The separator is flattened to an underscore, so the target survives as a
+    // single component directly under the temp dir.
+    expect(basename(p)).toBe('qwen-review-src_foo.ts-diff.txt');
+  });
+
+  it('refuses to escape the temp dir with a crafted target', () => {
+    const p = tmpFile('../../evil', 'diff.txt');
+    expect(dirname(p)).toBe(join('.qwen', 'tmp'));
+    expect(p).not.toContain('..');
+    // The dot-segment traversal is stripped to a plain component, not nested.
+    expect(basename(p)).toBe('qwen-review-evil-diff.txt');
+  });
+});
+
+describe('probeWorktreePath', () => {
+  it('appends -probe to an absolute worktree path', () => {
+    const worktree = resolve('/a/b/review-pr-1');
+    expect(probeWorktreePath(worktree)).toBe(`${worktree}-probe`);
+  });
+
+  it('resolves a relative worktree to absolute so it never depends on cwd', () => {
+    // The probe drives `git worktree add` with the shared worktree as cwd, so a
+    // relative probe path would resolve against that worktree and nest the probe
+    // tree inside it. Absolute keeps it a sibling wherever it is called from.
+    expect(probeWorktreePath('.qwen/tmp/review-pr-1')).toBe(
+      `${resolve('.qwen/tmp/review-pr-1')}-probe`,
+    );
+  });
+
+  it('is the single source of the -probe suffix both call sites share', () => {
+    // cleanup.ts sweeps `probeWorktreePath(worktreePath(n))`; the probe creates
+    // `probeWorktreePath(worktree)`. One helper, one suffix — they cannot drift.
+    expect(probeWorktreePath(worktreePath(7))).toBe(
+      `${resolve(worktreePath(7))}-probe`,
+    );
+  });
+});

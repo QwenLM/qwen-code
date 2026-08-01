@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonEvent,
   DaemonErrorKind,
+  DaemonSessionArtifactChange,
   PermissionResponse,
 } from '../types.js';
 
@@ -34,6 +35,7 @@ export type DaemonUiEventType =
   | 'debug'
   // Session-meta events
   | 'session.metadata.changed'
+  | 'session.artifact.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -56,6 +58,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.mcp.server_changed'
   | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
@@ -83,6 +86,8 @@ export interface DaemonUiEventBase {
    * the SDK reads the field whether the daemon emits it today or not.
    */
   serverTimestamp?: number;
+  /** Ordered persisted ChatRecord identities that contributed to this event. */
+  sourceRecordIds?: readonly string[];
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -94,8 +99,28 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   meta?: DaemonTextDeltaMeta;
 }
 
+export interface DaemonInputReference {
+  id: string;
+  kind?: string;
+  label?: string;
+  value?: string;
+  serialized?: string;
+  removable?: boolean;
+}
+
+export interface DaemonInputReferenceAnnotation {
+  type: 'reference';
+  start: number;
+  end: number;
+  text: string;
+  reference: DaemonInputReference;
+}
+
+export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
+  inputAnnotations?: DaemonInputAnnotation[];
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -279,6 +304,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   type: 'session.metadata.changed';
   sessionId: string;
   displayName?: string;
+}
+
+export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
+  type: 'session.artifact.changed';
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
 }
 
 export interface DaemonUiSessionApprovalModeChangedEvent
@@ -472,7 +503,24 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   extends DaemonUiEventBase {
   type: 'workspace.mcp.server_restart_refused';
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason:
+    | 'in_flight'
+    | 'disabled'
+    | 'budget_would_exceed'
+    | 'authentication_required';
+}
+
+export interface DaemonUiMcpServerChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.server_changed';
+  serverName: string;
+  action:
+    | 'added'
+    | 'removed'
+    | 'approve'
+    | 'enable'
+    | 'disable'
+    | 'authenticate'
+    | 'clear-auth';
 }
 
 export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
@@ -556,6 +604,7 @@ export type DaemonUiEvent =
   | DaemonUiErrorEvent
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
+  | DaemonUiSessionArtifactChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -578,6 +627,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiMcpServerChangedEvent
   | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
@@ -743,6 +793,8 @@ export interface DaemonTranscriptBlockBase {
    * display: clients viewing the same session see the same value.
    */
   serverTimestamp?: number;
+  /** Ordered persisted ChatRecord identities that contributed to this block. */
+  sourceRecordIds?: readonly string[];
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
@@ -949,11 +1001,20 @@ export interface DaemonTranscriptState
   nextOrdinal: number;
   now: number;
   maxBlocks: number;
+  retainSubagentBlocks: boolean;
 }
 
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
   now?: number;
+  retainSubagentBlocks?: boolean;
+  onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
+}
+
+export interface DaemonTranscriptTruncationDetail {
+  kind: 'blocks' | 'text';
+  blockId?: string;
+  sourceRecordIds?: readonly string[];
 }
 
 export interface DaemonTranscriptStore {
@@ -963,6 +1024,7 @@ export interface DaemonTranscriptStore {
   appendLocalUserMessage(
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
+    meta?: DaemonTextDeltaMeta,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

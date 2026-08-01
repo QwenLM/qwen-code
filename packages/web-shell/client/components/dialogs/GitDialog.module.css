@@ -1,0 +1,387 @@
+.content {
+  display: flex;
+  min-height: 50vh;
+  flex-direction: column;
+}
+
+.tabBar {
+  display: flex;
+  gap: 2px;
+  padding: 0 0 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.tab:hover,
+.tabActive {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.tabActive {
+  color: inherit;
+  font-weight: 500;
+}
+
+.tabPanel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+/* ── commit panel ─────────────────────────── */
+.commitPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.commitMessage {
+  width: 100%;
+  min-height: 80px;
+  max-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 8px 10px;
+  outline: none;
+  line-height: 1.5;
+}
+
+.commitMessage:focus {
+  border-color: var(--primary, #3b82f6);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--primary, #3b82f6) 20%, transparent);
+}
+
+.commitMessage::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.commitStatus {
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.commitStatusError {
+  color: var(--destructive, #ef4444);
+}
+
+.commitStatusSuccess {
+  color: var(--success-color);
+}
+
+.commitActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.commitBtn {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.15s;
+}
+
+.commitBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.commitBtnPrimary {
+  background: var(--primary, #3b82f6);
+  color: var(--background);
+}
+
+.commitBtnPrimary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.commitBtnSecondary {
+  background: var(--secondary, rgba(128, 128, 128, 0.15));
+  color: var(--foreground, #e0e0e0);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+}
+
+.commitBtnSecondary:hover:not(:disabled) {
+  background: var(--accent, rgba(128, 128, 128, 0.2));
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── PR create form ─────────────────────────── */
+.prForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.prInput {
+  width: 100%;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+}
+
+.prInput:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
+.prInput::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.prBody {
+  width: 100%;
+  min-height: 200px;
+  max-height: 400px;
+  resize: vertical;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 0 0 6px 6px;
+  border-top: none;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+  line-height: 1.5;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.prBody:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
+.prBody::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.prBodyWrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.prBodyToolbar {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  overflow: hidden;
+}
+
+.prBodyTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground, #888);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prBodyTab:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.prBodyTabActive:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.1));
+}
+
+.prBodyTabActive {
+  color: var(--foreground, #e0e0e0);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.1));
+  font-weight: 500;
+}
+
+.prBodyPreview {
+  min-height: 200px;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.prBodyEmpty {
+  color: var(--muted-foreground, #666);
+  font-style: italic;
+}
+
+.prFormRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+
+
+
+
+
+/* ── branch select (searchable) ─────────────── */
+.branchSelectTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 120px;
+  max-width: 200px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.branchSelectTrigger:hover {
+  border-color: var(--primary, #3b82f6);
+}
+
+.branchSelectValue {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.branchSelectPopover {
+  width: 240px;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.branchSelectSearch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  color: var(--muted-foreground, #888);
+}
+
+.branchSelectInput {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  outline: none;
+}
+
+.branchSelectInput::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.branchSelectList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.branchSelectGroup {
+  padding: 3px 10px 1px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted-foreground, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.branchSelectItem {
+  display: block;
+  width: 100%;
+  padding: 4px 10px 4px 16px;
+  border: none;
+  background: none;
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branchSelectItem:hover {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+}
+
+.branchSelectItemActive {
+  color: var(--primary, #60a5fa);
+  font-weight: 500;
+}
+
+.branchSelectEmpty {
+  padding: 12px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted-foreground, #888);
+}
+
+.branchSelectRetry {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary, #60a5fa);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.branchSelectRetry:hover {
+  text-decoration: underline;
+}

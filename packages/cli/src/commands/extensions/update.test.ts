@@ -149,6 +149,34 @@ describe('handleUpdate', () => {
       );
     });
 
+    it('should surface committed update warnings', async () => {
+      const mockExtension = {
+        name: 'test-extension',
+        installMetadata: { source: 'test' },
+      };
+      mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
+      mockCheckForExtensionUpdate.mockResolvedValueOnce(
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+      );
+      mockUpdateExtension.mockResolvedValueOnce({
+        name: 'test-extension',
+        originalVersion: '1.0.0',
+        updatedVersion: '2.0.0',
+        warnings: [
+          {
+            code: 'extension_settings_legacy_sync_failed',
+            error: 'keychain unavailable',
+          },
+        ],
+      });
+
+      await handleUpdate({ name: 'test-extension' });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Extension "test-extension" updated with warning extension_settings_legacy_sync_failed: keychain unavailable',
+      );
+    });
+
     it('should show up to date message when versions are the same after update', async () => {
       const mockExtension = {
         name: 'test-extension',

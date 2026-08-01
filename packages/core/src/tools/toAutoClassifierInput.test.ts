@@ -23,6 +23,7 @@ function minimalConfig(over: Partial<Record<string, unknown>> = {}): Config {
   return {
     getTargetDir: () => '/Users/test/project',
     getModelInvocableCommandsExecutor: () => undefined,
+    getShellDefaultTimeoutMs: () => undefined,
     ...over,
   } as unknown as Config;
 }
@@ -185,7 +186,7 @@ describe('SkillTool.toAutoClassifierInput', () => {
 // AgentTool ──────────────────────────────────────────────────────────────
 
 describe('AgentTool.toAutoClassifierInput', () => {
-  it('forwards full prompt and subagent_type (no truncation)', () => {
+  it('forwards full prompt and fork constraints', () => {
     // Regression guard: prior implementation truncated to 200 chars, which
     // hid attack payloads placed after character 200 from the classifier
     // while the sub-agent still received the full text. Same attack surface
@@ -200,10 +201,14 @@ describe('AgentTool.toAutoClassifierInput', () => {
       {
         description: 'short desc',
         prompt: longPrompt,
-        subagent_type: 'coder',
+        subagent_type: 'fork',
+        fork_turns: '3',
+        fork_tools: ['read_file'],
       },
     );
-    expect(result['subagent_type']).toBe('coder');
+    expect(result['subagent_type']).toBe('fork');
+    expect(result['fork_turns']).toBe('3');
+    expect(result['fork_tools']).toEqual(['read_file']);
     expect(result['prompt']).toBe(longPrompt);
     expect((result['prompt'] as string).length).toBe(longPrompt.length);
   });
@@ -224,5 +229,25 @@ describe('AgentTool.toAutoClassifierInput', () => {
     );
     expect(result['working_dir']).toBe('.qwen/tmp/review-pr-1');
     expect(result['subagent_type']).toBe('file-search');
+  });
+
+  it('includes fork_profile when no resolved launch snapshot is available', () => {
+    const result = (
+      AgentTool.prototype.toAutoClassifierInput as (
+        p: unknown,
+      ) => Record<string, unknown>
+    ).call(
+      {},
+      {
+        description: 'research',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_profile: 'ro-research',
+      },
+    );
+    expect(result['fork_profile']).toBe('ro-research');
+    expect(result['fork_tools']).toBeUndefined();
+    expect(result['fork_profile_tools']).toBeUndefined();
+    expect(result['fork_profile_prompt_hint']).toBeUndefined();
   });
 });

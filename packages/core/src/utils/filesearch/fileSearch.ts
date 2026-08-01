@@ -213,7 +213,7 @@ class RecursiveFileSearch implements FileSearch {
     // Initialize fuzzy search if enabled (or undefined, default true).
     if (this.options.enableFuzzySearch !== false) {
       // The v1 algorithm is much faster since it only looks at the first
-      // occurence of the pattern. We use it for search spaces that have >20k
+      // occurrence of the pattern. We use it for search spaces that have >20k
       // files, because the v2 algorithm is just too slow in those cases.
       //
       // Construction is the actual main-thread freeze on large workspaces

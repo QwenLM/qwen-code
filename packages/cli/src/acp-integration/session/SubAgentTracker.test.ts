@@ -352,10 +352,13 @@ describe('SubAgentTracker', () => {
       });
     });
 
-    it('should emit plan update for TodoWriteTool results', async () => {
+    // Subagent todo state is isolated from the parent session plan: a
+    // subagent's TodoWrite result must not promote into a session-level
+    // plan update. The guard lives in ToolCallEmitter.emitResult, keyed on
+    // the subagentMeta this tracker stamps onto every emit.
+    it('does not promote a subagent TodoWrite as the session plan', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
-      // Store args via tool call
       eventEmitter.emit(
         AgentEventType.TOOL_CALL,
         createToolCallEvent({
@@ -367,7 +370,6 @@ describe('SubAgentTracker', () => {
         }),
       );
 
-      // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
         name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
@@ -380,14 +382,12 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
-      await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Task 1', priority: 'medium', status: 'completed' },
-          ],
-        });
-      });
+      // emitResult is fire-and-forget; flush the microtask queue before
+      // asserting so a regression that re-enables plan emission is caught.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sendUpdateSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sessionUpdate: 'plan' }),
+      );
     });
 
     it('should clean up state after result', async () => {
@@ -542,6 +542,37 @@ describe('SubAgentTracker', () => {
             answers: undefined,
           },
         );
+      });
+    });
+
+    it('cancels outcomes that were not offered to the ACP host', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-exact-shell',
+          confirmationDetails: {
+            type: 'exec',
+            title: 'Confirm shell',
+            command: "python -c 'print(1)'",
+            rootCommand: 'python',
+            hideAlwaysAllow: true,
+            warnings: ['Exact one-off approval required'],
+          } as AgentApprovalRequestEvent['confirmationDetails'],
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
       });
     });
 

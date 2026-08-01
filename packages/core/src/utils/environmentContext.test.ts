@@ -38,6 +38,7 @@ import {
 import { prependToFirstTextPart } from './partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from './getFolderStructure.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
@@ -519,6 +520,22 @@ describe('startup reminder builders', () => {
     expect(reminder).toContain('- "cron_list": "List scheduled jobs."');
   });
 
+  it('keeps completed-task revival visible in the send_message summary', () => {
+    const tool = new SendMessageTool({} as Config);
+    const reminder = buildDeferredToolsReminder(
+      registry({
+        getDeferredToolSummary: vi
+          .fn()
+          .mockReturnValue([
+            { name: tool.name, description: tool.description },
+          ]),
+      }),
+    );
+
+    expect(reminder).toContain('completed background task');
+    expect(reminder).toContain('completed tasks are revived');
+  });
+
   it('JSON-encodes deferred tool metadata before rendering', () => {
     const reminder = buildDeferredToolsReminder(
       registry({
@@ -914,7 +931,7 @@ describe('buildAvailableSkillsReminder', () => {
     expect(result).toBeNull();
   });
 
-  it('trims descriptions when entries exceed budget', async () => {
+  it('preserves descriptions beyond 200 characters when entries exceed budget', async () => {
     const longDesc = 'A'.repeat(500) + '\nSecond line that should be dropped';
     const entries: AvailableSkillEntry[] = Array.from(
       { length: 30 },
@@ -932,6 +949,7 @@ describe('buildAvailableSkillsReminder', () => {
     });
     const result = await buildAvailableSkillsReminder(mockConfig as Config);
     expect(result).not.toBeNull();
+    expect(result!.reminder).toContain('A'.repeat(500));
     // Trimmed entries should NOT contain the second line
     expect(result!.reminder).not.toContain(
       'Second line that should be dropped',
@@ -968,22 +986,17 @@ describe('buildAddedSkillsReminder', () => {
     expect(result).toContain('skill-b');
   });
 
-  it('caps long descriptions to first line and MAX_TRIMMED_SKILL_DESC_LEN', () => {
+  it('preserves descriptions longer than 200 characters', () => {
     const longDesc = 'A'.repeat(300) + '\nSecond line that should be dropped';
     const entries: AvailableSkillEntry[] = [
       { name: 'mcp-skill', description: longDesc },
     ];
     const result = buildAddedSkillsReminder(entries);
     expect(result).not.toBeNull();
-    // The full 300-char first line should be truncated
-    expect(result).not.toContain('A'.repeat(300));
-    // Should contain a truncated version ending with "..."
-    expect(result).toContain('...');
-    // Second line should be dropped
-    expect(result).not.toContain('Second line');
+    expect(result).toContain(longDesc);
   });
 
-  it('caps multi-line descriptions to first line only', () => {
+  it('preserves multi-line descriptions', () => {
     const entries: AvailableSkillEntry[] = [
       {
         name: 'multiline-skill',
@@ -993,8 +1006,8 @@ describe('buildAddedSkillsReminder', () => {
     const result = buildAddedSkillsReminder(entries);
     expect(result).not.toBeNull();
     expect(result).toContain('First line only');
-    expect(result).not.toContain('Drop this');
-    expect(result).not.toContain('And this');
+    expect(result).toContain('Drop this');
+    expect(result).toContain('And this');
   });
 });
 

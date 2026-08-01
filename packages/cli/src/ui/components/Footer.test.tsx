@@ -17,6 +17,7 @@ import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { StreamingState } from '../types.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
@@ -149,6 +150,32 @@ describe('<Footer />', () => {
     expect(lastFrame()).not.toContain('workflow active');
   });
 
+  it('shows steer and queue shortcuts while the model is responding', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+
+    expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
+  });
+
+  it('shows mode indicator alongside steering hint during streaming', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+
+    const frame = lastFrame()!;
+    expect(frame).toContain('Enter to steer · Ctrl+Q to queue');
+    expect(frame).toContain('YOLO mode');
+  });
+
   it('shows deferred IDE connection progress', () => {
     const { lastFrame } = renderWithWidth(
       120,
@@ -196,7 +223,7 @@ describe('<Footer />', () => {
       isCronEnabled: vi.fn(() => true),
       getCronScheduler: vi.fn(() => ({ size: 2 })),
     });
-    expect(lastFrame()).toContain('◎ 2 scheduled tasks');
+    expect(lastFrame()).toContain('◎\uFE0E 2 scheduled tasks');
   });
 
   it('refreshes the scheduled task count after mount', async () => {
@@ -221,7 +248,7 @@ describe('<Footer />', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
-      expect(lastFrame()).toContain('◎ 1 scheduled task');
+      expect(lastFrame()).toContain('◎\uFE0E 1 scheduled task');
 
       schedulerSize = 0;
       await act(async () => {

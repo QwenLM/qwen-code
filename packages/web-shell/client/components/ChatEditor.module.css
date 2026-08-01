@@ -4,17 +4,21 @@
   margin: 0 0 14px;
 }
 
+.editorShellDropdownOpen {
+  z-index: 7;
+}
+
 .container {
   position: relative;
   container-type: inline-size;
   border-radius: 12px;
   margin: 0;
   cursor: text;
+  --chat-editor-min-height: 140px;
+  --chat-editor-max-height: min(350px, 40vh);
+  --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
-  --dac-glow-on: 0;
-  --dac-glow-pulse: 0;
-  --dac-g1: #6a78ff;
-  --dac-g2: #8a7bff;
+  --chat-editor-attachments-max-height: 136px;
   --chat-send-button-disabled-foreground: var(--secondary-foreground);
   --chat-send-button-foreground: #fafafa;
 }
@@ -23,8 +27,11 @@
   position: relative;
   z-index: 2;
   display: flex;
-  height: 140px;
+  box-sizing: border-box;
+  min-height: var(--chat-editor-min-height, 140px);
+  max-height: var(--chat-editor-max-height, min(350px, 40vh));
   flex-direction: column;
+  overflow: visible;
   border: 1.5px solid var(--agent-gray-200);
   border-radius: inherit;
   background: var(--chat-editor-bg-primary);
@@ -32,207 +39,97 @@
   padding: 12px;
 }
 
-.dacAura,
-.dacHalo {
+.specularEffect {
+  position: absolute;
+  inset: -20px;
+  z-index: 3;
+  overflow: visible;
   pointer-events: none;
 }
 
-.dacAura {
+.specularEffect::before {
   position: absolute;
-  inset: -50px;
-  z-index: 0;
-  opacity: calc(var(--dac-glow-on) * (0.66 + var(--dac-glow-pulse) * 0.34));
-  -webkit-mask: radial-gradient(
-    ellipse 56% 64% at center,
-    transparent 28%,
-    #000 48%,
-    transparent 94%
-  );
-  mask: radial-gradient(
-    ellipse 56% 64% at center,
-    transparent 28%,
-    #000 48%,
-    transparent 94%
-  );
-  will-change: opacity;
-}
-
-.dacAura::before,
-.dacAura::after {
-  position: absolute;
-  inset: 0;
+  inset: 20px;
+  border-radius: 12px;
   content: '';
+  opacity: 0;
+  transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1);
   will-change: opacity;
 }
 
-.dacAura::before {
-  background: color-mix(in srgb, var(--dac-g1) 58%, transparent);
-  -webkit-mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
-  -webkit-mask-composite: source-in;
-  mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
-  mask-composite: intersect;
-  opacity: 1;
-  transition: opacity 0.2s ease;
-}
-
-.dacAura::after {
-  background: color-mix(in srgb, var(--dac-g1) 66%, transparent);
-  -webkit-mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(
-      90deg,
-      #000 0,
-      rgba(0, 0, 0, 0.08) 28px,
-      #000 56px
-    );
-  -webkit-mask-composite: source-in, source-in;
-  mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(
-      90deg,
-      #000 0,
-      rgba(0, 0, 0, 0.08) 28px,
-      #000 56px
-    );
-  mask-composite: intersect, intersect;
-  opacity: 0;
-  animation: dac-aura-cols 2.4s linear infinite paused;
-  transition: opacity 0.2s ease;
-}
-
-.container[data-dac-typing] .dacAura::before {
-  opacity: 0;
-}
-
-.container[data-dac-typing] .dacAura::after {
-  opacity: 1;
-  animation-play-state: running;
-}
-
-.dacHalo {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  border-radius: inherit;
-  opacity: var(--dac-glow-on);
+.specularEffect[data-theme='light']::before {
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--dac-g2) 36%, transparent),
-    0 1px 5px color-mix(in srgb, var(--dac-g1) 18%, transparent),
-    0 6px 30px color-mix(in srgb, var(--dac-g1) 22%, transparent);
-  will-change: opacity;
+    0 0 0 4px rgba(205, 217, 255, 0.5),
+    0 16px 46px rgba(51, 92, 255, 0.08);
 }
 
-.dacHalo::after {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: 0 6px 40px color-mix(in srgb, var(--dac-g1) 14%, transparent);
-  content: '';
-  opacity: calc(var(--dac-glow-on) * var(--dac-glow-pulse));
-  will-change: opacity;
+.specularEffect[data-theme='dark']::before {
+  box-shadow:
+    0 0 0 4px rgba(83, 103, 159, 0.3),
+    0 18px 54px rgba(51, 92, 255, 0.18);
 }
 
-@keyframes dac-aura-cols {
-  from {
-    -webkit-mask-position:
-      0 0,
-      0 0,
-      0 0;
-    mask-position:
-      0 0,
-      0 0,
-      0 0;
-  }
-
-  to {
-    -webkit-mask-position:
-      0 0,
-      0 0,
-      56px 0;
-    mask-position:
-      0 0,
-      0 0,
-      56px 0;
-  }
+.container:hover .specularEffect::before,
+.container:focus-within .specularEffect::before {
+  opacity: 1;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .dacAura::after,
-  .container[data-dac-typing] .dacAura::after {
-    opacity: 0;
-    animation: none;
-  }
-
-  .container[data-dac-typing] .dacAura::before {
-    opacity: 1;
-  }
-}
-
-.slashPortalLayer {
-  display: contents;
+.specularEffect canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .atPortalLayer {
   display: contents;
 }
 
-.slashPanel {
-  position: fixed;
-  z-index: var(--web-shell-popover-z-index, 1000);
-  /* Round cap sized for ~12 command rows plus their section headers/dividers,
-     bounded by 45vh so it stays proportional on short viewports. */
-  --slash-panel-max-height: min(460px, 45vh);
-  --slash-anchor-width: 620px;
-  --slash-command-col: 20ch;
-  --slash-desc-col: 32ch;
-  --slash-column-gap: 2ch;
-  --slash-row-width: calc(
-    var(--slash-command-col) + var(--slash-desc-col) + var(--slash-column-gap) +
-      16px
-  );
-  width: fit-content;
-  min-width: min(240px, calc(var(--slash-anchor-width) - 32px));
+:global([data-web-shell-slash-menu]) {
+  width: 620px;
   max-width: min(
-    620px,
-    calc(var(--slash-anchor-width) - 32px),
+    calc(var(--radix-popover-trigger-width) - 32px),
+    var(--radix-popover-content-available-width),
     calc(100vw - 24px)
   );
-  max-height: var(--slash-panel-max-height);
-  padding: 6px;
-  overflow: visible;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 8px;
-  background: var(--background);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--chat-editor-text-primary);
+  max-height: var(--radix-popover-content-available-height);
+  overflow: hidden;
+}
+
+:global([data-web-shell-slash-detail]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  width: min(320px, calc(100vw - 24px));
+  max-height: min(200px, var(--radix-popover-content-available-height));
+  overflow: hidden;
+}
+
+:global([data-web-shell-toolbar-popover]) {
+  width: min(max-content, var(--radix-popover-content-available-width));
+  max-height: var(--radix-popover-content-available-height);
+  overflow: hidden;
+}
+
+.slashPanel {
+  max-height: min(
+    460px,
+    calc(var(--radix-popover-content-available-height) - 20px)
+  );
+  overflow: hidden;
   cursor: default;
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 13px;
-  line-height: 1.35;
 }
 
 .slashPanelBody {
-  max-height: calc(var(--slash-panel-max-height) - 12px);
+  max-height: inherit;
   overflow: hidden;
-  border-radius: 6px;
 }
 
 .slashList {
   display: flex;
-  width: min(var(--slash-row-width), calc(100vw - 46px));
-  max-width: 100%;
+  width: 100%;
   max-height: inherit;
   flex-direction: column;
   gap: 2px;
   overflow-x: hidden;
   overflow-y: auto;
-  border-radius: 6px;
   scroll-padding-bottom: 12px;
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -291,9 +188,9 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, var(--slash-command-col))
-    minmax(0, var(--slash-desc-col));
-  column-gap: var(--slash-column-gap);
+    minmax(0, 220px)
+    minmax(0, 1fr);
+  column-gap: 8px;
   align-items: baseline;
   padding: 5px 8px;
   border: 0;
@@ -303,6 +200,11 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.slashItem:not([data-has-description]) {
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
 }
 
 .slashItem:hover,
@@ -316,22 +218,13 @@
 }
 
 .slashDetail {
-  position: fixed;
-  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
-  width: min(320px, calc(100vw - 48px));
-  padding: 8px 10px;
+  min-height: 0;
+  max-height: min(
+    180px,
+    max(0px, calc(var(--radix-popover-content-available-height) - 20px))
+  );
   overflow: auto;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--foreground);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 20px;
   overflow-wrap: anywhere;
-  pointer-events: auto;
 }
 
 .slashDetailCommand {
@@ -371,6 +264,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -687,26 +581,19 @@
   font-size: 12px;
 }
 
-@container (max-width: 699px) {
-  .slashPanel {
-    left: 12px;
-    width: calc(100% - 24px);
-    min-width: 0;
-  }
-
-  .slashList {
-    width: 100%;
-  }
-
-  .slashItem {
-    width: 100%;
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 2px;
-  }
+.attachments {
+  display: flex;
+  min-height: 0;
+  max-height: var(--chat-editor-attachments-max-height, 136px);
+  flex: 0 1 auto;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .tags {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 0 8px;
@@ -727,14 +614,23 @@
   line-height: 1.2;
 }
 
+.tagContent {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  align-items: center;
+}
+
 .tagTooltip {
-  position: absolute;
   z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
-  top: calc(100% + 6px);
-  left: 0;
-  display: none;
+  box-sizing: border-box;
   min-width: 160px;
   max-width: min(320px, 80vw);
+  max-height: min(
+    calc(100vh - 16px),
+    var(--radix-tooltip-content-available-height, calc(100vh - 16px))
+  );
   padding: 8px 10px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
@@ -744,12 +640,10 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
   line-height: 1.5;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
   white-space: normal;
-}
-
-.tag:hover .tagTooltip,
-.tag:focus-within .tagTooltip {
-  display: block;
 }
 
 .tagLabel,
@@ -813,22 +707,100 @@
 }
 
 .editorArea {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 6px;
-  min-height: 0;
+  min-height: var(--chat-editor-input-min-height, 44px);
   padding: 4px 0;
-  overflow: auto;
+  overflow: clip;
+}
+
+.typewriterPlaceholder {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  z-index: 1;
+  color: var(--chat-editor-text-dimmed, #666);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.6;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
+.typewriterCaret {
+  display: inline-block;
+  margin-left: 1px;
+  color: #6785ff;
+}
+
+:global(.dark) .typewriterCaret {
+  color: rgba(205, 215, 255, 0.6);
+}
+
+.typewriterCaretFinished {
+  animation: typewriter-caret-blink 0.5s steps(1) 2 forwards;
+}
+
+.container[data-typewriter-visible] .editorArea :global(.cm-placeholder) {
+  opacity: 0;
+}
+
+.container[data-typewriter-visible] .mobileTextarea::placeholder {
+  color: transparent;
+}
+
+@keyframes typewriter-caret-blink {
+  0%,
+  48% {
+    opacity: 1;
+  }
+
+  49%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .typewriterPlaceholder {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .specularEffect::before {
+    transition: none;
+  }
+
+  .typewriterCaretFinished {
+    animation: none;
+  }
 }
 
 .editorArea > :last-child {
+  display: grid;
   min-width: 0;
+  min-height: var(--chat-editor-input-min-height, 44px);
   flex: 1;
+  overflow: clip;
+}
+
+.editorArea :global(.cm-editor) {
+  height: 100%;
+  min-height: 0;
+}
+
+.editorArea :global(.cm-scroller) {
+  height: 100%;
+  min-height: 0;
 }
 
 .shellPrefix {
   flex: 0 0 auto;
+  align-self: flex-start;
   padding-top: 1px;
   color: var(--chat-editor-accent-color);
   font-family: var(--font-mono);
@@ -844,6 +816,38 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.6;
+}
+
+/* Touch-device textarea backend (#5958). Mirrors the CodeMirror look; the
+   16px font size is mandatory: iOS Safari auto-zooms the page when focusing
+   any input with a smaller font. */
+.mobileTextarea {
+  field-sizing: content;
+  width: 100%;
+  min-height: var(--chat-editor-input-min-height, 44px);
+  max-height: var(--chat-editor-input-max-height, 300px);
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  color: var(--chat-editor-text-primary, #e0e0e0);
+  caret-color: var(--chat-editor-accent-color, #4a9eff);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.mobileTextarea::placeholder {
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+/* As .editorArea's last child the textarea would inherit `overflow: clip`
+   from the rule above, pinning scrollTop to 0 — content beyond the height
+   cap would become unreachable. The extra `textarea` type wins that
+   specificity. */
+.editorArea > textarea.mobileTextarea {
+  overflow-y: auto;
 }
 
 .editorArea .cm-scroller {
@@ -866,6 +870,7 @@
 
 .toolbar {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   min-width: 0;
@@ -885,6 +890,16 @@
 
 .toolbarLeading {
   margin-left: -5px;
+  min-width: 0;
+}
+
+.toolbar[data-mobile-voice-active='true'] .toolbarLeading,
+.toolbar[data-mobile-voice-active='true'] [data-hide-during-mobile-voice] {
+  display: none;
+}
+
+.toolbar[data-mobile-voice-active='true'] .toolbarRight {
+  margin-left: auto;
 }
 
 .toolbarStart {
@@ -897,7 +912,213 @@
 
 .toolbarLeft {
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.gitBranchChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* When the chip opens the Changes dialog it renders as a <button>; reset the
+   UA button chrome so it looks identical to the read-only <output> chip. */
+.gitBranchChipButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+
+.gitBranchChipButton:hover {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.gitBranchChipButton:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
+}
+
+.gitBranchIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.gitBranchIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.gitBranchText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitBranchChip[data-detached='true'] .gitBranchText {
+  color: var(--warning-color);
+}
+
+.gitBranchChip[data-worktree='true'] {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.gitBranchIconWrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 16px;
+}
+
+/* Compact (icon-only) chip: a single severity dot on the branch icon so the
+   working-tree state is still glanceable without the text + inline indicators. */
+.gitBranchBadgeDot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchBadgeDot[data-tone='warning'] {
+  background: var(--warning-color);
+}
+
+.gitBranchBadgeDot[data-tone='error'] {
+  background: var(--error-color);
+}
+
+.gitBranchIndicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.gitBranchDirtyDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  display: inline-block;
+}
+
+.gitBranchAheadBehind {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchConflicted {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--error-color);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchConflicted svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchOperation {
+  color: var(--warning-color);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.gitBranchTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gitBranchTooltipTitle {
+  font-weight: 600;
+}
+
+.gitBranchTooltipRow {
+  opacity: 0.85;
+}
+
+/* Which workspace a split-view pane's session lives in — parallel to the git
+   branch chip, shown only on a multi-workspace daemon. */
+.workspaceChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 160px;
+  height: 28px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* On a multi-workspace daemon the chip gets a stable per-workspace accent
+   (--ws-accent, set by a shared accent class): a faint tinted background plus a
+   colored folder, so panes stay distinguishable even when the chip collapses to
+   the icon-only compact state. */
+.workspaceChipAccented {
+  background: color-mix(in srgb, var(--ws-accent) 12%, transparent);
+}
+
+.workspaceChipAccented .workspaceChipIcon {
+  color: var(--ws-accent);
+}
+
+.workspaceChipIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.workspaceChipIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspaceChipText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbarRight {
@@ -911,50 +1132,45 @@
   align-items: center;
 }
 
-@container (max-width: 699px) {
-  .toolbarLeft .toolBtn {
-    width: auto;
-    padding: 0 6px;
-    justify-content: center;
-  }
-
-  .toolbarLeft .toolBtnText {
-    display: none;
-  }
+.toolbarMeasurements {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .dropdownWrapper {
   position: relative;
 }
 
-.dropdown {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  min-width: 160px;
-  padding: 4px;
-  background: var(--background);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow:
-    0 2px 4px -2px rgba(0, 0, 0, 0.1),
-    0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  z-index: 100;
+.dropdownWrapperCompact {
+  width: 28px;
+  flex: 0 0 28px;
+}
+
+.dropdownList {
   display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
-.dropdownRich {
-  min-width: min(360px, calc(100vw - 32px));
-  padding: 6px;
-  gap: 2px;
+.dropdownListConstrained {
+  max-height: 250px;
 }
 
-.dropdownCheck {
-  min-width: min(300px, calc(100vw - 32px));
-  padding: 6px;
-  gap: 2px;
+.dropdownEmpty {
+  padding: 8px 9px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .dropdownItem {
@@ -1067,9 +1283,79 @@
   white-space: nowrap;
 }
 
+.modeToolBtn,
+.modelToolBtn {
+  min-width: 0;
+}
+
 .toolBtn:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.workspaceSelectTrigger {
+  min-width: 0;
+  max-width: 176px;
+  align-items: center;
+  box-shadow: none;
+}
+
+.workspaceSelectTrigger[data-disabled] {
+  cursor: default;
+  opacity: 1;
+}
+
+.workspaceSelectTrigger > svg {
+  display: block;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.workspaceSelectTooltipTrigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 176px;
+}
+
+.workspaceSelectTrigger [data-slot='select-value'] {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-self: center;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitBranchChipCompact,
+.workspaceChipCompact,
+.workspaceSelectTriggerCompact,
+.toolBtnCompact {
+  width: 28px;
+  max-width: 28px;
+  flex: 0 0 28px;
+  gap: 0;
+  padding: 0 6px;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.workspaceSelectTooltipTriggerCompact {
+  width: 28px;
+  max-width: 28px;
+  flex: 0 0 28px;
+}
+
+.gitBranchChipCompact .gitBranchText,
+.workspaceChipCompact .workspaceChipText,
+.workspaceSelectTriggerCompact [data-slot='select-value'],
+.workspaceSelectTriggerCompact > svg:last-child,
+.workspaceSelectTriggerCompact .toolBtnText,
+.workspaceSelectTriggerCompact .toolBtnArrow,
+.toolBtnCompact .toolBtnText,
+.toolBtnCompact .toolBtnArrow {
+  display: none;
 }
 
 .toolBtn[data-tooltip]:hover::after,
@@ -1149,32 +1435,29 @@
 }
 
 .toolBtnText {
+  min-width: 0;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
-  line-height: 1;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolBtnArrow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 10px;
-  height: 10px;
-  margin-left: 2px;
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
 }
 
 .toolBtnArrow svg {
   display: block;
-}
-
-.chevronDown {
-  width: 7px;
-  height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
-  transform: rotate(45deg);
-  margin-top: -3px;
+  width: 16px;
+  height: 16px;
 }
 
 .quickActionsPanel {
@@ -1468,6 +1751,7 @@
 
 .images {
   display: flex;
+  flex: 0 0 auto;
   gap: 6px;
   padding: 4px 0 0;
   flex-wrap: wrap;

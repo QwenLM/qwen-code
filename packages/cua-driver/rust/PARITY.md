@@ -2184,8 +2184,8 @@ resolve the release tag in the same priority order as the Swift
    `CUA_DRIVER_RS_VERSION` (`$env:CUA_DRIVER_RS_VERSION` on Windows).
 2. **Baked-in default** —
    a sentinel-block-wrapped constant carried in the install script
-   itself, updated by the CD `Bake version into install scripts` step
-   after each `cua-driver-rs-v*` tag push. Matches the Swift driver's
+   itself, updated by the CD `sync-installer-version` job after each
+   successful `cua-driver-rs-v*` release. Matches the Swift driver's
    `CUA_DRIVER_BAKED_VERSION` shape.
 3. **GitHub Releases API fallback** —
    only consulted when the env override is absent *and* the baked
@@ -2230,27 +2230,17 @@ line, not the markers, so the markers are a human cue only.
 
 #### CD wiring
 
-`.github/workflows/cd-rust-cua-driver.yml` runs a `Bake version into
-install scripts` step at the end of the `release` job after each
-`cua-driver-rs-v*` tag push. It runs on `ubuntu-latest` (GNU sed)
-and the equivalent Swift step runs on `macos-15` (BSD sed), so the
-two workflows use slightly different `sed -i` syntax:
+`.github/workflows/cd-cua-driver.yml` first validates that the manual
+input or `cua-driver-rs-v*` tag matches the Cargo workspace version.
+Release builds use `--locked`, so a stale lockfile stops the workflow.
 
-| Workflow | Runner | `sed -i` form |
-|---|---|---|
-| `cd-rust-cua-driver.yml` (this) | `ubuntu-latest` | `sed -i 's/.../.../`  (GNU) |
-| `cd-swift-cua-driver.yml` | `macos-15` | `sed -i '' 's/.../.../`  (BSD) |
-
-Both push the rewritten files back to `main` using a GitHub App
-token (`RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`) so the push
-bypasses the "Changes must be made through a pull request" ruleset
-on `main` — the default `GITHUB_TOKEN` (github-actions[bot]) is
-rejected by that ruleset.
-
-The commit author is `trycua-release[bot]` and the message is
-`chore(cua-driver-rs): bake version <V> into install scripts [skip ci]`
-(the `[skip ci]` suppresses the recursive CD trigger from the
-bake-push hitting `main`).
+The installers deliberately keep pointing at the last published
+release while the new artifacts build. Only after the GitHub Release
+has been created successfully does `sync-installer-version` update the
+Bash and PowerShell baked constants plus the README examples. It opens
+a small follow-up PR with `CI_BOT_PAT` and enables auto-merge, preserving
+the main-branch ruleset and avoiding a window where default installs
+refer to assets that do not exist yet.
 
 ### Per-version release-dir GC (`CUA_DRIVER_RS_KEEP_VERSIONS`)
 

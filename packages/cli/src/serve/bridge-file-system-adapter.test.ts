@@ -247,6 +247,47 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).not.toContain('line1');
     });
 
+    it('reads a bounded ACP line window from text above MAX_READ_BYTES', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-window.txt');
+      const lines = Array.from(
+        { length: 4_000 },
+        (_, index) => `line${index + 1} ${'x'.repeat(80)}`,
+      );
+      const content = lines.join('\n');
+      expect(Buffer.byteLength(content)).toBeGreaterThan(MAX_READ_BYTES);
+      await fsp.writeFile(target, content, 'utf8');
+
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 3,
+        limit: 20,
+      });
+
+      expect(response.content).toBe(lines.slice(2, 22).join('\n'));
+    });
+
+    it('serves an oversized ACP line-only read as a bounded window', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-line-only.txt');
+      await fsp.writeFile(target, 'x'.repeat(MAX_READ_BYTES + 1), 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 2,
+      });
+
+      expect(response.content).toBe('');
+    });
+
     it('treats null line/limit as undefined (ACP wire compatibility)', async () => {
       const target = path.join(tmpDir, 'null-window.txt');
       await fsp.writeFile(target, 'hello\nworld\n', 'utf8');
@@ -364,6 +405,28 @@ describe('createBridgeFileSystemAdapter', () => {
         line: 0 as number,
       });
       expect(response.content).toBe('x\ny\n');
+    });
+
+    it('readText surfaces workspace-file-system parse_error for fractional positive limits', async () => {
+      const target = path.join(tmpDir, 'fractional-limit.txt');
+      await fsp.writeFile(target, 'x\ny\nz\n', 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const err = await adapter
+        .readText({
+          path: target,
+          sessionId: 'sess:test',
+          line: 1,
+          limit: 1.5,
+        })
+        .catch((e: unknown) => e);
+
+      expect((err as { kind?: string }).kind).toBe('parse_error');
+      expect((err as Error).message).toContain(
+        'limit must be a positive integer',
+      );
     });
   });
 

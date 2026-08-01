@@ -11,12 +11,13 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   unescapePath,
 } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { runRipgrep } from '../utils/ripgrepUtils.js';
+import { runRipgrep, type RipgrepRunResult } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -27,9 +28,13 @@ import {
   QwenIgnoreParser,
 } from '../utils/qwenIgnoreParser.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
+import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
+const RIPGREP_INCOMPLETE_NOTICE =
+  'Search did not complete: the results above may not include all matches.';
 
 interface RipgrepJsonMatch {
   type: 'match';
@@ -217,13 +222,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Get raw ripgrep output
-      const { stdout: rawOutput, truncated: truncatedBySystemLimit } =
-        await this.performRipgrepSearch({
-          pattern: this.params.pattern,
-          paths: searchPaths,
-          glob: this.params.glob,
-          signal,
-        });
+      const searchResult = await this.performRipgrepSearch({
+        pattern: this.params.pattern,
+        paths: searchPaths,
+        glob: this.params.glob,
+        signal,
+      });
+      const rawOutput = searchResult.stdout;
 
       // Build search description
       const searchLocationDescription = this.params.path
@@ -238,6 +243,17 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Check if we have any matches
       if (!rawOutput.trim()) {
+        if (searchResult.incomplete) {
+          const incompleteMsg = this.buildIncompleteSearchMessage(
+            searchLocationDescription,
+            filterDescription,
+            searchResult.error,
+          );
+          return {
+            llmContent: incompleteMsg,
+            returnDisplay: 'Error: Search incomplete',
+          };
+        }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
@@ -319,6 +335,17 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       const totalMatches = allLines.length;
       if (totalMatches === 0) {
+        if (searchResult.incomplete) {
+          const incompleteMsg = this.buildIncompleteSearchMessage(
+            searchLocationDescription,
+            filterDescription,
+            searchResult.error,
+          );
+          return {
+            llmContent: incompleteMsg,
+            returnDisplay: 'Error: Search incomplete',
+          };
+        }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
@@ -379,23 +406,26 @@ class GrepToolInvocation extends BaseToolInvocation<
       let llmContent = header + grepOutput;
 
       // Add truncation notice if needed
-      if (
-        truncatedByLineLimit ||
-        truncatedByCharLimit ||
-        truncatedBySystemLimit
-      ) {
+      if (truncatedByLineLimit || truncatedByCharLimit) {
         const omittedMatches = totalMatches - includedLines;
         llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
 
+      if (searchResult.incomplete) {
+        llmContent += `\n---\n[${RIPGREP_INCOMPLETE_NOTICE}]`;
+      }
+
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
-      if (
-        truncatedByLineLimit ||
-        truncatedByCharLimit ||
-        truncatedBySystemLimit
-      ) {
-        displayMessage += ` (truncated)`;
+      const displayTags: string[] = [];
+      if (truncatedByLineLimit || truncatedByCharLimit) {
+        displayTags.push('truncated');
+      }
+      if (searchResult.incomplete) {
+        displayTags.push('incomplete');
+      }
+      if (displayTags.length > 0) {
+        displayMessage += ` (${displayTags.join(', ')})`;
       }
 
       const resultFilePaths = Array.from(
@@ -455,7 +485,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     paths: string[]; // Can be files or directories
     glob?: string;
     signal: AbortSignal;
-  }): Promise<{ stdout: string; truncated: boolean }> {
+  }): Promise<RipgrepRunResult> {
     const { pattern, paths, glob } = options;
 
     const rgArgs: string[] = [
@@ -533,11 +563,54 @@ class GrepToolInvocation extends BaseToolInvocation<
       options.signal,
       this.config.getUseBuiltinRipgrep(),
     );
-    if (result.error && !result.stdout) {
+    this.logRipgrepRuntimeRecovery(result);
+    if (result.error && !result.stdout.trim()) {
       throw result.error;
     }
 
-    return { stdout: result.stdout, truncated: result.truncated };
+    return result;
+  }
+
+  private buildIncompleteSearchMessage(
+    searchLocationDescription: string,
+    filterDescription: string,
+    error?: Error,
+  ): string {
+    // Keep the instruction explicit: an incomplete scan with zero valid matches
+    // is unknown coverage, not negative proof that no matches exist.
+    const errorDetail = error ? ` Error: ${getErrorMessage(error)}` : '';
+    return `Search did not complete for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}. No valid matches were returned; do not treat this as no matches.${errorDetail}`;
+  }
+
+  private logRipgrepRuntimeRecovery(result: RipgrepRunResult): void {
+    const { recovery } = result;
+    if (recovery === undefined) {
+      return;
+    }
+    if (recovery.failureKind === undefined) {
+      return;
+    }
+    if (!recovery.retryTriggered && !result.incomplete && !result.error) {
+      return;
+    }
+
+    // Only bounded recovery metadata is emitted here; pattern, paths, stdout,
+    // stderr, and raw error text stay out of telemetry.
+    const eventParams: ConstructorParameters<
+      typeof RipgrepRuntimeRecoveryEvent
+    >[0] = {
+      selection_mode: recovery.selectionMode,
+      retry_triggered: recovery.retryTriggered,
+      failure_kind: recovery.failureKind,
+    };
+    if (recovery.retrySucceeded !== undefined) {
+      eventParams.retry_succeeded = recovery.retrySucceeded;
+    }
+
+    logRipgrepRuntimeRecovery(
+      this.config,
+      new RipgrepRuntimeRecoveryEvent(eventParams),
+    );
   }
 
   private getIgnoreRootForSearchPath(searchPath: string): string | undefined {
@@ -581,7 +654,11 @@ class GrepToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
     if (this.params.path) {
-      description += ` in path '${this.params.path}'`;
+      const displayPath = formatDisplayPath(
+        this.params.path,
+        this.config.getTargetDir(),
+      );
+      description += ` in ${displayPath}`;
     }
     if (this.params.glob) {
       description += ` (filter: '${this.params.glob}')`;

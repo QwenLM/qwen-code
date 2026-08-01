@@ -52,6 +52,7 @@ export class AutoReconnectTransport implements DaemonTransport {
   private reconnecting: Promise<void> | undefined;
 
   readonly supportsReplay: boolean;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(opts: {
     baseUrl: string;
@@ -63,7 +64,11 @@ export class AutoReconnectTransport implements DaemonTransport {
   }) {
     this.baseUrl = opts.baseUrl;
     this.token = opts.token;
-    this.fetchFn = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchFn =
+      opts.fetch ??
+      opts.initial?.restFetch ??
+      globalThis.fetch.bind(globalThis);
+    this.restFetch = this.fetchFn;
     this.preferredType = opts.preferredType ?? 'rest';
     this.factory = opts.factory;
     this.inner =

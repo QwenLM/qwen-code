@@ -104,6 +104,10 @@ export class ExtensionRefreshState {
     return this.extensionRefreshNeeded;
   }
 
+  isSuppressed(): boolean {
+    return this.suppressionDepth > 0 || Date.now() < this.suppressUntil;
+  }
+
   isReloadInProgress(): boolean {
     return this.reloadInProgress;
   }
@@ -145,10 +149,6 @@ export class ExtensionRefreshState {
     this.contentChangedDuringReload = false;
     this.suppressionDepth = 0;
     this.suppressUntil = 0;
-  }
-
-  private isSuppressed(): boolean {
-    return this.suppressionDepth > 0 || Date.now() < this.suppressUntil;
   }
 }
 

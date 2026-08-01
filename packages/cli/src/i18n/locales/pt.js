@@ -19,6 +19,8 @@ export default {
   'Shell mode': 'Modo shell',
   'YOLO mode': 'Modo YOLO',
   'Auto mode': 'Modo auto',
+  'auto_mode.entry_notice':
+    'Modo auto ativado.\n   Um classificador LLM avalia cada chamada de ferramenta — ações seguras são aprovadas automaticamente,\n   ações arriscadas são bloqueadas. Sair: Shift+Tab ou /approval-mode default.',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
   'Accepting edits': 'Aceitando edições',
@@ -52,7 +54,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to view transcript': 'para ver a transcrição',
+  'to expand details': 'para expandir os detalhes',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -68,6 +70,7 @@ export default {
   'Type your message or @path/to/file':
     'Digite sua mensagem ou @caminho/do/arquivo',
   '? for shortcuts': '? para atalhos',
+  'Pasting…': 'Colando…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Pressione 'i' para modo INSERÇÃO e 'Esc' para modo NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -245,9 +248,6 @@ export default {
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
   Transcript: 'Transcrição',
-  'to close': 'para fechar',
-  'to scroll': 'para rolar',
-  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
   'Read {{count}} file': 'Leu {{count}} arquivo',
   'Read {{count}} files': 'Leu {{count}} arquivos',
   'Reading {{count}} file': 'Lendo {{count}} arquivo',
@@ -470,6 +470,7 @@ export default {
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
+  'Auto (follow user input)': 'Automático (seguir entrada do usuário)',
   'Auto (detect terminal theme)': 'Automático (detectar tema do terminal)',
   Auto: 'Automático',
   Text: 'Texto',
@@ -604,7 +605,7 @@ export default {
     'Inclua o nome da extensão para desinstalar como um argumento posicional.',
   'Enables an extension.': 'Ativa uma extensão.',
   'The name of the extension to enable.': 'O nome da extensão para ativar.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'O escopo para ativar a extensão. Se não definido, será ativada em todos os escopos.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extensão "{{name}}" ativada com sucesso para o escopo "{{scope}}".',
@@ -614,7 +615,7 @@ export default {
     'Escopo inválido: {{scope}}. Use um de {{scopes}}.',
   'Disables an extension.': 'Desativa uma extensão.',
   'The name of the extension to disable.': 'O nome da extensão para desativar.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'O escopo para desativar a extensão.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extensão "{{name}}" desativada com sucesso para o escopo "{{scope}}".',
@@ -801,8 +802,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with original user prompt text.':
-    'A entrada para o comando é JSON com o texto original do prompt do usuário.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1472,6 +1473,11 @@ export default {
   reviewed: 'revisado',
   'Code Changes:': 'Alterações de Código:',
   Performance: 'Desempenho',
+  'Generation Metrics': 'Métricas de geração',
+  'Latest Request': 'Última solicitação',
+  'Generation Time': 'Tempo de geração',
+  'Average TTFT': 'TTFT médio',
+  'Session TPS': 'TPS da sessão',
   'Wall Time:': 'Tempo Total:',
   'Agent Active:': 'Agente Ativo:',
   'API Time:': 'Tempo de API:',
@@ -2130,8 +2136,14 @@ export default {
     'Uma nova versão do Qwen Code está disponível! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} está atualizado!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Falha ao verificar atualizações. Verifique sua rede ou configuração do registro.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Falha ao verificar atualizações ({{reason}}). Verifique sua rede ou configuração do registro.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Verificação de atualização ignorada ({{reason}}) — execute /update para tentar novamente.',
+  'registry did not respond within {{seconds}}s':
+    'o registro não respondeu em {{seconds}}s',
+  'registry unreachable': 'registro inacessível',
+  'registry error': 'erro no registro',
   'Unable to check for updates: {{reason}}':
     'Não foi possível verificar atualizações: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2168,6 +2180,16 @@ export default {
     'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
   'Manual update required. Please reinstall Qwen Code.':
     'Atualização manual necessária. Reinstale o Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Esta sessão usa a imagem de sandbox personalizada {{image}}. Atualize a imagem e reinicie o Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Atualize o Qwen Code no host e reinicie o sandbox.',
+  'The update will be installed after you exit this session.':
+    'A atualização será instalada após você sair desta sessão.',
+  'Run /update to install the update on the host.':
+    'Execute /update para instalar a atualização no host.',
+  'Run /update to install the update.':
+    'Execute /update para instalar a atualização.',
 
   // ============================================================================
   // reload-plugins command
@@ -2198,4 +2220,67 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e inicie uma nova sessão para retomar a gravação. Consulte o log de depuração para obter detalhes.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e execute `/clear` para iniciar uma nova sessão gravada. Consulte o log de depuração para obter detalhes.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Gerenciar as habilidades automáticas do projeto com base no uso recente.',
+  'Show project auto-skill lifecycle status.':
+    'Mostrar o status do ciclo de vida das habilidades automáticas do projeto.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Executar a manutenção do ciclo de vida das habilidades automáticas do projeto.',
+  'Restore an archived project auto-skill.':
+    'Restaurar uma habilidade automática arquivada do projeto.',
+  'Auto-skill curator': 'Gerenciador de habilidades automáticas',
+  'Last run: {{time}}': 'Última execução: {{time}}',
+  'Active: {{count}}': 'Ativas: {{count}}',
+  'Stale: {{count}}': 'Inativas: {{count}}',
+  'Archived: {{count}}': 'Arquivadas: {{count}}',
+  'Stale skills:': 'Habilidades inativas:',
+  'Pinned skills:': 'Habilidades fixadas:',
+  'Archived skills:': 'Habilidades arquivadas:',
+  'Dry run complete.': 'Simulação concluída.',
+  'Curator run complete.': 'Execução do gerenciador concluída.',
+  'Checked: {{count}}': 'Verificadas: {{count}}',
+  'First observed: {{count}}': 'Observadas pela primeira vez: {{count}}',
+  'Marked stale: {{count}}': 'Marcadas como inativas: {{count}}',
+  'Reactivated: {{count}}': 'Reativadas: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Colisões de arquivamento ignoradas: {{count}}',
+  'Archive candidates:': 'Candidatas ao arquivamento:',
+  'Skipped archive collisions:': 'Colisões de arquivamento ignoradas:',
+  'Skipped rename errors: {{count}}':
+    'Erros de renomeação ignorados: {{count}}',
+  'Skipped rename errors:': 'Erros de renomeação ignorados:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Seriam arquivadas',
+  Archived: 'Arquivadas',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Falha ao ler o status do gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Uso: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Falha ao executar o gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator restore <directory>': 'Uso: /curator restore <diretório>',
+  'Restored auto-skill: {{name}}': 'Habilidade automática restaurada: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Falha ao restaurar a habilidade automática: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Excluir uma habilidade automática da manutenção automática.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Retornar uma habilidade automática fixada à manutenção automática.',
+  'Usage: /curator pin <directory>': 'Uso: /curator pin <diretório>',
+  'Usage: /curator unpin <directory>': 'Uso: /curator unpin <diretório>',
+  'Pinned auto-skill: {{name}}': 'Habilidade automática fixada: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Habilidade automática desafixada: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Falha ao atualizar a fixação da habilidade automática: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
 };

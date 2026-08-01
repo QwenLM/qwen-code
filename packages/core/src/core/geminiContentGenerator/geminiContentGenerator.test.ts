@@ -8,6 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GeminiContentGenerator } from './geminiContentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 
+const mockReportGeminiRequest = vi.hoisted(() => vi.fn());
+const mockReportGeminiResponse = vi.hoisted(() => vi.fn());
+const mockReportGeminiChunk = vi.hoisted(() => vi.fn());
+
 vi.mock('@google/genai', () => {
   const mockGenerateContent = vi.fn();
   const mockGenerateContentStream = vi.fn();
@@ -25,6 +29,11 @@ vi.mock('@google/genai', () => {
     })),
   };
 });
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportGeminiRequest: mockReportGeminiRequest,
+  reportGeminiResponse: mockReportGeminiResponse,
+  reportGeminiChunk: mockReportGeminiChunk,
+}));
 
 describe('GeminiContentGenerator', () => {
   let generator: GeminiContentGenerator;
@@ -78,6 +87,8 @@ describe('GeminiContentGenerator', () => {
     const request = { model: 'gemini-1.5-flash', contents: [] };
     const expectedResponse = { responseId: 'test-id' };
     mockGoogleGenAI.models.generateContent.mockResolvedValue(expectedResponse);
+    const telemetryAttempt = {};
+    mockReportGeminiRequest.mockReturnValueOnce(telemetryAttempt);
 
     const response = await generator.generateContent(request, 'prompt-id');
 
@@ -93,6 +104,13 @@ describe('GeminiContentGenerator', () => {
           },
         }),
       }),
+    );
+    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+      mockGoogleGenAI.models.generateContent.mock.calls[0][0],
+    );
+    expect(mockReportGeminiResponse).toHaveBeenCalledWith(
+      telemetryAttempt,
+      expectedResponse,
     );
     expect(response).toBe(expectedResponse);
   });
@@ -129,6 +147,8 @@ describe('GeminiContentGenerator', () => {
       yield { responseId: '1' };
     })();
     mockGoogleGenAI.models.generateContentStream.mockResolvedValue(mockStream);
+    const telemetryAttempt = {};
+    mockReportGeminiRequest.mockReturnValueOnce(telemetryAttempt);
 
     const stream = await generator.generateContentStream(request, 'prompt-id');
 
@@ -145,7 +165,50 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
-    expect(stream).toBe(mockStream);
+    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0],
+    );
+    expect(await stream.next()).toEqual({
+      done: false,
+      value: { responseId: '1' },
+    });
+    expect(mockReportGeminiChunk).toHaveBeenCalledWith(telemetryAttempt, {
+      responseId: '1',
+    });
+  });
+
+  it('forwards stream return without pre-consuming the SDK stream', async () => {
+    const next = vi.fn();
+    const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
+    const sdkStream = {
+      [Symbol.asyncIterator]: () => ({ next, return: close }),
+    };
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(sdkStream);
+
+    const stream = await generator.generateContentStream(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-id',
+    );
+    await stream.return(undefined);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates SDK stream errors without reporting a chunk', async () => {
+    const failure = new Error('stream failed');
+    const next = vi.fn().mockRejectedValue(failure);
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue({
+      [Symbol.asyncIterator]: () => ({ next }),
+    });
+
+    const stream = await generator.generateContentStream(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-id',
+    );
+
+    await expect(stream.next()).rejects.toBe(failure);
+    expect(mockReportGeminiChunk).not.toHaveBeenCalled();
   });
 
   it('should call countTokens on the underlying model', async () => {

@@ -9,6 +9,7 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  isDebugLogFileEnabled,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
@@ -27,13 +28,25 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
+import {
+  disableKittyProtocol,
+  pushKittyProtocolFlags,
+} from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { registerCleanup } from '../utils/cleanup.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
+import {
+  ErrorBoundary,
+  consumeLastRenderError,
+} from './components/shared/ErrorBoundary.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
@@ -42,6 +55,11 @@ import {
 import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+// The tool scheduler only runs a pressure check after a tool call, so a long
+// interactive conversation with no tool calls would never reclaim and could
+// grow toward the V8 heap limit. This interval closes that gap.
+const PRESSURE_CHECK_INTERVAL_MS = 30_000;
 
 export interface StartInteractiveUIOptions {
   postRenderConnectIde?: boolean;
@@ -137,6 +155,12 @@ export async function startInteractiveUI(
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
 
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -166,6 +190,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
@@ -179,14 +204,37 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const stdoutMaxListeners = process.stdout.getMaxListeners();
+  if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
+    process.stdout.setMaxListeners(0);
+  }
+  const appTree = (
+    <ErrorBoundary
+      recordForExitEcho
+      onError={(error, info) => {
+        debugLogger.error(
+          `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+        );
+        // The fallback replaces AppWrapper, unmounting KeypressProvider and
+        // Ctrl+C handling. Schedule a graceful exit so the session does not
+        // hang (e.g. under the Kitty keyboard protocol where Ctrl+C is a
+        // keypress, not SIGINT).
+        setTimeout(() => {
+          void runExitCleanup().then(() => process.exit(1));
+        }, 5000);
+      }}
+    >
+      <AppWrapper />
+    </ErrorBoundary>
+  );
   const instance = render(
     process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
+      <React.StrictMode>{appTree}</React.StrictMode>
     ) : (
-      <AppWrapper />
+      appTree
     ),
     {
       exitOnCtrlC: false,
@@ -194,6 +242,17 @@ export async function startInteractiveUI(
       alternateScreen: useVP,
     },
   );
+  if (useVP) {
+    // Ink entered the alternate screen synchronously inside render() above.
+    // The Kitty keyboard flags were pushed at startup on the main screen, and
+    // the spec tracks them per screen, so re-push them onto the alternate
+    // screen now — otherwise Shift+Enter (and other modified keys) arrive
+    // without their modifier and degrade to a bare Enter or an orphaned Escape.
+    // The push is ordered after Ink's enter-alternate-screen write, and Ink
+    // discards the alternate screen (and its flag stack) on unmount, so the
+    // startup main-screen push remains balanced by disableKittyProtocol() below.
+    pushKittyProtocolFlags();
+  }
   // Records the moment Ink's `render()` call has returned, which is
   // synchronous and happens before React reconciliation actually pushes
   // bytes to the terminal. We intentionally keep the legacy name
@@ -211,16 +270,60 @@ export async function startInteractiveUI(
       config.isTelemetryInitializationDeferred(),
   });
 
+  // Periodic memory-pressure check for the interactive session. The interval
+  // is unref'd (can't keep the loop alive on its own) and cleared on cleanup.
+  const pressureMonitor = config.getMemoryPressureMonitor?.();
+  let pressureCheckTimer: NodeJS.Timeout | undefined;
+  if (pressureMonitor) {
+    pressureCheckTimer = setInterval(() => {
+      try {
+        pressureMonitor.performCheck();
+      } catch {
+        // Best-effort: a failing pressure check must not break the UI loop.
+      }
+    }, PRESSURE_CHECK_INTERVAL_MS);
+    pressureCheckTimer.unref?.();
+  }
+
   registerCleanup(async () => {
+    if (pressureCheckTimer) clearInterval(pressureCheckTimer);
+    // Best-effort reclaim before unmounting the React tree. Runs the
+    // synchronous cache-eviction step (and schedules compact_history) so a
+    // near-limit heap is not pushed over the edge by React reconciliation
+    // during unmount.
+    try {
+      pressureMonitor?.performCheck();
+    } catch {
+      // Best-effort: ignore.
+    }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
     instance.unmount();
+    // Pop the Kitty keyboard protocol only after Ink has unmounted. The
+    // protocol was enabled on the main screen before render, and the kitty
+    // spec tracks keyboard flags per screen: with alternateScreen enabled, a
+    // pop written before unmount lands on the alternate screen's (empty)
+    // stack, unmount then leaves the alternate screen, and the main screen's
+    // flags stay set — the user's shell keeps receiving kitty escape codes
+    // (e.g. "9;5u" on Ctrl-C) after exit.
+    disableKittyProtocol();
+    if (useVP) {
+      process.stdout.setMaxListeners(stdoutMaxListeners);
+    }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
+    // If the ErrorBoundary caught a rendering error, echo it to stderr
+    // now that we are back on the main screen buffer. In VP mode the
+    // fallback UI was drawn on the alternate screen and is gone.
+    const renderError = consumeLastRenderError();
+    if (renderError) {
+      const loggedHint = isDebugLogFileEnabled()
+        ? ' (logged to debug file)'
+        : '';
+      writeStderrLine(
+        `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
+      );
+    }
   });
 }
 

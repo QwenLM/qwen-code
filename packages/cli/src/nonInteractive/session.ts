@@ -10,7 +10,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
-  detectTurnInterruption,
+  buildSessionRecoveryPlanFromApiHistory,
   SendMessageType,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from '@qwen-code/qwen-code-core';
@@ -43,6 +43,10 @@ import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import {
+  settleChatRecording,
+  subscribeToHeadlessChatRecordingFailures,
+} from '../utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -86,6 +90,7 @@ class Session {
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
   private settings: LoadedSettings;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -108,6 +113,10 @@ class Session {
     this.outputAdapter = new StreamJsonOutputAdapter(
       config,
       config.getIncludePartialMessages(),
+    );
+    this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
+      config,
+      this.outputAdapter,
     );
 
     this.setupSignalHandlers();
@@ -146,6 +155,10 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // gemini.tsx has already emitted warnings known before stream-json
+      // initialization starts. Keep that snapshot so only warnings produced
+      // by the deferred initialize() call are written here.
+      const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
       // the non-stream-json branch in `gemini.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
@@ -157,6 +170,11 @@ class Session {
       profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
       profileCheckpoint('config_initialize_end');
+      for (const warning of this.config.getWarnings()) {
+        if (emittedWarnings.has(warning)) continue;
+        emittedWarnings.add(warning);
+        process.stderr.write(`${warning}\n`);
+      }
       // Stream-json sessions feed prompts straight to the model after init.
       // Under progressive MCP availability `initialize()` returns before
       // MCP servers settle, so we must explicitly await discovery here —
@@ -497,32 +515,39 @@ class Session {
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
-    const detection = detectTurnInterruption(historyTail);
-    debugLogger.info('[Session] requestContinueLastTurn detection', {
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
-      kind: detection.kind,
+      apiHistory: historyTail,
     });
-    if (detection.kind === 'none') {
+    debugLogger.info('[Session] requestContinueLastTurn recovery', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    if (!recoveryPlan.continuation) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: no interrupted turn',
       );
       return { accepted: false, interruption: 'none' };
     }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
     if (this.pendingContinueTurn || this.continueTurnInProgress) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: continuation already pending',
-        { kind: detection.kind },
+        { kind: recoveryPlan.kind },
       );
-      return { accepted: false, interruption: detection.kind };
+      return { accepted: false, interruption };
     }
 
     this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
       sessionId: this.sessionId,
-      kind: detection.kind,
+      kind: recoveryPlan.kind,
     });
-    return { accepted: true, interruption: detection.kind };
+    return { accepted: true, interruption };
   }
 
   /**
@@ -573,6 +598,19 @@ class Session {
   ): Promise<void> {
     await this.waitForInitialization();
 
+    batch = batch.filter((item) => {
+      if (item.sdkNotification.status !== 'running') {
+        return true;
+      }
+      return (
+        this.config.getMonitorRegistry().get(item.sdkNotification.task_id)
+          ?.status !== 'cancelled'
+      );
+    });
+    if (batch.length === 0) {
+      return;
+    }
+
     for (const item of batch) {
       this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
       this.outputAdapter.emitSystemMessage(
@@ -621,7 +659,7 @@ class Session {
           await this.processContinueTurn();
         } catch (error) {
           debugLogger.error('[Session] Error processing continue turn:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -632,7 +670,7 @@ class Session {
           await this.processUserMessage(userMessage);
         } catch (error) {
           debugLogger.error('[Session] Error processing user message:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -654,7 +692,7 @@ class Session {
           '[Session] Error processing monitor notification batch:',
           error,
         );
-        this.emitErrorResult(error);
+        await this.emitErrorResult(error);
       }
     }
   }
@@ -694,12 +732,13 @@ class Session {
     });
   }
 
-  private emitErrorResult(
+  private async emitErrorResult(
     error: unknown,
     numTurns: number = 0,
     durationMs: number = 0,
     apiDurationMs: number = 0,
-  ): void {
+  ): Promise<void> {
+    await settleChatRecording(this.config, { finalize: false });
     const message = error instanceof Error ? error.message : String(error);
     this.outputAdapter.emitResult({
       isError: true,
@@ -770,7 +809,7 @@ class Session {
     // terminal error result so it learns the continuation was abandoned.
     if (this.pendingContinueTurn) {
       this.pendingContinueTurn = false;
-      this.emitErrorResult(
+      await this.emitErrorResult(
         new Error('Continuation abandoned: session shut down before it ran'),
       );
     }
@@ -839,6 +878,10 @@ class Session {
       process.removeListener('SIGTERM', this.shutdownHandler);
       this.shutdownHandler = null;
     }
+  }
+
+  dispose(): void {
+    this.unsubscribeRecordingFailure();
   }
 
   /**
@@ -983,5 +1026,10 @@ export async function runNonInteractiveStreamJson(
   }
 
   const manager = new Session(config, initialPrompt, settings);
-  await manager.run();
+  try {
+    await manager.run();
+  } finally {
+    await settleChatRecording(config, { finalize: true });
+    manager.dispose();
+  }
 }

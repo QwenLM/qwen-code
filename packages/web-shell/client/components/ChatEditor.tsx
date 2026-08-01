@@ -9,14 +9,21 @@ import {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
-import type { CSSProperties, ReactNode, RefObject } from 'react';
+import type { ReactNode, RefObject } from 'react';
+import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonSessionGroupPresetColor,
+  DaemonWorkspaceGitStatus,
+} from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
+import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
+import { SpecularComposerEffect } from './SpecularComposerEffect';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -27,6 +34,7 @@ import {
 } from '../customization';
 import {
   useComposerCore,
+  type ComposerSubmitMetadata,
   type EditorHandle,
   type SlashMenuState,
   getComposerTagDisplay,
@@ -35,27 +43,68 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from './composerTagIcons';
+import {
+  getComposerTagIconUrl,
+  isBuiltinComposerTagIconUrl,
+} from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import type {
+  VoiceStatusRevision,
+  VoiceWorkspaceTarget,
+} from '../voice/voice-workspace-target';
+import {
+  GitBranchChipContent,
+  GitBranchIndicator,
+  gitBranchAriaLabel,
+} from './GitBranchIndicator';
+import { GitModePopover, type SessionGitIntent } from './GitModePopover';
+import { BranchPickerPopover } from './BranchPickerPopover';
+import { WorkspaceIndicator } from './WorkspaceIndicator';
+import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
+import { WorkspaceSelector } from './WorkspaceSelector';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from './ui/popover';
+import { Input } from './ui/input';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
+import {
+  filterToolbarDropdownItems,
+  getToolbarExpansionBudget,
+  getToolbarItemVisibilityWithHysteresis,
+  resolveToolbarModelLabel,
+  type ToolbarDropdownItem,
+} from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'gitBranch'
   | 'model'
   | 'commands'
   | 'files'
   | 'widthMode'
-  | 'voice';
+  | 'voice'
+  | 'workspace';
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'gitBranch',
   'model',
   'widthMode',
   'voice',
+  'workspace',
 ] as const satisfies readonly ComposerToolbarAction[];
 const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
   ACTIVE_TOOLBAR_ACTIONS,
@@ -66,7 +115,10 @@ interface ChatEditorProps {
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
+    metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -76,6 +128,7 @@ interface ChatEditorProps {
   cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
+  animatePlaceholder?: boolean;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
@@ -84,6 +137,30 @@ interface ChatEditorProps {
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
+  gitBranch?: string;
+  /** Whether the session is in a worktree (styles the git chip purple). */
+  gitWorktree?: boolean;
+  /** Git working directory for worktree sessions; targets git operations. */
+  gitCwd?: string;
+  /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
+  gitModeIntent?: SessionGitIntent;
+  /** Callback when the user changes the git mode intent via the composer chip popover. */
+  onGitModeIntentChange?: (intent: SessionGitIntent) => void;
+  /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
+  gitStatus?: DaemonWorkspaceGitStatus;
+  /** Opens the working-tree Changes dialog; makes the git chip clickable. */
+  onOpenGitDiff?: () => void;
+  /** Opens the commit dialog. */
+  onOpenCommit?: () => void;
+  /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
+  workspaceName?: string;
+  /** Full workspace cwd, used as the chip's tooltip. */
+  workspaceTitle?: string;
+  /**
+   * Stable per-workspace accent color for the chip, so it stays distinguishable
+   * from other panes' chips even when it collapses to an icon on a narrow split.
+   */
+  workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -91,18 +168,37 @@ interface ChatEditorProps {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    label: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
+  selectedWorkspaceCwd?: string;
+  workspaceSelectionDisabled?: boolean;
+  onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  scratchWorkspaceSupported?: boolean;
+  existingFolderWorkspaceSupported?: boolean;
+  workspaceMutationBusy?: boolean;
+  onCreateScratchWorkspace?: () => void;
+  onOpenExistingWorkspace?: () => void;
+  atWorkspaceCwd?: string;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -168,19 +264,104 @@ function isTouchLikeDevice(): boolean {
   );
 }
 
-const SLASH_PANEL_THEME_VARS = [
-  '--chat-editor-accent-color',
-  '--accent',
-  '--background',
-  '--chat-editor-bg-tertiary',
-  '--chat-editor-border-color',
-  '--foreground',
-  '--font-mono',
-  '--font-sans',
-  '--muted-foreground',
-  '--chat-editor-text-primary',
-  '--chat-editor-text-secondary',
-] as const;
+function TopComposerTag({
+  tag,
+  content,
+  tooltip,
+  onActivate,
+  onRemove,
+}: {
+  tag: WebShellComposerTag;
+  content: ReactNode;
+  tooltip: ReactNode | null | undefined;
+  onActivate?: (anchorRect: DOMRectReadOnly) => void;
+  onRemove?: () => void;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const portalRoot = useWebShellPortalRoot();
+  const hasTooltip = tooltip !== undefined && tooltip !== null;
+  const tagContent = (
+    <span
+      className={styles.tagContent}
+      data-web-shell-composer-tag-trigger
+      role={onActivate ? 'button' : undefined}
+      tabIndex={onActivate || hasTooltip ? 0 : undefined}
+      onClick={(event) => {
+        if (!onActivate) return;
+        event.stopPropagation();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+      onKeyDown={(event) => {
+        if (!onActivate) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onActivate(
+          anchorRef.current?.getBoundingClientRect() ??
+            event.currentTarget.getBoundingClientRect(),
+        );
+      }}
+    >
+      {content}
+    </span>
+  );
+  const tagElement = (
+    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+      {hasTooltip ? (
+        <TooltipPrimitive.Trigger asChild>
+          {tagContent}
+        </TooltipPrimitive.Trigger>
+      ) : (
+        tagContent
+      )}
+      {onRemove && (
+        <button
+          type="button"
+          className={styles.tagRemove}
+          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.stopPropagation();
+              return;
+            }
+            if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+            event.preventDefault();
+            event.stopPropagation();
+            onRemove();
+          }}
+        >
+          ×
+        </button>
+      )}
+    </span>
+  );
+
+  if (!hasTooltip) return tagElement;
+
+  return (
+    <TooltipPrimitive.Root disableHoverableContent={false}>
+      {tagElement}
+      <TooltipPrimitive.Portal container={portalRoot ?? undefined}>
+        <TooltipPrimitive.Content
+          className={styles.tagTooltip}
+          data-web-shell-composer-tag-tooltip
+          sideOffset={6}
+          collisionPadding={8}
+          avoidCollisions
+        >
+          {tooltip}
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
+  );
+}
 
 function SendIcon() {
   return (
@@ -228,89 +409,63 @@ function QuickActionsIcon() {
   );
 }
 
-function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
-  let glowRaf: number | undefined;
-  let pulseRaf: number | undefined;
-  let pulseDecayTimer: number | undefined;
-  let typingTimer: number | undefined;
-  let glowCurrent = 0;
-  let pulseCurrent = 0;
+function TypewriterPlaceholder({ text }: { text: string }) {
+  const totalRuns = 2;
+  const replayDelay = 3000;
+  const reducedMotion = usePrefersReducedMotion();
+  const [visibleText, setVisibleText] = useState(reducedMotion ? text : '');
+  const [finished, setFinished] = useState(false);
 
-  const apply = (on: number, pulse: number) => {
-    glowRootEl.style.setProperty('--dac-glow-on', on.toFixed(4));
-    glowRootEl.style.setProperty('--dac-glow-pulse', pulse.toFixed(4));
-  };
-
-  const animateGlow = (target: number) => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    const start = glowCurrent;
-    const diff = target - start;
-    if (Math.abs(diff) < 0.001) {
-      glowCurrent = target;
-      apply(target, pulseCurrent);
-      return;
+  useEffect(() => {
+    if (reducedMotion) {
+      setVisibleText(text);
+      setFinished(false);
+      return undefined;
     }
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 220, 1);
-      glowCurrent = start + diff * (1 - (1 - t) ** 2);
-      apply(glowCurrent, pulseCurrent);
-      glowRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
+
+    let run = 0;
+    let timer = 0;
+    const startRun = () => {
+      let index = 0;
+      setVisibleText('');
+      setFinished(false);
+      const typeNextCharacter = () => {
+        index += 1;
+        setVisibleText(text.slice(0, index));
+        if (index === text.length) {
+          run += 1;
+          setFinished(true);
+          if (run < totalRuns) {
+            timer = window.setTimeout(startRun, replayDelay);
+          }
+          return;
+        }
+        timer = window.setTimeout(typeNextCharacter, 45);
+      };
+      timer = window.setTimeout(typeNextCharacter, 45);
     };
-    glowRaf = window.requestAnimationFrame(tick);
-  };
+    startRun();
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion, text]);
 
-  const animatePulseDecay = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    const start = pulseCurrent;
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 300, 1);
-      pulseCurrent = start * (1 - t);
-      apply(glowCurrent, pulseCurrent);
-      pulseRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
-    };
-    pulseRaf = window.requestAnimationFrame(tick);
-  };
-
-  const setTyping = (on: boolean) => {
-    if (on) glowRootEl.setAttribute('data-dac-typing', '');
-    else glowRootEl.removeAttribute('data-dac-typing');
-  };
-
-  const onFocus = () => animateGlow(1);
-  const onBlur = () => {
-    animateGlow(0);
-    setTyping(false);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-  };
-  const onKeydown = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    pulseCurrent = 1;
-    apply(glowCurrent, 1);
-    pulseDecayTimer = window.setTimeout(animatePulseDecay, 100);
-    setTyping(true);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    typingTimer = window.setTimeout(() => setTyping(false), 650);
-  };
-
-  inputEl.addEventListener('focus', onFocus);
-  inputEl.addEventListener('blur', onBlur);
-  inputEl.addEventListener('keydown', onKeydown);
-  if (document.activeElement === inputEl) animateGlow(1);
-
-  return () => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    inputEl.removeEventListener('focus', onFocus);
-    inputEl.removeEventListener('blur', onBlur);
-    inputEl.removeEventListener('keydown', onKeydown);
-    apply(0, 0);
-    setTyping(false);
-  };
+  return (
+    <span
+      className={styles.typewriterPlaceholder}
+      data-web-shell-composer-typewriter
+      aria-hidden="true"
+    >
+      {visibleText}
+      {!reducedMotion && (
+        <span
+          className={`${styles.typewriterCaret} ${
+            finished ? styles.typewriterCaretFinished : ''
+          }`}
+        >
+          _
+        </span>
+      )}
+    </span>
+  );
 }
 
 function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
@@ -341,10 +496,6 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
   );
 }
 
-function ChevronDownIcon() {
-  return <span className={styles.chevronDown} aria-hidden="true" />;
-}
-
 function ModelIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -367,9 +518,7 @@ function ModelIcon() {
   );
 }
 
-interface DropdownItem {
-  id: string;
-  label: string;
+interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
 }
@@ -489,114 +638,179 @@ function getModeListLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? getModeLabel(modeId, t);
 }
 
-function ToolbarDropdown({
+function ToolbarPopover({
   open,
   items,
   activeId,
-  onClose,
+  onOpenChange,
   onSelect,
-  anchorRef,
+  trigger,
+  tooltip,
   showCheck = false,
-  maxHeight,
+  searchable = false,
+  searchLabel,
+  noResultsLabel,
 }: {
   open: boolean;
   items: DropdownItem[];
   activeId: string;
-  onClose: () => void;
+  onOpenChange: (open: boolean) => void;
   onSelect: (id: string) => void;
-  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  trigger: ReactNode;
+  tooltip?: ReactNode;
   showCheck?: boolean;
-  maxHeight?: number;
+  searchable?: boolean;
+  searchLabel?: string;
+  noResultsLabel?: (query: string) => string;
 }) {
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerOutside = (event: Event) => {
-      if (event instanceof MouseEvent && event.button !== 0) return;
-      if (event.defaultPrevented) return;
-      const dropdown = dropdownRef.current;
-      const anchor = anchorRef.current;
-      const target = event.target;
-      if (
-        dropdown &&
-        target instanceof Node &&
-        !dropdown.contains(target) &&
-        anchor &&
-        !anchor.contains(target)
-      ) {
-        onClose();
-      }
-    };
-    window.addEventListener('mousedown', onPointerOutside);
-    return () => window.removeEventListener('mousedown', onPointerOutside);
-  }, [open, onClose, anchorRef]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onEscape);
-    return () => window.removeEventListener('keydown', onEscape);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
+  const [searchQuery, setSearchQuery] = useState('');
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
+  const selectionRef = useRef(false);
+  const handoffRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const hasRichItems = items.some((item) => item.description || item.icon);
+  const visibleItems = searchable
+    ? filterToolbarDropdownItems(items, searchQuery)
+    : items;
+
+  useEffect(() => {
+    if (!open) {
+      setSearchQuery('');
+    }
+  }, [open]);
+
   const hasCheckItems = hasRichItems || showCheck;
 
   return (
-    <div
-      ref={dropdownRef}
-      className={`${styles.dropdown} ${
-        hasRichItems
-          ? styles.dropdownRich
-          : showCheck
-            ? styles.dropdownCheck
-            : ''
-      }`}
-      style={maxHeight ? { maxHeight, overflowY: 'auto' } : undefined}
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) {
+          selectionRef.current = false;
+          handoffRef.current = false;
+          setCollisionBoundary(
+            triggerRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+              null,
+          );
+        }
+        onOpenChange(nextOpen);
+      }}
     >
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`${styles.dropdownItem} ${
-            item.id === activeId ? styles.dropdownItemActive : ''
-          }`}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onSelect(item.id);
-          }}
+      {tooltip ? (
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PopoverTrigger ref={triggerRef} asChild>
+                {trigger}
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="top">{tooltip}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      ) : (
+        <PopoverTrigger ref={triggerRef} asChild>
+          {trigger}
+        </PopoverTrigger>
+      )}
+      <PopoverContent
+        side="top"
+        align="start"
+        collisionPadding={8}
+        collisionBoundary={collisionBoundary ?? undefined}
+        data-web-shell-toolbar-popover
+        onClick={(event) => event.stopPropagation()}
+        onPointerDownOutside={(event) => {
+          const target = event.target;
+          if (
+            target instanceof Element &&
+            target.closest('[data-web-shell-toolbar-popover-trigger]')
+          ) {
+            handoffRef.current = true;
+          }
+        }}
+        onCloseAutoFocus={(event) => {
+          if (handoffRef.current) {
+            event.preventDefault();
+            handoffRef.current = false;
+            return;
+          }
+          if (
+            document.activeElement instanceof HTMLElement &&
+            document.activeElement.closest('[data-web-shell-toolbar-popover]')
+          ) {
+            event.preventDefault();
+            return;
+          }
+          if (!selectionRef.current) return;
+          event.preventDefault();
+          selectionRef.current = false;
+        }}
+      >
+        {searchable && (
+          <Input
+            type="search"
+            value={searchQuery}
+            aria-label={searchLabel}
+            placeholder={searchLabel}
+            autoComplete="off"
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+        )}
+        <div
+          className={`${styles.dropdownList} ${
+            hasRichItems
+              ? styles.dropdownRich
+              : showCheck
+                ? styles.dropdownCheck
+                : ''
+          } ${searchable ? styles.dropdownListConstrained : ''}`}
         >
-          {hasCheckItems ? (
-            <>
-              {hasRichItems && (
-                <span className={styles.dropdownItemIcon}>{item.icon}</span>
-              )}
-              <span className={styles.dropdownItemContent}>
-                <span className={styles.dropdownItemLabel}>{item.label}</span>
-                {item.description && (
-                  <span className={styles.dropdownItemDesc}>
-                    {item.description}
+          {visibleItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`${styles.dropdownItem} ${
+                item.id === activeId ? styles.dropdownItemActive : ''
+              }`}
+              title={item.label}
+              onClick={() => {
+                selectionRef.current = true;
+                onSelect(item.id);
+              }}
+            >
+              {hasCheckItems ? (
+                <>
+                  {hasRichItems && (
+                    <span className={styles.dropdownItemIcon}>{item.icon}</span>
+                  )}
+                  <span className={styles.dropdownItemContent}>
+                    <span className={styles.dropdownItemLabel}>
+                      {item.label}
+                    </span>
+                    {item.description && (
+                      <span className={styles.dropdownItemDesc}>
+                        {item.description}
+                      </span>
+                    )}
                   </span>
-                )}
-              </span>
-              <span className={styles.dropdownItemCheck}>
-                {item.id === activeId ? <CheckIcon /> : null}
-              </span>
-            </>
-          ) : (
-            item.label
+                  <span className={styles.dropdownItemCheck}>
+                    {item.id === activeId ? <CheckIcon /> : null}
+                  </span>
+                </>
+              ) : (
+                item.label
+              )}
+            </button>
+          ))}
+          {visibleItems.length === 0 && noResultsLabel && (
+            <div className={styles.dropdownEmpty} role="status">
+              {noResultsLabel(searchQuery)}
+            </div>
           )}
-        </button>
-      ))}
-    </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -604,31 +818,28 @@ function SlashCommandPanel({
   menu,
   anchorRef,
   panelRef,
+  detailRef,
+  onClose,
   onSelect,
   onAccept,
 }: {
   menu: SlashMenuState;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
+  detailRef: RefObject<HTMLDivElement | null>;
+  onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [anchorRect, setAnchorRect] = useState<{
-    left: number;
-    bottom: number;
-    width: number;
-  } | null>(null);
-  const [themeVars, setThemeVars] = useState<CSSProperties>({});
+  const hoverAnchorRef = useRef<HTMLButtonElement>(null);
+  const [collisionBoundary, setCollisionBoundary] =
+    useState<HTMLElement | null>(null);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
-    left: number;
-    top?: number;
-    bottom?: number;
-    maxHeight: number;
+    side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
-  const detailRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     itemRefs.current[menu.selectedIndex]?.scrollIntoView({
@@ -636,209 +847,235 @@ function SlashCommandPanel({
     });
   }, [menu.items, menu.selectedIndex]);
 
-  useLayoutEffect(() => {
-    const anchor = anchorRef.current;
-    if (!anchor) return undefined;
-
-    const update = () => {
-      const rect = anchor.getBoundingClientRect();
-      const computedStyle = getComputedStyle(anchor);
-      const nextThemeVars = Object.fromEntries(
-        SLASH_PANEL_THEME_VARS.map((name) => [
-          name,
-          computedStyle.getPropertyValue(name),
-        ]),
-      ) as CSSProperties;
-      setAnchorRect({
-        left: Math.max(12, Math.min(rect.left + 16, window.innerWidth - 252)),
-        bottom: window.innerHeight - rect.top + 8,
-        width: rect.width,
-      });
-      setThemeVars(nextThemeVars);
-    };
-
-    update();
-    const resizeObserver = new ResizeObserver(update);
-    resizeObserver.observe(anchor);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-    };
-  }, [anchorRef, menu.items]);
-
   useEffect(() => {
     setHoverDetail(null);
   }, [menu.items]);
 
-  const measureText = (text: string) => Array.from(text).length;
-  const maxLabelLength = Math.max(
-    ...menu.items.map((item) => measureText(item.label)),
-    0,
-  );
-  const maxDetailLength = Math.max(
-    ...menu.items.map((item) => measureText(item.detail ?? '')),
-    0,
-  );
-  const hasDetailColumn = maxDetailLength > 0;
-  const panelStyle = {
-    '--slash-command-col': `${Math.min(
-      Math.max(maxLabelLength + 1, 10),
-      24,
-    )}ch`,
-    '--slash-desc-col': hasDetailColumn
-      ? `${Math.min(Math.max(maxDetailLength + 1, 18), 36)}ch`
-      : '0px',
-    '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
-  } as CSSProperties;
+  useLayoutEffect(() => {
+    setCollisionBoundary(
+      anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ?? null,
+    );
+  }, [anchorRef]);
 
-  if (!anchorRect) return null;
+  useEffect(() => {
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      window.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, []);
 
   const rowPlans = planSlashSectionRows(menu.items, menu.kind);
 
-  const positionedPanelStyle = {
-    ...panelStyle,
-    ...themeVars,
-    left: anchorRect.left,
-    bottom: anchorRect.bottom,
-    '--slash-anchor-width': `${anchorRect.width}px`,
-  } as CSSProperties;
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      className={styles.slashPortalLayer}
-      style={themeVars}
-      data-web-shell-slash-menu
-    >
-      <div
-        className={styles.slashPanel}
-        style={positionedPanelStyle}
-        role="listbox"
-        onMouseDown={(event) => event.preventDefault()}
-        onMouseLeave={(event) => {
-          const nextTarget = event.relatedTarget;
-          if (
-            nextTarget instanceof Node &&
-            detailRef.current?.contains(nextTarget)
-          ) {
-            return;
-          }
-          setHoverDetail(null);
+  return (
+    <>
+      <Popover
+        open
+        onOpenChange={(open) => {
+          if (!open) onClose();
         }}
       >
-        <div className={styles.slashPanelBody}>
-          <div
-            className={styles.slashList}
-            onScroll={() => setHoverDetail(null)}
-          >
-            {menu.items.map((item, index) => {
-              const plan = rowPlans[index];
-              return (
-                <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {plan.showHeader && (
-                    <>
-                      {plan.showDivider && (
-                        <div className={styles.slashSection} />
-                      )}
-                      <div className={styles.slashSectionHeader}>
-                        <span>{item.section}</span>
-                        {plan.count > 0 ? (
-                          <span className={styles.slashSectionCount}>
-                            {plan.count}
-                          </span>
-                        ) : null}
-                      </div>
-                    </>
-                  )}
-                  <button
-                    ref={(node) => {
-                      itemRefs.current[index] = node;
-                    }}
-                    type="button"
-                    role="option"
-                    aria-selected={index === menu.selectedIndex}
-                    className={`${styles.slashItem} ${
-                      index === menu.selectedIndex ? styles.slashItemActive : ''
-                    }`}
-                    onMouseEnter={(event) => {
-                      onSelect(index);
-                      if (!item.detail) {
-                        setHoverDetail(null);
-                        return;
-                      }
-                      const row = event.currentTarget;
-                      const gap = 8;
-                      const detailMaxHeight = 180;
-                      const rowRect = row.getBoundingClientRect();
-                      const detailWidth = 320;
-                      const left = Math.min(
-                        rowRect.left + Math.min(220, rowRect.width * 0.34),
-                        window.innerWidth - detailWidth - 12,
-                      );
-                      const spaceBelow =
-                        window.innerHeight - rowRect.bottom - gap - 12;
-                      const spaceAbove = rowRect.top - gap - 12;
-                      const showBelow =
-                        spaceBelow >= 96 || spaceBelow >= spaceAbove;
-                      const maxHeight = Math.max(
-                        72,
-                        Math.min(
-                          detailMaxHeight,
-                          showBelow ? spaceBelow : spaceAbove,
-                        ),
-                      );
-                      setHoverDetail({
-                        label: item.label,
-                        detail: item.detail,
-                        left: Math.max(12, left),
-                        ...(showBelow
-                          ? { top: rowRect.bottom + gap }
-                          : {
-                              bottom: window.innerHeight - rowRect.top + gap,
-                            }),
-                        maxHeight,
-                      });
-                    }}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onAccept(index);
-                    }}
-                  >
-                    <span className={styles.slashCommand}>{item.label}</span>
-                    {item.detail && (
-                      <span className={styles.slashDescription}>
-                        {item.detail}
-                      </span>
-                    )}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-      {hoverDetail && (
-        <div
-          ref={detailRef}
-          className={styles.slashDetail}
-          style={{
-            ...themeVars,
-            left: hoverDetail.left,
-            top: hoverDetail.top,
-            bottom: hoverDetail.bottom,
-            maxHeight: hoverDetail.maxHeight,
+        <PopoverAnchor
+          virtualRef={
+            anchorRef as RefObject<{ getBoundingClientRect(): DOMRect }>
+          }
+        />
+        <PopoverContent
+          ref={panelRef}
+          side="top"
+          align="start"
+          alignOffset={16}
+          sideOffset={8}
+          avoidCollisions={false}
+          collisionPadding={12}
+          collisionBoundary={collisionBoundary ?? undefined}
+          className="duration-0 data-open:animate-none data-closed:animate-none"
+          role="listbox"
+          data-web-shell-slash-menu
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Node &&
+              (anchorRef.current?.contains(target) ||
+                detailRef.current?.contains(target))
+            ) {
+              event.preventDefault();
+            }
+          }}
+          onMouseDown={(event) => event.preventDefault()}
+          onMouseLeave={(event) => {
+            const nextTarget = event.relatedTarget;
+            if (
+              nextTarget instanceof Node &&
+              detailRef.current?.contains(nextTarget)
+            ) {
+              return;
+            }
+            setHoverDetail(null);
           }}
         >
-          <div className={styles.slashDetailCommand}>{hoverDetail.label}</div>
-          <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
-        </div>
-      )}
-    </div>,
-    document.body,
+          <div className={styles.slashPanel}>
+            <div className={styles.slashPanelBody}>
+              <div
+                className={styles.slashList}
+                onScroll={() => setHoverDetail(null)}
+              >
+                {menu.items.map((item, index) => {
+                  const plan = rowPlans[index];
+                  return (
+                    <div
+                      key={`${item.id}:${index}`}
+                      className={styles.slashEntry}
+                    >
+                      {plan.showHeader && (
+                        <>
+                          {plan.showDivider && (
+                            <div className={styles.slashSection} />
+                          )}
+                          <div className={styles.slashSectionHeader}>
+                            <span>{item.section}</span>
+                            {plan.count > 0 ? (
+                              <span className={styles.slashSectionCount}>
+                                {plan.count}
+                              </span>
+                            ) : null}
+                          </div>
+                        </>
+                      )}
+                      <button
+                        ref={(node) => {
+                          itemRefs.current[index] = node;
+                        }}
+                        type="button"
+                        role="option"
+                        aria-selected={index === menu.selectedIndex}
+                        data-has-description={item.detail ? '' : undefined}
+                        className={`${styles.slashItem} ${
+                          index === menu.selectedIndex
+                            ? styles.slashItemActive
+                            : ''
+                        }`}
+                        onMouseEnter={(event) => {
+                          onSelect(index);
+                          if (!item.detail) {
+                            setHoverDetail(null);
+                            return;
+                          }
+                          hoverAnchorRef.current = event.currentTarget;
+                          const rowRect =
+                            event.currentTarget.getBoundingClientRect();
+                          const boundaryRect =
+                            collisionBoundary?.getBoundingClientRect();
+                          const left = boundaryRect?.left ?? 0;
+                          const right =
+                            boundaryRect?.right ?? window.innerWidth;
+                          const top = boundaryRect?.top ?? 0;
+                          const bottom =
+                            boundaryRect?.bottom ?? window.innerHeight;
+                          const detailWidth = Math.min(320, right - left - 24);
+                          const side =
+                            right - rowRect.right >= detailWidth + 8
+                              ? 'right'
+                              : rowRect.left - left >= detailWidth + 8
+                                ? 'left'
+                                : rowRect.top - top >= bottom - rowRect.bottom
+                                  ? 'top'
+                                  : 'bottom';
+                          setHoverDetail({
+                            label: item.label,
+                            detail: item.detail,
+                            side,
+                          });
+                        }}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onAccept(index);
+                        }}
+                      >
+                        <span className={styles.slashCommand}>
+                          {item.label}
+                        </span>
+                        {item.detail && (
+                          <span className={styles.slashDescription}>
+                            {item.detail}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <Popover
+        open={Boolean(hoverDetail)}
+        onOpenChange={(open) => {
+          if (!open) setHoverDetail(null);
+        }}
+      >
+        <PopoverAnchor
+          virtualRef={
+            hoverAnchorRef as RefObject<{ getBoundingClientRect(): DOMRect }>
+          }
+        />
+        {hoverDetail && (
+          <PopoverContent
+            ref={detailRef}
+            side={hoverDetail.side}
+            align="start"
+            sideOffset={8}
+            collisionPadding={12}
+            collisionBoundary={collisionBoundary ?? undefined}
+            className="duration-0 data-open:animate-none data-closed:animate-none"
+            data-web-shell-slash-detail
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            onCloseAutoFocus={(event) => event.preventDefault()}
+            onMouseLeave={(event) => {
+              const nextTarget = event.relatedTarget;
+              if (
+                nextTarget instanceof Node &&
+                panelRef.current?.contains(nextTarget)
+              ) {
+                return;
+              }
+              setHoverDetail(null);
+            }}
+          >
+            <div className={styles.slashDetail}>
+              <div className={styles.slashDetailCommand}>
+                {hoverDetail.label}
+              </div>
+              <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
+            </div>
+          </PopoverContent>
+        )}
+      </Popover>
+    </>
   );
 }
 
@@ -846,10 +1083,14 @@ function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
+  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
+  // The keyboard shortcut grid is pointless without a hardware keyboard, so
+  // the mobile textarea backend hides it.
+  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -873,20 +1114,22 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        <div className={styles.quickKeysGrid}>
-          {QUICK_KEY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={styles.quickKey}
-              title={t(item.descriptionKey)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onPressKey(item)}
-            >
-              <span className={styles.quickKeyLabel}>{item.label}</span>
-            </button>
-          ))}
-        </div>
+        {showKeyHints && (
+          <div className={styles.quickKeysGrid}>
+            {QUICK_KEY_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={styles.quickKey}
+                title={t(item.descriptionKey)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onPressKey(item)}
+              >
+                <span className={styles.quickKeyLabel}>{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -896,6 +1139,8 @@ export const ChatEditor = memo(
   forwardRef<EditorHandle, ChatEditorProps>(function ChatEditor(props, ref) {
     const {
       onSubmit,
+      onInputTextChange,
+      onAttachmentsChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -904,6 +1149,7 @@ export const ChatEditor = memo(
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
+      animatePlaceholder = true,
       commands,
       skills = [],
       slashCommandCategoryOrder,
@@ -911,6 +1157,17 @@ export const ChatEditor = memo(
       onPopQueuedMessages,
       currentMode = 'default',
       currentModel = '',
+      gitBranch,
+      gitWorktree,
+      gitCwd,
+      gitModeIntent,
+      onGitModeIntentChange,
+      gitStatus,
+      onOpenGitDiff,
+      onOpenCommit,
+      workspaceName,
+      workspaceTitle,
+      workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -918,18 +1175,31 @@ export const ChatEditor = memo(
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      workspaces,
+      selectedWorkspaceCwd,
+      workspaceSelectionDisabled = false,
+      onSelectWorkspace,
+      scratchWorkspaceSupported = false,
+      existingFolderWorkspaceSupported = false,
+      workspaceMutationBusy = false,
+      onCreateScratchWorkspace,
+      onOpenExistingWorkspace,
+      atWorkspaceCwd,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
       builtinAtProviders,
       atProviders,
       composerTagIcons,
+      voiceTarget,
+      voiceStatusRevision,
     } = props;
 
     const {
@@ -939,10 +1209,12 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      parseUserMessageContent,
     } = useWebShellCustomization();
 
     const core = useComposerCore({
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       disabled,
@@ -958,12 +1230,15 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
       builtinAtProviders,
       atProviders,
+      atWorkspaceCwd,
       composerTagIcons,
+      parseUserMessageContent,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -974,23 +1249,51 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
+    useEffect(() => {
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
+
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
+    const [typewriterSuppressed, setTypewriterSuppressed] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const slashDetailRef = useRef<HTMLDivElement>(null);
     const atPanelRef = useRef<HTMLDivElement>(null);
-    const modeBtnRef = useRef<HTMLButtonElement>(null);
-    const modelBtnRef = useRef<HTMLButtonElement>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
+    const toolbarLeadingRef = useRef<HTMLDivElement>(null);
+    const toolbarRightRef = useRef<HTMLDivElement>(null);
+    const toolbarStartRef = useRef<HTMLDivElement>(null);
+    const toolbarEndRef = useRef<HTMLDivElement>(null);
+    const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
+    const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
+    const [voiceActive, setVoiceActive] = useState(false);
+    const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
+      workspaceSelect: false,
+      workspace: false,
+      gitBranch: false,
+      mode: false,
+      model: false,
+    });
+    const [lastConfirmedModelLabel, setLastConfirmedModelLabel] = useState('');
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
     const atMenu = core.atMenu;
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
-    const editorViewRef = core.viewRef;
+    const showTypewriterPlaceholder =
+      animatePlaceholder &&
+      !disabled &&
+      Boolean(placeholderText) &&
+      !core.hasInput() &&
+      !typewriterSuppressed &&
+      !core.shellMode &&
+      !followupState?.isVisible;
 
     useEffect(() => {
       if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -1015,6 +1318,7 @@ export const ChatEditor = memo(
           container &&
           !container.contains(target) &&
           !slashPanelRef.current?.contains(target) &&
+          !slashDetailRef.current?.contains(target) &&
           !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
@@ -1028,13 +1332,6 @@ export const ChatEditor = memo(
         window.removeEventListener('touchstart', onPointerOutside);
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
-
-    useEffect(() => {
-      const glowRoot = containerRef.current;
-      const inputEl = editorViewRef.current?.contentDOM;
-      if (!glowRoot || !inputEl) return undefined;
-      return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
 
     useEffect(() => {
       const container = containerRef.current;
@@ -1077,6 +1374,8 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    const showModeAction = showToolbarAction('approvalMode');
+    const showModelAction = showToolbarAction('model');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -1203,6 +1502,7 @@ export const ChatEditor = memo(
         availableModels.map((m) => ({
           id: m.id,
           label: getModelDisplayName(m.label || m.id),
+          searchText: `${m.label ?? ''}\n${m.id}`,
         })),
       [availableModels],
     );
@@ -1226,6 +1526,15 @@ export const ChatEditor = memo(
     );
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
+        if (core.mobileComposer) {
+          // No CodeMirror to dispatch into. History search is the one key
+          // action with a non-keyboard equivalent; the rest are hidden on
+          // the textarea backend.
+          if (event.ctrlKey && event.key === 'r') {
+            core.searchState.openHistorySearch();
+          }
+          return;
+        }
         const view = core.viewRef.current;
         if (!view) return;
         view.focus();
@@ -1280,6 +1589,7 @@ export const ChatEditor = memo(
       searchInputRef,
       searchUiRef,
       closeSearch,
+      restoreSearchMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,
@@ -1300,7 +1610,10 @@ export const ChatEditor = memo(
       const iconUrl =
         tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
       const safeIconUrl =
-        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+        iconUrl &&
+        (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+          ? iconUrl
+          : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
@@ -1322,17 +1635,239 @@ export const ChatEditor = memo(
     // Mode display label
     const modeLabel = getModeLabel(currentMode, t);
 
-    // Model display label
-    const modelLabel = getModelDisplayName(currentModel);
+    const currentModelLabel = currentModel
+      ? (availableModels.find((model) => model.id === currentModel)?.label ??
+        (currentModel.startsWith('qwen-route:')
+          ? ''
+          : getModelDisplayName(currentModel)))
+      : '';
+    const { modelLabel, modelLabelReady } = resolveToolbarModelLabel({
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    });
+    const selectedWorkspace = workspaces?.find((entry) =>
+      selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
+    );
+    const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
+    const workspaceSelectVisible = Boolean(
+      workspaces &&
+        onSelectWorkspace &&
+        (workspaces.length > 1 ||
+          scratchWorkspaceSupported ||
+          existingFolderWorkspaceSupported),
+    );
+    const workspaceIndicatorVisible = Boolean(
+      workspaceName && showToolbarAction('workspace'),
+    );
+    const gitBranchVisible = Boolean(
+      gitBranch && showToolbarAction('gitBranch'),
+    );
+
+    useLayoutEffect(() => {
+      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+        setLastConfirmedModelLabel(currentModelLabel);
+      }
+    }, [currentModelLabel, lastConfirmedModelLabel]);
+
+    const showWorkspaceSelectLabel = toolbarLabelVisibility.workspaceSelect;
+    const showWorkspaceLabel = toolbarLabelVisibility.workspace;
+    const showGitBranchLabel = toolbarLabelVisibility.gitBranch;
+    const showModeLabel = toolbarLabelVisibility.mode;
+    const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const mobileVoiceActive = showQuickActions && voiceActive;
+
+    useEffect(() => {
+      if (mobileVoiceActive) setQuickActionsOpen(false);
+    }, [mobileVoiceActive]);
+
+    useLayoutEffect(() => {
+      const toolbar = toolbarRef.current;
+      const toolbarLeading = toolbarLeadingRef.current;
+      const toolbarRight = toolbarRightRef.current;
+      const measurements = toolbarMeasurementsRef.current;
+      if (!toolbar || !toolbarLeading || !toolbarRight || !measurements) {
+        return undefined;
+      }
+
+      const update = () => {
+        const expansionWidth = (id: string) => {
+          const collapsed = measurements.querySelector<HTMLElement>(
+            `[data-toolbar-measure="${id}:collapsed"]`,
+          );
+          const expanded = measurements.querySelector<HTMLElement>(
+            `[data-toolbar-measure="${id}:expanded"]`,
+          );
+          return Math.max(
+            0,
+            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
+              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
+          );
+        };
+        const items = [
+          ...(workspaceSelectVisible
+            ? [
+                {
+                  id: 'workspaceSelect',
+                  expansionWidth: expansionWidth('workspaceSelect'),
+                },
+              ]
+            : []),
+          ...(workspaceIndicatorVisible
+            ? [
+                {
+                  id: 'workspace',
+                  expansionWidth: expansionWidth('workspace'),
+                },
+              ]
+            : []),
+          ...(gitBranchVisible
+            ? [
+                {
+                  id: 'gitBranch',
+                  expansionWidth: expansionWidth('gitBranch'),
+                },
+              ]
+            : []),
+          ...(showModeAction
+            ? [
+                {
+                  id: 'mode',
+                  expansionWidth: expansionWidth('mode'),
+                },
+              ]
+            : []),
+          ...(showModelAction
+            ? [
+                {
+                  id: 'model',
+                  expansionWidth: expansionWidth('model'),
+                  ready: modelLabelReady,
+                },
+              ]
+            : []),
+        ];
+        const currentExpansionWidth = items.reduce(
+          (total, item) =>
+            total +
+            (toolbarLabelVisibility[
+              item.id as keyof typeof toolbarLabelVisibility
+            ]
+              ? item.expansionWidth
+              : 0),
+          0,
+        );
+        const currentLeadingWidth = toolbarLeading.scrollWidth;
+        const gap = Math.ceil(
+          Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
+        );
+        const availableWidth = getToolbarExpansionBudget({
+          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
+          leadingWidth: currentLeadingWidth,
+          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
+          currentExpansionWidth,
+          gap,
+        });
+        const itemVisibility = getToolbarItemVisibilityWithHysteresis({
+          availableWidth,
+          items,
+          currentVisibility: toolbarLabelVisibility,
+          // Aggregate scrollWidth can differ from the sum of individually
+          // rounded replicas by one pixel per item. Apply that slack only when
+          // expanding so a collapsed/expanded pair cannot form a two-cycle.
+          expansionMargin: items.length,
+        });
+        const next = {
+          workspaceSelect: itemVisibility.workspaceSelect ?? false,
+          workspace: itemVisibility.workspace ?? false,
+          gitBranch: itemVisibility.gitBranch ?? false,
+          mode: itemVisibility.mode ?? false,
+          model: itemVisibility.model ?? false,
+        };
+        setToolbarLabelVisibility((current) => {
+          const unchanged = Object.keys(next).every(
+            (key) =>
+              current[key as keyof typeof current] ===
+              next[key as keyof typeof next],
+          );
+          return unchanged ? current : next;
+        });
+      };
+
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(toolbar);
+      resizeObserver.observe(toolbarLeading);
+      resizeObserver.observe(toolbarRight);
+      for (const child of measurements.children) {
+        resizeObserver.observe(child);
+      }
+      const customToolbarRoots = [
+        toolbarStartRef.current,
+        toolbarEndRef.current,
+        toolbarRightCustomRef.current,
+      ].filter((element): element is HTMLDivElement => element !== null);
+      const observeCustomToolbarContent = () => {
+        for (const root of customToolbarRoots) {
+          resizeObserver.observe(root);
+          for (const child of root.children) {
+            resizeObserver.observe(child);
+          }
+        }
+      };
+      observeCustomToolbarContent();
+      const mutationObserver = new MutationObserver(() => {
+        observeCustomToolbarContent();
+        update();
+      });
+      for (const root of customToolbarRoots) {
+        mutationObserver.observe(root, {
+          attributes: true,
+          characterData: true,
+          childList: true,
+          subtree: true,
+        });
+      }
+      return () => {
+        mutationObserver.disconnect();
+        resizeObserver.disconnect();
+      };
+    }, [
+      ToolbarEnd,
+      ToolbarRight,
+      ToolbarStart,
+      disabled,
+      gitBranch,
+      gitBranchVisible,
+      isRunning,
+      modelLabel,
+      modelLabelReady,
+      modeLabel,
+      sessionName,
+      showModelAction,
+      showModeAction,
+      toolbarLabelVisibility,
+      workspaceIndicatorVisible,
+      workspaceName,
+      workspaceSelectVisible,
+      selectedWorkspaceLabel,
+    ]);
 
     return (
-      <div className={styles.editorShell} data-composer data-web-shell-composer>
+      <div
+        className={`${styles.editorShell} ${
+          modeDropdownOpen || modelDropdownOpen
+            ? styles.editorShellDropdownOpen
+            : ''
+        }`}
+        data-composer
+        data-web-shell-composer
+      >
         <div
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
-          data-dac-glow
+          data-typewriter-visible={showTypewriterPlaceholder || undefined}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -1340,8 +1875,7 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          <SpecularComposerEffect targetRef={containerRef} />
           {searchMode && (
             <div
               ref={searchUiRef}
@@ -1377,7 +1911,11 @@ export const ChatEditor = memo(
                         }`}
                         onMouseDown={(event) => {
                           event.preventDefault();
-                          core.replaceEditorText(match);
+                          if (restoreSearchMatch) {
+                            restoreSearchMatch(match);
+                          } else {
+                            core.replaceEditorText(match);
+                          }
                           closeSearch(false);
                         }}
                       >
@@ -1398,102 +1936,82 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {core.composerTags.length > 0 && (
-              <div className={styles.tags}>
-                {core.composerTags.map((tag) => {
-                  const tagInfo = {
-                    tag,
-                    placement: 'composer' as const,
-                    readonly: false,
-                  };
-                  const tooltip = renderComposerTagTooltip?.(tagInfo);
-                  return (
-                    <span
-                      key={tag.id}
-                      className={styles.tag}
-                      role={onComposerTagClick ? 'button' : undefined}
-                      tabIndex={onComposerTagClick ? 0 : undefined}
-                      onClick={(event) => {
-                        if (!onComposerTagClick) return;
-                        event.stopPropagation();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                      onKeyDown={(event) => {
-                        if (!onComposerTagClick) return;
-                        if (event.key !== 'Enter' && event.key !== ' ') return;
-                        event.preventDefault();
-                        onComposerTagClick({
-                          ...tagInfo,
-                          anchorRect:
-                            event.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                    >
-                      {renderComposerTagContent(tag)}
-                      {tag.removable !== false && (
+            {(core.composerTags.length > 0 || core.pastedImages.length > 0) && (
+              <div
+                className={styles.attachments}
+                data-web-shell-composer-attachments
+              >
+                {core.composerTags.length > 0 && (
+                  <TooltipPrimitive.Provider
+                    delayDuration={0}
+                    disableHoverableContent={false}
+                  >
+                    <div className={styles.tags}>
+                      {core.composerTags.map((tag) => {
+                        const tagInfo = {
+                          tag,
+                          placement: 'composer' as const,
+                          readonly: false,
+                        };
+                        let tooltip: ReactNode | null | undefined;
+                        try {
+                          tooltip = renderComposerTagTooltip?.(tagInfo);
+                        } catch (error) {
+                          console.warn(
+                            '[WebShell] composer tag tooltip render failed',
+                            error,
+                          );
+                        }
+                        return (
+                          <TopComposerTag
+                            key={tag.id}
+                            tag={tag}
+                            content={renderComposerTagContent(tag)}
+                            tooltip={tooltip}
+                            onActivate={
+                              onComposerTagClick
+                                ? (anchorRect) =>
+                                    onComposerTagClick({
+                                      ...tagInfo,
+                                      anchorRect,
+                                    })
+                                : undefined
+                            }
+                            onRemove={
+                              tag.removable !== false
+                                ? () => {
+                                    core.removeTopTag(tag.id);
+                                    core.viewRef.current?.focus();
+                                  }
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  </TooltipPrimitive.Provider>
+                )}
+                {core.pastedImages.length > 0 && (
+                  <div className={styles.images}>
+                    {core.pastedImages.map((img, i) => (
+                      <div key={i} className={styles.imageThumb}>
+                        <img
+                          src={`data:${img.media_type};base64,${img.data}`}
+                          alt=""
+                        />
                         <button
-                          type="button"
-                          className={styles.tagRemove}
-                          aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.stopPropagation();
-                              return;
-                            }
-                            if (
-                              event.key !== 'Backspace' &&
-                              event.key !== 'Delete'
-                            ) {
-                              return;
-                            }
-                            event.preventDefault();
-                            event.stopPropagation();
-                            core.removeTopTag(tag.id);
-                            core.viewRef.current?.focus();
+                          className={styles.imageRemove}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            core.removeImage(i);
                           }}
                         >
                           ×
                         </button>
-                      )}
-                      {tooltip !== undefined && tooltip !== null && (
-                        <span className={styles.tagTooltip} role="tooltip">
-                          {tooltip}
-                        </span>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-            {core.pastedImages.length > 0 && (
-              <div className={styles.images}>
-                {core.pastedImages.map((img, i) => (
-                  <div key={i} className={styles.imageThumb}>
-                    <img
-                      src={`data:${img.media_type};base64,${img.data}`}
-                      alt=""
-                    />
-                    <button
-                      className={styles.imageRemove}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        core.removeImage(i);
-                      }}
-                    >
-                      ×
-                    </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             )}
             {core.slashMenu && (
@@ -1501,6 +2019,8 @@ export const ChatEditor = memo(
                 menu={core.slashMenu}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
+                detailRef={slashDetailRef}
+                onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
                 onAccept={core.acceptSlashCompletion}
               />
@@ -1523,18 +2043,61 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            <div className={styles.editorArea}>
+            <div
+              className={styles.editorArea}
+              onPointerDownCapture={() => setTypewriterSuppressed(true)}
+              onKeyDownCapture={() => setTypewriterSuppressed(true)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) {
+                  setTypewriterSuppressed(false);
+                }
+              }}
+            >
+              {showTypewriterPlaceholder && (
+                <TypewriterPlaceholder text={placeholderText} />
+              )}
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
                   !
                 </span>
               )}
-              <div ref={core.containerRef} data-web-shell-composer-editor />
+              {core.mobileComposer ? (
+                // Touch devices get a plain textarea instead of CodeMirror:
+                // mobile virtual keyboards and IMEs interact poorly with the
+                // contenteditable editor (#5958). Enter inserts a newline
+                // natively; submission goes through the Send button.
+                <textarea
+                  ref={core.mobileComposer.textareaRef}
+                  className={styles.mobileTextarea}
+                  value={core.mobileComposer.value}
+                  onChange={core.mobileComposer.onChange}
+                  onBlur={core.mobileComposer.onBlur}
+                  onPaste={core.mobileComposer.onPaste}
+                  placeholder={core.mobileComposer.placeholder}
+                  disabled={core.disabled}
+                  rows={1}
+                  enterKeyHint="enter"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-web-shell-composer-editor
+                />
+              ) : (
+                <div ref={core.containerRef} data-web-shell-composer-editor />
+              )}
             </div>
-            <div className={styles.toolbar}>
-              <div className={styles.toolbarLeading}>
+            <div
+              ref={toolbarRef}
+              className={styles.toolbar}
+              data-mobile-voice-active={mobileVoiceActive || undefined}
+            >
+              <div
+                ref={toolbarLeadingRef}
+                className={styles.toolbarLeading}
+                data-web-shell-toolbar-leading
+              >
                 {ToolbarStart && (
-                  <div className={styles.toolbarStart}>
+                  <div ref={toolbarStartRef} className={styles.toolbarStart}>
                     <ToolbarStart
                       disabled={disabled}
                       isRunning={isRunning}
@@ -1545,78 +2108,180 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {showToolbarAction('approvalMode') && (
-                    <div className={styles.dropdownWrapper}>
-                      <ToolbarDropdown
+                  {workspaceSelectVisible &&
+                    workspaces &&
+                    onSelectWorkspace && (
+                      <WorkspaceSelector
+                        workspaces={workspaces}
+                        selectedWorkspaceCwd={selectedWorkspaceCwd}
+                        disabled={workspaceSelectionDisabled}
+                        busy={workspaceMutationBusy}
+                        scratchSupported={scratchWorkspaceSupported}
+                        existingFolderSupported={
+                          existingFolderWorkspaceSupported
+                        }
+                        className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+                          showWorkspaceSelectLabel
+                            ? ''
+                            : styles.workspaceSelectTriggerCompact
+                        }`}
+                        onSelectWorkspace={onSelectWorkspace}
+                        onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
+                        onOpenExistingFolder={
+                          onOpenExistingWorkspace ?? (() => {})
+                        }
+                      />
+                    )}
+                  {workspaceIndicatorVisible && workspaceName && (
+                    <WorkspaceIndicator
+                      name={workspaceName}
+                      title={workspaceTitle ?? workspaceName}
+                      color={workspaceColor}
+                      compact={!showWorkspaceLabel}
+                      ariaLabel={t('workspace.paneLabel', {
+                        name: workspaceName,
+                      })}
+                    />
+                  )}
+                  {gitBranchVisible &&
+                    gitBranch &&
+                    (gitModeIntent && onGitModeIntentChange ? (
+                      <GitModePopover
+                        branch={gitBranch}
+                        compact={!showGitBranchLabel}
+                        intent={gitModeIntent}
+                        onIntentChange={onGitModeIntentChange}
+                      />
+                    ) : (
+                      <BranchPickerPopover
+                        open={branchPickerOpen}
+                        onOpenChange={setBranchPickerOpen}
+                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
+                        gitCwd={gitCwd}
+                        onOpenDiff={onOpenGitDiff}
+                        onOpenCommit={onOpenCommit}
+                      >
+                        <button
+                          type="button"
+                          className={styles.gitBranchChipButton}
+                          aria-label={gitBranchAriaLabel(
+                            gitBranch,
+                            gitStatus,
+                            t,
+                          )}
+                        >
+                          <GitBranchIndicator
+                            branch={gitBranch}
+                            status={gitStatus}
+                            compact={!showGitBranchLabel}
+                            worktree={gitWorktree}
+                          />
+                        </button>
+                      </BranchPickerPopover>
+                    ))}
+                  {showModeAction && (
+                    <div
+                      className={`${styles.dropdownWrapper} ${
+                        showModeLabel ? '' : styles.dropdownWrapperCompact
+                      }`}
+                    >
+                      <ToolbarPopover
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}
-                        onClose={() => setModeDropdownOpen(false)}
-                        onSelect={handleModeSelect}
-                        anchorRef={modeBtnRef}
-                      />
-                      <button
-                        ref={modeBtnRef}
-                        className={styles.toolBtn}
-                        data-web-shell-mode-button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          core.closeSlashMenu();
-                          core.closeAtMenu();
-                          setQuickActionsOpen(false);
-                          setModeDropdownOpen((v) => !v);
-                          setModelDropdownOpen(false);
+                        onOpenChange={(open) => {
+                          setModeDropdownOpen(open);
+                          if (open) setModelDropdownOpen(false);
                         }}
-                        aria-label={t('status.mode')}
-                      >
-                        <span className={styles.toolBtnModeIcon}>
-                          <ModeIcon mode={currentMode} />
-                        </span>
-                        <span className={styles.toolBtnText}>{modeLabel}</span>
-                        <span className={styles.toolBtnArrow}>
-                          <ChevronDownIcon />
-                        </span>
-                      </button>
+                        onSelect={handleModeSelect}
+                        tooltip={modeLabel}
+                        trigger={
+                          <button
+                            className={`${styles.toolBtn} ${styles.modeToolBtn} ${
+                              showModeLabel ? '' : styles.toolBtnCompact
+                            }`}
+                            data-web-shell-mode-button
+                            data-web-shell-toolbar-popover-trigger
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              core.closeSlashMenu();
+                              core.closeAtMenu();
+                              setQuickActionsOpen(false);
+                            }}
+                            aria-label={t('status.mode')}
+                          >
+                            <span className={styles.toolBtnModeIcon}>
+                              <ModeIcon mode={currentMode} />
+                            </span>
+                            {showModeLabel && (
+                              <span className={styles.toolBtnText}>
+                                {modeLabel}
+                              </span>
+                            )}
+                            <span className={styles.toolBtnArrow}>
+                              <ChevronDownIcon />
+                            </span>
+                          </button>
+                        }
+                      />
                     </div>
                   )}
-                  {showToolbarAction('model') && (
-                    <div className={styles.dropdownWrapper}>
-                      <ToolbarDropdown
+                  {showModelAction && (
+                    <div
+                      className={`${styles.dropdownWrapper} ${
+                        showModelLabel ? '' : styles.dropdownWrapperCompact
+                      }`}
+                    >
+                      <ToolbarPopover
                         open={modelDropdownOpen}
                         items={modelItems}
                         activeId={currentModel}
-                        onClose={() => setModelDropdownOpen(false)}
-                        onSelect={handleModelSelect}
-                        anchorRef={modelBtnRef}
-                        showCheck
-                        maxHeight={300}
-                      />
-                      <button
-                        ref={modelBtnRef}
-                        className={styles.toolBtn}
-                        data-web-shell-model-button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          core.closeSlashMenu();
-                          core.closeAtMenu();
-                          setQuickActionsOpen(false);
-                          setModelDropdownOpen((v) => !v);
-                          setModeDropdownOpen(false);
+                        onOpenChange={(open) => {
+                          setModelDropdownOpen(open);
+                          if (open) setModeDropdownOpen(false);
                         }}
-                        aria-label={t('model.select')}
-                      >
-                        <span className={styles.toolBtnModelIcon}>
-                          <ModelIcon />
-                        </span>
-                        <span className={styles.toolBtnText}>{modelLabel}</span>
-                        <span className={styles.toolBtnArrow}>
-                          <ChevronDownIcon />
-                        </span>
-                      </button>
+                        onSelect={handleModelSelect}
+                        tooltip={modelLabel}
+                        showCheck
+                        searchable
+                        searchLabel={t('common.search')}
+                        noResultsLabel={(query) =>
+                          t('model.noMatch', { query })
+                        }
+                        trigger={
+                          <button
+                            className={`${styles.toolBtn} ${styles.modelToolBtn} ${
+                              showModelLabel ? '' : styles.toolBtnCompact
+                            }`}
+                            data-web-shell-model-button
+                            data-web-shell-toolbar-popover-trigger
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              core.closeSlashMenu();
+                              core.closeAtMenu();
+                              setQuickActionsOpen(false);
+                            }}
+                            aria-label={`${t('model.select')}: ${modelLabel}`}
+                            title={modelLabel}
+                          >
+                            <span className={styles.toolBtnModelIcon}>
+                              <ModelIcon />
+                            </span>
+                            {showModelLabel && (
+                              <span className={styles.toolBtnText}>
+                                {modelLabel}
+                              </span>
+                            )}
+                            <span className={styles.toolBtnArrow}>
+                              <ChevronDownIcon />
+                            </span>
+                          </button>
+                        }
+                      />
                     </div>
                   )}
                   {ToolbarEnd && (
-                    <div className={styles.toolbarEnd}>
+                    <div ref={toolbarEndRef} className={styles.toolbarEnd}>
                       <ToolbarEnd
                         disabled={disabled}
                         isRunning={isRunning}
@@ -1628,10 +2293,11 @@ export const ChatEditor = memo(
                   )}
                 </div>
               </div>
-              <div className={styles.toolbarRight}>
+              <div ref={toolbarRightRef} className={styles.toolbarRight}>
                 {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
+                    data-hide-during-mobile-voice
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
@@ -1651,7 +2317,11 @@ export const ChatEditor = memo(
                   </button>
                 )}
                 {ToolbarRight && (
-                  <div className={styles.toolbarRightCustom}>
+                  <div
+                    ref={toolbarRightCustomRef}
+                    className={styles.toolbarRightCustom}
+                    data-hide-during-mobile-voice
+                  >
                     <ToolbarRight
                       disabled={disabled}
                       isRunning={isRunning}
@@ -1666,6 +2336,7 @@ export const ChatEditor = memo(
                   showToolbarAction('widthMode') && (
                     <button
                       className={`${styles.toolBtn} ${styles.widthModeBtn}`}
+                      data-hide-during-mobile-voice
                       onClick={(e) => {
                         e.stopPropagation();
                         onChatWidthModeChange?.(
@@ -1697,6 +2368,9 @@ export const ChatEditor = memo(
                 {showToolbarAction('voice') && (
                   <VoiceButton
                     disabled={disabled}
+                    onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
                     onInsert={(text) => {
                       const existing = core.getText();
                       const sep = existing && !/\s$/.test(existing) ? ' ' : '';
@@ -1770,6 +2444,136 @@ export const ChatEditor = memo(
                 </span>
               </div>
             </div>
+            <div
+              ref={toolbarMeasurementsRef}
+              className={styles.toolbarMeasurements}
+              aria-hidden="true"
+            >
+              {workspaceSelectVisible && selectedWorkspace && (
+                <>
+                  <span
+                    data-toolbar-measure="workspaceSelect:collapsed"
+                    className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${styles.workspaceSelectTriggerCompact}`}
+                  >
+                    <FolderClosedIcon size={16} strokeWidth={1.2} />
+                    <span className={styles.toolBtnText}>
+                      {selectedWorkspaceLabel}
+                    </span>
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="workspaceSelect:expanded"
+                    className={`${styles.toolBtn} ${styles.workspaceSelectTrigger}`}
+                  >
+                    <FolderClosedIcon size={16} strokeWidth={1.2} />
+                    <span className={styles.toolBtnText}>
+                      {selectedWorkspaceLabel}
+                    </span>
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </span>
+                </>
+              )}
+              {workspaceIndicatorVisible && workspaceName && (
+                <>
+                  <span
+                    data-toolbar-measure="workspace:collapsed"
+                    className={`${styles.workspaceChip} ${styles.workspaceChipCompact}`}
+                  >
+                    <span className={styles.workspaceChipIcon} />
+                    <span className={styles.workspaceChipText}>
+                      {workspaceName}
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="workspace:expanded"
+                    className={styles.workspaceChip}
+                  >
+                    <span className={styles.workspaceChipIcon} />
+                    <span className={styles.workspaceChipText}>
+                      {workspaceName}
+                    </span>
+                  </span>
+                </>
+              )}
+              {gitBranchVisible && gitBranch && (
+                <>
+                  <span
+                    data-toolbar-measure="gitBranch:collapsed"
+                    className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
+                  >
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact
+                      worktree={gitWorktree}
+                    />
+                  </span>
+                  <span
+                    data-toolbar-measure="gitBranch:expanded"
+                    className={styles.gitBranchChip}
+                  >
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact={false}
+                      worktree={gitWorktree}
+                    />
+                  </span>
+                </>
+              )}
+              <span
+                data-toolbar-measure="mode:collapsed"
+                className={`${styles.toolBtn} ${styles.modeToolBtn} ${styles.toolBtnCompact}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnText}>{modeLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="mode:expanded"
+                className={`${styles.toolBtn} ${styles.modeToolBtn}`}
+              >
+                <span className={styles.toolBtnModeIcon}>
+                  <ModeIcon mode={currentMode} />
+                </span>
+                <span className={styles.toolBtnText}>{modeLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="model:collapsed"
+                className={`${styles.toolBtn} ${styles.modelToolBtn} ${styles.toolBtnCompact}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+              <span
+                data-toolbar-measure="model:expanded"
+                className={`${styles.toolBtn} ${styles.modelToolBtn}`}
+              >
+                <span className={styles.toolBtnModelIcon}>
+                  <ModelIcon />
+                </span>
+                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnArrow}>
+                  <ChevronDownIcon />
+                </span>
+              </span>
+            </div>
           </div>
         </div>
         {showQuickActions && quickActionsOpen && quickActions.length > 0 && (
@@ -1777,6 +2581,7 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
+            showKeyHints={!core.mobileComposer}
           />
         )}
       </div>

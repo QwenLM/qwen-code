@@ -23,6 +23,21 @@ function makeTextChunk(id: number, text: string): BridgeEvent {
   };
 }
 
+function makeDiscreteTextChunk(
+  id: number,
+  text: string,
+  attempt: number,
+): BridgeEvent {
+  const event = makeTextChunk(id, text);
+  (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+    source: 'todo_stop_guard',
+    qwenDiscreteMessage: true,
+    attempt,
+    maxAttempts: 2,
+  };
+  return event;
+}
+
 function makeThoughtChunk(id: number, text: string): BridgeEvent {
   return {
     id,
@@ -228,6 +243,41 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(data.update.content.text).toBe('Let me think...');
     });
 
+    it('preserves discrete agent messages and their metadata', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Before'));
+      engine.ingest(makeDiscreteTextChunk(2, 'Guard one', 1));
+      engine.ingest(makeDiscreteTextChunk(3, 'Guard two', 2));
+      engine.ingest(makeDiscreteTextChunk(4, 'Guard exhausted', 2));
+      engine.ingest(makeTextChunk(5, 'After'));
+      engine.ingest(makeTurnComplete(6));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Before',
+        'Guard one',
+        'Guard two',
+        'Guard exhausted',
+        'After',
+      ]);
+      const guardEvents = events.filter((event) => {
+        const data = event.data as {
+          update?: { _meta?: Record<string, unknown> };
+        };
+        return data.update?._meta?.['source'] === 'todo_stop_guard';
+      });
+      expect(guardEvents).toHaveLength(3);
+      expect(
+        guardEvents.map((event) => {
+          const data = event.data as {
+            update: { _meta: Record<string, unknown> };
+          };
+          return data.update._meta['attempt'];
+        }),
+      ).toEqual([1, 2, 2]);
+      expect(guardEvents.map((event) => event.id)).toEqual([2, 3, 4]);
+    });
+
     it('keeps user messages as-is', () => {
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(makeUserMessage(1, 'How are you?'));
@@ -364,7 +414,7 @@ describe('TurnBoundaryCompactionEngine', () => {
           truncatedEvents: 2,
           retainedEvents: 1,
           maxBytes: 128,
-          fullTranscriptAvailable: false,
+          fullTranscriptAvailable: true,
         },
       };
       const engine = new TurnBoundaryCompactionEngine();
@@ -420,7 +470,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedTurns: 2,
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
     });
 
@@ -564,6 +614,154 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
   });
 
+  describe('liveJournal caps (DAEMON-009)', () => {
+    const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
+      snap.liveJournal.find((e) => e.type === 'history_truncated');
+
+    it('drops the oldest journal entries past maxJournalEvents and prepends a marker', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 3,
+      });
+      for (let i = 1; i <= 5; i++) {
+        engine.ingest(makeTextChunk(i, `chunk-${i}`));
+      }
+
+      const snap = engine.snapshot();
+      // marker + the 3 newest raw events; the 2 oldest were dropped.
+      expect(snap.liveJournal).toHaveLength(4);
+      const marker = markerOf(snap);
+      expect(marker?.data).toEqual({
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 2,
+        retainedEvents: 3,
+        maxBytes: 8 * 1024 * 1024,
+        maxEvents: 3,
+        fullTranscriptAvailable: true,
+      });
+      expect(snap.liveJournal[0]).toBe(marker);
+      expect(snap.liveJournal.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
+    });
+
+    it('drops the oldest journal entries past maxJournalBytes but keeps at least one', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 300,
+      });
+      engine.ingest(makeTextChunk(1, 'x'.repeat(200)));
+      engine.ingest(makeTextChunk(2, 'y'.repeat(200)));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker).toBeDefined();
+      expect(
+        (marker?.data as { truncatedEvents: number }).truncatedEvents,
+      ).toBe(1);
+      // The newest (still oversized alone) entry survives — first-item rule.
+      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
+        1,
+      );
+      expect(snap.liveJournal.at(-1)?.id).toBe(2);
+    });
+
+    it('does not let journal truncation corrupt the compacted turn', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+      });
+      engine.ingest(makeTextChunk(1, 'Hello'));
+      engine.ingest(makeTextChunk(2, ' world'));
+      engine.ingest(makeTurnComplete(3));
+
+      const snap = engine.snapshot();
+      // Compaction folds from the slots working set, not the journal:
+      // the merged text is complete even though the journal was capped.
+      expect(extractTexts(snap.compactedTurns)).toContain('Hello world');
+      // Turn boundary reset the journal AND the truncation counter.
+      expect(snap.liveJournal).toHaveLength(0);
+      expect(markerOf(snap)).toBeUndefined();
+    });
+
+    it('emits no marker while the journal stays within its caps', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'H'));
+      engine.ingest(makeTextChunk(2, 'i'));
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeUndefined();
+      expect(snap.liveJournal).toHaveLength(2);
+    });
+
+    it('marker carries the last-seen recordId as a pagination anchor when the journal overflows', () => {
+      // Regression coverage: a single long in-flight turn can push the
+      // liveJournal past its caps with only streaming `session_update`s
+      // (no recordId). The marker must still carry the recordId of the
+      // most recent prior turn-boundary event so the client can anchor
+      // transcript pagination at `beforeRecordId`.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 3,
+      });
+      const turnBounded: BridgeEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'prior-turn' },
+            _meta: { 'qwen.session.recordId': 'record-anchor' },
+          },
+        },
+      };
+      engine.ingest(turnBounded);
+      engine.ingest(makeTextChunk(2, 'a'));
+      engine.ingest(makeTextChunk(3, 'b'));
+      engine.ingest(makeTextChunk(4, 'c'));
+      engine.ingest(makeTextChunk(5, 'd'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker).toBeDefined();
+      expect(marker?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 2,
+        retainedEvents: 3,
+        recordId: 'record-anchor',
+      });
+    });
+
+    it('seeded engine stamps marker with recordId observed on post-seed ingest', () => {
+      // A seed resets activeRecordId; subsequent ingest must rebuild it.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      engine.seed({
+        compactedTurns: [makeTextChunk(1, 'seeded')],
+        lastEventId: 1,
+      });
+      const bounded: BridgeEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'post-seed' },
+            _meta: { 'qwen.session.recordId': 'record-post-seed' },
+          },
+        },
+      };
+      engine.ingest(bounded);
+      engine.ingest(makeTextChunk(3, 'x'));
+      engine.ingest(makeTextChunk(4, 'y'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker?.data).toMatchObject({
+        recordId: 'record-post-seed',
+      });
+    });
+  });
+
   describe('multi-turn sessions', () => {
     it('compacts multiple turns independently', () => {
       const engine = new TurnBoundaryCompactionEngine();
@@ -696,7 +894,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedEvents: 1,
         retainedEvents: 1,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
     });
 
@@ -723,7 +921,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedEvents: 1,
         retainedEvents: 2,
         maxBytes: 512,
-        fullTranscriptAvailable: false,
+        fullTranscriptAvailable: true,
       });
       expect(
         (snap.compactedTurns[0]?.data as Record<string, unknown>)[
@@ -838,6 +1036,87 @@ describe('TurnBoundaryCompactionEngine', () => {
   });
 });
 
+describe('transcript record provenance compaction', () => {
+  function updateOf(event: BridgeEvent): Record<string, unknown> {
+    return (event.data as { update: Record<string, unknown> }).update;
+  }
+
+  function withSources(
+    event: BridgeEvent,
+    sourceRecordIds: string[],
+  ): BridgeEvent {
+    const update = (event.data as { update: Record<string, unknown> }).update;
+    update['_meta'] = { qwenTranscript: { sourceRecordIds } };
+    return event;
+  }
+
+  it('merges text within one record but not across record boundaries', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(withSources(makeTextChunk(1, 'one '), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(2, 'two'), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(3, 'three'), ['record-b']));
+    engine.ingest(makeTurnComplete(4));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(
+      textEvents.map(
+        (event) => (updateOf(event)['content'] as { text: string }).text,
+      ),
+    ).toEqual(['one two', 'three']);
+  });
+
+  it('uses structured source identity for interleaved subagent chunks', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const first = makeTextChunkWithParent(1, 'first', 'task::x');
+    const second = makeTextChunkWithParent(2, 'second', 'task::x');
+    engine.ingest(withSources(first, ['a::b', 'c']));
+    engine.ingest(withSources(second, ['a', 'b::c']));
+    engine.ingest(makeTurnComplete(3));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(textEvents).toHaveLength(2);
+  });
+
+  it('unions tool start and result source ids in event order', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withSources(makeToolCall(1, '__proto__', 'running'), ['start-record']),
+    );
+    engine.ingest(
+      withSources(makeToolCallUpdate(2, '__proto__', 'completed'), [
+        'result-record',
+        'start-record',
+      ]),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const toolEvent = engine
+      .snapshot()
+      .compactedTurns.find(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['toolCallId'] === '__proto__',
+      );
+    expect(updateOf(toolEvent!)['_meta']).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['start-record', 'result-record'],
+      },
+    });
+  });
+});
+
 describe('EventBus + CompactionEngine integration', () => {
   it('seedReplayEvents advances replay state without populating the ring or liveJournal', async () => {
     const engine = new TurnBoundaryCompactionEngine();
@@ -923,13 +1202,223 @@ describe('EventBus + CompactionEngine integration', () => {
       truncatedEvents: 1,
       retainedEvents: 1,
       maxBytes: 512,
-      fullTranscriptAvailable: false,
+      fullTranscriptAvailable: true,
     });
     expect(
       (snapshot.compactedTurns[0]?.data as Record<string, unknown>)[
         'truncatedTurns'
       ],
     ).toBeUndefined();
+  });
+
+  it('seedReplayEvents evicts whole persisted records', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    const update = (recordId: string, text: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${text}-${'x'.repeat(600)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+
+    bus.seedReplayEvents([
+      update('old-record', 'old-1'),
+      update('old-record', 'old-2'),
+      update('new-record', 'new-1'),
+      update('new-record', 'new-2'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([
+      `new-1-${'x'.repeat(600)}`,
+      `new-2-${'x'.repeat(600)}`,
+    ]);
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 2,
+      retainedEvents: 2,
+      // Last-seen recordId before the retained window — `new-record`
+      // lives inside the retained window, so it's also the last-seen
+      // value across the whole seed. Stamped as a pagination anchor so
+      // the client can issue `beforeRecordId: 'new-record'` even when
+      // no session_update on the retained suffix carries one.
+      recordId: 'new-record',
+    });
+  });
+
+  it('seedReplayEvents marker carries recordId from evicted head when retained records lack one', () => {
+    // Critical regression case: only the EVICTED records carry a
+    // recordId. The retained suffix has no recordId-bearing events. The
+    // pre-scan must still capture the evicted recordId so the marker
+    // ships with a pagination anchor — otherwise the client has no way
+    // to page the transcript backward.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'evicted-record' },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 1,
+      recordId: 'evicted-record',
+    });
+  });
+
+  it('replay marker anchor is not advanced by post-seed ingest', () => {
+    // Critical regression: seed with evicted + retained events carrying
+    // distinct recordIds, then ingest a new turn boundary. The replay
+    // marker must carry the eviction-time anchor (the retained window's
+    // earliest recordId), NOT the post-ingest activeRecordId — otherwise
+    // the client's `beforeRecordId` re-fetches records already displayed.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'record-evicted' },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'record-retained' },
+          },
+        },
+      },
+    ]);
+    // Post-seed ingest advances activeRecordId past the eviction boundary.
+    engine.ingest({
+      id: 10,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'post-seed' },
+          _meta: { 'qwen.session.recordId': 'record-post-seed' },
+        },
+      },
+    });
+    engine.ingest({
+      id: 11,
+      v: 1,
+      type: 'turn_complete',
+      data: {},
+    });
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    // The replay marker carries the eviction-time anchor, not the
+    // post-ingest 'record-post-seed'.
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'record-retained',
+    });
+  });
+
+  it('replay marker anchor is the first retained recordId, not the last overall', () => {
+    // Critical regression (review): when the retained window holds
+    // MULTIPLE recordIds, the anchor must be the FIRST retained one (the
+    // eviction boundary). Anchoring on the last recordId across all seed
+    // events — which a retained segment may carry — puts `beforeRecordId`
+    // inside the retained window and re-fetches records the client
+    // already displays, duplicating transcript blocks (prepend has no
+    // dedup at the daemon boundary).
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    const bus = new EventBus(100, undefined, engine);
+    const segment = (recordId: string, pad: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${pad}-${'z'.repeat(300)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+    // Three ~330B segments (total ~990 > 900): the first evicts, leaving
+    // rec-B (first retained) and rec-C (last overall) in the window.
+    bus.seedReplayEvents([
+      segment('rec-A', 'a'),
+      segment('rec-B', 'b'),
+      segment('rec-C', 'c'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'rec-B',
+    });
+  });
+
+  it('seed pre-scans compactedTurns for recordId anchor', () => {
+    // Suggestion regression: seed() must pre-scan compactedTurns for
+    // recordIds (mirroring seedReplayEvents) so eviction doesn't lose
+    // the only anchor.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    engine.seed({
+      compactedTurns: [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+              _meta: { 'qwen.session.recordId': 'seed-anchor' },
+            },
+          },
+        },
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+            },
+          },
+        },
+      ],
+      lastEventId: 2,
+    });
+
+    const snap = engine.snapshot();
+    expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snap.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 1,
+      recordId: 'seed-anchor',
+    });
   });
 
   it('seedReplayEvents replaces prior replay and truncation state', () => {
@@ -1531,5 +2020,239 @@ describe('parentToolCallId-aware text merging', () => {
     expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
       'task-A',
     );
+  });
+});
+
+describe('turn attribution preservation (DAEMON-007)', () => {
+  /**
+   * Stamp top-level prompt/originator attribution and/or a `data.sessionId`
+   * onto a factory-built event, mirroring what the bridge publishes.
+   */
+  function withAttribution(
+    event: BridgeEvent,
+    attrs: {
+      promptId?: string;
+      originatorClientId?: string;
+      sessionId?: string;
+    },
+  ): BridgeEvent {
+    const out: BridgeEvent = { ...event };
+    if (attrs.promptId !== undefined) out.promptId = attrs.promptId;
+    if (attrs.originatorClientId !== undefined) {
+      out.originatorClientId = attrs.originatorClientId;
+    }
+    if (attrs.sessionId !== undefined) {
+      out.data = {
+        sessionId: attrs.sessionId,
+        ...(event.data as Record<string, unknown>),
+      };
+    }
+    return out;
+  }
+
+  function compactedUpdates(
+    engine: TurnBoundaryCompactionEngine,
+    sessionUpdate: string,
+  ): BridgeEvent[] {
+    return engine
+      .snapshot()
+      .compactedTurns.filter(
+        (e) =>
+          e.type === 'session_update' &&
+          (e.data as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === sessionUpdate,
+      );
+  }
+
+  it('merged text event keeps top-level promptId/originatorClientId and data.sessionId', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunk(1, 'hello '), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(
+      withAttribution(makeTextChunk(2, 'world'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged).toBeDefined();
+    expect(merged!.promptId).toBe('p1');
+    expect(merged!.originatorClientId).toBe('client-a');
+    expect((merged!.data as { sessionId?: string }).sessionId).toBe('s-1');
+    expect(
+      (merged!.data as { update: { content: { text: string } } }).update.content
+        .text,
+    ).toBe('hello world');
+  });
+
+  it('merged thought event keeps attribution, latest chunk wins', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeThoughtChunk(1, 'thinking '), {
+        promptId: 'p1',
+        sessionId: 's-1',
+      }),
+    );
+    // Later chunk carries a fresher stamp — the merged event must carry it.
+    engine.ingest(
+      withAttribution(makeThoughtChunk(2, 'harder'), {
+        promptId: 'p2',
+        originatorClientId: 'client-b',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_thought_chunk');
+    expect(merged!.promptId).toBe('p2');
+    expect(merged!.originatorClientId).toBe('client-b');
+    expect((merged!.data as { sessionId?: string }).sessionId).toBe('s-1');
+  });
+
+  it('keeps an earlier attribution when a later chunk carries none', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunk(1, 'a'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(makeTextChunk(2, 'b'));
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p1');
+    expect(merged!.originatorClientId).toBe('client-a');
+    expect((merged!.data as { sessionId?: string }).sessionId).toBe('s-1');
+  });
+
+  it('merges turn fields independently when a later chunk carries only one', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunk(1, 'a'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+      }),
+    );
+    // Second chunk carries only promptId — originatorClientId must survive
+    // from the earlier capture (field-level merge, not atomic replacement).
+    engine.ingest(withAttribution(makeTextChunk(2, 'b'), { promptId: 'p2' }));
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p2');
+    expect(merged!.originatorClientId).toBe('client-a');
+  });
+
+  it('merges turn fields independently in the subagent path', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(1, 'sub ', 'task-A'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+      }),
+    );
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(2, 'agent', 'task-A'), {
+        originatorClientId: 'client-b',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p1');
+    expect(merged!.originatorClientId).toBe('client-b');
+  });
+
+  it('subagent (parentToolCallId) merge path also preserves attribution', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(1, 'sub ', 'task-A'), {
+        promptId: 'p1',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(2, 'agent', 'task-A'), {
+        promptId: 'p1',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p1');
+    expect((merged!.data as { sessionId?: string }).sessionId).toBe('s-1');
+  });
+
+  it('folded tool_call keeps latest promptId/originatorClientId and data.sessionId', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeToolCall(1, 'tc1', 'running', { title: 'Read' }), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(
+      withAttribution(makeToolCallUpdate(2, 'tc1', 'done'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+        sessionId: 's-1',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [folded] = compactedUpdates(engine, 'tool_call');
+    expect(folded!.promptId).toBe('p1');
+    expect(folded!.originatorClientId).toBe('client-a');
+    expect((folded!.data as { sessionId?: string }).sessionId).toBe('s-1');
+    expect((folded!.data as { update: { status: string } }).update.status).toBe(
+      'done',
+    );
+  });
+
+  it('folded tool_call falls back to the existing stamp when the update carries none', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeToolCall(1, 'tc1', 'running'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+      }),
+    );
+    engine.ingest(makeToolCallUpdate(2, 'tc1', 'done'));
+    engine.ingest(makeTurnComplete(3));
+
+    const [folded] = compactedUpdates(engine, 'tool_call');
+    expect(folded!.promptId).toBe('p1');
+    expect(folded!.originatorClientId).toBe('client-a');
+  });
+
+  it('does not invent attribution fields when source events carry none', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunk(1, 'hello '));
+    engine.ingest(makeTextChunk(2, 'world'));
+    engine.ingest(makeToolCall(3, 'tc1', 'running'));
+    engine.ingest(makeToolCallUpdate(4, 'tc1', 'done'));
+    engine.ingest(makeTurnComplete(5));
+
+    const [mergedText] = compactedUpdates(engine, 'agent_message_chunk');
+    expect('promptId' in mergedText!).toBe(false);
+    expect('originatorClientId' in mergedText!).toBe(false);
+    expect('sessionId' in (mergedText!.data as object)).toBe(false);
+
+    const [folded] = compactedUpdates(engine, 'tool_call');
+    expect('promptId' in folded!).toBe(false);
+    expect('originatorClientId' in folded!).toBe(false);
+    expect('sessionId' in (folded!.data as object)).toBe(false);
   });
 });

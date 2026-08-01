@@ -10,9 +10,17 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
+import {
+  writeSkillArgs,
+  clearSkillArgs,
+  staleArgsWarning,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 import type {
   SlashCommand,
   SlashCommandActionReturn,
@@ -22,6 +30,27 @@ import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
+
+export async function recordAutoSkillCommandUsage(
+  config: Config | null,
+  command: SlashCommand,
+): Promise<void> {
+  const detail = command.skillDetail;
+  if (!config || detail?.level !== 'project' || !detail.filePath) {
+    return;
+  }
+  try {
+    await recordAutoSkillUsage(config.getProjectRoot(), {
+      name: detail.name,
+      level: 'project',
+      filePath: detail.filePath,
+    });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to record auto-skill command usage: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 /**
  * Loads user-level, project-level, and extension-level skills as slash
@@ -115,6 +144,7 @@ export class SkillCommandLoader implements ICommandLoader {
             name: skill.name,
             description: skill.description,
             body: skill.body,
+            filePath: skill.filePath,
             level: skill.level,
             ...(isExtension && skill.extensionName
               ? { extensionName: skill.extensionName }
@@ -132,9 +162,27 @@ export class SkillCommandLoader implements ICommandLoader {
               skill.body,
             );
 
-            const content = context.invocation?.args
-              ? appendToLastTextPart([{ text: body }], context.invocation.raw)
-              : [{ text: body }];
+            // See BundledSkillLoader: the arguments are written down for the
+            // skill to read, rather than transcribed by the model, and a bare
+            // invocation erases any prior record so its authority is not reused.
+            const rawArgs = context.invocation?.args ?? '';
+            let content;
+            if (rawArgs) {
+              content = appendToLastTextPart(
+                [{ text: body }],
+                context.invocation!.raw +
+                  (writeSkillArgs(skill.name, rawArgs)
+                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                    : ''),
+              );
+            } else {
+              // See BundledSkillLoader: a failed revocation leaves the earlier
+              // run's posting authority on disk, and the skill must be told.
+              content = [{ text: body }];
+              if (!clearSkillArgs(skill.name)) {
+                content = appendToLastTextPart(content, staleArgsWarning());
+              }
+            }
 
             return {
               type: 'submit_prompt',

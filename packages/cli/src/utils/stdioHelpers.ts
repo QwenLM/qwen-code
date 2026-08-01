@@ -33,6 +33,25 @@ export const writeStderrLine = (message: string): void => {
 };
 
 /**
+ * `writeStderrLine` that cannot throw.
+ *
+ * `process.stderr.write` throws on EPIPE or a closed fd — reachable whenever
+ * the reader goes away (`qwen … | head`) or a daemon redirects its stderr. Most
+ * of the CLI *wants* that to be loud, so this is not the default.
+ *
+ * Use it only where the write is incidental to the work in hand and failing it
+ * would destroy something real: a diagnostic emitted mid-way through replaying
+ * a transcript, say, where a throw would abandon the remaining records.
+ */
+export const writeStderrLineSafe = (message: string): void => {
+  try {
+    writeStderrLine(message);
+  } catch {
+    // stderr is gone. There is, definitionally, nowhere to report that.
+  }
+};
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */

@@ -2,7 +2,8 @@
 name: feat-dev
 description: End-to-end workflow for implementing a non-trivial qwen-code
   feature. Covers requirements investigation, design, E2E test planning,
-  baseline dry-run, implementation, verification, code review, and iteration.
+  baseline dry-run, implementation, verification, self-audit, code review,
+  and iteration.
 ---
 
 # Feature Development Workflow
@@ -113,10 +114,13 @@ pass.
 
 Output: E2E results appended to the test plan.
 
-## Phase 7: Code Review
+## Phase 7: Self-Audit and Code Review
 
-Run `/review` with a review task listing all changed files. Triage each comment
-before acting:
+First self-audit the full diff per the self-audit step in AGENTS.md's General
+workflow (open-ended passes plus presume-wrong verification, until two
+consecutive clean passes). If the audit changes source, return through
+Phases 5-6 before resuming it. Then run `/review` with a review task listing
+all changed files. Triage each comment before acting:
 
 - **Valid**: real bug or meaningful improvement. Fix it.
 - **False positive**: reviewer missed context. Skip it.
@@ -136,6 +140,7 @@ separate PR comment when applicable.
 ## Iteration Rules
 
 - If Phase 6 fails, return to Phase 5 and then re-run Phase 6.
-- If Phase 7 finds valid issues, fix them and run a quick Phase 6 sanity check.
+- If Phase 7 finds valid issues, fix them, run a quick Phase 6 sanity check,
+  and re-run the self-audit.
 - Do not loop more than 3 times between Phases 5-7 without asking the user.
 - If the test plan is inaccurate, update it and document why.

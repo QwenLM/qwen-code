@@ -771,6 +771,109 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores compaction model selector without switching models', async () => {
+    const switchModel = vi.fn();
+    const setCompactionModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isCompactionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'compaction-model',
+            label: 'compaction-model',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'gpt-4',
+            label: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+        isCurrentPrimaryModel: (m: { id: string; authType?: string }) =>
+          m.id === 'gpt-4' && m.authType === AuthType.USE_OPENAI,
+        setCompactionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::compaction-model`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'compactionModel',
+      'openai:compaction-model',
+    );
+    expect(setCompactionModel).toHaveBeenCalledWith('openai:compaction-model');
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows only image-generation models and stores the exact provider route', async () => {
+    const setImageModel = vi.fn().mockResolvedValue(undefined);
+    const baseUrl = 'https://images.example.com/api/v1';
+    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    const { props, mockSettings, getByText } = renderComponent(
+      { isImageModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-plus',
+            label: 'Qwen Plus',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+          {
+            id: 'image-without-credentials',
+            label: 'Image without credentials',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://invalid.example.com/api/v1',
+            imageOnly: true,
+          },
+        ]),
+        resolveImageGenerationModel: vi.fn((selector: string) =>
+          selector === persisted
+            ? {
+                model: 'qwen-image-2.0',
+                baseUrl,
+                apiKeyEnv: 'IMAGE_API_KEY',
+              }
+            : undefined,
+        ),
+        setImageModel,
+      } as unknown as Partial<Config>,
+    );
+
+    expect(getByText('Select Image Model')).toBeDefined();
+    const selectProps = mockedSelect.mock.calls[0][0];
+    expect(selectProps.items).toHaveLength(1);
+    await selectProps.onSelect(
+      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'imageModel',
+      persisted,
+    );
+    expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();

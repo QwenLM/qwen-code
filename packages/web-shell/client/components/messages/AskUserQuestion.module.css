@@ -166,14 +166,34 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  width: 100%;
   min-height: 36px;
   padding: 7px 12px;
+  border: 0;
   border-radius: 12px;
+  background: transparent;
   color: var(--foreground);
   cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
+  text-align: left;
+  appearance: none;
+}
+
+.option:hover {
+  background: var(--accent);
+}
+
+.option:disabled,
+.customTrigger:disabled {
+  cursor: not-allowed;
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
 }
 
 .optionActive,
@@ -281,6 +301,30 @@
   outline: none;
 }
 
+/* The "Other" row's clickable label when not editing — a real <button> so it's
+   keyboard-reachable, styled to read like the option label it replaces. */
+.customTrigger {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.customTrigger:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
 .customInput:focus {
   border-bottom-color: var(--agent-blue-500);
 }
@@ -320,9 +364,17 @@
 }
 
 .submitButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: var(--primary);
   color: var(--primary-foreground);
   border-color: transparent;
+}
+
+.submitSpinner {
+  width: 14px;
+  height: 14px;
 }
 
 .ignoreButton {
@@ -340,4 +392,9 @@
 
 .ignoreButton:hover {
   color: var(--foreground);
+}
+
+.ignoreButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }

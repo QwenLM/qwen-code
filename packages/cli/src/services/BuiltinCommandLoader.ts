@@ -24,6 +24,7 @@ import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
+import { curatorCommand } from '../ui/commands/curator-command.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { doctorCommand } from '../ui/commands/doctorCommand.js';
@@ -70,6 +71,7 @@ import { vimCommand } from '../ui/commands/vimCommand.js';
 import { voiceCommand } from '../ui/commands/voice-command.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
+import { learnCommand } from '../ui/commands/learn-command.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
 import { updateCommand } from '../ui/commands/update-command.js';
@@ -127,6 +129,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressFastCommand,
       configCommand,
       contextCommand,
+      curatorCommand,
       copyCommand,
       diffCommand,
       deleteCommand,
@@ -144,6 +147,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       importConfigCommand,
       initCommand,
       languageCommand,
+      learnCommand,
       mcpCommand,
       ...(this.config?.isManagedMemoryAvailable()
         ? [dreamCommand, forgetCommand]

@@ -627,7 +627,7 @@ describe('streaming guards', () => {
     onResponseChunk(ch, 'test-chat', 'stale text', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectId'] = (chp['reconnectId'] as number) + 1;
+    chp['_reconnectId'] = (chp['_reconnectId'] as number) + 1;
 
     vi.advanceTimersByTime(2000);
     await drain();
@@ -662,7 +662,7 @@ describe('streaming guards', () => {
 
     (chp['idleFlush'] as (sid: string, rid: number) => void)(
       'sess-1',
-      chp['reconnectId'] as number,
+      chp['_reconnectId'] as number,
     );
 
     resolveSend!(mockResponse(true));
@@ -988,7 +988,7 @@ describe('idleFlush guard re-schedule (#5)', () => {
     const prevTimer = st.timer;
     (chp['idleFlush'] as (sid: string, rid: number) => void)(
       'sess-1',
-      chp['reconnectId'] as number,
+      chp['_reconnectId'] as number,
     );
 
     // A new timer should have been set for re-schedule

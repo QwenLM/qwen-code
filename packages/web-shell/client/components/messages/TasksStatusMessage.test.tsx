@@ -4,8 +4,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 
 // The panel only needs getTasks/cancelTask from the daemon SDK; mock the
@@ -58,7 +61,35 @@ function agentTask(
   };
 }
 
-function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
+function monitorTask(
+  overrides: Partial<DaemonSessionMonitorTaskStatus> = {},
+): DaemonSessionMonitorTaskStatus {
+  return {
+    kind: 'monitor',
+    id: 'monitor-1',
+    label: 'monitor-label',
+    description: 'watch server log',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'tail -f server.log',
+    eventCount: 3,
+    lastEventTime: 5_000,
+    droppedLines: 0,
+    ...overrides,
+  };
+}
+
+function renderPanel(
+  tasks: DaemonSessionTaskStatus[],
+  options: {
+    embedded?: boolean;
+    planTodos?: readonly TodoItem[];
+    agentTools?: readonly ACPToolCall[];
+    onOpenSubagent?: (tool: ACPToolCall) => void;
+    onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
+  } = {},
+): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
     v: 1,
     sessionId: 'session-1',
@@ -72,14 +103,109 @@ function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TasksStatusMessage message={{ snapshot }} manageActiveEvent={false} />
+        <TasksStatusMessage
+          message={{ snapshot }}
+          embedded={options.embedded}
+          manageActiveEvent={false}
+          planTodos={options.planTodos}
+          agentTools={options.agentTools}
+          onOpenSubagent={options.onOpenSubagent}
+          onOpenMonitor={options.onOpenMonitor}
+        />
       </I18nProvider>,
     );
   });
   return container;
 }
 
+describe('TasksStatusMessage monitor details', () => {
+  it('opens an embedded monitor in the right-panel callback', () => {
+    const onOpenMonitor = vi.fn();
+    const task = monitorTask();
+    const container = renderPanel([task], {
+      embedded: true,
+      onOpenMonitor,
+    });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+    expect(label?.parentElement).not.toBeNull();
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(onOpenMonitor).toHaveBeenCalledOnce();
+    expect(onOpenMonitor).toHaveBeenCalledWith(task);
+    expect(container.textContent).not.toContain('tail -f server.log');
+  });
+
+  it('keeps the existing inline detail when no panel callback is provided', () => {
+    const container = renderPanel([monitorTask()], { embedded: true });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(container.textContent).toContain('tail -f server.log');
+  });
+});
+
 describe('TasksStatusMessage nested-agent tree', () => {
+  it('leaves workflow and subagent buttons in control of their keyboard input', async () => {
+    const onOpenSubagent = vi.fn();
+    const tool: ACPToolCall = {
+      callId: 'call-build',
+      toolName: 'Agent',
+      title: 'Build agent',
+      status: 'in_progress',
+      args: { todo_id: 'build' },
+    };
+    const container = renderPanel(
+      [agentTask('build', { toolUseId: tool.callId })],
+      {
+        planTodos: [
+          { id: 'build', content: 'Build the feature', status: 'in_progress' },
+        ],
+        agentTools: [tool],
+        onOpenSubagent,
+      },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    const node = container.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="build"]',
+    )!;
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => node.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+    act(() => node.click());
+
+    const details = container.querySelector('[data-plan-step-details]')!;
+    const execution = Array.from(
+      details.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Build agent'))!;
+    const executionEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => execution.dispatchEvent(executionEnter));
+    expect(executionEnter.defaultPrevented).toBe(false);
+    act(() => execution.click());
+    expect(onOpenSubagent).toHaveBeenCalledWith(tool);
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+  });
+
   it('groups a child directly beneath its parent across the sort order', () => {
     // Active sort alone renders newest-first: child(3000), other(2000),
     // parent(1000). The tree post-pass must pull the child up under its
@@ -148,15 +274,16 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     // The global keydown listener attaches after a 50 ms guard delay.
+    // Use 200 ms to keep a generous margin on slow CI runners.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('ArrowDown'); // select the child (row 2)
     await press('x');
@@ -177,14 +304,14 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('x'); // fully-foreground chain → arms the confirm instead
     expect(cancelTaskMock).not.toHaveBeenCalled();
@@ -210,5 +337,31 @@ describe('TasksStatusMessage nested-agent tree', () => {
     // not the user; must NOT be tagged.
     expect(text).not.toContain('[blocking] label-fg-child');
     expect(text).not.toContain('[blocking] label-bg-parent');
+  });
+
+  it('caps the detail progress list at the newest MAX_DISPLAYED_ACTIVITIES rows', async () => {
+    const recentActivities = Array.from({ length: 8 }, (_, i) => ({
+      name: 'read_file',
+      description: `activity-${i}.ts`,
+      at: i,
+    }));
+    const tasks = [agentTask('solo', { recentActivities })];
+    // The 3 s poll would otherwise replace state; return the same task.
+    getTasksMock.mockResolvedValue({ tasks });
+    const container = renderPanel(tasks);
+    // Global keydown listener attaches after a 50 ms guard delay.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    // Enter opens the detail view for the selected (only) task.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    const text = container.textContent ?? '';
+    // Only the newest five (activity-3 … activity-7) render; older drop.
+    expect(text).not.toContain('activity-2.ts');
+    expect(text).toContain('activity-3.ts');
+    expect(text).toContain('activity-7.ts');
   });
 });

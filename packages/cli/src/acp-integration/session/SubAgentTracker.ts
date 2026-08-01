@@ -20,21 +20,28 @@ import {
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { z } from 'zod';
 import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
   RequestPermissionRequest,
+  RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
+
+type PermissionRequester = (
+  params: RequestPermissionRequest,
+  signal: AbortSignal,
+) => Promise<RequestPermissionResponse>;
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.
@@ -65,6 +72,10 @@ export class SubAgentTracker {
     parentToolCallId: string,
     subagentType: string,
     private readonly onPermissionCancel?: () => void,
+    private readonly permissionRequester: PermissionRequester = (
+      params,
+      signal,
+    ) => requestPermissionWithAbort(this.client, params, signal),
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -199,9 +210,13 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
+      const permissionOptions = toPermissionOptions(fullConfirmationDetails);
+      const offeredPermissionOptions = permissionOptions.map((option) => ({
+        ...option,
+      }));
       const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
-        options: toPermissionOptions(fullConfirmationDetails),
+        options: permissionOptions,
         toolCall: {
           toolCallId: event.callId,
           status: 'pending',
@@ -224,16 +239,17 @@ export class SubAgentTracker {
 
       try {
         // Request permission from client
-        const output = await this.client.requestPermission(params);
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
+        const output = await this.permissionRequester(params, abortSignal);
+        const outcome = resolvePermissionOutcome(
+          output,
+          offeredPermissionOptions,
+        );
         // Respond to subagent with the outcome
         await event.respond(outcome, {
-          answers: 'answers' in output ? output.answers : undefined,
+          answers:
+            'answers' in output
+              ? (output.answers as Record<string, string> | undefined)
+              : undefined,
         });
         if (outcome === ToolConfirmationOutcome.Cancel) {
           this.onPermissionCancel?.();

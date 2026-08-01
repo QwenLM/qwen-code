@@ -132,6 +132,10 @@ describe('ModelRegistry', () => {
       expect(gpt4?.description).toBe('Most capable GPT-4');
       expect(gpt4?.isVision).toBe(true);
       expect(gpt4?.authType).toBe(AuthType.USE_OPENAI);
+      expect(gpt4?.registryBaseUrl).toBe('https://api.openai.com/v1');
+      expect(
+        models.find((m) => m.id === 'gpt-3.5-turbo')?.registryBaseUrl,
+      ).toBeUndefined();
     });
   });
 
@@ -185,6 +189,32 @@ describe('ModelRegistry', () => {
     it('should return undefined for non-existent authType', () => {
       const model = registry.getModel(AuthType.USE_VERTEX_AI, 'some-model');
       expect(model).toBeUndefined();
+    });
+
+    it('matches a plain registry key by its resolved default baseUrl', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'default-endpoint-model' }],
+      });
+      const unkeyed = registry.getModel(
+        AuthType.USE_OPENAI,
+        'default-endpoint-model',
+      );
+
+      expect(unkeyed?.baseUrl).toBeTruthy();
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          unkeyed?.baseUrl,
+        ),
+      ).toBe(unkeyed);
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          'https://wrong.example.com',
+        ),
+      ).toBeUndefined();
     });
   });
 
@@ -511,6 +541,10 @@ describe('ModelRegistry', () => {
       expect(models.length).toBe(2);
       expect(models[0].label).toBe('GPT-4 Direct');
       expect(models[1].label).toBe('GPT-4 Proxy');
+      expect(models.map((model) => model.registryBaseUrl)).toEqual([
+        'https://api.openai.com/v1',
+        'https://proxy.example.com/v1',
+      ]);
     });
 
     it('should retrieve model by id and baseUrl precisely', () => {
@@ -982,6 +1016,21 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
   });
 
+  it('should propagate imageOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen-image-2.0',
+          imageOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
+    ).toBe(true);
+  });
+
   it('should warn when both fastOnly and voiceOnly are set', () => {
     const config: ModelProvidersConfig = {
       openai: [
@@ -996,6 +1045,36 @@ describe('fastOnly and voiceOnly flags', () => {
     const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
     expect(models).toHaveLength(1);
     expect(models[0].fastOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
+
+  it('should propagate visionOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'vision-bridge', name: 'Vision Bridge', visionOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.visionOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'vision-bridge')?.visionOnly).toBe(true);
+  });
+
+  it('should warn when visionOnly conflicts with another selector-only flag', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'unreachable-vision',
+          visionOnly: true,
+          voiceOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].visionOnly).toBe(true);
     expect(models[0].voiceOnly).toBe(true);
   });
 });

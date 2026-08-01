@@ -7,9 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   DaemonMetricsRing,
-  computeCpuPercent,
   type DaemonMetricsGauges,
 } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 
 const GAUGES: DaemonMetricsGauges = {
   cpuPercent: 12,
@@ -93,6 +93,24 @@ describe('DaemonMetricsRing', () => {
     expect(nb.llmApiP50Ms).toBe(0);
     expect(nb.pipeInBytes).toBe(0);
     expect(nb.pipeOutBytes).toBe(0);
+  });
+
+  it('sums model API errors + automatic retries per window and resets them', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    ring.recordApiActivity(1, 1); // a transient error that was retried
+    ring.recordApiActivity(2, 0); // two errors in a later round, no retry
+    ring.recordApiActivity(0, 3); // three retries in another round
+    // Malformed / non-positive increments are ignored, never poison the total.
+    ring.recordApiActivity(Number.NaN, -5);
+    ring.sample(1000, GAUGES);
+    const [b] = ring.snapshot();
+    expect(b.llmApiErrors).toBe(3);
+    expect(b.llmApiRetries).toBe(4);
+    // Window aggregates reset on the next seal (idle window reads clean zero).
+    ring.sample(2000, GAUGES);
+    const nb = ring.snapshot()[1];
+    expect(nb.llmApiErrors).toBe(0);
+    expect(nb.llmApiRetries).toBe(0);
   });
 
   it('resets accumulators after each seal (idle window reads clean zero)', () => {
@@ -207,6 +225,10 @@ describe('computeCpuPercent', () => {
   it('returns 0 for a non-positive window', () => {
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 0, 1)).toBe(0);
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), -5, 1)).toBe(0);
+  });
+
+  it('returns 0 for a non-positive core count', () => {
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 0)).toBe(0);
   });
 
   it('computes a normalized, clamped windowed percent', () => {

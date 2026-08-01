@@ -5,8 +5,16 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import type { FunctionDeclaration } from '@google/genai';
-import { AgentCore } from './agent-core.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import {
+  AgentCore,
+  extractParentToolNames,
+  type ReasoningLoopResult,
+} from './agent-core.js';
+import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
   getCurrentAgentId,
@@ -37,6 +45,41 @@ import type {
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../../utils/invocation-context.js';
+import { GeminiChat } from '../../core/geminiChat.js';
+import { ContextState } from './agent-headless.js';
+
+describe('AgentCore.createChat manual plan-exit notice ownership', () => {
+  it('enables notices only for interactive agent chats', async () => {
+    const core = new AgentCore(
+      'notice-agent',
+      {} as Config,
+      { renderedSystemPrompt: 'system', initialMessages: [] },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    const enableSpy = vi.spyOn(
+      GeminiChat.prototype,
+      'enableManualPlanExitNotices',
+    );
+
+    const interactiveChat = await core.createChat(new ContextState(), {
+      interactive: true,
+    });
+    expect(interactiveChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    const headlessChat = await core.createChat(new ContextState());
+    expect(headlessChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    enableSpy.mockRestore();
+  });
+});
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -151,6 +194,31 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBeUndefined();
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('clears the parent invocation context before running the reasoning loop', async () => {
+    const core = makeCore('isolated-agent');
+    const parentContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'parent-session',
+      promptId: 'parent-prompt',
+    };
+    let observed: InvocationContextV1 | undefined;
+    vi.spyOn(
+      core as unknown as {
+        _runReasoningLoopInner: () => Promise<ReasoningLoopResult>;
+      },
+      '_runReasoningLoopInner',
+    ).mockImplementation(async () => {
+      observed = getInvocationContext();
+      return { text: '', terminateMode: null, turnsUsed: 0 };
+    });
+
+    await runWithInvocationContext(parentContext, () =>
+      core.runReasoningLoop({} as never, [], [], new AbortController()),
+    );
+
+    expect(observed).toBeUndefined();
   });
 
   it('uses inheritedView for deferred-approval continuation when the agent owns no view', async () => {
@@ -352,6 +420,7 @@ describe('AgentCore.prepareTools', () => {
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
+    toolOutputBatchBudget = Number.POSITIVE_INFINITY,
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -371,6 +440,8 @@ describe('AgentCore.prepareTools', () => {
         getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
+      getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -559,6 +630,10 @@ describe('AgentCore.prepareTools', () => {
         description: 'task update',
       } as FunctionDeclaration,
       {
+        name: ToolNames.TODO_WRITE,
+        description: 'TodoWrite',
+      } as FunctionDeclaration,
+      {
         name: ToolNames.ENTER_PLAN_MODE,
         description: 'enter plan mode',
       } as FunctionDeclaration,
@@ -655,6 +730,74 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).not.toContain('not found');
     },
   );
+
+  it('hard-caps the aggregate subagent tool response', async () => {
+    const { core } = buildAgentForTools(undefined, [], 5, 1000);
+    const missingName = `missing_${'a'.repeat(2000)}`;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-core-'));
+    const jsonlPath = path.join(tempDir, 'agent.jsonl');
+    const writer = attachJsonlTranscriptWriter(
+      core.getEventEmitter(),
+      jsonlPath,
+      {
+        agentId: 'agent-budget',
+        agentName: 'test-subagent',
+        sessionId: 'session-budget',
+        cwd: tempDir,
+        version: 'test',
+      },
+    );
+
+    try {
+      const result = await core.processFunctionCalls(
+        [
+          { name: missingName, args: {} },
+          { name: missingName, args: {} },
+        ],
+        new AbortController(),
+        'prompt-budget',
+        1,
+        [],
+      );
+
+      const parts = result.messages[0].parts ?? [];
+      const total = parts.reduce((sum, part) => {
+        const response = part.functionResponse?.response;
+        const output = response?.['output'];
+        const error = response?.['error'];
+        return (
+          sum +
+          (typeof output === 'string' ? output.length : 0) +
+          (typeof error === 'string' ? error.length : 0)
+        );
+      }, 0);
+      expect(total).toBeLessThanOrEqual(1000);
+      const responseIds = parts.map((part) => part.functionResponse?.id);
+      expect(new Set(responseIds).size).toBe(2);
+      expect(responseIds[0]).toMatch(/-0$/);
+      expect(responseIds[1]).toMatch(/-1$/);
+
+      writer.cleanup();
+      const records = fs
+        .readFileSync(jsonlPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              type?: string;
+              message?: { parts?: unknown[] };
+            },
+        );
+      const transcriptParts = records
+        .filter((record) => record.type === 'tool_result')
+        .flatMap((record) => record.message?.parts ?? []);
+      expect(transcriptParts).toEqual(parts);
+    } finally {
+      writer.cleanup();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 
   // ─── Nested sub-agents ──────────────────────────────────────────
   // The AgentTool is depth-gated: available to a sub-agent only while
@@ -780,5 +923,80 @@ describe('AgentCore STREAM_TEXT batching (#2928)', () => {
     expect(events).toHaveLength(2);
     expect(events[0].thought).toBe(true);
     expect(events[1].thought).toBe(false);
+  });
+});
+
+describe('extractParentToolNames', () => {
+  const configWithTools = (
+    tools: Array<{ functionDeclarations?: FunctionDeclaration[] }>,
+  ): GenerateContentConfig => ({ tools }) as unknown as GenerateContentConfig;
+
+  it('extracts declaration names from a single group', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.WRITE_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+  });
+
+  it('flattens and deduplicates names across multiple functionDeclarations groups', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        { functionDeclarations: [{ name: ToolNames.READ_FILE }] },
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.GREP },
+          ],
+        },
+      ]),
+    );
+    // READ_FILE appears in both groups but is returned once.
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.GREP]);
+  });
+
+  it('drops tools a subagent must never inherit (EXCLUDED_TOOLS_FOR_SUBAGENTS)', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.WORKFLOW },
+            { name: ToolNames.AGENT },
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+    expect(names).not.toContain(ToolNames.WORKFLOW);
+    expect(names).not.toContain(ToolNames.AGENT);
+  });
+
+  it('filters out empty and non-string declaration names', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: '' },
+            { name: undefined } as FunctionDeclaration,
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('returns an empty array for undefined config or missing tools', () => {
+    expect(extractParentToolNames(undefined)).toEqual([]);
+    expect(extractParentToolNames({} as GenerateContentConfig)).toEqual([]);
+    expect(extractParentToolNames(configWithTools([]))).toEqual([]);
+    expect(extractParentToolNames(configWithTools([{}]))).toEqual([]);
   });
 });

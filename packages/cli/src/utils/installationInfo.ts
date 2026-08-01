@@ -22,6 +22,53 @@ export enum PackageManager {
   UNKNOWN = 'unknown',
 }
 
+export function getNpmCliPath(
+  nodePath = process.execPath,
+  platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    return path.win32.join(
+      path.win32.dirname(nodePath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+  }
+  // Prefer the npm symlink that sits next to the node binary and resolve it to
+  // the real npm-cli.js. On split layouts where npm is not adjacent to node,
+  // fall back to the conventional `<prefix>/lib/node_modules/npm` location
+  // instead of throwing synchronously — getNpmCliPath is called from a
+  // non-async site (handleAutoUpdate), and a returned best-effort path lets the
+  // downstream spawn surface any failure through its 'error' handler.
+  //
+  // Node version managers (mise, asdf, proto) may replace bin/npm with a shell
+  // wrapper instead of a symlink to npm-cli.js. Validate the resolved path is a
+  // .js file before returning it; otherwise use the conventional fallback.
+  //
+  // This branch is POSIX-only; pin path.posix (not the host-default path) so the
+  // separator stays correct even when a caller passes an explicit `platform`
+  // that differs from the host, e.g. getNpmCliPath('/usr/bin/node', 'linux') on
+  // a Windows host.
+  const npmCliJs = path.posix.join(
+    path.posix.dirname(nodePath),
+    '..',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  const adjacentNpm = path.posix.join(path.posix.dirname(nodePath), 'npm');
+  try {
+    const resolved = fs.realpathSync(adjacentNpm);
+    if (resolved.endsWith('.js')) return resolved;
+    return npmCliJs;
+  } catch {
+    return npmCliJs;
+  }
+}
+
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
 const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';

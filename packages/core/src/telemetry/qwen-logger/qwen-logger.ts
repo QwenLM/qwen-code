@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
@@ -46,6 +47,7 @@ import type {
   UserFeedbackEvent,
   UserRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
   ArenaSessionStartedEvent,
@@ -540,6 +542,8 @@ export class QwenLogger {
           response_id: event.response_id,
           tool_name: event.function_name,
           permission: event.decision,
+          status: event.status,
+          tool_type: event.tool_type,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
           error_type: event.error_type,
@@ -884,6 +888,28 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logRipgrepRuntimeRecoveryEvent(event: RipgrepRuntimeRecoveryEvent): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'ripgrep_runtime_recovery',
+      {
+        properties: {
+          platform: process.platform,
+          arch: process.arch,
+          selection_mode: event.selection_mode,
+          retry_triggered: event.retry_triggered,
+          ...(event.retry_succeeded !== undefined
+            ? { retry_succeeded: event.retry_succeeded }
+            : {}),
+          failure_kind: event.failure_kind,
+        },
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logLoopDetectionDisabledEvent(): void {
     const rumEvent = this.createActionEvent(
       'misc',
@@ -954,6 +980,21 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
       },
     });
 

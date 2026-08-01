@@ -16,7 +16,8 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { ToolCallStatus } from '../types.js';
+import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import { ToolCallStatus, StreamingState } from '../types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -26,12 +27,20 @@ const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+// Records every <Box> render's props so tests can assert layout props
+// (e.g. the pending-region maxHeight backstop) without coupling to ink's
+// Yoga internals.
+const boxPropsSpy = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
 
   return {
     ...actual,
+    Box: (props: React.ComponentProps<typeof actual.Box>) => {
+      boxPropsSpy(props);
+      return <actual.Box {...props} />;
+    },
     Static: ({
       children,
       items,
@@ -87,6 +96,10 @@ vi.mock('./Notifications.js', () => ({
 
 vi.mock('./DebugModeNotification.js', () => ({
   DebugModeNotification: () => <Text>DEBUG_NOTIFICATION</Text>,
+}));
+
+vi.mock('../selection/use-text-selection.js', () => ({
+  TextSelectionController: () => null,
 }));
 
 vi.mock('./shared/ScrollableList.js', async () => {
@@ -350,6 +363,52 @@ describe('<MainContent />', () => {
     ).toBe(1);
   });
 
+  it('does not reset source copy numbering on a mid-turn steer item', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          // Steer injection: typed 'user' but not a real turn boundary.
+          { id: 2, type: 'user', text: 'steer', sentToModel: false },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // The steer must NOT reset the counter: item 3's math block continues
+    // numbering from item 1 (offset 1) rather than restarting at 0.
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(1);
+  });
+
+  it('still resets source copy numbering on a real user turn', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          { id: 2, type: 'user', text: 'real prompt', sentToModel: true },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // A real user turn resets the counter: item 3 starts fresh (offset 0).
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(0);
+  });
+
   it('passes the full history to Static in one render when below the progressive replay threshold', () => {
     staticItemsSpy.mockClear();
     const history = Array.from({ length: 50 }, (_, i) => ({
@@ -602,6 +661,74 @@ describe('<MainContent />', () => {
 
     // No reset means the LAST staticItemsSpy call still received TOTAL.
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+  });
+
+  describe('fullDetail wiring (Ctrl+O / Alt+T full-detail toggle)', () => {
+    const toolGroupHistory = [
+      {
+        id: 1,
+        type: 'tool_group' as const,
+        tools: [
+          {
+            callId: 'a1',
+            name: 'bash',
+            description: 'run ls',
+            status: ToolCallStatus.Success,
+            resultDisplay: undefined,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+    ];
+
+    const renderWithThoughtExpanded = (
+      history: UIState['history'],
+      allExpanded: boolean,
+    ) =>
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <ThoughtExpandedProvider
+                  value={{
+                    allExpanded,
+                    expandedHeadIds: new Set<number>(),
+                    toggle: () => {},
+                  }}
+                >
+                  <MainContent />
+                </ThoughtExpandedProvider>
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+    it('forwards allExpanded=true from ThoughtExpandedContext as fullDetail', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      renderWithThoughtExpanded(toolGroupHistory, true);
+
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const toolGroup = calls.find((c) => c?.item?.id === 1);
+      expect(toolGroup).toBeDefined();
+      // MainContent reads allExpanded from context and must forward it to
+      // every HistoryItemDisplay as fullDetail — the wiring the deleted
+      // TranscriptView used to be the sole producer of.
+      expect(toolGroup.fullDetail).toBe(true);
+    });
+
+    it('forwards fullDetail=false when the full-detail toggle is off', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      renderWithThoughtExpanded(toolGroupHistory, false);
+
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const toolGroup = calls.find((c) => c?.item?.id === 1);
+      expect(toolGroup).toBeDefined();
+      expect(toolGroup.fullDetail).toBe(false);
+    });
   });
 
   describe('compact mode + Static path (useTerminalBuffer=false)', () => {
@@ -877,5 +1004,63 @@ describe('<MainContent />', () => {
       // The ref-based read keeps identity stable.
       expect(secondRenderItem).toBe(firstRenderItem);
     });
+  });
+
+  // #6809: the pending-region maxHeight backstop must stay ON while streaming
+  // (Responding) so streaming tables don't yank the viewport to the top
+  // (#6421), but drop in show-more mode once streaming has settled to a static
+  // confirmation (WaitingForConfirmation) so a tall diff renders every row.
+  it('gates the pending-region maxHeight backstop on streamingState (#6809)', () => {
+    const wrapperProps = () =>
+      boxPropsSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (p: { flexShrink?: number; overflow?: string }) =>
+            p.flexShrink === 0 && p.overflow === 'hidden',
+        );
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.Responding,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+      }),
+    );
+    expect(
+      wrapperProps().some(
+        (p: { maxHeight?: number }) => p.maxHeight === undefined,
+      ),
+    ).toBe(true);
+
+    // Constrained mode (#6421): constrainHeight alone must engage the
+    // backstop even when not streaming, so streaming tables don't yank
+    // the viewport to the top.
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: true,
+        streamingState: StreamingState.Idle,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
   });
 });

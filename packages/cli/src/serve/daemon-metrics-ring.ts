@@ -14,8 +14,9 @@
  * Each bucket covers the window `(t - intervalMs, t]`. Fields fall into two
  * kinds:
  *  - **window aggregates** (`requests`, `tokensIn`, the `*P95Ms`/`*P50Ms`
- *    percentiles, `promptsCompleted`, `pipe*Bytes`, `rateLimitRejected`):
- *    summarize everything that happened *during* the window.
+ *    percentiles, `promptsCompleted`, `pipe*Bytes`, `rateLimitRejected`,
+ *    `llmApiErrors`, `llmApiRetries`): summarize everything that happened
+ *    *during* the window.
  *  - **gauges** (`activeSessions`, `activePrompts`, `queuedPrompts`,
  *    `cpuPercent`, `rssBytes`, `heapUsedBytes`, `eventLoopLagP99Ms`, the
  *    `*Connections`): the instantaneous reading at seal time `t`.
@@ -62,6 +63,14 @@ export interface DaemonMetricsBucket {
   llmApiP50Ms: number;
   /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
   llmApiP95Ms: number;
+  /** Model API errors in this window (one per failed model API attempt) — the
+   *  provider-side failures, distinct from the client→daemon HTTP `errors`
+   *  above. Rides the per-round token frame's `_meta`. */
+  llmApiErrors: number;
+  /** Automatic backoff retries in this window (one per retried attempt). A
+   *  rising retry count is the early-warning signal that the model endpoint is
+   *  throttling/flapping before it turns into hard `llmApiErrors`. */
+  llmApiRetries: number;
 
   // —— Resource pressure (gauge @ seal) ——
   /** Process CPU utilization over the window, percent of total capacity across
@@ -157,6 +166,8 @@ export class DaemonMetricsRing {
   private readonly curQueueWaits: number[] = [];
   private readonly curPromptDurations: number[] = [];
   private readonly curLlmDurations: number[] = [];
+  private curLlmApiErrors = 0;
+  private curLlmApiRetries = 0;
   private curPipeInBytes = 0;
   private curPipeOutBytes = 0;
   private curTokensIn = 0;
@@ -187,6 +198,20 @@ export class DaemonMetricsRing {
   /** Fold one model round's LLM API round-trip time (from the token frame). */
   recordLlmDuration(durationMs: number): void {
     pushCapped(this.curLlmDurations, durationMs);
+  }
+
+  /**
+   * Fold one model round's per-round model-API-error and automatic-retry
+   * increments (from the same token frame) into the open window. Both are
+   * plain counters — a burst in one window accrues exactly, past the sample
+   * cap that only bounds the percentile arrays. Non-finite / negative inputs
+   * are ignored so a malformed frame cannot poison the totals.
+   */
+  recordApiActivity(errors: number, retries: number): void {
+    if (Number.isFinite(errors) && errors > 0) this.curLlmApiErrors += errors;
+    if (Number.isFinite(retries) && retries > 0) {
+      this.curLlmApiRetries += retries;
+    }
   }
 
   /** Fold one ACP-child pipe message's payload size into the open window. */
@@ -232,6 +257,8 @@ export class DaemonMetricsRing {
       promptDurationP95Ms: percentile(this.curPromptDurations, 0.95),
       llmApiP50Ms: percentile(this.curLlmDurations, 0.5),
       llmApiP95Ms: percentile(this.curLlmDurations, 0.95),
+      llmApiErrors: this.curLlmApiErrors,
+      llmApiRetries: this.curLlmApiRetries,
       cpuPercent: finiteGauge(gauges.cpuPercent),
       rssBytes: finiteGauge(gauges.rssBytes),
       heapUsedBytes: finiteGauge(gauges.heapUsedBytes),
@@ -257,6 +284,8 @@ export class DaemonMetricsRing {
     this.curQueueWaits.length = 0;
     this.curPromptDurations.length = 0;
     this.curLlmDurations.length = 0;
+    this.curLlmApiErrors = 0;
+    this.curLlmApiRetries = 0;
     this.curPipeInBytes = 0;
     this.curPipeOutBytes = 0;
     this.curTokensIn = 0;
@@ -267,28 +296,6 @@ export class DaemonMetricsRing {
   snapshot(): DaemonMetricsBucket[] {
     return this.buckets.slice();
   }
-}
-
-/**
- * Windowed CPU utilization percent from two `process.cpuUsage()` samples over
- * `elapsedMs`, normalized by core count and clamped to [0,100]. Returns 0 when
- * either sample is null (a failed/absent read) or the window is non-positive —
- * so a failed read contributes no delta, and a caller that advances its
- * baseline only on a successful read cannot manufacture a phantom spike. Shared
- * by the daemon self-sampler and the ACP child's `workspaceResource` handler.
- */
-export function computeCpuPercent(
-  prev: NodeJS.CpuUsage | null,
-  cur: NodeJS.CpuUsage | null,
-  elapsedMs: number,
-  coreCount: number,
-): number {
-  if (!prev || !cur || elapsedMs <= 0) return 0;
-  const cpuUs = cur.user - prev.user + (cur.system - prev.system);
-  return Math.min(
-    100,
-    Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / coreCount),
-  );
 }
 
 /** Coerce a host-supplied gauge to a finite number (NaN/±Infinity → 0) so a

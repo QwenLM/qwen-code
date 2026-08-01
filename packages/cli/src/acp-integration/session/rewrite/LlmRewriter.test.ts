@@ -94,6 +94,54 @@ describe('LlmRewriter', () => {
       expect(secondInput).not.toContain('上一轮改写结果');
     });
 
+    // Regression: outputHistory previously grew unboundedly — every rewrite was
+    // pushed even though only the last `contextTurns` are ever read.
+    function historyOf(rewriter: unknown): string[] {
+      return (rewriter as { outputHistory: string[] }).outputHistory;
+    }
+
+    it('bounds outputHistory to contextTurns instead of growing unboundedly', async () => {
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        contextTurns: 2,
+      } as MessageRewriteConfig);
+
+      for (let i = 0; i < 6; i++) {
+        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+      }
+
+      expect(historyOf(rewriter).length).toBe(2);
+    });
+
+    it('stores nothing when contextTurns=0', async () => {
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        contextTurns: 0,
+      } as MessageRewriteConfig);
+
+      for (let i = 0; i < 4; i++) {
+        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+      }
+
+      expect(historyOf(rewriter).length).toBe(0);
+    });
+
+    it("keeps the full history when contextTurns is 'all'", async () => {
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        contextTurns: 'all',
+      } as MessageRewriteConfig);
+
+      for (let i = 0; i < 4; i++) {
+        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+      }
+
+      expect(historyOf(rewriter).length).toBe(4);
+    });
+
     it('should include last N rewrites when contextTurns=N', async () => {
       mockGenerateContent
         .mockResolvedValueOnce({

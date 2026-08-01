@@ -164,6 +164,7 @@ export interface UseAtMentionMenuOptions {
   disabledRef: RefObject<boolean>;
   shellModeRef: RefObject<boolean>;
   workspaceActionsRef: RefObject<AtMentionWorkspaceActions | undefined>;
+  workspaceKey?: string;
   builtinProviders?: WebShellBuiltinAtProvidersConfig;
   providers?: readonly WebShellAtProvider[];
   createInlineTagEffect?: (range: {
@@ -192,6 +193,52 @@ const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
+
+function shallowEqualMenuState(
+  current: AtMentionMenuState | null,
+  next: AtMentionMenuState | null,
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  const keys = Object.keys(current) as Array<keyof AtMentionMenuState>;
+  return (
+    keys.length === Object.keys(next).length &&
+    keys.every((key) => {
+      const currentValue = current[key];
+      const nextValue = next[key];
+      if (Object.is(currentValue, nextValue)) return true;
+      return (
+        Array.isArray(currentValue) &&
+        Array.isArray(nextValue) &&
+        currentValue.length === nextValue.length &&
+        currentValue.every((value, index) => Object.is(value, nextValue[index]))
+      );
+    })
+  );
+}
+
+function equalProviderViews(
+  current: readonly AtMentionProviderView[],
+  next: readonly AtMentionProviderView[],
+): boolean {
+  return (
+    current.length === next.length &&
+    current.every((provider, index) => {
+      const nextProvider = next[index];
+      return (
+        nextProvider !== undefined &&
+        provider.id === nextProvider.id &&
+        provider.textValue === nextProvider.textValue &&
+        Object.is(provider.label, nextProvider.label) &&
+        provider.description === nextProvider.description &&
+        provider.tabs === nextProvider.tabs &&
+        provider.selectedTabId === nextProvider.selectedTabId &&
+        provider.renderItem === nextProvider.renderItem
+      );
+    })
+  );
+}
+
 function isBuiltinProviderId(providerId: string): boolean {
   return BUILTIN_PROVIDER_IDS.includes(
     providerId as WebShellBuiltinAtProviderId,
@@ -269,7 +316,17 @@ function normalizeDirectoryPath(path: string): string {
 }
 
 function escapeGlobQuery(query: string): string {
-  return query.replace(/[\\*?[{\]}]/g, '\\$&');
+  return Array.from(query, (char) => {
+    if (/[a-z]/i.test(char)) {
+      return `[${char.toLowerCase()}${char.toUpperCase()}]`;
+    }
+    return /[\\*?[{\]}()!@+|]/.test(char) ? `\\${char}` : char;
+  }).join('');
+}
+
+function fileSearchGlobPattern(query: string): string {
+  const normalizedQuery = unescapeAtReferenceText(query).replace(/^\.\//, '');
+  return normalizedQuery ? `**/*${escapeGlobQuery(normalizedQuery)}*` : '**/*';
 }
 
 function matchesQuery(query: string, ...values: Array<string | undefined>) {
@@ -597,7 +654,7 @@ function createFileProvider(
       const actions = getActions();
       const currentDir = normalizeDirectoryPath(getCurrentDir());
       const listDirectory = actions?.listDirectory;
-      if (listDirectory) {
+      if (listDirectory && (!query || !actions?.globWorkspace)) {
         try {
           const { dirPath, entryQuery } = splitFileQuery(query, currentDir);
           const lowerQuery = entryQuery.toLowerCase();
@@ -660,7 +717,7 @@ function createFileProvider(
         return [];
       }
       try {
-        const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
+        const pattern = fileSearchGlobPattern(query);
         const result = await getCached(getCache().globResults, pattern, () =>
           globWorkspace(pattern, { maxResults: ITEM_LIMIT, signal }),
         );
@@ -713,6 +770,7 @@ function createExtensionProvider(
             const insertName = escapeAtReferenceText(
               sanitizeInsertText(ext.name),
             );
+            const serialized = `@ext:${insertName}`;
             const displayName = sanitizeDisplayText(ext.displayName ?? '');
             const description = sanitizeDisplayText(ext.description ?? '');
             return {
@@ -726,7 +784,13 @@ function createExtensionProvider(
                 displayName && description
                   ? `${displayName} - ${description}`
                   : (displayName ?? description),
-              insertText: `@ext:${insertName} `,
+              composerTag: {
+                id: `extension:${serialized}`,
+                kind: 'extension',
+                value: displayName || label,
+                serialized,
+              },
+              insertText: `${serialized} `,
             };
           })
           .filter((ext) => {
@@ -835,6 +899,7 @@ export function useAtMentionMenu({
   disabledRef,
   shellModeRef,
   workspaceActionsRef,
+  workspaceKey,
   builtinProviders,
   providers = EMPTY_PROVIDERS,
   createInlineTagEffect,
@@ -915,11 +980,25 @@ export function useAtMentionMenu({
     (next: SetStateAction<AtMentionMenuState | null>) => {
       const resolved =
         typeof next === 'function' ? next(stateRef.current) : next;
+      if (shallowEqualMenuState(stateRef.current, resolved)) return;
       stateRef.current = resolved;
       setState(resolved);
     },
     [],
   );
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    }
+    fileDirectoryRef.current = '.';
+    builtinCacheRef.current = createBuiltinProviderCache();
+    stateRef.current = null;
+    setState(null);
+  }, [workspaceKey]);
 
   const clearPendingLoad = useCallback(() => {
     abortRef.current?.abort();
@@ -932,6 +1011,16 @@ export function useAtMentionMenu({
 
   const close = useCallback(
     (options: { preserveProviderSelection?: boolean } = {}) => {
+      if (
+        stateRef.current === null &&
+        abortRef.current === null &&
+        searchTimerRef.current === null &&
+        lastSelectedProviderIdRef.current === null &&
+        lastSelectedMcpServerNameRef.current === null &&
+        !preserveProviderSelectionRef.current
+      ) {
+        return;
+      }
       clearPendingLoad();
       builtinCacheRef.current = createBuiltinProviderCache();
       const preserveSelection =
@@ -1023,6 +1112,9 @@ export function useAtMentionMenu({
       const actions = workspaceActionsRef.current;
       const cache = builtinCacheRef.current;
       if (providerId === FILE_PROVIDER_ID) {
+        if (query && actions?.globWorkspace) {
+          return cache.globResults.has(fileSearchGlobPattern(query));
+        }
         if (actions?.listDirectory) {
           const { dirPath } = splitFileQuery(
             query,
@@ -1030,7 +1122,7 @@ export function useAtMentionMenu({
           );
           return cache.directories.has(dirPath);
         }
-        const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
+        const pattern = fileSearchGlobPattern(query);
         return (
           Boolean(actions?.globWorkspace) && cache.globResults.has(pattern)
         );
@@ -1387,13 +1479,24 @@ export function useAtMentionMenu({
         });
         return true;
       }
-      const filteredProviders = providerViewsRef.current.filter((provider) => {
-        return matchesQuery(
-          parsed.query,
-          provider.textValue,
-          provider.description,
-        );
-      });
+      const filteredProviders = providerViewsRef.current
+        .filter((provider) => {
+          return matchesQuery(
+            parsed.query,
+            provider.textValue,
+            provider.description,
+          );
+        })
+        .slice(0, ITEM_LIMIT);
+      if (
+        current?.level === 'categories' &&
+        current.from === parsed.from &&
+        current.to === parsed.to &&
+        current.query === parsed.query &&
+        equalProviderViews(current.providers, filteredProviders)
+      ) {
+        return true;
+      }
       if (filteredProviders.length === 0 && parsed.query) {
         const insertedReference = splitInsertedReferenceQuery(
           parsed.query,

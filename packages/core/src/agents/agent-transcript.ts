@@ -16,6 +16,8 @@
  *                            notification XML points here
  *   agent-<id>.meta.json   — sidecar with agentType, description, parent
  *                            session/agent IDs, createdAt
+ *   agent-<id>.jsonl.stream — transient live text, removed when the writer
+ *                            closes
  */
 
 import * as fs from 'node:fs';
@@ -25,8 +27,9 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
-  type AgentToolResultEvent,
+  type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
+  type AgentStreamTextEvent,
   type AgentExternalMessageEvent,
 } from './runtime/agent-events.js';
 import type {
@@ -37,9 +40,10 @@ import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
-import type { FunctionDeclaration, Content } from '@google/genai';
+import type { Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
+const MAX_PENDING_STREAM_BYTES = 64 * 1024;
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -101,6 +105,8 @@ export interface AgentMeta {
   description: string;
   /** SessionId of the user session that launched this agent. */
   parentSessionId: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /** AgentId of the launching subagent for nested forks; null for top-level. */
   parentAgentId: string | null;
   /** ISO 8601 creation time. */
@@ -110,10 +116,24 @@ export interface AgentMeta {
    * `running` as resumable work that was interrupted by process exit.
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /**
+   * Whether the original launch ran asynchronously. Completed entries are
+   * restored only when this is explicitly true so legacy foreground sidecars
+   * are never exposed as reusable background agents.
+   */
+  isBackgrounded?: boolean;
+  /** Whether the original launch used temporary worktree isolation. */
+  isolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /**
+   * Immutable launch-time execution policy for a restricted fork.
+   * Legacy absence allows every tool except the mandatory interaction-tool
+   * exclusion; an empty list means deny-all.
+   */
+  executionAllowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
@@ -127,6 +147,11 @@ export interface AgentMeta {
    * via {@link normalizeResumedAgentDepth} — never trust the raw value.
    */
   depth?: number;
+  /**
+   * Concrete model ID this agent runs with. Persisted so a process-restart
+   * recovery can enforce per-model concurrency caps on the revive path.
+   */
+  model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
 }
@@ -139,6 +164,8 @@ export interface AgentPersistedCliFlags {
   sandbox?: SandboxConfig | null;
   screenReader?: boolean;
   model?: string;
+  authType?: string;
+  baseUrl?: string;
   maxSessionTurns?: number;
   maxToolCalls?: number;
   /**
@@ -186,6 +213,16 @@ export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
   } catch (error) {
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
+    return;
+  }
+  try {
+    const now = new Date();
+    fs.utimesSync(path.dirname(metaPath), now, now);
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to refresh agent session directory for ${metaPath}:`,
+      error,
+    );
   }
 }
 
@@ -267,17 +304,9 @@ export interface AttachJsonlOptions {
   initialUserPrompt?: string;
   /**
    * Exact bootstrap history that seeded the agent before its first runtime
-   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   * turn. Used by transcript-first resume to reconstruct fork context.
    */
   bootstrapHistory?: Content[];
-  /**
-   * Immutable launch-time system instruction for fork resume.
-   */
-  bootstrapSystemInstruction?: string | Content;
-  /**
-   * Immutable launch-time tool declarations / allowlist for fork resume.
-   */
-  bootstrapTools?: Array<string | FunctionDeclaration>;
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -308,7 +337,7 @@ export interface AttachJsonlTranscriptResult {
  * the transcript tree the same way they walk the main session log.
  *
  * Holds a single append-mode fd for the lifetime of the writer so streaming
- * tools (which can fire many TOOL_CALL/TOOL_RESULT events per round) avoid
+ * tools (which can fire many TOOL_CALL events per round) avoid
  * an open+write+close syscall storm. The fd is opened lazily on the first
  * write so callers that attach but never produce a record don't materialize
  * an empty file.
@@ -325,7 +354,22 @@ export function attachJsonlTranscriptWriter(
         ? readLastTranscriptRecordUuidSync(jsonlPath)
         : null;
   let fd: number | null = null;
+  let streamFd: number | null = null;
+  const streamPath = `${jsonlPath}.stream`;
+  const streamRunId = randomUUID();
+  let pendingStreamText = '';
+  let pendingStreamBytes = 0;
+  let streamFlushTimer: NodeJS.Timeout | null = null;
   let openFailed = false;
+
+  try {
+    fs.rmSync(streamPath, { force: true });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to reset streaming transcript ${streamPath}:`,
+      error,
+    );
+  }
 
   const ensureOpen = (): boolean => {
     if (fd !== null) return true;
@@ -366,11 +410,65 @@ export function attachJsonlTranscriptWriter(
     }
   };
 
+  const flushStreamText = () => {
+    streamFlushTimer = null;
+    if (!pendingStreamText) return;
+    const text = pendingStreamText;
+    pendingStreamText = '';
+    pendingStreamBytes = 0;
+    try {
+      if (streamFd === null) {
+        fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+        streamFd = fs.openSync(streamPath, 'w');
+      }
+      fs.writeSync(streamFd, text);
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to append streaming transcript ${streamPath}:`,
+        error,
+      );
+    }
+  };
+
+  const appendStreamText = (event: AgentStreamTextEvent) => {
+    const record = `${JSON.stringify({
+      v: 1,
+      runId: event.runId ?? streamRunId,
+      round: event.round,
+      text: event.text,
+      thought: event.thought === true,
+      timestamp: event.timestamp,
+    })}\n`;
+    pendingStreamText += record;
+    pendingStreamBytes += Buffer.byteLength(record);
+    if (pendingStreamBytes >= MAX_PENDING_STREAM_BYTES) {
+      if (streamFlushTimer !== null) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      flushStreamText();
+      return;
+    }
+    if (streamFlushTimer === null) {
+      streamFlushTimer = setTimeout(flushStreamText, 100);
+      streamFlushTimer.unref();
+    }
+  };
+
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (!event.text) return;
+    const parts = [
+      ...(event.thoughtText
+        ? [{ text: event.thoughtText, thought: true }]
+        : []),
+      ...(event.text ? [{ text: event.text }] : []),
+    ];
+    if (parts.length === 0 && !event.usageMetadata) return;
     append({
       ...baseFields('assistant'),
-      message: { role: 'model', parts: [{ text: event.text }] },
+      message: { role: 'model', parts },
+      usageMetadata: event.usageMetadata,
+      agentRunId: event.runId ?? streamRunId,
+      agentRound: event.round,
     });
   };
 
@@ -392,31 +490,21 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const onToolResult = (event: AgentToolResultEvent) => {
-    // Prefer the real response parts the model saw; fall back to a status
-    // stub only when the agent aborted before a response was formed.
-    const parts = event.responseParts ?? [
-      {
-        functionResponse: {
-          id: event.callId,
-          name: event.name,
-          response: {
-            success: event.success,
-            ...(event.error ? { error: event.error } : {}),
-          },
+  const onToolResponsesFinalized = (
+    event: AgentToolResponsesFinalizedEvent,
+  ) => {
+    for (const response of event.responses) {
+      append({
+        ...baseFields('tool_result'),
+        message: { role: 'user', parts: response.responseParts },
+        toolCallResult: {
+          callId: response.callId,
+          ...(response.durationMs !== undefined
+            ? { durationMs: response.durationMs }
+            : {}),
         },
-      },
-    ];
-    append({
-      ...baseFields('tool_result'),
-      message: { role: 'user', parts },
-      toolCallResult: {
-        callId: event.callId,
-        ...(event.durationMs !== undefined
-          ? { durationMs: event.durationMs }
-          : {}),
-      },
-    });
+      });
+    }
   };
 
   const recordUserMessage = (
@@ -446,25 +534,10 @@ export function attachJsonlTranscriptWriter(
     recordUserMessage(event.text, event.kind ?? 'message');
   };
 
-  const hasBootstrapPayload =
-    options.bootstrapHistory !== undefined ||
-    options.bootstrapSystemInstruction !== undefined ||
-    options.bootstrapTools !== undefined;
-
-  if (hasBootstrapPayload) {
+  if (options.bootstrapHistory !== undefined) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
-      ...(options.bootstrapSystemInstruction !== undefined
-        ? {
-            systemInstruction: structuredClone(
-              options.bootstrapSystemInstruction,
-            ),
-          }
-        : {}),
-      ...(options.bootstrapTools !== undefined
-        ? { tools: structuredClone(options.bootstrapTools) }
-        : {}),
     };
     recordSystem('agent_bootstrap', payload);
   }
@@ -480,15 +553,25 @@ export function attachJsonlTranscriptWriter(
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
+  emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
+    emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(
+      AgentEventType.TOOL_RESPONSES_FINALIZED,
+      onToolResponsesFinalized,
+    );
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+    if (streamFlushTimer !== null) {
+      clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
+    }
+    flushStreamText();
     if (fd !== null) {
       try {
         fs.closeSync(fd);
@@ -496,6 +579,22 @@ export function attachJsonlTranscriptWriter(
         // best effort
       }
       fd = null;
+    }
+    if (streamFd !== null) {
+      try {
+        fs.closeSync(streamFd);
+      } catch {
+        // Best-effort cleanup; the process will release the descriptor.
+      }
+      streamFd = null;
+    }
+    try {
+      fs.rmSync(streamPath, { force: true });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to remove streaming transcript ${streamPath}:`,
+        error,
+      );
     }
   };
 

@@ -26,3 +26,18 @@ Verify custom icon lookup ignores inherited object properties, built-in icons st
 ## Not run
 
 Manual browser screenshots were not captured in this environment. The behavior is covered at the hook and rendering helper boundaries, and the package build validates the web-shell bundle.
+
+## Built-in SVG data URI regression (2026-07-16)
+
+### Baseline
+
+- Global `qwen --version`: `0.18.5-preview.0`.
+- The pre-fix DOM matrix resolved all four built-in icons to `data:image/svg+xml` URLs, then rendered zero icon mask nodes in inline composer tags, top composer tags, and submitted user-message tags.
+
+### Verification
+
+- Accepting an extension from the `@` menu still inserts an inline tag with `kind: 'extension'`.
+- Inline composer tags, top composer tags, and submitted user-message tags each render four icon mask nodes for extension, file, MCP, and skill references.
+- Arbitrary SVG data URIs and `javascript:` custom icon URLs remain absent from the DOM on all three surfaces.
+- Focused WebShell result: 5 files and 128 tests passed, including the extension `@` acceptance path.
+- Full repository build passed after installing the dependency set declared by the existing lockfile; full repository typecheck passed.

@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { Text } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { ICON } from '../constants.js';
 import { theme } from '../semantic-colors.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -45,7 +46,7 @@ export const CronPill: React.FC<CronPillProps> = ({ count }) => {
   const noun = count === 1 ? 'scheduled task' : 'scheduled tasks';
   return (
     <Text color={theme.text.accent}>
-      ◎ {count} {noun}
+      {ICON.BULLSEYE} {count} {noun}
     </Text>
   );
 };

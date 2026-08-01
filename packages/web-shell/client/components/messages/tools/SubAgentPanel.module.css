@@ -82,8 +82,9 @@
   overflow: hidden;
 }
 
-/* Result and sub-tool list: scroll within the same cap as the live
-   stream so the enclosing panel never grows past a screen. */
+/* Result (compact mode) and the step list (always): scroll within the
+   same cap as the live stream so the enclosing panel never grows past a
+   screen. */
 .scrollWindow {
   max-height: 400px;
   overflow-y: auto;
@@ -104,31 +105,24 @@
   color: var(--muted-foreground);
 }
 
-.tabBar {
+/* Hairline-ruled caption separating the conclusion from the step
+   timeline when both are present. */
+.sectionCap {
   display: flex;
-  gap: 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 6px;
-}
-
-.tab {
-  padding: 4px 12px;
-  font-size: 12px;
-  color: var(--muted-foreground);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.tab:hover {
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted-foreground);
 }
 
-.tabActive {
-  color: var(--foreground);
-  border-bottom-color: var(--agent-blue-500);
+.sectionCap::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--border);
 }
 
 .tools {
@@ -139,6 +133,49 @@
 
 .tools .panel {
   border-left-width: 2px;
+}
+
+/* Step rail: a dot per step plus per-step segments of vertical line, so
+   the sub-tool list reads as one chronological timeline. Segments (not
+   one absolute line on the scroll container) because the container's
+   height is the scrollport, not the content. */
+.step {
+  position: relative;
+  padding-left: 16px;
+}
+
+.step::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 55%, transparent);
+  z-index: 1;
+}
+
+.step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 16px;
+  bottom: -8px;
+  width: 1px;
+  background: var(--border);
+}
+
+.step[data-status='in_progress']::before,
+.step[data-status='pending']::before {
+  background: var(--agent-blue-500);
+}
+
+.step[data-status='failed']::before,
+.step[data-status='error']::before,
+.step[data-status='cancelled']::before,
+.step[data-status='canceled']::before {
+  background: var(--error-color);
 }
 
 /*

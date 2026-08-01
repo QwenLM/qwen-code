@@ -17,7 +17,7 @@ Disk session history remains the authoritative full transcript source. PR-1 only
 
 ## Non-Goals
 
-- No cap on a single in-flight live turn in PR-1; `liveJournal` continues to hold the active turn until a boundary.
+- ~~No cap on a single in-flight live turn in PR-1; `liveJournal` continues to hold the active turn until a boundary.~~ Added by DAEMON-009 (PR #7622): `liveJournal` is now capped by `maxJournalEvents` (default 10 000) and `maxJournalBytes` (default 8 MiB), configurable via `--max-journal-events` / `--max-journal-bytes`.
 - No turn-count cap. Turn counts are diagnostic only when the engine can count dropped completed turn segments exactly.
 - No `/capabilities` feature tag for this additive event. The resolved limit is exposed in daemon status.
 - No complete transcript endpoint. PR-2 must design paginated or streaming transcript reads and must not expose a one-shot full array response.
@@ -39,7 +39,7 @@ When `replayBytes > maxReplayBytes`, the engine drops oldest segments while more
     "retainedEvents": 8,
     "maxBytes": 4194304,
     "truncatedTurns": 3,
-    "fullTranscriptAvailable": false
+    "fullTranscriptAvailable": true
   }
 }
 ```

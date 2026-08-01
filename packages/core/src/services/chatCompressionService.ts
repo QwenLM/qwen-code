@@ -16,6 +16,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { resolveModelId } from '../utils/modelId.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
@@ -50,20 +51,12 @@ const debugLogger = createDebugLogger('COMPRESSION');
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
- * Default proportional auto-compaction threshold. Used as a small-window
- * fallback / safety net inside computeThresholds — when the window is so
- * small that the absolute branch becomes degenerate, the proportional
- * branch keeps the trigger usable.
+ * Default proportional auto-compaction threshold — the preferred trigger and an
+ * upper bound on how high it can sit. See computeThresholds for how it combines
+ * with the absolute ceiling (it governs large windows; the ceiling governs
+ * smaller ones).
  */
-export const DEFAULT_PCT = 0.7;
-
-/**
- * Offset from DEFAULT_PCT used to position the warn tier proportionally
- * (warn-pct = 0.7 - 0.1 = 0.6). Three-tier ladder makes warn fire
- * meaningfully before auto on small windows where the absolute formula
- * would otherwise compress warn flush against auto.
- */
-export const WARN_PCT_OFFSET = 0.1;
+export const DEFAULT_PCT = 0.85;
 
 /**
  * Token budget reserved from the window for compression output. Matches
@@ -148,15 +141,19 @@ export interface CompactionThresholds {
 /**
  * Compute the three-tier threshold ladder for a given context window.
  *
- * Each tier is `max(proportional, absolute)`:
- *   auto = max(pct * window,                               effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max(0, max((pct - WARN_PCT_OFFSET) * window,    auto - WARN_BUFFER))
- *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
+ * The absolute term (effectiveWindow - AUTOCOMPACT_BUFFER) is a *ceiling* —
+ * "compact by here, or the summarization side-query has no room to run" — so
+ * it is combined with the proportional preference via `min`, not `max`:
+ *   auto = absoluteCeiling > 0 ? min(pct * window, absoluteCeiling) : pct * window
+ *   warn = max(0, auto - WARN_BUFFER)
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER, auto + HARD_BUFFER))
  *
- * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
- * the absolute branch goes negative) automatically fall back to the
- * proportional branch. Large windows are dominated by the absolute branch,
- * capping wasted reservation to ~33K instead of 30% of the window.
+ * So large windows compact at ~pct (never crowding the ceiling), smaller
+ * windows compact at the ceiling (leaving room for the summary), and a window
+ * too small for even the ceiling (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER) falls
+ * back to the proportional value as a floor. This mirrors claude-code
+ * (autoCompact.ts), which combines its percentage override with the absolute
+ * ceiling via Math.min. `pct` defaults to DEFAULT_PCT.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
@@ -169,28 +166,31 @@ export function computeThresholds(
     Math.max(0, pct !== undefined && Number.isFinite(pct) ? pct : DEFAULT_PCT),
   );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
-  // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
-  // below absorb the floor — clamping does not shift those outputs because
-  // each is `max(proportional, absolute)` and the proportional branch
-  // dominates whenever the absolute branch goes negative.
+  // value in `/context` stays meaningful.
   const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
-  const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto = Math.max(effectivePct * window, absAuto);
+  // The absolute term is a ceiling: compact before the prompt leaves too little
+  // room for the summarization side-query (which needs up to SUMMARY_RESERVE of
+  // output). Combine it with the proportional preference via `min`. When the
+  // window is so small the ceiling is non-positive, fall back to the
+  // proportional value as a floor so the trigger stays usable.
+  const proportional = effectivePct * window;
+  const absoluteCeiling = effectiveWindow - AUTOCOMPACT_BUFFER;
+  const auto =
+    absoluteCeiling > 0
+      ? Math.min(proportional, absoluteCeiling)
+      : proportional;
 
-  const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max(
-    0,
-    Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn),
-  );
+  // Warn fires WARN_BUFFER below auto (claude-code positions its warning tier
+  // the same way, relative to the auto threshold).
+  const warn = Math.max(0, auto - WARN_BUFFER);
 
-  const rawHard = effectiveWindow - HARD_BUFFER;
-  // Guarantee hard >= auto so compaction doesn't wait until the last moment.
-  // When pct=1, auto equals the full window and hard collapses to auto
-  // (degenerate case: both thresholds trigger simultaneously).
-  // For tiny/zero windows where auto is already at the proportional floor,
-  // clamp hard to the window itself so it never exceeds the actual limit.
-  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
+  // hard is the last-ditch force-compaction point: the window edge (hardEdge),
+  // but never below auto + HARD_BUFFER so it stays a distinct tier above auto on
+  // degenerate small windows (where auto is the proportional floor and can
+  // exceed hardEdge). Clamp to the window so hard never exceeds the actual limit.
+  const hardEdge = effectiveWindow - HARD_BUFFER;
+  const hard = Math.min(window, Math.max(hardEdge, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
@@ -200,7 +200,6 @@ export type CompactTrigger = 'manual' | 'auto';
 export interface CompressOptions {
   promptId: string;
   force: boolean;
-  model: string;
   config: Config;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
@@ -249,13 +248,6 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
-  /**
-   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
-   * When provided, the cheap-gate subtracts this from the context window
-   * before computing thresholds so auto-compression fires based on the
-   * real available input budget rather than the full window.
-   */
-  reservedOutputTokens?: number;
 }
 
 /**
@@ -326,7 +318,6 @@ export class ChatCompressionService {
     const {
       promptId,
       force,
-      model,
       config,
       consecutiveFailures,
       originalTokenCount,
@@ -359,13 +350,13 @@ export class ChatCompressionService {
     }
 
     if (!force) {
-      const rawContextLimit =
+      // Thresholds run against the FULL window: the send-path output clamp
+      // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
+      // to be reserved out of the window here (this replaced the
+      // #5957/#6266 reservedOutputTokens machinery).
+      const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const contextLimit = Math.max(
-        0,
-        rawContextLimit - (opts.reservedOutputTokens ?? 0),
-      );
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -406,9 +397,7 @@ export class ChatCompressionService {
         if (!screenshotOverflow) {
           debugLogger.debug(
             `[compaction] cheap-gate NOOP: effectiveTokens=${effectiveTokens}, ` +
-              `auto=${auto}, contextLimit=${contextLimit}, ` +
-              `rawContextLimit=${rawContextLimit}, ` +
-              `reservedOutputTokens=${opts.reservedOutputTokens ?? 0}`,
+              `auto=${auto}, contextLimit=${contextLimit}`,
           );
           return {
             newHistory: null,
@@ -424,7 +413,7 @@ export class ChatCompressionService {
       }
     }
 
-    // Compression only reads the existing history while deciding the split and
+    // Compression reads existing history plus any pending tool result while
     // preparing the side-query payload. Avoid `getHistory(true)` here: long
     // tool-heavy sessions can make a defensive deep clone larger than the
     // remaining V8 heap headroom at exactly the moment compaction is trying to
@@ -497,10 +486,27 @@ export class ChatCompressionService {
       }
     }
 
+    // A tool result is still pending when automatic compaction runs before
+    // sendMessageStream commits the current user turn to chat history. Include
+    // it in the side-query so Anthropic-compatible providers see it immediately
+    // after the preceding tool_use block.
+    const pendingToolResult = opts.pendingUserMessage?.parts?.some(
+      (part) => !!part.functionResponse,
+    );
+    const sideQueryHistory = pendingToolResult
+      ? [...curatedHistory, opts.pendingUserMessage!]
+      : curatedHistory;
+    const pendingToolResultTokenCount = pendingToolResult
+      ? estimateContentTokens(
+          [opts.pendingUserMessage!],
+          slimmingConfig.imageTokenEstimate,
+        )
+      : 0;
+
     // Slim the side-query input: replace inlineData with placeholders.
     // The original history (with images) is preserved separately for
     // the post-compact image restoration block.
-    const slim = slimCompactionInput(curatedHistory);
+    const slim = slimCompactionInput(sideQueryHistory);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
@@ -510,10 +516,61 @@ export class ChatCompressionService {
         );
     }
 
+    // Hoist the system prompt so the guard can include it in the estimate.
+    const systemInstruction = buildCompressionSystemPrompt(
+      opts.customInstructions,
+      hookExtraInstructions,
+    );
+
+    // Guard: if the compaction model's context window is too small for the
+    // slimmed payload, fall back to the main model for this compression only.
+    // Coalesce to the main model so an undefined getCompactionModel() (e.g.
+    // validation failure) never leaks to the fast model via resolveDefaultModel.
+    let effectiveCompactionModel =
+      config.getCompactionModel?.() ?? config.getModel();
+    let compactionWarning: string | undefined;
+    // Only check the window when the effective model differs from the main
+    // model — warning about the main model being "too small" is confusing
+    // when no compaction model was explicitly configured.
+    if (effectiveCompactionModel !== config.getModel()) {
+      const resolved = resolveModelId(effectiveCompactionModel);
+      if (resolved) {
+        const models = resolved.authType
+          ? config.getAllConfiguredModels([resolved.authType])
+          : config.getAllConfiguredModels();
+        const entry = models.find((m) => m.id === resolved.modelId);
+        const window = entry?.contextWindowSize;
+        // Include the system prompt and the output reserve: providers check
+        // prompt + max_tokens <= window, so all three terms count.
+        const slimmedTokenEstimate =
+          estimateContentTokens(
+            slim.slimmedHistory,
+            slimmingConfig.imageTokenEstimate,
+          ) +
+          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+          COMPACT_MAX_OUTPUT_TOKENS;
+        if (window && window > 0 && slimmedTokenEstimate > window) {
+          compactionWarning =
+            `Compaction model "${resolved.modelId}" context window ` +
+            `(${window.toLocaleString()} tokens) is too small for the current ` +
+            `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
+            `using the main model for this compression.`;
+          config
+            .getDebugLogger()
+            .warn(`[chat-compression] ${compactionWarning}`);
+          effectiveCompactionModel = config.getModel();
+        }
+      }
+    }
+
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       skipOutputLanguagePreference: true,
-      model,
+      model: effectiveCompactionModel,
+      // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
+      // Falls back to the main model if not set or if the payload exceeds the
+      // compaction model's context window.
+      // See https://github.com/QwenLM/qwen-code/issues/5956
       // Stream so a slow compression inference keeps the HTTP connection alive.
       // Non-streaming returns no bytes until the whole summary is generated, so
       // behind a BFF gateway with a short `proxy_read_timeout` a long inference
@@ -523,10 +580,7 @@ export class ChatCompressionService {
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: buildCompressionSystemPrompt(
-        opts.customInstructions,
-        hookExtraInstructions,
-      ),
+      systemInstruction,
       contents: [
         ...slim.slimmedHistory,
         {
@@ -740,10 +794,14 @@ export class ChatCompressionService {
         compressionOutputTokenCount > 0
       ) {
         canCalculateNewTokenCount = true;
+        const compressedHistoryTokenCount = Math.max(
+          0,
+          compressionInputTokenCount - 1000 - pendingToolResultTokenCount,
+        );
         newTokenCount = Math.max(
           0,
           originalTokenCount -
-            (compressionInputTokenCount - 1000) +
+            compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
         // The composer injects file-restoration blocks (up to
@@ -867,6 +925,7 @@ export class ChatCompressionService {
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
+          ...(compactionWarning && { warning: compactionWarning }),
         },
       };
     }

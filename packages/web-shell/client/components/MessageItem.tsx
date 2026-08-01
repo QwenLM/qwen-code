@@ -10,7 +10,11 @@ import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+  type SessionContentGenerator,
+} from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -28,11 +32,14 @@ interface MessageItemProps {
   isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  sendFailed?: boolean;
+  onRetrySend?: () => void;
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  generateContent?: SessionContentGenerator;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -43,11 +50,14 @@ export const MessageItem = memo(function MessageItem({
   isLatest = false,
   showRetryHint = false,
   onRetryClick,
+  sendFailed = false,
+  onRetrySend,
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
   const body = ((): ReactElement | null => {
@@ -57,7 +67,10 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
+            inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
+            sendFailed={sendFailed}
+            onRetrySend={onRetrySend}
           />
         );
       case 'assistant':
@@ -76,10 +89,12 @@ export const MessageItem = memo(function MessageItem({
       case 'thinking':
         return (
           <ThinkingMessage
+            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'tool_group':
@@ -253,10 +268,13 @@ function areMessageItemPropsEqual(
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.sendFailed !== next.sendFailed) return false;
+  if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (prev.generateContent !== next.generateContent) return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,

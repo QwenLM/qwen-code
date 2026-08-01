@@ -43,8 +43,14 @@ import type {
   ShellPostPromoteHandlers,
   ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
-import { ShellExecutionService } from '../services/shellExecutionService.js';
-import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
+import {
+  getShellAbortReasonKind,
+  ShellExecutionService,
+} from '../services/shellExecutionService.js';
+import {
+  statusFilePathFor,
+  type ShellTaskRegistration,
+} from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -62,7 +68,7 @@ import {
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
-import { parse } from 'shell-quote';
+import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
@@ -81,6 +87,19 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+
+/**
+ * Model-facing liveness guidance shared verbatim by both background
+ * launch paths (`executeBackground` and the foreground→background
+ * promote), so the two copies cannot drift (#7626).
+ */
+function statusFileGuidance(outputPath: string): string {
+  return (
+    `status file: ${statusFilePathFor(outputPath)}\n` +
+    `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
+    `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
+  );
+}
 
 /**
  * Strip a single bare trailing `&` (bash background operator) from a
@@ -341,6 +360,65 @@ function tokeniseSegment(segment: string): string[] | null {
     }
   }
   return tokens.slice(i);
+}
+
+const EXIT_ONE_IS_NOT_ERROR_COMMANDS = new Set([
+  'grep',
+  'rg',
+  'diff',
+  'test',
+  '[',
+  '[[',
+]);
+
+const PIPELINE_ALLOWED_OPERATORS = new Set<ControlOperator['op']>([
+  '|',
+  '|&',
+  '<<<',
+  '>>',
+  '>&',
+  '<&',
+  '<',
+  '>',
+]);
+
+function getExitStatusSegment(command: string): string | null {
+  const segments = splitCommands(command);
+  if (segments.length === 1) return segments[0]!;
+
+  try {
+    const operators = parse(command, (key) => '$' + key).filter(
+      (token): token is ControlOperator =>
+        typeof token === 'object' && token !== null && 'op' in token,
+    );
+    if (
+      !operators.some(({ op }) => op === '|' || op === '|&') ||
+      operators.some(({ op }) => !PIPELINE_ALLOWED_OPERATORS.has(op))
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return segments.at(-1) ?? null;
+}
+
+function isShellExitError(command: string, exitCode: number | null) {
+  if (exitCode === null || exitCode === 0) return false;
+  if (exitCode >= 2) return true;
+
+  const exitStatusSegment = getExitStatusSegment(command);
+  if (!exitStatusSegment) return true;
+
+  const tokens = tokeniseSegment(exitStatusSegment);
+  const executable = tokens?.[0];
+  if (!executable) return true;
+
+  const commandName = path
+    .basename(path.win32.basename(executable))
+    .replace(/\.(?:exe|cmd|bat)$/i, '');
+  return !EXIT_ONE_IS_NOT_ERROR_COMMANDS.has(commandName);
 }
 
 const SUDO_FLAGS_WITH_VALUE = new Set([
@@ -917,6 +995,7 @@ export function parseNumstat(numstatOutput: string): Map<string, number> {
 }
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
+export const DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
 /**
@@ -928,8 +1007,68 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
-/** Maximum wait for the output stream flush before transitioning the registry. */
-const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+/**
+ * Maximum wait for the output stream flush before transitioning the
+ * registry. Shared by the promote settle path and `executeBackground`'s
+ * settle path — see `endStreamThenSettle`.
+ */
+const OUTPUT_FLUSH_TIMEOUT_MS = 10_000;
+
+/**
+ * End `stream` and run `settle` exactly once after its queued writes
+ * have been flushed to the underlying fd (`'finish'`). `stream.end()`
+ * is asynchronous — pending writes can still be in the libuv queue
+ * when it returns, so transitioning the registry before the flush
+ * lets `/tasks` consumers (and the status sidecar) observe a terminal
+ * status and read the output file BEFORE the trailing bytes are on
+ * disk, producing truncated logs. `'error'` covers a late EIO /
+ * ENOSPC racing `.end()` itself, an already-destroyed or
+ * already-finished stream short-circuits (neither event would ever
+ * fire on it), and the timer backstops a stream wedged mid-flush —
+ * whichever lands first, `settle` runs exactly once.
+ */
+function endStreamThenSettle(
+  stream: fs.WriteStream,
+  origin: 'promote' | 'background',
+  shellId: string,
+  settle: () => void,
+): void {
+  let settled = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const runOnce = () => {
+    if (settled) return;
+    settled = true;
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    settle();
+  };
+  // A destroyed or already-finished stream emits neither 'finish' nor
+  // 'error' — `.end()` on it is a silent no-op (Node only delivers
+  // ERR_STREAM_DESTROYED to an `end()` callback), so waiting would
+  // always burn the full timeout with nothing left to flush.
+  // `writableFinished`, not `writableEnded`: the latter is already
+  // true mid-flush, which is exactly the window this helper waits for.
+  if (stream.destroyed || stream.writableFinished) {
+    runOnce();
+    return;
+  }
+  try {
+    flushTimer = setTimeout(() => {
+      debugLogger.warn(
+        `${origin}: output stream flush timed out for ${shellId} after ${OUTPUT_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+      );
+      runOnce();
+    }, OUTPUT_FLUSH_TIMEOUT_MS);
+    flushTimer.unref();
+    stream.once('finish', runOnce);
+    stream.once('error', runOnce);
+    stream.end();
+  } catch (closeErr) {
+    debugLogger.warn(
+      `${origin}: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+    );
+    runOnce();
+  }
+}
 
 /**
  * PR-2.5 slots shared between the foreground `execute()` postPromote
@@ -1647,9 +1786,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
   ): ToolResult {
     if (getAbortReasonName(signal) === 'TimeoutError') {
       const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+      const detail = `${message} There was no output before it timed out.`;
       return {
-        llmContent: message,
-        returnDisplay: message,
+        llmContent: detail,
+        returnDisplay: detail,
+        error: {
+          message,
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
       };
     }
     return {
@@ -2070,8 +2214,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return this.executeBackground(signal, shellExecutionConfig);
     }
 
+    // Precedence: an explicit per-call `timeout` wins; otherwise fall back
+    // to the configured `tools.shell.defaultTimeoutMs` setting; otherwise
+    // the built-in default. A value of 0 disables the timeout, but only at
+    // the settings/default level — the per-call `timeout` param is validated
+    // to be > 0 by `validateToolParamValues`, so 0 never arrives that way.
     const effectiveTimeout =
-      this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS;
+      this.params.timeout ??
+      this.config.getShellDefaultTimeoutMs() ??
+      DEFAULT_FOREGROUND_TIMEOUT_MS;
+    debugLogger.debug('resolved foreground shell timeout', {
+      perCallTimeout: this.params.timeout ?? null,
+      configuredDefault: this.config.getShellDefaultTimeoutMs() ?? null,
+      effectiveTimeout,
+    });
 
     // Create combined signal with timeout AND promote-trigger for
     // foreground execution. The promoteAbortController is exposed to
@@ -2168,6 +2324,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
     let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
     let showTimeoutWarning = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let lastOutputPerfTime: number | null = null;
 
     const cancelTrailingFlush = () => {
       if (trailingFlushTimer !== null) {
@@ -2180,6 +2338,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (timeoutWarningTimer !== null) {
         clearTimeout(timeoutWarningTimer);
         timeoutWarningTimer = null;
+      }
+    };
+
+    const cancelHeartbeat = () => {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
       }
     };
 
@@ -2211,9 +2376,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // If the command is aborted (user cancel or timeout) while a trailing
     // flush is pending, cancel the timer so we don't emit a stale frame
     // between the abort signal firing and the result promise settling.
+    // The heartbeat stops here too: after abort, a "still running" signal
+    // during the kill-to-settle window would be a lie.
     const onAbort = () => {
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
     };
     combinedSignal.addEventListener('abort', onAbort, { once: true });
 
@@ -2250,6 +2418,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       switch (event.type) {
         case 'data':
+          lastOutputPerfTime = performance.now();
           if (isBinaryStream) break;
           cumulativeOutput = event.chunk;
           // Stats are only consumed by the ANSI-output branch below,
@@ -2296,6 +2465,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           shouldUpdate = true;
           break;
         case 'binary_progress':
+          lastOutputPerfTime = performance.now();
           isBinaryStream = true;
           cumulativeOutput = `[Receiving binary output... ${formatMemoryUsage(
             event.bytesReceived,
@@ -2403,6 +2573,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // re-throw to the caller.
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
       throw err;
     }
@@ -2419,14 +2590,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     setPromoteAbortControllerCallback?.(promoteAbortController);
     armTimeoutWarning();
 
-    // Bracket the spawn → settle wall-clock so the result builder below
+    // Bracket the execution-handle → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
     // `await ShellExecutionService.execute(...)` returns its handle so
     // pre-spawn setup (PTY dynamic import via `getPty()`, ~50–200ms on
     // first call) is excluded — the elapsed should reflect the
-    // command's actual runtime, not the tool call's total wall time.
-    // The `pid` set above confirms the process has been spawned by this
-    // point, so subtraction below is true post-spawn-to-settle.
+    // command's actual runtime, not the tool call's total wall time. A
+    // startup-stage abort can now return a handle with no process, in which
+    // case this measures only the immediate aborted-result handoff.
     //
     // `performance.now()` (monotonic high-res, ms-precision) instead of
     // `Date.now()` so NTP corrections / VM clock drift between capture
@@ -2435,6 +2606,39 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // arbitrary but consistent across the two reads — only the
     // difference matters here.
     const executionStartTime = performance.now();
+
+    // Liveness heartbeat for silent commands: while no output has arrived
+    // for a full interval, emit a small structured ShellProgressData through
+    // the same updateOutput channel so headless consumers (ACP, stream-json)
+    // can distinguish "still running" from a dead execution chain. Display
+    // consumers ignore it. Both the idle gate and the reported durations use
+    // the monotonic `performance.now()` clock (via `lastOutputPerfTime`,
+    // falling back to spawn time before any output), so an NTP step can
+    // neither skew the payload nor misfire the heartbeat. Started only
+    // post-spawn so PTY init can't produce a heartbeat for a process that
+    // doesn't exist yet.
+    const heartbeatIntervalMs =
+      this.config.getShellHeartbeatIntervalMs() ??
+      DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS;
+    if (updateOutput && heartbeatIntervalMs > 0 && !combinedSignal.aborted) {
+      heartbeatTimer = setInterval(() => {
+        const now = performance.now();
+        const idleSince = lastOutputPerfTime ?? executionStartTime;
+        if (now - idleSince < heartbeatIntervalMs) return;
+        updateOutput({
+          type: 'shell_progress',
+          elapsedMs: Math.round(now - executionStartTime),
+          ...(lastOutputPerfTime !== null && {
+            lastOutputAgeMs: Math.round(now - lastOutputPerfTime),
+          }),
+          // Stats are only maintained on the PTY/AnsiOutput path; omit
+          // rather than report a misleading 0 on the plain-string path.
+          ...(totalLines > 0 && { totalLines }),
+          ...(totalBytes > 0 && { totalBytes }),
+          ...(effectiveTimeout > 0 && { timeoutMs: effectiveTimeout }),
+        });
+      }, heartbeatIntervalMs);
+    }
 
     let result;
     try {
@@ -2447,6 +2651,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // happy path and the (theoretical) reject path so no timer leaks.
       cancelTrailingFlush();
       cancelTimeoutWarning();
+      cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
     }
 
@@ -2500,31 +2705,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
+    const abortReasonName = getAbortReasonName(combinedSignal);
+    const wasTimeout =
+      result.aborted &&
+      effectiveTimeout > 0 &&
+      abortReasonName === 'TimeoutError';
+    const wasPromoteRefused =
+      result.aborted &&
+      getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    const timeoutSummary = wasTimeout
+      ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
+      : undefined;
+
     let llmContent = '';
     if (result.aborted) {
-      // Check if it was a timeout or user cancellation. Exclude BOTH
-      // the user signal AND the promote signal — the latter matters
-      // when PR-3's Ctrl+B keybind fires `promoteAbortController.abort`
-      // but the service's race guard refused promotion (the child
-      // terminated a beat earlier). The result then lands with
-      // `aborted: true, promoted: false`; without the
-      // `promoteAbortController.signal.aborted` exclusion, the
-      // foreground path would falsely report "Command timed out" for
-      // a process that finished naturally.
-      // When the scheduler's execution timeout fires, execSignal is aborted
-      // with a TimeoutError — distinguish this from a user cancellation.
-      const schedulerTimedOut =
-        signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
-      const wasTimeout =
-        effectiveTimeout &&
-        combinedSignal.aborted &&
-        (!signal.aborted || schedulerTimedOut) &&
-        !promoteAbortController.signal.aborted;
-      const wasPromoteRefused =
-        promoteAbortController.signal.aborted && !signal.aborted;
-
       if (wasTimeout) {
-        llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+        llmContent = timeoutSummary!;
         if (result.output.trim()) {
           llmContent += ` Below is the output before it timed out:\n${result.output}`;
         } else {
@@ -2631,8 +2827,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Fires on both successful and naturally-failed completions since
     // the advice ("next time, background it") is the same in both.
     const elapsedMs = performance.now() - executionStartTime;
-    const longRunThreshold = longRunThresholdFor(effectiveTimeout);
+    // When the timeout is disabled (effectiveTimeout === 0) there is no
+    // meaningful "half the timeout" threshold: `longRunThresholdFor(0)` would
+    // return its 1000ms floor and fire the hint on every foreground command
+    // over ~1s. Suppress the long-run hint entirely in that case.
+    const longRunThreshold =
+      effectiveTimeout === 0 ? null : longRunThresholdFor(effectiveTimeout);
     const shouldAppendLongRunHint =
+      longRunThreshold !== null &&
       !result.aborted &&
       result.signal === null &&
       elapsedMs >= longRunThreshold;
@@ -2642,7 +2844,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (aborted / signal / under-threshold) plus the actual elapsed and
     // computed threshold. No PII — just timing + result flags.
     debugLogger.debug(
-      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold}ms ` +
+      `long-run hint: elapsed=${Math.round(elapsedMs)}ms threshold=${longRunThreshold === null ? 'disabled' : `${longRunThreshold}ms`} ` +
         `aborted=${result.aborted} signal=${result.signal} → ${shouldAppendLongRunHint ? 'fire' : 'suppress'}`,
     );
 
@@ -2665,25 +2867,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       returnDisplayMessage = llmContent;
     } else {
       if (result.output.trim()) {
-        returnDisplayMessage = result.output;
+        returnDisplayMessage = wasTimeout
+          ? `${timeoutSummary}\n${result.output}`
+          : result.output;
       } else {
         if (result.aborted) {
-          // Check if it was a timeout, a refused-promote, or a real user
-          // cancellation. See the matching block above for why we also
-          // exclude `promoteAbortController.signal.aborted` from the
-          // timeout discriminator.
-          const schedulerTimedOut =
-            signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
-          const wasTimeout =
-            effectiveTimeout &&
-            combinedSignal.aborted &&
-            (!signal.aborted || schedulerTimedOut) &&
-            !promoteAbortController.signal.aborted;
-          const wasPromoteRefused =
-            promoteAbortController.signal.aborted && !signal.aborted;
-
           returnDisplayMessage = wasTimeout
-            ? `Command timed out after ${effectiveTimeout}ms.`
+            ? `${timeoutSummary} There was no output before it timed out.`
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
@@ -2701,8 +2891,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
+    let persistedOutputFiles: string[] | undefined;
+
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
+      const originalLlmContent = llmContent;
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2715,14 +2908,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // no-op here. lines: Infinity keeps this char-only so the global line
         // cap can't undercut the declared 30k char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
-        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
+        {
+          threshold: 30_000,
+          previewChars: 4000,
+          keep: 'both',
+          lines: Number.POSITIVE_INFINITY,
+        },
       );
 
       if (truncatedResult.outputFile) {
+        persistedOutputFiles = [truncatedResult.outputFile];
         llmContent = truncatedResult.content;
         returnDisplayMessage +=
           (returnDisplayMessage ? '\n' : '') +
           `Output too long and was saved to: ${truncatedResult.outputFile}`;
+      } else if (truncatedResult.content !== originalLlmContent) {
+        persistedOutputFiles = [];
+        llmContent = truncatedResult.content;
       }
     }
 
@@ -2798,20 +3000,39 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
-    const executionError = result.error
+    const executionError = timeoutSummary
       ? {
           error: {
-            message:
-              result.error.message +
-              (longRunHint ? `\n\n---\n${longRunHint}` : ''),
-            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+            message: timeoutSummary,
+            type: ToolErrorType.EXECUTION_TIMEOUT,
           },
         }
-      : {};
+      : result.error
+        ? {
+            error: {
+              message:
+                result.error.message +
+                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              type: ToolErrorType.SHELL_EXECUTE_ERROR,
+            },
+          }
+        : isShellExitError(this.params.command, result.exitCode)
+          ? {
+              error: {
+                // Schedulers use error.message as the model-facing response.
+                message:
+                  typeof llmContent === 'string'
+                    ? llmContent
+                    : returnDisplayMessage,
+                type: ToolErrorType.SHELL_EXECUTE_ERROR,
+              },
+            }
+          : {};
 
     return {
       llmContent,
       returnDisplay: returnDisplayMessage,
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...executionError,
     };
   }
@@ -3261,39 +3482,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         transitionRegistry(info);
         return;
       }
-      try {
-        // `finish` fires after all queued writes have been flushed to
-        // the underlying fd. `error` covers a late EIO / ENOSPC that
-        // doesn't reach the existing `'error'` listener — race with
-        // `.end()` itself. Either way, run the transition once.
-        let transitioned = false;
-        const finalize = () => {
-          if (transitioned) return;
-          transitioned = true;
-          transitionRegistry(info);
-        };
-        const flushTimer = setTimeout(() => {
-          debugLogger.warn(
-            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
-          );
-          finalize();
-        }, PROMOTE_FLUSH_TIMEOUT_MS);
-        flushTimer.unref();
-        stream.once('finish', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.once('error', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.end();
-      } catch (closeErr) {
-        debugLogger.warn(
-          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
-        );
-        transitionRegistry(info);
-      }
+      endStreamThenSettle(stream, 'promote', shellId, () =>
+        transitionRegistry(info),
+      );
     };
     // Drain a settle that landed BEFORE the wire installed (fast
     // commands can exit between `result.promoted` and this line).
@@ -3315,6 +3506,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const statusLine = postPromoteSettleObserved
       ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
       : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
+    const statusFileLine = statusFileGuidance(outputPath);
     const inspectLine = `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
     const stopLine = postPromoteSettleObserved
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
@@ -3323,6 +3515,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
+      statusFileLine,
       inspectLine,
       stopLine,
     ].join('\n');
@@ -3504,36 +3697,46 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
+    //
+    // Same flush-ordering hazard as the promote settle path: transition
+    // the registry only after the output stream has flushed, so the
+    // status sidecar can't report a terminal state while the trailing
+    // output bytes are still in the libuv queue. The exit timestamp is
+    // captured BEFORE the flush wait — endTime records when the child
+    // exited, not when its bytes reached disk.
     void resultPromise.then(
       (result) => {
-        outputStream.end();
         const endTime = Date.now();
-        if (entryAc.signal.aborted) {
-          if (registry.get(shellId)?.status === 'running') {
-            registry.cancel(shellId, endTime);
+        endStreamThenSettle(outputStream, 'background', shellId, () => {
+          if (entryAc.signal.aborted) {
+            if (registry.get(shellId)?.status === 'running') {
+              registry.cancel(shellId, endTime);
+            }
+          } else if (
+            result.error ||
+            (result.exitCode !== null && result.exitCode !== 0) ||
+            result.signal !== null
+          ) {
+            // Non-zero exit / killed by signal / spawn error all count as failed.
+            // Treating them as `completed` would let `/tasks` (and any future
+            // model-facing notification) misreport a failed `npm test` or
+            // `false` command as a success.
+            const reason = result.error
+              ? result.error.message
+              : result.signal !== null
+                ? `terminated by signal ${result.signal}`
+                : `exited with code ${result.exitCode}`;
+            registry.fail(shellId, reason, endTime);
+          } else {
+            registry.complete(shellId, result.exitCode ?? 0, endTime);
           }
-        } else if (
-          result.error ||
-          (result.exitCode !== null && result.exitCode !== 0) ||
-          result.signal !== null
-        ) {
-          // Non-zero exit / killed by signal / spawn error all count as failed.
-          // Treating them as `completed` would let `/tasks` (and any future
-          // model-facing notification) misreport a failed `npm test` or
-          // `false` command as a success.
-          const reason = result.error
-            ? result.error.message
-            : result.signal !== null
-              ? `terminated by signal ${result.signal}`
-              : `exited with code ${result.exitCode}`;
-          registry.fail(shellId, reason, endTime);
-        } else {
-          registry.complete(shellId, result.exitCode ?? 0, endTime);
-        }
+        });
       },
       (err) => {
-        outputStream.end();
-        registry.fail(shellId, getErrorMessage(err), Date.now());
+        const endTime = Date.now();
+        endStreamThenSettle(outputStream, 'background', shellId, () =>
+          registry.fail(shellId, getErrorMessage(err), endTime),
+        );
       },
     );
 
@@ -3544,6 +3747,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
+        `${statusFileGuidance(outputPath)}\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates). Read the output file directly to view the captured output.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };

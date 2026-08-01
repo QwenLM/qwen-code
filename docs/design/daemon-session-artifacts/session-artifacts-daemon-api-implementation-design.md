@@ -141,7 +141,7 @@ Client 点击时打开 URL；Daemon 不读取、不验证、不预渲染该 URL�
 - `packages/core/src/tools/tool-names.ts`
 - `packages/core/src/tools/artifact/artifact-tool.ts`
 - `packages/cli/src/acp-integration/session/Session.ts`
-- `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`
+- `packages/cli/src/acp-integration/session/emitters/tool-call-emitter.ts`
 
 现状：
 
@@ -1005,7 +1005,7 @@ Phase A 先接入 `ToolResult.artifacts` 和 `ArtifactTool`；`record_artifact` 
 
 - `packages/cli/src/acp-integration/session/types.ts`
   - `ToolCallResultParams.artifacts?`
-- `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`
+- `packages/cli/src/acp-integration/session/emitters/tool-call-emitter.ts`
   - `_meta.artifacts = params.artifacts`
 - `packages/cli/src/acp-integration/session/Session.ts`
   - 工具成功后收集 `toolResult.artifacts`。
@@ -1338,7 +1338,7 @@ cd packages/core && npx vitest run src/tools/artifact/artifact-tool.test.ts
 命令：
 
 ```bash
-cd packages/cli && npx vitest run src/acp-integration/session/emitters/ToolCallEmitter.test.ts
+cd packages/cli && npx vitest run src/acp-integration/session/emitters/tool-call-emitter.test.ts
 cd packages/cli && npx vitest run src/acp-integration/session/Session.test.ts
 ```
 

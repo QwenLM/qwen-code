@@ -14,14 +14,16 @@ import type {
   ToolResultDisplay,
   AgentStatus,
   ArenaDiffSummary,
+  GoalSnapshotV2,
+  GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
-import { type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 export type { ThoughtSummary };
 
 export enum AuthState {
-  // Attemtping to authenticate or re-authenticate
+  // Attempting to authenticate or re-authenticate
   Unauthenticated = 'unauthenticated',
   // Auth dialog is open for user to select auth method
   Updating = 'updating',
@@ -67,6 +69,7 @@ export interface IndividualToolCallDisplay {
   name: string;
   description: string;
   resultDisplay: ToolResultDisplay | string | undefined;
+  visionBridgeNotice?: string;
   /**
    * Full tool-result text for the Ctrl+O full-detail transcript (§4.9).
    * Derived (NOT persisted) — extracted via `getToolResponseDisplayText` from
@@ -227,6 +230,9 @@ export type HistoryItemStats = HistoryItemBase & {
  */
 export interface DiffRenderRow {
   filename: string;
+  /** Pre-rename path when this row is a rename; absent otherwise. `filename`
+   *  is the current (post-rename) path used to address the file. */
+  oldPath?: string;
   /** `undefined` for binary files; a line count (lower bound if `truncated`)
    *  otherwise. */
   added?: number;
@@ -580,7 +586,26 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
+
+export const GOAL_STATUS_KINDS = [
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'paused',
+  'checking',
+] as const satisfies readonly GoalStatusKind[];
+
+/** Narrows an untrusted value (e.g. a persisted transcript field). */
+export function isGoalStatusKind(value: unknown): value is GoalStatusKind {
+  return (
+    typeof value === 'string' &&
+    (GOAL_STATUS_KINDS as readonly string[]).includes(value)
+  );
+}
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
@@ -605,6 +630,12 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   setAt?: number;
   durationMs?: number;
   lastReason?: string;
+};
+
+export type HistoryItemGoalState = HistoryItemBase & {
+  type: 'goal_state';
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
 };
 
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
@@ -653,7 +684,8 @@ export type HistoryItemWithoutId =
   | HistoryItemStopHookSystemMessage
   | HistoryItemDoctor
   | HistoryItemDiffStats
-  | HistoryItemGoalStatus;
+  | HistoryItemGoalStatus
+  | HistoryItemGoalState;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -698,6 +730,7 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  GOAL_STATE = 'goal_state',
   VISION_NOTICE = 'vision_notice',
 }
 

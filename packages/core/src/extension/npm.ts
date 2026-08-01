@@ -3,6 +3,7 @@
  */
 
 import * as fs from 'node:fs';
+import type { ClientRequest, IncomingMessage } from 'node:http';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as tar from 'tar';
@@ -11,8 +12,14 @@ import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
+import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
+const NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
+const NPM_ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const NPM_METADATA_MAX_BYTES = 10 * 1024 * 1024;
+const NPM_MAX_REDIRECTS = 10;
 
 export interface NpmDownloadResult {
   version: string;
@@ -30,6 +37,16 @@ interface NpmPackageMetadata {
       };
     }
   >;
+}
+
+function resolveNpmRedirectUrl(currentUrl: string, location: string): URL {
+  try {
+    return new URL(location, currentUrl);
+  } catch {
+    throw new Error(
+      `Invalid npm redirect URL: ${redactUrlCredentials(location)}`,
+    );
+  }
 }
 
 /**
@@ -122,12 +139,18 @@ export function resolveNpmRegistry(
  * Get npm auth token for a registry.
  *
  * Priority:
- * 1. NPM_TOKEN environment variable
+ * 1. NPM_TOKEN environment variable for the configured registry origin
  * 2. Registry-specific _authToken from .npmrc
  */
-function getNpmAuthToken(registryUrl: string): string | undefined {
+function getNpmAuthToken(
+  registryUrl: string,
+  ambientTokenRegistryUrl: string,
+): string | undefined {
   const envToken = process.env['NPM_TOKEN'];
-  if (envToken) {
+  if (
+    envToken &&
+    new URL(registryUrl).origin === new URL(ambientTokenRegistryUrl).origin
+  ) {
     return envToken;
   }
 
@@ -178,7 +201,19 @@ function getNpmAuthToken(registryUrl: string): string | undefined {
   return undefined;
 }
 
-function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
+function fetchNpmJson<T>(
+  url: string,
+  authToken?: string,
+  signal?: AbortSignal,
+  redirectCount = 0,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<T> {
+  signal?.throwIfAborted();
+  if (redirectCount > NPM_MAX_REDIRECTS) {
+    return Promise.reject(
+      new Error('Too many redirects while fetching npm package metadata'),
+    );
+  }
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
@@ -186,88 +221,299 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = clientForUrl(url);
-
-  return new Promise((resolve, reject) => {
-    client
-      .get(url, { headers }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          if (res.headers.location) {
-            // Strip auth token when redirected to a different host
-            const originalHost = new URL(url).host;
-            const redirectHost = new URL(res.headers.location).host;
-            const redirectToken =
-              redirectHost === originalHost ? authToken : undefined;
-            fetchNpmJson<T>(res.headers.location, redirectToken)
-              .then(resolve)
-              .catch(reject);
-            return;
-          }
-        }
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(
-              `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
-            ),
-          );
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
-          } catch (e) {
-            reject(new Error(`Failed to parse npm registry response: ${e}`));
-          }
-        });
-      })
-      .on('error', reject);
-  });
+  return resolveNetworkTarget(url, networkPolicy, signal).then(
+    (target) =>
+      new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
+        const client = clientForUrl(target.url.toString());
+        client
+          .get(
+            url,
+            {
+              headers,
+              signal,
+              lookup: target.lookup,
+              ...(target.lookup ? { agent: false } : {}),
+            },
+            (res) => {
+              res.on('error', (error) => {
+                reject(signal?.aborted ? signal.reason : error);
+              });
+              if (res.statusCode === 301 || res.statusCode === 302) {
+                if (res.headers.location) {
+                  let redirectUrl: URL;
+                  try {
+                    redirectUrl = resolveNpmRedirectUrl(
+                      url,
+                      res.headers.location,
+                    );
+                  } catch (error) {
+                    res.resume();
+                    reject(error);
+                    return;
+                  }
+                  res.resume();
+                  const originalOrigin = new URL(url).origin;
+                  const redirectToken =
+                    redirectUrl.origin === originalOrigin
+                      ? authToken
+                      : undefined;
+                  fetchNpmJson<T>(
+                    redirectUrl.toString(),
+                    redirectToken,
+                    signal,
+                    redirectCount + 1,
+                    networkPolicy,
+                  )
+                    .then(resolve)
+                    .catch(reject);
+                  return;
+                }
+              }
+              if (res.statusCode !== 200) {
+                res.resume();
+                return reject(
+                  new Error(
+                    `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
+                  ),
+                );
+              }
+              const chunks: Buffer[] = [];
+              let totalBytes = 0;
+              let responseFinished = false;
+              res.on('data', (chunk: Buffer) => {
+                if (responseFinished) return;
+                totalBytes += chunk.length;
+                if (totalBytes > NPM_METADATA_MAX_BYTES) {
+                  responseFinished = true;
+                  res.destroy();
+                  reject(
+                    new Error(
+                      `npm package metadata exceeded maximum size of ${NPM_METADATA_MAX_BYTES} bytes`,
+                    ),
+                  );
+                  return;
+                }
+                chunks.push(chunk);
+              });
+              res.on('end', () => {
+                if (responseFinished) return;
+                responseFinished = true;
+                try {
+                  resolve(JSON.parse(Buffer.concat(chunks).toString()) as T);
+                } catch (e) {
+                  reject(
+                    new Error(`Failed to parse npm registry response: ${e}`),
+                  );
+                }
+              });
+            },
+          )
+          .on('error', (error) => {
+            reject(signal?.aborted ? signal.reason : error);
+          });
+      }),
+  );
 }
 
 /**
  * Download a file from a URL, following redirects.
  */
-function downloadNpmFile(
+interface NpmDownloadContext {
+  activeRequest?: ClientRequest;
+  activeResponse?: IncomingMessage;
+  activeFile?: fs.WriteStream;
+  requestGeneration: number;
+  timedOut: boolean;
+}
+
+function downloadNpmFileRedirect(
   url: string,
   dest: string,
+  context: NpmDownloadContext,
   authToken?: string,
+  signal?: AbortSignal,
+  redirectCount = 0,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<void> {
+  signal?.throwIfAborted();
+  if (redirectCount > NPM_MAX_REDIRECTS) {
+    return Promise.reject(
+      new Error('Too many redirects while downloading npm package'),
+    );
+  }
   const headers: Record<string, string> = {};
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = clientForUrl(url);
+  return resolveNetworkTarget(url, networkPolicy, signal).then(
+    (target) =>
+      new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
+        const client = clientForUrl(target.url.toString());
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const fail = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+        const requestGeneration = ++context.requestGeneration;
+        const req = client
+          .get(
+            url,
+            {
+              headers,
+              signal,
+              lookup: target.lookup,
+              ...(target.lookup ? { agent: false } : {}),
+            },
+            (res) => {
+              if (context.timedOut) {
+                res.destroy();
+                return;
+              }
+              context.activeResponse = res;
+              if (res.statusCode === 301 || res.statusCode === 302) {
+                if (res.headers.location) {
+                  let redirectUrl: URL;
+                  try {
+                    redirectUrl = resolveNpmRedirectUrl(
+                      url,
+                      res.headers.location,
+                    );
+                  } catch (error) {
+                    res.destroy();
+                    context.activeResponse = undefined;
+                    fail(error);
+                    return;
+                  }
+                  const originalOrigin = new URL(url).origin;
+                  const redirectToken =
+                    redirectUrl.origin === originalOrigin
+                      ? authToken
+                      : undefined;
+                  res.destroy();
+                  context.activeResponse = undefined;
+                  downloadNpmFileRedirect(
+                    redirectUrl.toString(),
+                    dest,
+                    context,
+                    redirectToken,
+                    signal,
+                    redirectCount + 1,
+                    networkPolicy,
+                  )
+                    .then(finish)
+                    .catch(fail);
+                  return;
+                }
+              }
+              if (res.statusCode !== 200) {
+                res.destroy();
+                context.activeResponse = undefined;
+                fail(
+                  new Error(
+                    `Failed to download npm tarball: status ${res.statusCode}`,
+                  ),
+                );
+                return;
+              }
+              const file = fs.createWriteStream(dest);
+              context.activeFile = file;
+              let bytesWritten = 0;
+              res.on('data', (chunk: Buffer) => {
+                bytesWritten += chunk.length;
+                if (bytesWritten > NPM_ARCHIVE_DOWNLOAD_MAX_BYTES) {
+                  res.destroy();
+                  file.destroy();
+                  fail(
+                    new Error(
+                      `npm extension archive download exceeded maximum size of ${NPM_ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
+                    ),
+                  );
+                  return;
+                }
+              });
+              res.on('error', (error) => {
+                file.destroy();
+                fail(error);
+              });
+              file.on('error', (error) => {
+                res.destroy();
+                fail(error);
+              });
+              res.pipe(file);
+              file.on('finish', () => file.close(finish));
+            },
+          )
+          .on('error', (error) => {
+            fail(signal?.aborted ? signal.reason : error);
+          });
+        if (requestGeneration === context.requestGeneration) {
+          context.activeRequest = req;
+        }
+      }),
+  );
+}
 
+function downloadNpmFile(
+  url: string,
+  dest: string,
+  authToken?: string,
+  signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<void> {
+  const context: NpmDownloadContext = {
+    requestGeneration: 0,
+    timedOut: false,
+  };
+  const timeoutController = new AbortController();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   return new Promise((resolve, reject) => {
-    client
-      .get(url, { headers }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          if (res.headers.location) {
-            // Strip auth token when redirected to a different host
-            const originalHost = new URL(url).host;
-            const redirectHost = new URL(res.headers.location).host;
-            const redirectToken =
-              redirectHost === originalHost ? authToken : undefined;
-            downloadNpmFile(res.headers.location, dest, redirectToken)
-              .then(resolve)
-              .catch(reject);
-            return;
-          }
-        }
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(
-              `Failed to download npm tarball: status ${res.statusCode}`,
-            ),
-          );
-        }
-        const file = fs.createWriteStream(dest);
-        res.pipe(file);
-        file.on('finish', () => file.close(resolve as () => void));
-      })
-      .on('error', reject);
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      resolve();
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardDeadline);
+      reject(error);
+    };
+    const hardDeadline = setTimeout(() => {
+      context.timedOut = true;
+      const error = new Error(
+        `npm tarball download timed out after ${NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS}ms`,
+      );
+      timeoutController.abort(error);
+      fail(error);
+      context.activeRequest?.destroy();
+      context.activeResponse?.destroy();
+      context.activeFile?.destroy();
+    }, NPM_ARCHIVE_DOWNLOAD_TIMEOUT_MS);
+    hardDeadline.unref();
+    downloadNpmFileRedirect(
+      url,
+      dest,
+      context,
+      authToken,
+      requestSignal,
+      0,
+      networkPolicy,
+    )
+      .then(finish)
+      .catch(fail);
   });
 }
 
@@ -277,18 +523,19 @@ function downloadNpmFile(
 export async function downloadFromNpmRegistry(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<NpmDownloadResult> {
   const { name, version: requestedVersion } = parseNpmPackageSource(
     installMetadata.source,
   );
   const scope = name.split('/')[0];
-  const registryUrl =
-    installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
+  const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
+  const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
 
   // Store resolved registry for future update checks
   installMetadata.registryUrl = registryUrl;
 
-  const authToken = getNpmAuthToken(registryUrl);
+  const authToken = getNpmAuthToken(registryUrl, configuredRegistryUrl);
 
   // Fetch package metadata
   const encodedName = name.replaceAll('/', '%2f');
@@ -300,6 +547,9 @@ export async function downloadFromNpmRegistry(
   const metadata = await fetchNpmJson<NpmPackageMetadata>(
     metadataUrl,
     authToken,
+    signal,
+    0,
+    installMetadata.networkPolicy,
   );
 
   // Resolve version
@@ -342,28 +592,41 @@ export async function downloadFromNpmRegistry(
 
   // Download tarball
   const tarballPath = path.join(destination, 'package.tgz');
-  await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken);
+  await downloadNpmFile(
+    tarballUrl,
+    tarballPath,
+    tarballAuthToken,
+    signal,
+    installMetadata.networkPolicy,
+  );
+  signal?.throwIfAborted();
 
   // Extract tarball
+  await assertTarArchiveHasNoLinks(tarballPath);
+  signal?.throwIfAborted();
   await tar.x({
     file: tarballPath,
     cwd: destination,
   });
+  signal?.throwIfAborted();
 
   // npm tarballs contain a `package/` wrapper directory — flatten it
   const packageDir = path.join(destination, 'package');
   if (fs.existsSync(packageDir)) {
     const entries = await fs.promises.readdir(packageDir);
     for (const entry of entries) {
+      signal?.throwIfAborted();
       await fs.promises.rename(
         path.join(packageDir, entry),
         path.join(destination, entry),
       );
     }
+    signal?.throwIfAborted();
     await fs.promises.rmdir(packageDir);
   }
 
   // Clean up tarball
+  signal?.throwIfAborted();
   await fs.promises.unlink(tarballPath);
 
   debugLogger.debug(
@@ -381,19 +644,23 @@ export async function downloadFromNpmRegistry(
  */
 export async function checkNpmUpdate(
   installMetadata: ExtensionInstallMetadata,
+  signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
   try {
     const { name } = parseNpmPackageSource(installMetadata.source);
     const scope = name.split('/')[0];
-    const registryUrl =
-      installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
-    const authToken = getNpmAuthToken(registryUrl);
+    const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
+    const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
+    const authToken = getNpmAuthToken(registryUrl, configuredRegistryUrl);
 
     const encodedName = name.replaceAll('/', '%2f');
     const metadataUrl = `${registryUrl}/${encodedName}`;
     const metadata = await fetchNpmJson<NpmPackageMetadata>(
       metadataUrl,
       authToken,
+      signal,
+      0,
+      installMetadata.networkPolicy,
     );
 
     const { version: requestedVersion } = parseNpmPackageSource(
@@ -425,6 +692,7 @@ export async function checkNpmUpdate(
     }
     return ExtensionUpdateState.UP_TO_DATE;
   } catch (error) {
+    signal?.throwIfAborted();
     debugLogger.error(
       `Failed to check npm update for "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(String(error))}`,
     );

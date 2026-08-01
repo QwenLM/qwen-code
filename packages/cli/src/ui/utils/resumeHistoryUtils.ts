@@ -15,8 +15,13 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
   HistoryGap,
+  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
-import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
+import {
+  getToolResponseDisplayText,
+  parseGoalStateRecordPayloadV2,
+  stripTrailingUserPromptSubmitContextPart,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -30,6 +35,29 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { shouldDisplayGoalStateCause } from './goal-runtime.js';
+
+/**
+ * Projects a plain user record to its display text.
+ *
+ * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
+ * the model-bound parts. For records that carry the reserved tag but no
+ * payload (written by other/newer writers), drops a trailing part that is
+ * entirely a tagged hook-context block. Legacy records with bare injected
+ * text fall back to the raw part concatenation.
+ */
+function extractUserRecordDisplayText(
+  record: ConversationRecord['messages'][number],
+): string {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText) {
+    return payload.displayText;
+  }
+  const parts = (record.message?.parts as Part[] | undefined) ?? [];
+  return extractTextFromParts([
+    ...stripTrailingUserPromptSubmitContextPart(parts),
+  ]);
+}
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -187,6 +215,7 @@ function convertToHistoryItems(
     name: string;
     description: string;
     resultDisplay: ToolResultDisplay | undefined;
+    visionBridgeNotice?: string;
     detailedDisplay?: string;
     status: ToolCallStatus;
     confirmationDetails: undefined;
@@ -268,6 +297,21 @@ function convertToHistoryItems(
     }
 
     if (record.type === 'system') {
+      if (record.subtype === 'goal_state') {
+        const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+        if (payload && shouldDisplayGoalStateCause(payload.cause)) {
+          if (currentToolGroup.length > 0) {
+            items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+            currentToolGroup = [];
+          }
+          items.push({
+            type: 'goal_state',
+            snapshot: payload.snapshot,
+            cause: payload.cause,
+          });
+        }
+        continue;
+      }
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
         if (currentToolGroup.length > 0) {
@@ -316,6 +360,7 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        if (record.subtype === 'goal_runtime') break;
         // Restore notification items (background agent completions and cron fires)
         if (record.subtype === 'notification' || record.subtype === 'cron') {
           const payload = record.systemPayload as
@@ -340,7 +385,7 @@ function convertToHistoryItems(
             payload?.displayText ||
             extractTextFromParts(record.message?.parts as Part[]);
           if (text) {
-            items.push({ type: 'notification', text });
+            items.push({ type: MessageType.USER, text, sentToModel: false });
           }
           break;
         }
@@ -355,9 +400,7 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text =
-            payload.userText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+          const text = payload.userText || extractUserRecordDisplayText(record);
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -380,7 +423,7 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractTextFromParts(record.message?.parts as Part[]);
+        const text = extractUserRecordDisplayText(record);
         if (text) {
           items.push({ type: 'user', text });
         }
@@ -460,6 +503,10 @@ function convertToHistoryItems(
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
+            if (record.toolCallResult.visionBridgeNotice !== undefined) {
+              toolCall.visionBridgeNotice =
+                record.toolCallResult.visionBridgeNotice;
+            }
             // Check if status exists and use it
             const rawStatus = (
               record.toolCallResult as Record<string, unknown>
@@ -643,7 +690,8 @@ export function applyCollapsePolicyAndSummary(
   if (collapsePreviewCount > 0) {
     let userTurnCount = 0;
     for (let i = rawItems.length - 1; i >= 0; i--) {
-      if (rawItems[i].type === MessageType.USER) {
+      const item = rawItems[i];
+      if (item.type === MessageType.USER && item.sentToModel !== false) {
         userTurnCount++;
         if (userTurnCount === collapsePreviewCount) {
           boundary = i;

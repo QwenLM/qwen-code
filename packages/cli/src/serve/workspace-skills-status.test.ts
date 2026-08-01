@@ -15,6 +15,11 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 }));
 
 import { SkillManager } from '@qwen-code/qwen-code-core';
+import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+  getUserSettingsPath,
+} from '../config/settings.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
@@ -89,7 +94,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
     await fsp.writeFile(
       path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['disabled'] } }),
+      JSON.stringify({
+        skills: {
+          defaultDisabled: ['disabled', 'enabled'],
+          enabled: ['ENABLED'],
+        },
+      }),
     );
     const provider = createWorkspaceSkillsStatusProvider();
 
@@ -99,12 +109,238 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       {
         name: 'enabled',
         status: 'ok',
+        installedPath: '/skills/enabled/SKILL.md',
       },
       {
         name: 'disabled',
         status: 'disabled',
+        disabledReason: 'default',
+        installedPath: '/skills/disabled/SKILL.md',
       },
     ]);
+  });
+
+  it('marks hard-disabled skills with a hard disable reason', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'enabled',
+        description: 'Enabled skill',
+        body: 'Visible',
+        filePath: '/skills/enabled/SKILL.md',
+        level: 'project',
+      },
+      {
+        name: 'disabled',
+        description: 'Disabled skill',
+        body: 'Hidden',
+        filePath: '/skills/disabled/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-hard-disabled-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: {
+          disabled: ['disabled'],
+        },
+      }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    const status = await provider(workspace);
+
+    expect(status.skills).toMatchObject([
+      {
+        name: 'enabled',
+        status: 'ok',
+        installedPath: '/skills/enabled/SKILL.md',
+      },
+      {
+        name: 'disabled',
+        status: 'disabled',
+        disabledReason: 'hard',
+        installedPath: '/skills/disabled/SKILL.md',
+      },
+    ]);
+    // A workspace-scope hard disable is not locked by a higher scope.
+    const hardDisabled = status.skills.find((s) => s.name === 'disabled');
+    expect(hardDisabled?.lockedScope).toBeUndefined();
+  });
+
+  it('resolves disablements in safe mode (status matches execution)', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'available',
+        description: 'Available skill',
+        body: 'Visible',
+        filePath: '/skills/available/SKILL.md',
+        level: 'bundled',
+      },
+      {
+        name: 'blocked',
+        description: 'Blocked skill',
+        body: 'Hidden',
+        filePath: '/skills/blocked/SKILL.md',
+        level: 'bundled',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-mode-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: {
+          disabled: ['blocked'],
+        },
+      }),
+    );
+    const saved = process.env['QWEN_CODE_SAFE_MODE'];
+    process.env['QWEN_CODE_SAFE_MODE'] = '1';
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.skills).toMatchObject([
+        { name: 'available', status: 'ok' },
+        { name: 'blocked', status: 'disabled', disabledReason: 'hard' },
+      ]);
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_SAFE_MODE'];
+      } else {
+        process.env['QWEN_CODE_SAFE_MODE'] = saved;
+      }
+    }
+  });
+
+  it('does not read workspace-level disabled skills when untrusted', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'project-skill',
+        description: 'Project skill',
+        body: 'Visible only when trusted',
+        filePath: '/skills/project-skill/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['project-skill'] } }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider({
+      workspaceTrusted: false,
+    });
+
+    const status = await provider(workspace);
+
+    expect(status.skills[0]).toMatchObject({
+      name: 'project-skill',
+      status: 'ok',
+    });
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('does not consume corruption recovery state while reading disabled skills', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([]);
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-settings-'),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const previousCorruptedPath = process.env[ENV_CORRUPTED_PATH];
+    const previousWasRecovered = process.env[ENV_WAS_RECOVERED];
+    try {
+      process.env['QWEN_HOME'] = qwenHome;
+      const userSettingsPath = getUserSettingsPath();
+      await fsp.writeFile(userSettingsPath, '{}');
+      process.env[ENV_CORRUPTED_PATH] = `${userSettingsPath}.corrupted`;
+      process.env[ENV_WAS_RECOVERED] = '1';
+
+      await createWorkspaceSkillsStatusProvider()('/ws');
+
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+        `${userSettingsPath}.corrupted`,
+      );
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (previousCorruptedPath === undefined) {
+        delete process.env[ENV_CORRUPTED_PATH];
+      } else {
+        process.env[ENV_CORRUPTED_PATH] = previousCorruptedPath;
+      }
+      if (previousWasRecovered === undefined) {
+        delete process.env[ENV_WAS_RECOVERED];
+      } else {
+        process.env[ENV_WAS_RECOVERED] = previousWasRecovered;
+      }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('hides skills from disabled levels in workspace settings', async () => {
+    // No listSkills mock: this exercises the real daemon wiring — the
+    // settings.merged.skills?.disabledLevels read, VALID_SKILL_LEVELS
+    // filtering, and the getDisabledSkillLevels shim method that the prior
+    // daemon regression broke.
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-disabled-levels-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['bundled'] } }),
+    );
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.initialized).toBe(true);
+      expect(status.skills.find((s) => s.level === 'bundled')).toBeUndefined();
+      expect(status.skills.find((s) => s.name === 'review')).toBeUndefined();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores disabledLevels in safe mode (matches CLI child session)', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-levels-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['bundled'] } }),
+    );
+    const saved = process.env['QWEN_CODE_SAFE_MODE'];
+    process.env['QWEN_CODE_SAFE_MODE'] = '1';
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.initialized).toBe(true);
+      expect(status.skills.find((s) => s.name === 'review')).toBeDefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_SAFE_MODE'];
+      } else {
+        process.env['QWEN_CODE_SAFE_MODE'] = saved;
+      }
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it('reuses one SkillManager per workspace across calls', async () => {

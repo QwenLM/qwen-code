@@ -256,9 +256,17 @@ const probeHostname =
   hostname.startsWith('[') && hostname.endsWith(']')
     ? hostname.slice(1, -1)
     : hostname;
-const port = hasOption('--port')
-  ? String(startPort)
-  : String(await findAvailablePort(probeHostname, startPort));
+let port;
+try {
+  port = hasOption('--port')
+    ? String(startPort)
+    : String(await findAvailablePort(probeHostname, startPort));
+} catch (err) {
+  console.error(
+    `[daemon-dev] ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
@@ -281,6 +289,12 @@ const serveEnv = {
   QWEN_SERVER_TOKEN: token,
   QWEN_CODE_NO_RELAUNCH: 'true',
   NODE_OPTIONS: nodeOptions,
+  // QWEN_CODE_CLI — the entry a `qwen …` subprocess should call to reach this
+  // build — is NOT set here: `scripts/dev.js`, which the daemon below is launched
+  // through, stamps it unconditionally. Setting it here too gave it two writers,
+  // and this one deferred to an inherited value (`??`) — so a daemon started from
+  // inside another qwen session's shell pointed every subprocess at the OUTER
+  // session's CLI: the exact skew the variable exists to prevent, one level up.
 };
 
 const webEnv = {
@@ -292,7 +306,7 @@ console.log(`qwen daemon dev`);
 console.log(`  daemon:   ${webEnv.QWEN_DAEMON_URL}`);
 console.log(`  workspace: ${workspace}`);
 console.log(
-  `  web-shell: http://localhost:5173/ (token: ${token.slice(0, 4)}...)`,
+  `  web-shell: opening in browser (auto-increments from 5173 if busy — see Vite output for the actual URL, token: ${token.slice(0, 4)}...)`,
 );
 console.log('');
 
@@ -316,7 +330,6 @@ waitForDaemon(webEnv.QWEN_DAEMON_URL)
         '--',
         '--open',
         `/?token=${encodeURIComponent(token)}`,
-        '--strictPort',
       ],
       {
         cwd: root,

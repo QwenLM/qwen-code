@@ -13,13 +13,26 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelMutationResult,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
+  DaemonChannelsSnapshot,
+  DaemonChannelStartupRequest,
+  DaemonChannelTypeCatalog,
+  DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   ExtensionMutationResponse,
+  ExtensionInteractionResponse,
+  ExtensionInteractionResponseResult,
   ExtensionOperationStatus,
+  ExtensionActiveOperations,
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
@@ -29,9 +42,13 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
@@ -41,15 +58,25 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceCapability,
+  DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -67,6 +94,7 @@ import type {
   DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonRevisionRequest,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -116,6 +144,16 @@ export interface DaemonWorkspaceContextValue {
   error?: Error;
   capabilities?: DaemonCapabilities;
   getCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Force a fresh `/capabilities` fetch and push the result into the
+   * provider's `capabilities` state so consumers re-render. Unlike
+   * `getCapabilities` — which memoizes its first in-flight promise for the
+   * lifetime of the connection and never calls `setCapabilities` outside the
+   * initial mount — this bypasses that cache. Use it after a mutation that
+   * changes capabilities (e.g. registering a workspace) so the new state
+   * shows without a full page reload.
+   */
+  refreshCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
@@ -154,6 +192,24 @@ export interface DaemonGlobResult {
   matches: string[];
 }
 
+export interface DaemonChannelsResource {
+  catalog: DaemonChannelTypeCatalog;
+  snapshot: DaemonChannelsSnapshot;
+}
+
+export interface DaemonChannelPairingActions {
+  list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
+  approve(
+    name: string,
+    code: string,
+  ): Promise<DaemonChannelPairingApprovalResult>;
+  approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revoke(
+    name: string,
+    senderId: string,
+  ): Promise<DaemonChannelPairingRevocationResult>;
+}
+
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
 
 /** A durable scheduled task as returned by the daemon. `name`/`enabled` are
@@ -171,9 +227,10 @@ export interface DaemonScheduledTaskRun {
    * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
    * on the client (not surfaced in the UI yet). */
   sessionId?: string;
-  /** The fire was delivered but its prompt never ran: the task's precondition
-   * did not release it. Absent = the fire was dispatched. Without this a
-   * withheld fire is indistinguishable from a real run in the history. */
+  /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
+   * precondition withheld the prompt. Never written now, but kept so the UI can
+   * still mark such stored entries "skipped" instead of showing them as ordinary
+   * successful runs. Absent = a real dispatched run. */
   withheld?: boolean;
 }
 
@@ -192,21 +249,16 @@ export interface DaemonScheduledTask {
   /** Id of the dedicated session this task is bound to — its transcript is the
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
-  /** How each fire runs. `'shared'` (default) runs in the bound session so runs
-   * accumulate in one transcript; `'isolated'` dispatches each scheduled fire
-   * into a fresh sub-session daemon-side, so the bound session's transcript
-   * stays empty. Normalized (never undefined). Note: `runs[].sessionId` always
-   * records the anchor (bound) session — the sub-session id is not surfaced
-   * here. */
-  runMode: 'shared' | 'isolated';
-  /** Precondition guarding each fire of an isolated task: the bound session runs
-   * it as a normal turn first and only dispatches `prompt` into a sub-session on
-   * a YES verdict. Null when the task fires unconditionally, and always null for
-   * a `'shared'` task (the field only gates the isolated dispatch). */
-  condition: string | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
+  /** The registered workspace this task belongs to, when the aggregated
+   * multi-workspace view tagged it client-side. Absent (single-workspace) means
+   * the primary workspace. `workspaceId` targets its workspace-qualified route;
+   * `workspaceCwd` labels the card. The daemon never sends these — they are
+   * attached by the client after a per-workspace fetch. */
+  workspaceId?: string;
+  workspaceCwd?: string;
 }
 
 export interface DaemonCreateScheduledTaskRequest {
@@ -218,12 +270,6 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
-  /** Defaults to `'shared'` (the #6389 single-session model). `'isolated'`
-   * spawns a fresh session per fire. */
-  runMode?: 'shared' | 'isolated';
-  /** Precondition for the isolated dispatch. Omit or null for none. Rejected
-   * with `condition_requires_isolated` unless `runMode` is `'isolated'`. */
-  condition?: string | null;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -234,12 +280,76 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
-  runMode?: 'shared' | 'isolated';
-  /** `condition: null` (or '') clears the precondition. The COMBINED post-patch
-   * state is validated, so switching a guarded task to `runMode: 'shared'`
-   * without also clearing the condition is rejected. */
-  condition?: string | null;
 }
+
+export interface DaemonAddWorkspaceResult {
+  id: string;
+  cwd: string;
+  displayName?: string;
+  primary: boolean;
+  trusted: boolean;
+  persisted?: boolean;
+}
+
+/**
+ * One session's active `/goal`. Goals live in the owning session's memory and
+ * only advance while it is resident, so this list covers exactly the goals that
+ * are actually running — a session that isn't loaded contributes nothing.
+ */
+export interface DaemonGoal {
+  /** The session driving this goal; its transcript is the goal's history. */
+  sessionId: string;
+  /** The session's label, or null — the UI falls back to the id. */
+  displayName: string | null;
+  condition: string;
+  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  iterations: number;
+  setAt: number;
+  /** The judge's verdict on the most recent turn, when it has run. */
+  lastReason?: string;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too.
+   */
+  hasActivePrompt: boolean;
+}
+
+/** The `GET /goals` payload. */
+export interface DaemonGoalList {
+  goals: DaemonGoal[];
+  /**
+   * Sessions whose goal could not be probed (wedged or dying child). Their
+   * goals are missing from `goals`, so a non-zero count means this list is
+   * incomplete rather than empty.
+   */
+  droppedCount: number;
+}
+
+export interface DaemonWorkspacePathSuggestion {
+  name: string;
+  path: string;
+}
+
+export interface DaemonWorkspacePathSuggestions {
+  kind: 'workspace-path-suggestions';
+  /** Directory the suggestions were listed from. */
+  dir: string;
+  /** Path separator of the daemon host, for appending on accept. */
+  sep: string;
+  suggestions: DaemonWorkspacePathSuggestion[];
+  truncated: boolean;
+}
+
+export type DaemonWorkspaceDirectoryPickerResult =
+  | {
+      kind: 'workspace-directory-picker';
+      selected: true;
+      path: string;
+    }
+  | {
+      kind: 'workspace-directory-picker';
+      selected: false;
+    };
 
 export interface DaemonWorkspaceActions {
   // Sessions
@@ -281,8 +391,29 @@ export interface DaemonWorkspaceActions {
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
 
+  // Channels
+  loadChannels(): Promise<DaemonChannelsResource>;
+  upsertChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  removeChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  setChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  startChannel(name: string): Promise<DaemonChannelMutationResult>;
+  stopChannel(name: string): Promise<DaemonChannelMutationResult>;
+  restartChannel(name: string): Promise<DaemonChannelMutationResult>;
+  channelPairing: DaemonChannelPairingActions;
+
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
+  initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -292,6 +423,10 @@ export interface DaemonWorkspaceActions {
     serverName: string,
     action: DaemonMcpManageAction,
   ): Promise<DaemonMcpManageResult>;
+  addRuntimeMcpServer(
+    request: DaemonRuntimeMcpAddRequest,
+  ): Promise<DaemonRuntimeMcpAddResult>;
+  removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(
@@ -304,22 +439,37 @@ export interface DaemonWorkspaceActions {
     heatmapDays?: number;
   }): Promise<DaemonUsageDashboard>;
 
-  // Skills (read-only)
+  // Skills
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult>;
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult>;
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
 
   // Tools
+  preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
 
   // Settings
   loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
+    options?: {
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
@@ -327,9 +477,17 @@ export interface DaemonWorkspaceActions {
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
+
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
+  getAgent(
+    agentType: string,
+    scope?: 'workspace' | 'global',
+  ): Promise<DaemonWorkspaceAgentDetail>;
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;
@@ -354,19 +512,34 @@ export interface DaemonWorkspaceActions {
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
 
-  // Scheduled tasks (durable cron)
-  listScheduledTasks(): Promise<DaemonScheduledTask[]>;
+  // Scheduled tasks (durable cron). The optional `workspaceId` targets a
+  // registered non-primary workspace's own cron file via the workspace-qualified
+  // route; omit it (or pass the primary's) to hit the primary `/scheduled-tasks`
+  // surface. The aggregated Web Shell view fans `listScheduledTasks` out over
+  // every trusted workspace and threads each task's `workspaceId` back into the
+  // mutations.
+  listScheduledTasks(workspaceId?: string): Promise<DaemonScheduledTask[]>;
   createScheduledTask(
     req: DaemonCreateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
    * prompt itself is executed by the caller in the task's bound session. */
-  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string): Promise<void>;
+  runScheduledTask(
+    id: string,
+    workspaceId?: string,
+  ): Promise<DaemonScheduledTask>;
+  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+
+  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  listGoals(): Promise<DaemonGoalList>;
+  /** Drop a session's goal hook. No-op when that session has no active goal. */
+  clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
@@ -391,6 +564,13 @@ export interface DaemonWorkspaceActions {
   extensionOperationStatus(
     operationId: string,
   ): Promise<ExtensionOperationStatus>;
+  activeExtensionOperations(): Promise<ExtensionActiveOperations>;
+  respondToExtensionInteraction(
+    operationId: string,
+    interactionId: string,
+    response: ExtensionInteractionResponse,
+    clientId?: string,
+  ): Promise<ExtensionInteractionResponseResult>;
   checkExtensionUpdates(
     clientId?: string,
   ): Promise<ExtensionUpdateCheckResponse>;
@@ -428,4 +608,26 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+  deleteModel(
+    target: DaemonModelDeleteRequest,
+  ): Promise<DaemonModelDeleteResult>;
+
+  // Workspace management
+  addWorkspace(
+    cwd: string,
+    options?: { persist?: boolean; displayName?: string },
+  ): Promise<DaemonAddWorkspaceResult>;
+  addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  suggestWorkspacePaths(
+    prefix: string,
+  ): Promise<DaemonWorkspacePathSuggestions>;
+  pickWorkspaceDirectory(): Promise<DaemonWorkspaceDirectoryPickerResult>;
+  updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability>;
+  removeWorkspace(
+    workspaceId: string,
+    options?: { force?: boolean; timeoutMs?: number },
+  ): Promise<DaemonWorkspaceRemovalResult>;
 }

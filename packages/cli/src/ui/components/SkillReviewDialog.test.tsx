@@ -5,6 +5,8 @@
  */
 
 import { render as inkRender } from 'ink-testing-library';
+import { Box } from 'ink';
+import stripAnsi from 'strip-ansi';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -176,6 +178,36 @@ describe('SkillReviewDialog', () => {
     expect(lastFrame()).toContain('auto-skill-alpha');
     expect(lastFrame()).toContain('does alpha');
     expect(lastFrame()).toContain('1/2');
+  });
+
+  // Regression for #7037: the outer Box used width="100%" PLUS marginLeft={1},
+  // making the dialog one column wider than the layout's dialog container
+  // (DefaultAppLayout caps it at mainAreaWidth with overflow hidden), so the
+  // right border was clipped off. Render inside an equivalent fixed-width,
+  // overflow-hidden container and require every border row to still end with
+  // its right-edge glyph.
+  it('does not overflow a width-constrained container (right border stays visible)', () => {
+    const { lastFrame } = render(
+      <Box width={60} flexDirection="column" overflow="hidden">
+        <SkillReviewDialog
+          skills={skills}
+          onAccept={vi.fn()}
+          onReject={vi.fn()}
+          onClose={vi.fn()}
+          onDismiss={vi.fn()}
+        />
+      </Box>,
+    );
+    const lines = lastFrame()!
+      .split('\n')
+      .map((line) => stripAnsi(line).trimEnd())
+      .filter((line) => line !== '');
+    expect(lines.length).toBeGreaterThan(2);
+    expect(lines[0]!.endsWith('╮')).toBe(true);
+    expect(lines[lines.length - 1]!.endsWith('╯')).toBe(true);
+    for (const line of lines.slice(1, -1)) {
+      expect(line.endsWith('│')).toBe(true);
+    }
   });
 
   it('offers keep / discard / bulk / turn-off options while several remain', () => {

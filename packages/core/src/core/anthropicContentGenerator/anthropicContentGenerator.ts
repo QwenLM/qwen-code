@@ -44,8 +44,18 @@ import { createChildAbortController } from '../../utils/abortController.js';
 import {
   tokenLimit,
   hasExplicitOutputLimit,
+  defaultOutputCeiling,
+  reconcileMaxTokens,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
+import {
+  reportAnthropicEvent,
+  reportAnthropicFollowingRequest,
+  reportAnthropicRequest,
+  reportAnthropicResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -251,9 +261,20 @@ type StreamingBlockState = {
 // and the adaptive shape for 4.6+. Centralized so the message-params type,
 // the streaming-request override, and `buildThinkingConfig`'s return type
 // stay in lockstep when a third shape (e.g. `extended`) eventually lands.
+//
+// `display` controls whether adaptive thinking is rendered as readable text
+// ('summarized') or withheld ('omitted', the server default per Anthropic's
+// own migration docs — Opus 4.7+/Fable 5/etc. all default to 'omitted', so
+// a caller that surfaces reasoning to users must set 'summarized' or every
+// thinking block comes back empty).
+type AnthropicThinkingDisplay = 'summarized' | 'omitted';
 type AnthropicThinkingParam =
-  | { type: 'enabled'; budget_tokens: number }
-  | { type: 'adaptive' };
+  | {
+      type: 'enabled';
+      budget_tokens: number;
+      display?: AnthropicThinkingDisplay;
+    }
+  | { type: 'adaptive'; display?: AnthropicThinkingDisplay };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -344,11 +365,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     try {
       const anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
+      const telemetryAttempt = reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
         signal: perRequestAc?.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
       throw redactProxyError(error);
     } finally {
@@ -370,6 +393,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
     runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
+    const telemetryAttempt = reportAnthropicRequest(streamingRequest);
 
     // Wrap the caller's signal in a per-request child so the Anthropic SDK's
     // leaked abort listener (core.mjs fetchWithTimeout registers one with no
@@ -399,6 +423,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       anthropicRequest,
       perRequestAc.signal,
       headers,
+      telemetryAttempt,
     );
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
@@ -516,8 +541,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // The `prompt-caching-scope-2026-01-05` beta is meaningful only when
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
+    // (the static-prefix block when the system prompt is split)
     // and the last tool entry when `useGlobalCacheScope` is true (gated
-    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
     // re-deriving the gate here, so:
     //   1. The beta and the body-side field share a single source of
@@ -532,6 +558,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('prompt-caching-scope-2026-01-05');
     }
 
+    // Sent defensively whenever the body carries `ttl: '1h'`. Live
+    // verification against the Anthropic Messages API (via Vertex AI)
+    // found this header has no observable effect there -- identical
+    // `ephemeral_1h_input_tokens` with and without it across every
+    // currently-active model -- but omitting it risks a hard 400 on any
+    // Anthropic-compatible backend that still enforces the beta gate.
+    if (this.hasExtendedCacheTtlOnWire(anthropicRequest)) {
+      betas.push('extended-cache-ttl-2025-04-11');
+    }
+
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
@@ -539,8 +575,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
-   * `cache_control` entries this request. Requires both
-   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * `cache_control` entries this request. Requires
+   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
+   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
+   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -557,9 +595,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * to attach scope to, beta correctly suppressed).
    */
   private useGlobalCacheScope(): boolean {
+    if (this.contentGeneratorConfig.enableCacheControl === false) {
+      return false;
+    }
     return (
-      this.contentGeneratorConfig.enableCacheControl !== false &&
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.forceGlobalCacheScope === true
     );
   }
 
@@ -590,6 +631,51 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (Array.isArray(req.tools)) {
       for (const tool of req.tools) {
         if (isGlobalScope(tool)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether the assembled request body carries any
+   * `cache_control: { ..., ttl: '1h' }` entry. Scans the system block,
+   * tools array, and message content blocks — every place the converter
+   * attaches `cache_control` (system text, last tool, trailing user
+   * message). Used to gate the `extended-cache-ttl-2025-04-11` beta
+   * header defensively: live verification found the header has no
+   * observable effect on this proxy/Vertex backend (identical
+   * `ephemeral_1h_input_tokens` with and without it), but a hard
+   * requirement can't be ruled out for every Anthropic-compatible
+   * backend, so it is sent whenever the body actually requests the 1h
+   * tier -- same single-source-of-truth pattern as
+   * {@link hasGlobalCacheScopeOnWire}.
+   */
+  private hasExtendedCacheTtlOnWire(
+    req: MessageCreateParamsWithThinking,
+  ): boolean {
+    const hasTtl1h = (block: unknown): boolean => {
+      if (!block || typeof block !== 'object') return false;
+      const cc = (block as { cache_control?: unknown }).cache_control;
+      if (!cc || typeof cc !== 'object') return false;
+      return (cc as { ttl?: string }).ttl === '1h';
+    };
+
+    if (Array.isArray(req.system)) {
+      for (const block of req.system) {
+        if (hasTtl1h(block)) return true;
+      }
+    }
+    if (Array.isArray(req.tools)) {
+      for (const tool of req.tools) {
+        if (hasTtl1h(tool)) return true;
+      }
+    }
+    if (Array.isArray(req.messages)) {
+      for (const message of req.messages) {
+        if (!Array.isArray(message.content)) continue;
+        for (const block of message.content) {
+          if (hasTtl1h(block)) return true;
+        }
       }
     }
     return false;
@@ -647,6 +733,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const dropUnsignedAssistantThinking =
+      !isDeepSeek &&
+      !!thinking &&
+      this.modelSupportsAdaptiveThinking() &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+    // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
+    // message has role 'assistant' ("assistant message prefill") with a
+    // hard 400 — per Anthropic's own migration guidance this is a
+    // model-generation behavior change, identical on the native API,
+    // Vertex AI, and Bedrock, so (unlike the signature workaround above)
+    // this is NOT gated on baseURL.
+    const stripTrailingAssistantPrefill = this.modelSupportsAdaptiveThinking();
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -656,9 +754,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // ContentGenerator. (Non-qwen-oauth providers refresh via generator
     // recreation, so `baseUrl` is captured fresh at construct time, not
     // mutated mid-session — defensive per-request reads on both fields
-    // cover both paths.) `useGlobalCacheScope` is a strict subset of
-    // `enableCacheControl` (true only when caching is on AND the resolved
-    // baseURL is Anthropic-native) and governs whether the body's
+    // cover both paths.) `useGlobalCacheScope` requires
+    // `enableCacheControl` (true only when caching is on AND either the resolved
+    // baseURL is Anthropic-native OR `forceGlobalCacheScope` is set) and governs whether the body's
     // `cache_control` entries carry `scope: 'global'`. The matching
     // `prompt-caching-scope-2026-01-05` beta isn't passed through this
     // sample — `buildPerRequestHeaders` instead scans the assembled body
@@ -667,27 +765,54 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const enableCacheControl =
       this.contentGeneratorConfig.enableCacheControl !== false;
     const useGlobalCacheScope = this.useGlobalCacheScope();
+    const cacheRetention = this.contentGeneratorConfig.cacheRetention;
+    const cacheRetentionByBlock =
+      this.contentGeneratorConfig.cacheRetentionByBlock;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
-        // Both run together: normalization fills missing signatures so the
-        // injection pass treats those blocks as already-present, and the
-        // injection adds a synthetic block on tool_use turns lacking one.
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude uses the separate unsigned-thinking cleanup below because an
+        // empty string cannot replace Claude's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
         stripAssistantThinking,
+        stripTrailingAssistantPrefill,
         enableCacheControl,
         useGlobalCacheScope,
+        cacheRetention,
+        cacheRetentionByBlock,
+        // Read per request (not latched at construction): the client
+        // re-records the prefix whenever it rebuilds the system prompt
+        // (memory refresh, model change), and the converter fails open to
+        // the single-block layout when the request's system text doesn't
+        // start with it (subagent prompts, stale prefix).
+        staticSystemPrefix: this.cliConfig.getStaticSystemPrefix(),
       },
     );
 
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(
           request.config.tools,
-          { enableCacheControl, useGlobalCacheScope },
+          {
+            enableCacheControl,
+            useGlobalCacheScope,
+            cacheRetention,
+            cacheRetentionByBlock,
+          },
         )
       : undefined;
+
+    // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
+    // tool_choice. Without this, the API defaults to tool_choice=auto and
+    // the model may legitimately skip tool calls — a problem for structured
+    // side queries (e.g. the AUTO-mode classifier's respond_in_schema) where
+    // the model must emit a tool call. Adaptive-thinking models (Claude
+    // 4.6+) compound this by consuming output budget on server-driven
+    // thinking before any tool_use, making forced tool_choice essential.
+    const toolChoice = this.resolveToolChoice(request, tools);
 
     return {
       model: this.contentGeneratorConfig.model,
@@ -697,6 +822,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ...sampling,
       ...(thinking ? { thinking } : {}),
       ...(outputConfig ? { output_config: outputConfig } : {}),
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
     };
   }
 
@@ -720,8 +846,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
-    // Apply output token limit logic consistent with OpenAI providers
-    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    // Apply output token limit logic consistent with OpenAI providers.
+    // A config-level max_tokens is a ceiling, not an exemption from the
+    // window clamp: when the request also carries a (clamped)
+    // maxOutputTokens, the smaller of the two goes on the wire so
+    // `prompt + max_tokens ≤ window` holds for samplingParams users too.
+    const configMaxTokens = configSamplingParams?.max_tokens as
+      | number
+      | undefined
+      | null;
+    const requestMaxTokens = requestConfig.maxOutputTokens;
+    const userMaxTokens =
+      reconcileMaxTokens(configMaxTokens, requestMaxTokens) ??
+      configMaxTokens ??
+      requestMaxTokens;
     const modelId = this.contentGeneratorConfig.model;
     const modelLimit = tokenLimit(modelId, 'output');
     const isKnownModel = hasExplicitOutputLimit(modelId);
@@ -732,7 +870,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? Math.min(userMaxTokens, modelLimit)
         : userMaxTokens;
     } else {
-      // No explicit user config — check env var, then use the model limit.
+      // No explicit user config — check env var, then use the model limit
+      // clipped to the flat output ceiling.
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -741,7 +880,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = modelLimit;
+        maxTokens = defaultOutputCeiling(modelId);
       }
     }
 
@@ -953,8 +1092,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Models that support adaptive thinking use { type: 'adaptive' } without
     // a budget_tokens field. The server controls the thinking budget via
     // output_config.effort instead.
+    //
+    // `display: 'summarized'` is set explicitly rather than relying on the
+    // server default: Sonnet 4.6 defaults adaptive thinking's `display` to
+    // `'summarized'`, but Opus 4.7+ and every 5.x family (Sonnet 5, Fable 5,
+    // Mythos 5, …) silently changed the default to `'omitted'` — with no
+    // error, thinking blocks stream back with empty `thinking` text, which
+    // looks like a long pause before output to anyone rendering reasoning.
+    // Setting it explicitly is a no-op on 4.6 (matches its existing default)
+    // and required on 4.7+ to keep behavior consistent across the whole
+    // adaptive-thinking model population.
     if (this.modelSupportsAdaptiveThinking()) {
-      return { type: 'adaptive' };
+      return { type: 'adaptive', display: 'summarized' };
     }
 
     // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has
@@ -993,6 +1142,31 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return { effort: effectiveEffort };
   }
 
+  /**
+   * Translate the Gemini-style `toolConfig.functionCallingConfig.mode` on
+   * the request into an Anthropic `tool_choice` value.
+   *
+   * Mapping:
+   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
+   *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
+   *     should omit `tools` entirely)
+   *
+   * Only emitted when `tools` is non-empty — Anthropic rejects requests
+   * that carry `tool_choice` without a `tools` array.
+   */
+  private resolveToolChoice(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[] | undefined,
+  ): NonNullable<MessageCreateParamsNonStreaming['tool_choice']> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
+    if (mode === 'ANY') {
+      return { type: 'any' };
+    }
+    return undefined;
+  }
+
   private async *redactStreamErrors(
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<RawMessageStreamEvent> {
@@ -1007,46 +1181,83 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
-    let model = this.contentGeneratorConfig.model;
+    let model: string | undefined;
     let cachedTokens = 0;
     let cacheCreationTokens = 0;
+    let cachedTokensReported = false;
+    let cacheCreationTokensReported = false;
     let promptTokens = 0;
+    let promptTokensReported = false;
     let completionTokens = 0;
+    let completionTokensReported = false;
     let finishReason: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const collectedResponses: GenerateContentResponse[] = [];
+    let messageStartUsagePending = false;
+    const takePendingMessageStartUsage = () => {
+      if (!messageStartUsagePending) return undefined;
+      messageStartUsagePending = false;
+      return buildAnthropicUsageMetadata({
+        inputTokens: promptTokens,
+        cacheReadTokens: cachedTokens,
+        cacheCreationTokens,
+        outputTokens: completionTokensReported ? completionTokens : undefined,
+        cacheReadTokensReported: cachedTokensReported,
+        cacheCreationTokensReported,
+      });
+    };
 
     for await (const event of stream) {
+      reportAnthropicEvent(telemetryAttempt, event);
       switch (event.type) {
         case 'message_start': {
           messageId = event.message.id ?? messageId;
           model = event.message.model ?? model;
+          promptTokensReported ||=
+            typeof event.message.usage?.input_tokens === 'number';
+          completionTokensReported ||=
+            typeof event.message.usage?.output_tokens === 'number';
+          cachedTokensReported ||=
+            typeof event.message.usage?.cache_read_input_tokens === 'number';
+          cacheCreationTokensReported ||=
+            typeof event.message.usage?.cache_creation_input_tokens ===
+            'number';
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
           cacheCreationTokens =
             event.message.usage?.cache_creation_input_tokens ??
             cacheCreationTokens;
           promptTokens = event.message.usage?.input_tokens ?? promptTokens;
+          completionTokens =
+            event.message.usage?.output_tokens ?? completionTokens;
+          messageStartUsagePending =
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported;
           break;
         }
         case 'content_block_start': {
           const index = event.index ?? 0;
           const type = String(event.content_block.type || 'text');
+          const id =
+            'id' in event.content_block ? event.content_block.id : undefined;
+          const name =
+            'name' in event.content_block
+              ? event.content_block.name
+              : undefined;
           const initialInput =
             type === 'tool_use' && 'input' in event.content_block
               ? JSON.stringify(event.content_block.input)
               : '';
           blocks.set(index, {
             type,
-            id:
-              'id' in event.content_block ? event.content_block.id : undefined,
-            name:
-              'name' in event.content_block
-                ? event.content_block.name
-                : undefined,
+            id,
+            name,
             inputJson: initialInput !== '{}' ? initialInput : '',
             signature:
               type === 'thinking' &&
@@ -1055,6 +1266,24 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 ? event.content_block.signature
                 : '',
           });
+          if (
+            type === 'tool_use' &&
+            typeof id === 'string' &&
+            id.length > 0 &&
+            typeof name === 'string' &&
+            name.length > 0
+          ) {
+            const chunk = this.buildGeminiChunk(
+              undefined,
+              messageId,
+              model,
+              undefined,
+              takePendingMessageStartUsage(),
+            );
+            setToolCallPreparations(chunk, [{ callId: id, toolName: name }]);
+            collectedResponses.push(chunk);
+            yield chunk;
+          }
           break;
         }
         case 'content_block_delta': {
@@ -1065,7 +1294,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk({ text }, messageId, model);
+              const chunk = this.buildGeminiChunk(
+                { text },
+                messageId,
+                model,
+                undefined,
+                takePendingMessageStartUsage(),
+              );
               collectedResponses.push(chunk);
               yield chunk;
             }
@@ -1077,6 +1312,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { text: thinking, thought: true },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1090,6 +1327,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1118,6 +1357,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
               },
               messageId,
               model,
+              undefined,
+              takePendingMessageStartUsage(),
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1142,27 +1383,32 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (event.usage?.output_tokens !== undefined) {
             completionTokens = event.usage.output_tokens;
+            completionTokensReported = true;
           }
           if (usageRecord?.['input_tokens'] !== undefined) {
             const inputTokens = usageRecord['input_tokens'];
             if (typeof inputTokens === 'number') {
               promptTokens = inputTokens;
+              promptTokensReported = true;
             }
           }
           if (usageRecord?.['cache_read_input_tokens'] !== undefined) {
             const cacheRead = usageRecord['cache_read_input_tokens'];
             if (typeof cacheRead === 'number') {
               cachedTokens = cacheRead;
+              cachedTokensReported = true;
             }
           }
           if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
             const cacheCreate = usageRecord['cache_creation_input_tokens'];
             if (typeof cacheCreate === 'number') {
               cacheCreationTokens = cacheCreate;
+              cacheCreationTokensReported = true;
             }
           }
 
           if (finishReason || event.usage) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1172,7 +1418,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1181,7 +1431,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           break;
         }
         case 'message_stop': {
-          if (promptTokens || completionTokens) {
+          if (
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported
+          ) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1191,7 +1447,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1215,11 +1475,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     fallbackRequest: MessageCreateParamsWithThinking,
     abortSignal: AbortSignal | undefined,
     headers: Record<string, string> | undefined,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let hasAssistantPayload = false;
     let hasFinishReason = false;
 
-    for await (const chunk of this.processStream(stream)) {
+    for await (const chunk of this.processStream(stream, telemetryAttempt)) {
       const candidates = chunk.candidates ?? [];
       hasFinishReason ||= candidates.some(
         (candidate) => candidate.finishReason !== undefined,
@@ -1248,10 +1509,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let response: Message;
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
+      const fallbackAttempt = reportAnthropicFollowingRequest(
+        fallbackRequest,
+        telemetryAttempt,
+      );
       response = (await this.client.messages.create(fallbackRequest, {
         signal: abortSignal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(fallbackAttempt, response);
       yield this.converter.convertAnthropicResponseToGemini(response);
     } catch (error) {
       throw redactProxyError(error);
@@ -1273,7 +1539,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
     response.createTime = Date.now().toString();
-    response.modelVersion = model || this.contentGeneratorConfig.model;
+    response.modelVersion = model || undefined;
     response.promptFeedback = { safetyRatings: [] };
 
     const candidateParts = part ? [part as unknown as Part] : [];

@@ -3,10 +3,15 @@ import {
   normalize,
   tokenLimit,
   knownTokenLimit,
-  escalatedOutputTokenLimit,
+  clampOutputTokensToWindow,
+  outputClampMargin,
+  defaultOutputCeiling,
+  reconcileMaxTokens,
   DEFAULT_TOKEN_LIMIT,
   DEFAULT_OUTPUT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  MIN_CLAMPED_OUTPUT_TOKENS,
+  OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
 
 describe('normalize', () => {
@@ -21,6 +26,17 @@ describe('normalize', () => {
 
   it('should handle pipe and colon separators', () => {
     expect(normalize('qwen|qwen2.5:qwen2.5-1m')).toBe('qwen2.5-1m');
+  });
+
+  it('should keep the model name when the colon carries a variant tag', () => {
+    // OpenRouter variants and Ollama / LM Studio tags put the colon on the
+    // right of the model name — the opposite side from the `family:model`
+    // form above — so the half worth keeping is the left one.
+    expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
+    expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
+    expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
+    expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
+    expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
   });
 
   it('should collapse whitespace to a single hyphen', () => {
@@ -137,8 +153,13 @@ describe('tokenLimit', () => {
   });
 
   describe('Anthropic Claude', () => {
-    it('should return 200K for all Claude models', () => {
-      expect(tokenLimit('claude-opus-4-6')).toBe(200000);
+    it('should return 1M for Opus 4.6 through 4.8', () => {
+      expect(tokenLimit('claude-opus-4-6')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-7')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-4-8')).toBe(1_000_000);
+    });
+
+    it('should return 200K for other Claude models', () => {
       expect(tokenLimit('claude-sonnet-4-6')).toBe(200000);
       expect(tokenLimit('claude-sonnet-4')).toBe(200000);
       expect(tokenLimit('claude-opus-4')).toBe(200000);
@@ -271,6 +292,37 @@ describe('tokenLimit', () => {
   });
 });
 
+describe('variant-tagged model ids', () => {
+  it('resolves the same limit with and without the tag', () => {
+    for (const [tagged, bare] of [
+      ['qwen/qwen3-coder:free', 'qwen/qwen3-coder'],
+      ['google/gemini-2.5-pro:online', 'google/gemini-2.5-pro'],
+      ['openai/gpt-5:free', 'openai/gpt-5'],
+      ['qwen2.5-coder:32b', 'qwen2.5-coder'],
+      ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+    ] as Array<[string, string]>) {
+      expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
+      expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
+    }
+  });
+
+  it('reports the real window rather than the default fallback', () => {
+    // Pinned absolutely as well as relatively: if both sides of the
+    // comparison above regressed to the default the pairs would still match.
+    expect(tokenLimit('qwen/qwen3-coder:free')).toBe(262_144);
+    expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
+    expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
+    expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+  });
+
+  it('still keeps the right half of a prefixed id', () => {
+    // The guard against over-correcting: a colon suffix is dropped only when
+    // it looks like a tag, so the `family:model` forms stay as they were.
+    expect(tokenLimit('qwen|qwen2.5:qwen2.5-1m')).toBe(262_144);
+    expect(tokenLimit('  a/b/c|GPT-4o:gpt-4o-2024-05-13-q4  ')).toBe(131_072);
+  });
+});
+
 describe('knownTokenLimit', () => {
   it('returns a limit for known input models', () => {
     expect(knownTokenLimit('qwen3-max')).toBe(262144);
@@ -298,8 +350,10 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('gemini-3-flash-preview', 'output')).toBe(65536);
     });
 
-    it('should return correct output limits for Claude 4.6', () => {
-      expect(tokenLimit('claude-opus-4-6', 'output')).toBe(131072);
+    it('should return correct output limits for Claude Opus 4.6 through 4.8', () => {
+      expect(tokenLimit('claude-opus-4-6', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4-7', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(128_000);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
     });
   });
@@ -386,32 +440,98 @@ describe('tokenLimit with output type', () => {
   });
 });
 
-describe('escalatedOutputTokenLimit', () => {
-  it('uses the escalated floor for unknown models with a large window', () => {
-    expect(escalatedOutputTokenLimit('unknown-model', 200_000)).toBe(
-      ESCALATED_MAX_TOKENS,
+describe('clampOutputTokensToWindow', () => {
+  it('returns the ceiling when the window has plenty of room', () => {
+    // 200K window, 50K prompt, margin = max(10K, 5%×200K) = 10K:
+    // room = 140K, ceiling 32K binds.
+    expect(clampOutputTokensToWindow(32_000, 200_000, 50_000)).toBe(32_000);
+  });
+
+  it('tapers to the room left as the prompt approaches the window', () => {
+    // 200K window, 170K prompt: room = 200K − 170K − 10K = 20K < 32K ceiling.
+    expect(clampOutputTokensToWindow(32_000, 200_000, 170_000)).toBe(20_000);
+  });
+
+  it('keeps prompt + max_tokens under the window (issue #5950 invariant)', () => {
+    // The #5950 shape: 131K window, ~71K prompt, 64K ceiling. The clamp must
+    // never let prompt + output exceed the window.
+    const window = 131_072;
+    const prompt = 71_349;
+    const clamped = clampOutputTokensToWindow(64_000, window, prompt);
+    expect(prompt + clamped).toBeLessThanOrEqual(window);
+    expect(clamped).toBe(window - prompt - outputClampMargin(window));
+  });
+
+  it('floors at MIN_CLAMPED_OUTPUT_TOKENS when no room is left', () => {
+    // Prompt at/above the window: never send max_tokens ≤ 0; compaction /
+    // hard-rescue owns this regime.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(
+      MIN_CLAMPED_OUTPUT_TOKENS,
+    );
+    expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(
+      MIN_CLAMPED_OUTPUT_TOKENS,
     );
   });
 
-  it('caps the reservation at half a small custom window (issue #6144)', () => {
-    // A 64K local model must not have the flat 64K escalation floor
-    // reserved — that would leave only 1,536 tokens of input budget.
-    expect(escalatedOutputTokenLimit('qwen3coder-64k', 65_536)).toBe(32_768);
+  it('scales the margin at 5% for huge windows', () => {
+    expect(outputClampMargin(200_000)).toBe(10_000);
+    expect(outputClampMargin(1_000_000)).toBe(50_000);
+    // Small windows keep the 10K floor.
+    expect(outputClampMargin(40_000)).toBe(10_000);
+    // 1M window, 500K prompt: room = 1M − 500K − 50K = 450K, ceiling binds.
+    expect(clampOutputTokensToWindow(64_000, 1_000_000, 500_000)).toBe(64_000);
   });
 
-  it('uses the model output limit when larger than the floor and within the cap', () => {
-    // claude-sonnet-4-6 declares a 65,536 output limit; half of 200K is 100K.
-    expect(escalatedOutputTokenLimit('claude-sonnet-4-6', 200_000)).toBe(
-      65_536,
-    );
+  it('respects an explicit ceiling below the room', () => {
+    expect(clampOutputTokensToWindow(8_000, 40_000, 10_000)).toBe(8_000);
   });
 
-  it('falls back to DEFAULT_TOKEN_LIMIT for the cap when the window is unset', () => {
-    expect(escalatedOutputTokenLimit('unknown-model')).toBe(
-      Math.min(ESCALATED_MAX_TOKENS, Math.floor(DEFAULT_TOKEN_LIMIT / 2)),
+  it('never inflates an explicit ceiling below the floor (review finding)', () => {
+    // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend:
+    // the floor applies to the ROOM, not to the user's explicit ceiling.
+    expect(clampOutputTokensToWindow(2_000, 200_000, 50_000)).toBe(2_000);
+    // Even with no room left, a tiny explicit ceiling is preserved.
+    expect(clampOutputTokensToWindow(2_000, 40_000, 39_000)).toBe(2_000);
+  });
+
+  it('keeps OUTPUT_TOKEN_CEILING aligned with the escalation target', () => {
+    expect(OUTPUT_TOKEN_CEILING).toBe(ESCALATED_MAX_TOKENS);
+  });
+});
+
+describe('defaultOutputCeiling', () => {
+  it('clips a model advertising more than the ceiling down to it', () => {
+    // deepseek-v4 advertises 384K output → clipped to OUTPUT_TOKEN_CEILING.
+    expect(defaultOutputCeiling('deepseek-v4-pro')).toBe(OUTPUT_TOKEN_CEILING);
+  });
+
+  it('leaves a model below the ceiling untouched', () => {
+    // kimi-k2.5 advertises 32,768 output, below the 64K ceiling.
+    expect(defaultOutputCeiling('kimi-k2.5')).toBe(32_768);
+  });
+
+  it('allows Claude Opus 4.6 through 4.8 to use the full 128K default', () => {
+    expect(defaultOutputCeiling('claude-opus-4-6')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4-7')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(128_000);
+  });
+
+  it('uses the default output limit for an unknown model', () => {
+    expect(defaultOutputCeiling('some-unknown-model')).toBe(
+      Math.min(DEFAULT_OUTPUT_TOKEN_LIMIT, OUTPUT_TOKEN_CEILING),
     );
-    expect(escalatedOutputTokenLimit('unknown-model', 0)).toBe(
-      Math.min(ESCALATED_MAX_TOKENS, Math.floor(DEFAULT_TOKEN_LIMIT / 2)),
-    );
+  });
+});
+
+describe('reconcileMaxTokens', () => {
+  it('takes the smaller when both are numbers (user ceiling never overrides clamp upward)', () => {
+    expect(reconcileMaxTokens(8_000, 5_000)).toBe(5_000);
+    expect(reconcileMaxTokens(5_000, 8_000)).toBe(5_000);
+  });
+
+  it('returns undefined when either side is absent (caller applies its own fallback)', () => {
+    expect(reconcileMaxTokens(8_000, undefined)).toBeUndefined();
+    expect(reconcileMaxTokens(undefined, 8_000)).toBeUndefined();
+    expect(reconcileMaxTokens(null, null)).toBeUndefined();
   });
 });

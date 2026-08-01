@@ -228,6 +228,11 @@
   color: var(--foreground);
 }
 
+.codeBlockCopy:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .codeBlockContent {
   max-width: 100%;
   max-height: none;
@@ -285,7 +290,7 @@
 }
 
 .mermaidBlock :global(svg) {
-  max-width: 100%;
+  max-width: none;
   height: auto;
 }
 
@@ -307,6 +312,18 @@
 .mermaidActions {
   display: flex;
   gap: 4px;
+}
+
+.mermaidZoomWrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.mermaidDragging {
+  cursor: grabbing;
 }
 
 .content :global(.katex-display) {

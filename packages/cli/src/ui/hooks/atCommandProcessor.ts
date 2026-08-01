@@ -19,6 +19,8 @@ import {
   emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
+  SessionService,
+  SessionReferenceService,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -32,6 +34,7 @@ import {
   matchExtensionByRef,
   buildExtensionRef,
 } from './extension-mention-ref.js';
+import { parseSessionRef, buildSessionRef } from './session-mention-ref.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -152,6 +155,14 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
   );
 }
 
+export function extractAtPathCommands(query: string): string[] {
+  return parseAllAtCommands(query).flatMap((part) =>
+    part.type === 'atPath' && part.content !== '@'
+      ? [part.content.substring(1)]
+      : [],
+  );
+}
+
 /**
  * Detect an `@server:uri` MCP resource reference. Returns the parsed
  * `{ serverName, uri }` ONLY when `pathName` is prefixed by a configured MCP
@@ -201,14 +212,43 @@ export async function resolveAtCommandQuery({
   const fileDiscovery = config.getFileService();
 
   const respectFileIgnore = config.getFileFilteringOptions();
+  const configuredProjectTempDir = Storage.getGlobalTempDir();
+  const projectTempDir = await fs
+    .realpath(configuredProjectTempDir)
+    .catch(() => path.resolve(configuredProjectTempDir));
 
   const pathSpecsToRead: string[] = [];
   const atPathToResolvedSpecMap = new Map<string, string>();
   const contentLabelsForDisplay: string[] = [];
+  const displayPaths = new Map<string, string>();
+  const displayPathsByCanonicalPath = new Map<string, Set<string>>();
   const ignoredByReason: Record<string, string[]> = {
     git: [],
     qwen: [],
     both: [],
+  };
+  const getIgnoreReason = (
+    candidate: string,
+  ): 'git' | 'qwen' | 'both' | undefined => {
+    const gitIgnored =
+      respectFileIgnore.respectGitIgnore &&
+      fileDiscovery.shouldIgnoreFile(candidate, {
+        respectGitIgnore: true,
+        respectQwenIgnore: false,
+      });
+    const qwenIgnored =
+      respectFileIgnore.respectQwenIgnore &&
+      fileDiscovery.shouldIgnoreFile(candidate, {
+        respectGitIgnore: false,
+        respectQwenIgnore: true,
+      });
+    return gitIgnored && qwenIgnored
+      ? 'both'
+      : gitIgnored
+        ? 'git'
+        : qwenIgnored
+          ? 'qwen'
+          : undefined;
   };
 
   // MCP resource references (`@server:uri`) collected during the loop and
@@ -230,6 +270,14 @@ export async function resolveAtCommandQuery({
   const extensionMentions: Array<{
     originalAtPath: string;
     extension: Extension;
+  }> = [];
+
+  // Session references (`@session:<id|title>`) collected during the loop and
+  // resolved after it. Each resolves to a slimmed, read-only block of a prior
+  // session's history injected as reference context (never a fork/resume).
+  const sessionMentions: Array<{
+    originalAtPath: string;
+    ref: { id?: string; title?: string };
   }> = [];
 
   for (const atPathPart of atPathCommandParts) {
@@ -262,6 +310,28 @@ export async function resolveAtCommandQuery({
       onDebugMessage(
         `Extension "${extRef.name}" not found among active extensions. ` +
           `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
+    }
+
+    // Session reference (`@session:<id|title>`): detected BEFORE MCP and
+    // filesystem resolution so the ':' in the token isn't mistaken for a path
+    // or intercepted by an MCP server literally named "session". Resolution
+    // (load + slim) happens after the loop; here we only collect and normalize
+    // escaped title delimiters in the prompt text.
+    const sessionRef = parseSessionRef(pathName);
+    if (sessionRef) {
+      if (
+        !sessionMentions.some(
+          (m) =>
+            (m.ref.id ?? m.ref.title) === (sessionRef.id ?? sessionRef.title),
+        )
+      ) {
+        sessionMentions.push({ originalAtPath, ref: sessionRef });
+      }
+      atPathToResolvedSpecMap.set(
+        originalAtPath,
+        buildSessionRef(sessionRef.id ?? sessionRef.title!),
       );
       continue;
     }
@@ -310,12 +380,12 @@ export async function resolveAtCommandQuery({
     const workspaceContext = config.getWorkspaceContext();
 
     // Check if path is in project temp directory
-    const projectTempDir = Storage.getGlobalTempDir();
     const absolutePathName = path.isAbsolute(pathName)
       ? pathName
       : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
 
     if (
+      !isSubpath(configuredProjectTempDir, absolutePathName) &&
       !isSubpath(projectTempDir, absolutePathName) &&
       !workspaceContext.isPathWithinWorkspace(pathName)
     ) {
@@ -325,22 +395,9 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const gitIgnored =
-      respectFileIgnore.respectGitIgnore &&
-      fileDiscovery.shouldIgnoreFile(pathName, {
-        respectGitIgnore: true,
-        respectQwenIgnore: false,
-      });
-    const qwenIgnored =
-      respectFileIgnore.respectQwenIgnore &&
-      fileDiscovery.shouldIgnoreFile(pathName, {
-        respectGitIgnore: false,
-        respectQwenIgnore: true,
-      });
-
-    if (gitIgnored || qwenIgnored) {
-      const reason =
-        gitIgnored && qwenIgnored ? 'both' : gitIgnored ? 'git' : 'qwen';
+    const ignoredReason = getIgnoreReason(pathName);
+    if (ignoredReason) {
+      const reason = ignoredReason;
       ignoredByReason[reason].push(pathName);
       const reasonText =
         reason === 'both'
@@ -354,17 +411,49 @@ export async function resolveAtCommandQuery({
 
     let resolvedSuccessfully = false;
     let sawNotFound = false;
+    let deferredIgnoreReason: string | undefined;
     for (const dir of config.getWorkspaceContext().getDirectories()) {
-      let currentPathSpec = pathName;
       try {
         const absolutePath = path.resolve(dir, pathName);
-        const stats = await fs.stat(absolutePath);
+        const canonicalPath = await fs.realpath(absolutePath);
+        const stats = await fs.stat(canonicalPath);
+        if (
+          !isSubpath(configuredProjectTempDir, canonicalPath) &&
+          !isSubpath(projectTempDir, canonicalPath) &&
+          !workspaceContext.isPathWithinWorkspace(canonicalPath)
+        ) {
+          onDebugMessage(
+            `Path ${pathName} is not in the workspace and will be skipped.`,
+          );
+          continue;
+        }
+        const canonicalIgnoreReason = getIgnoreReason(canonicalPath);
+        if (canonicalIgnoreReason) {
+          deferredIgnoreReason = canonicalIgnoreReason;
+          const reasonText =
+            canonicalIgnoreReason === 'both'
+              ? 'ignored by both git and qwen'
+              : canonicalIgnoreReason === 'git'
+                ? 'git-ignored'
+                : 'qwen-ignored';
+          onDebugMessage(
+            `Path ${pathName} is ${reasonText} and will be skipped.`,
+          );
+          continue;
+        }
         if (stats.isDirectory()) {
-          currentPathSpec = pathName;
           onDebugMessage(`Path ${pathName} resolved to directory.`);
         } else {
           onDebugMessage(`Path ${pathName} resolved to file: ${absolutePath}`);
         }
+        pathSpecsToRead.push(canonicalPath);
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        contentLabelsForDisplay.push(pathName);
+        displayPaths.set(canonicalPath, pathName);
+        const canonicalDisplays =
+          displayPathsByCanonicalPath.get(canonicalPath) ?? new Set<string>();
+        canonicalDisplays.add(pathName);
+        displayPathsByCanonicalPath.set(canonicalPath, canonicalDisplays);
         resolvedSuccessfully = true;
       } catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT') {
@@ -377,9 +466,6 @@ export async function resolveAtCommandQuery({
         }
       }
       if (resolvedSuccessfully) {
-        pathSpecsToRead.push(currentPathSpec);
-        atPathToResolvedSpecMap.set(originalAtPath, currentPathSpec);
-        contentLabelsForDisplay.push(pathName);
         break;
       }
     }
@@ -388,50 +474,43 @@ export async function resolveAtCommandQuery({
         `Path ${pathName} not found. Path ${pathName} will be skipped.`,
       );
     }
-  }
-
-  // Construct the initial part of the query for the LLM
-  let initialQueryText = '';
-  for (let i = 0; i < commandParts.length; i++) {
-    const part = commandParts[i];
-    if (part.type === 'text') {
-      initialQueryText += part.content;
-    } else {
-      // type === 'atPath'
-      const resolvedSpec = atPathToResolvedSpecMap.get(part.content);
-      if (
-        i > 0 &&
-        initialQueryText.length > 0 &&
-        !initialQueryText.endsWith(' ')
-      ) {
-        // Add space if previous part was text and didn't end with space, or if previous was @path
-        const prevPart = commandParts[i - 1];
-        if (
-          prevPart.type === 'text' ||
-          (prevPart.type === 'atPath' &&
-            atPathToResolvedSpecMap.has(prevPart.content))
-        ) {
-          initialQueryText += ' ';
-        }
-      }
-      if (resolvedSpec) {
-        initialQueryText += `@${resolvedSpec}`;
-      } else {
-        // If not resolved for reading (e.g. lone @ or invalid path that was skipped),
-        // add the original @-string back, ensuring spacing if it's not the first element.
-        if (
-          i > 0 &&
-          initialQueryText.length > 0 &&
-          !initialQueryText.endsWith(' ') &&
-          !part.content.startsWith(' ')
-        ) {
-          initialQueryText += ' ';
-        }
-        initialQueryText += part.content;
-      }
+    if (!resolvedSuccessfully && deferredIgnoreReason) {
+      ignoredByReason[deferredIgnoreReason].push(pathName);
     }
   }
-  initialQueryText = initialQueryText.trim();
+
+  const buildInitialQueryText = () => {
+    let text = '';
+    for (let i = 0; i < commandParts.length; i++) {
+      const part = commandParts[i];
+      if (part.type === 'text') {
+        text += part.content;
+      } else {
+        const resolvedSpec = atPathToResolvedSpecMap.get(part.content);
+        if (i > 0 && text.length > 0 && !text.endsWith(' ')) {
+          const prevPart = commandParts[i - 1];
+          if (prevPart.type === 'text' || prevPart.type === 'atPath') {
+            text += ' ';
+          }
+        }
+        if (resolvedSpec) {
+          text += `@${resolvedSpec}`;
+        } else {
+          if (
+            i > 0 &&
+            text.length > 0 &&
+            !text.endsWith(' ') &&
+            !part.content.startsWith(' ')
+          ) {
+            text += ' ';
+          }
+          text += part.content;
+        }
+      }
+    }
+    return text.trim();
+  };
+  let initialQueryText = buildInitialQueryText();
 
   // Inform user about ignored paths
   const totalIgnored =
@@ -526,7 +605,8 @@ export async function resolveAtCommandQuery({
     pathSpecsToRead.length === 0 &&
     mcpResourceRefs.length === 0 &&
     mcpServerMentions.length === 0 &&
-    extensionMentions.length === 0
+    extensionMentions.length === 0 &&
+    sessionMentions.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
@@ -600,6 +680,154 @@ export async function resolveAtCommandQuery({
     });
   }
 
+  // Resolve session references: load + deterministically slim a prior session
+  // and inject it as a read-only reference block. A miss (not-found / ambiguous
+  // title) surfaces an error card and leaves the `@session:` token as literal
+  // text (already retained above), never aborting the turn.
+  const resolvedSessionIds = new Set<string>();
+  for (let i = 0; i < sessionMentions.length; i++) {
+    const { originalAtPath, ref } = sessionMentions[i];
+    const callId = `client-session-${userMessageTimestamp}-${i}`;
+
+    let sessionId = ref.id;
+    if (!sessionId && ref.title) {
+      let matches: Array<{ sessionId: string }> = [];
+      try {
+        matches = await new SessionService(
+          config.getProjectRoot(),
+        ).findSessionsByTitle(ref.title);
+      } catch (error: unknown) {
+        const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (${getErrorMessage(error)}); try a session id instead.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title ?? originalAtPath),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title ?? ''}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
+      }
+      if (matches.length === 1) {
+        sessionId = matches[0].sessionId;
+      } else {
+        const reason =
+          matches.length === 0
+            ? `No session matches "@${originalAtPath.substring(1)}".`
+            : `"@${originalAtPath.substring(1)}" is ambiguous (${matches.length} matches); use the picker or a session id.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
+      }
+    }
+
+    if (!sessionId) {
+      const reason = `Session reference "@${originalAtPath.substring(1)}" could not be resolved.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(ref.title ?? ref.id ?? originalAtPath),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session "${ref.title ?? ref.id ?? ''}"`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    // Cross-form dedup: a UUID ref and a title ref may resolve to the
+    // same session — skip if already injected.
+    if (resolvedSessionIds.has(sessionId)) {
+      onDebugMessage(
+        `Session reference "@${originalAtPath.substring(1)}" resolves to session ${sessionId}, which was already referenced; skipping duplicate.`,
+      );
+      continue;
+    }
+    resolvedSessionIds.add(sessionId);
+
+    let resolved;
+    try {
+      resolved = await new SessionReferenceService(
+        config.getProjectRoot(),
+      ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+    } catch (error: unknown) {
+      const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    if ('notFound' in resolved) {
+      const reason = `Session "${sessionId}" not found in this project.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: resolved.text },
+      label: buildSessionRef(sessionId),
+      display: {
+        callId,
+        name: 'Referenced Session',
+        description: `Referenced session "${resolved.meta.title}"${
+          resolved.truncated ? ' (truncated)' : ''
+        }`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
   const scopedMentionOrder = new Map(
     atPathCommandParts.map((part, index) => [part.content, index]),
   );
@@ -618,12 +846,70 @@ export async function resolveAtCommandQuery({
   // any extension/resource tool-cards already gathered are still surfaced.
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
-  if (pathSpecsToRead.length > 0) {
+  const revalidatedPathSpecs: string[] = [];
+  const revalidatedDisplayPaths = new Map<string, string>();
+  const validatedPathIdentities = new Map<
+    string,
+    { dev: number; ino: number }
+  >();
+  const pruneSkippedPath = (approvedPath: string) => {
+    const displayPath = displayPaths.get(approvedPath);
+    const displayLabels =
+      displayPathsByCanonicalPath.get(approvedPath) ??
+      new Set(displayPath ? [displayPath] : []);
+    for (const [originalAtPath, resolvedSpec] of atPathToResolvedSpecMap) {
+      if (resolvedSpec === approvedPath || displayLabels.has(resolvedSpec)) {
+        atPathToResolvedSpecMap.delete(originalAtPath);
+      }
+    }
+    for (let index = contentLabelsForDisplay.length - 1; index >= 0; index--) {
+      const label = contentLabelsForDisplay[index];
+      if (label === approvedPath || displayLabels.has(label)) {
+        contentLabelsForDisplay.splice(index, 1);
+      }
+    }
+  };
+  for (const approvedPath of pathSpecsToRead) {
+    try {
+      const currentPath = await fs.realpath(approvedPath);
+      const stats = await fs.stat(currentPath);
+      if (
+        currentPath === approvedPath &&
+        (stats.isFile() || stats.isDirectory()) &&
+        (isSubpath(configuredProjectTempDir, currentPath) ||
+          isSubpath(projectTempDir, currentPath) ||
+          config.getWorkspaceContext().isPathWithinWorkspace(currentPath)) &&
+        getIgnoreReason(currentPath) === undefined
+      ) {
+        revalidatedPathSpecs.push(currentPath);
+        const displayPath = displayPaths.get(approvedPath);
+        if (displayPath) revalidatedDisplayPaths.set(currentPath, displayPath);
+        validatedPathIdentities.set(currentPath, {
+          dev: stats.dev,
+          ino: stats.ino,
+        });
+      } else {
+        pruneSkippedPath(approvedPath);
+        onDebugMessage(
+          `Path ${approvedPath} failed revalidation and will be skipped.`,
+        );
+      }
+    } catch {
+      pruneSkippedPath(approvedPath);
+      onDebugMessage(
+        `Path ${approvedPath} changed before it could be read and will be skipped.`,
+      );
+    }
+  }
+  initialQueryText = buildInitialQueryText();
+  if (revalidatedPathSpecs.length > 0) {
     try {
       const result = await readManyFiles(config, {
-        paths: pathSpecsToRead,
+        paths: revalidatedPathSpecs,
         signal,
         preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
+        validatedPathIdentities,
+        displayPaths: revalidatedDisplayPaths,
       });
 
       const parts = Array.isArray(result.contentParts)
@@ -633,9 +919,7 @@ export async function resolveAtCommandQuery({
       fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
-        description: file.isDirectory
-          ? `Read directory ${path.basename(file.filePath)}`
-          : `Read file ${path.basename(file.filePath)}`,
+        description: `@${path.basename(file.filePath)}`,
         status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
         resultDisplay: file.error
           ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`

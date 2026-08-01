@@ -155,13 +155,14 @@ const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
 /**
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
  * tools would let a subagent break the "final text IS the return value"
- * contract: SendMessage would deliver the answer to the user instead of
- * the calling script, plan lifecycle tools would interrupt the workflow's
- * plan-mode intent, and MonitorTool depends on AgentTool-owned notification
- * callbacks that workflow subagents do not register. Defense-in-depth alongside
- * the workflow system prompt's return-value contract.
+ * contract: AskUserQuestion and SendMessage would interact outside the calling
+ * script, plan lifecycle tools would interrupt the workflow's plan-mode intent,
+ * and MonitorTool depends on AgentTool-owned notification callbacks that
+ * workflow subagents do not register. Defense-in-depth alongside the workflow
+ * system prompt's return-value contract.
  */
 const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+  ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
@@ -371,6 +372,7 @@ export function createProductionDispatch(
    * just without budget recording.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
@@ -385,15 +387,21 @@ export function createProductionDispatch(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
     return runStallResilient(
-      (attemptSignal, emitter) =>
-        runSingleDispatch(
-          config,
-          prompt,
-          opts,
-          attemptSignal,
-          emitter,
-          onTokens,
-        ),
+      async (attemptSignal, emitter) => {
+        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        try {
+          return await runSingleDispatch(
+            config,
+            prompt,
+            opts,
+            attemptSignal,
+            emitter,
+            onTokens,
+          );
+        } finally {
+          cleanupApprovalBridge?.();
+        }
+      },
       {
         stallMs,
         signal,

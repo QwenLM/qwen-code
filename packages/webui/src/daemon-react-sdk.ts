@@ -73,6 +73,9 @@ export { useDaemonAgents as useAgents } from './daemon/index.js';
 /** Authentication state for the daemon connection. */
 export { useDaemonAuth as useAuth } from './daemon/index.js';
 
+/** Channel catalog, configuration, lifecycle, and pairing management. */
+export { useDaemonChannels as useChannels } from './daemon/index.js';
+
 /** Language diagnostics (errors, warnings) from the workspace. */
 export { useDaemonDiagnostics as useDiagnostics } from './daemon/index.js';
 
@@ -115,6 +118,7 @@ export { useDaemonTools as useTools } from './daemon/index.js';
 
 /** Workspace settings (read/write). */
 export { useDaemonSettings as useSettings } from './daemon/index.js';
+export { useDaemonProviders as useProviders } from './daemon/index.js';
 
 // ── Workspace Hooks ───────────────────────────────────────────────
 
@@ -134,6 +138,9 @@ export { useDaemonWorkspaceEventSignals as useWorkspaceEventSignals } from './da
 
 /** Raw transcript blocks from the SSE stream. For custom message conversion. */
 export { useDaemonTranscriptBlocks as useTranscriptBlocks } from './daemon/session/index.js';
+
+/** Load older persisted transcript pages for the active session. */
+export { useDaemonTranscriptHistory as useTranscriptHistory } from './daemon/session/index.js';
 
 /** Full transcript state including block index and progress tracking. */
 export { useDaemonTranscriptState as useTranscriptState } from './daemon/session/index.js';
@@ -197,6 +204,7 @@ export type {
   DaemonSessionNotice,
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
+  DaemonTranscriptHistory,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
@@ -253,6 +261,8 @@ export type {
 export type {
   /** All workspace-level actions: MCP, tools, memory, agents, files, auth. */
   DaemonWorkspaceActions,
+  DaemonChannelPairingActions,
+  DaemonChannelsResource,
   /** Internal workspace context value (client + actions + status + error). */
   DaemonWorkspaceContextValue,
   /** Props accepted by `<DaemonWorkspaceProvider>`. */
@@ -280,6 +290,10 @@ export type {
   DaemonGlobOptions,
   /** Glob match result containing matched file paths. */
   DaemonGlobResult,
+  /** One session's active `/goal`, as listed workspace-wide by the daemon. */
+  DaemonGoal,
+  /** The `GET /goals` payload: the goals plus a count of unreachable sessions. */
+  DaemonGoalList,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
   /** One recorded fire in a scheduled task's run history. */
@@ -329,6 +343,7 @@ export type {
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */
   DaemonWorkspaceAgentSummary,
+  DaemonWorkspaceGenerationEvent,
   /** MCP server status: name, transport, connection state, disabled reason. */
   DaemonWorkspaceMcpServerStatus,
   /** Single MCP tool: name, description, JSON schema, validity. */
@@ -351,6 +366,33 @@ export type {
   DaemonWorkspaceSettingsStatus,
   /** Result of POST /workspace/settings. */
   DaemonSettingUpdateResult,
+  /** Configured model providers returned by GET /workspace/providers. */
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceProviderStatus,
+  DaemonWorkspaceProviderModel,
+  DaemonChannelConfigFieldKind,
+  DaemonChannelConfigFieldDescriptor,
+  DaemonChannelTypeDescriptor,
+  DaemonChannelTypeCatalog,
+  DaemonChannelRuntimeState,
+  DaemonChannelSecretState,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelsSnapshot,
+  DaemonChannelSecretUpdate,
+  DaemonRevisionRequest,
+  DaemonChannelUpsertRequest,
+  DaemonChannelStartupRequest,
+  DaemonChannelMutationResult,
+  DaemonChannelPairingRequest,
+  DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingApprovalRequest,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
+  /** Request/result for DELETE /workspace/models. */
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
 } from './daemon/index.js';
 
 // ── Types: SDK Transcript Blocks (low-level) ─────────────────────

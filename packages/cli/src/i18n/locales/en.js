@@ -21,6 +21,8 @@ export default {
 
   'User level': 'User level',
   'Project level': 'Project level',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -178,15 +180,19 @@ export default {
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
+  'toolDisplayName.ZoomImage': 'toolDisplayName.ZoomImage',
   'toolDisplayName.Grep': 'toolDisplayName.Grep',
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',
   'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
+  'toolDisplayName.Goal': 'toolDisplayName.Goal',
+  'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -200,6 +206,7 @@ export default {
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
+  'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -216,6 +223,7 @@ export default {
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
+  'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -233,6 +241,8 @@ export default {
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
   'Auto mode': 'Auto mode',
+  'auto_mode.entry_notice':
+    'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -267,7 +277,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to view transcript': 'to view transcript',
+  'to expand details': 'to expand details',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -282,6 +292,7 @@ export default {
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
   '? for shortcuts': '? for shortcuts',
+  'Pasting…': 'Pasting…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -475,6 +486,14 @@ export default {
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.',
+  'The local video could not be attached for /learn.':
+    'The local video could not be attached for /learn.',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -488,9 +507,6 @@ export default {
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
   Transcript: 'Transcript',
-  'to close': 'to close',
-  'to scroll': 'to scroll',
-  'Failed to render transcript.': 'Failed to render transcript.',
   'Read {{count}} file': 'Read {{count}} file',
   'Read {{count}} files': 'Read {{count}} files',
   'Reading {{count}} file': 'Reading {{count}} file',
@@ -751,6 +767,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (follow user input)': 'Auto (follow user input)',
   'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
   Auto: 'Auto',
   Text: 'Text',
@@ -922,8 +939,8 @@ export default {
   'Enables an extension.': 'Enables an extension.',
   'The name of the extension to enable.':
     'The name of the extension to enable.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extension in. If not set, will be enabled in all scopes.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully enabled in all scopes.':
@@ -933,8 +950,8 @@ export default {
   'Disables an extension.': 'Disables an extension.',
   'The name of the extension to disable.':
     'The name of the extension to disable.',
-  'The scope to disable the extenison in.':
-    'The scope to disable the extenison in.',
+  'The scope to disable the extension in.':
+    'The scope to disable the extension in.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1132,8 +1149,8 @@ export default {
     'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Input to command is JSON with notification message and type.',
-  'Input to command is JSON with original user prompt text.':
-    'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
@@ -1475,6 +1492,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1488,17 +1507,36 @@ export default {
     'Set the model for voice transcription',
   'Set the image-capable model used to transcribe images for a text-only main model':
     'Set the image-capable model used to transcribe images for a text-only main model',
+  'Set the model used to generate images':
+    'Set the model used to generate images',
+  'Set the model used for chat compression (auto-compaction)':
+    'Set the model used for chat compression (auto-compaction)',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
     'Persist the model selection to the user settings (global scope)',
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
+  'Select Image Model': 'Select Image Model',
+  'Select Compaction Model': 'Select Compaction Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
+  'Image Model': 'Image Model',
+  'Compaction Model': 'Compaction Model',
+  'Compaction model override cleared': 'Compaction model override cleared',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+  'not set (falls back to the main model)':
+    'not set (falls back to the main model)',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
+  'Selected compaction model is unavailable.':
+    'Selected compaction model is unavailable.',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
+  'Selected image model is unavailable.':
+    'Selected image model is unavailable.',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1746,8 +1784,16 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================
@@ -1835,7 +1881,10 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
-  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q to queue · ↑ to edit queued messages',
+  'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
   // MCP Status
@@ -1926,6 +1975,11 @@ export default {
   reviewed: 'reviewed',
   'Code Changes:': 'Code Changes:',
   Performance: 'Performance',
+  'Generation Metrics': 'Generation Metrics',
+  'Latest Request': 'Latest Request',
+  'Generation Time': 'Generation Time',
+  'Average TTFT': 'Average TTFT',
+  'Session TPS': 'Session TPS',
   'Wall Time:': 'Wall Time:',
   'Agent Active:': 'Agent Active:',
   'API Time:': 'API Time:',
@@ -2222,6 +2276,7 @@ export default {
   'Press Ctrl+Y to retry': 'Press Ctrl+Y to retry',
   'No failed request to retry.': 'No failed request to retry.',
   'to retry last request': 'to retry last request',
+  'to queue for the next turn': 'to queue for the next turn',
 
   // ============================================================================
   // Coding Plan Authentication
@@ -2419,6 +2474,7 @@ export default {
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
+  'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2593,8 +2649,14 @@ export default {
     'A new version of Qwen Code is available! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Failed to check for updates. Please check your network or registry configuration.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update check skipped ({{reason}}) — run /update to retry.',
+  'registry did not respond within {{seconds}}s':
+    'registry did not respond within {{seconds}}s',
+  'registry unreachable': 'registry unreachable',
+  'registry error': 'registry error',
   'Unable to check for updates: {{reason}}':
     'Unable to check for updates: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2631,6 +2693,15 @@ export default {
     'Unable to auto-update this standalone installation. Please reinstall from:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manual update required. Please reinstall Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Update Qwen Code on the host, then restart the sandbox.',
+  'The update will be installed after you exit this session.':
+    'The update will be installed after you exit this session.',
+  'Run /update to install the update on the host.':
+    'Run /update to install the update on the host.',
+  'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 
@@ -2676,4 +2747,66 @@ export default {
     'Running this scheduled task in a new session: {{link}}',
   'This scheduled run could not be started: {{error}}':
     'This scheduled run could not be started: {{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Maintain project auto-skills based on recent use.',
+  'Show project auto-skill lifecycle status.':
+    'Show project auto-skill lifecycle status.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Run project auto-skill lifecycle maintenance.',
+  'Restore an archived project auto-skill.':
+    'Restore an archived project auto-skill.',
+  'Auto-skill curator': 'Auto-skill curator',
+  'Last run: {{time}}': 'Last run: {{time}}',
+  'Active: {{count}}': 'Active: {{count}}',
+  'Stale: {{count}}': 'Stale: {{count}}',
+  'Archived: {{count}}': 'Archived: {{count}}',
+  'Stale skills:': 'Stale skills:',
+  'Pinned skills:': 'Pinned skills:',
+  'Archived skills:': 'Archived skills:',
+  'Dry run complete.': 'Dry run complete.',
+  'Curator run complete.': 'Curator run complete.',
+  'Checked: {{count}}': 'Checked: {{count}}',
+  'First observed: {{count}}': 'First observed: {{count}}',
+  'Marked stale: {{count}}': 'Marked stale: {{count}}',
+  'Reactivated: {{count}}': 'Reactivated: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Skipped archive collisions: {{count}}',
+  'Archive candidates:': 'Archive candidates:',
+  'Skipped archive collisions:': 'Skipped archive collisions:',
+  'Skipped rename errors: {{count}}': 'Skipped rename errors: {{count}}',
+  'Skipped rename errors:': 'Skipped rename errors:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Would archive',
+  Archived: 'Archived',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Failed to read auto-skill curator status: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Usage: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Failed to run auto-skill curator: {{message}}',
+  'Usage: /curator restore <directory>': 'Usage: /curator restore <directory>',
+  'Restored auto-skill: {{name}}': 'Restored auto-skill: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Failed to restore auto-skill: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclude an auto-skill from automatic maintenance.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Return a pinned auto-skill to automatic maintenance.',
+  'Usage: /curator pin <directory>': 'Usage: /curator pin <directory>',
+  'Usage: /curator unpin <directory>': 'Usage: /curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': 'Pinned auto-skill: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Unpinned auto-skill: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Failed to update auto-skill pin: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Auto-skill curator changes are disabled in safe mode.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
 };

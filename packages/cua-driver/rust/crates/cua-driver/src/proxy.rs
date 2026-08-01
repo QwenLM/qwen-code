@@ -29,7 +29,7 @@ use cua_driver_core::protocol::{initialize_result, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, warn};
 
-use crate::serve::{is_daemon_listening, send_request, DaemonRequest};
+use crate::serve::{is_daemon_listening, send_request, DaemonRequest, DaemonResponse};
 
 /// Run the MCP stdio proxy. Reads JSON-RPC lines from stdin, forwards
 /// the body of each `tools/list` / `tools/call` to the daemon at
@@ -494,14 +494,7 @@ async fn forward_tool_call(
         // it as `Response::ok` with `isError: true`. Mirror that
         // shape here so MCP clients see identical envelopes either
         // way — CodeRabbit #2.
-        let msg = resp.error.unwrap_or_else(|| "daemon reported failure".into());
-        let exit_code = resp.exit_code.unwrap_or(1);
-        let result = serde_json::json!({
-            "content": [{ "type": "text", "text": msg }],
-            "isError": true,
-            "structuredContent": { "exit_code": exit_code }
-        });
-        return Response::ok(id, result);
+        return Response::ok(id, tool_error_result(resp));
     }
 
     let result = resp.result.unwrap_or_else(|| {
@@ -511,6 +504,25 @@ async fn forward_tool_call(
         })
     });
     Response::ok(id, result)
+}
+
+fn tool_error_result(resp: DaemonResponse) -> serde_json::Value {
+    let msg = resp.error.unwrap_or_else(|| "daemon reported failure".into());
+    let exit_code = resp.exit_code.unwrap_or(1);
+    let mut structured = match resp.error_data {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        Some(data) => serde_json::json!({ "details": data }),
+        None => serde_json::json!({}),
+    };
+    structured
+        .as_object_mut()
+        .expect("structured tool error is always an object")
+        .insert("exit_code".into(), serde_json::json!(exit_code));
+    serde_json::json!({
+        "content": [{ "type": "text", "text": msg }],
+        "isError": true,
+        "structuredContent": structured,
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -534,14 +546,7 @@ mod tests {
         id: serde_json::Value,
         resp: DaemonResponse,
     ) -> Response {
-        let msg = resp.error.unwrap_or_else(|| "daemon reported failure".into());
-        let exit_code = resp.exit_code.unwrap_or(1);
-        let result = serde_json::json!({
-            "content": [{ "type": "text", "text": msg }],
-            "isError": true,
-            "structuredContent": { "exit_code": exit_code }
-        });
-        Response::ok(id, result)
+        Response::ok(id, tool_error_result(resp))
     }
 
     #[test]
@@ -551,6 +556,7 @@ mod tests {
             result: None,
             error: Some("missing required field `pid`".into()),
             exit_code: Some(64),
+            error_data: None,
         };
         let resp = build_tool_error_response(serde_json::json!(7), daemon_resp);
         let value = serde_json::to_value(&resp).expect("serialize");
@@ -578,11 +584,34 @@ mod tests {
             result: None,
             error: None,
             exit_code: None,
+            error_data: None,
         };
         let resp = build_tool_error_response(serde_json::json!("abc"), daemon_resp);
         let value = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(value["result"]["isError"], serde_json::json!(true));
         assert_eq!(value["result"]["content"][0]["text"], "daemon reported failure");
         assert_eq!(value["result"]["structuredContent"]["exit_code"], 1);
+    }
+
+    #[test]
+    fn daemon_error_data_is_preserved_in_structured_content() {
+        let daemon_resp = DaemonResponse {
+            ok: false,
+            result: None,
+            error: Some("timed out".into()),
+            exit_code: Some(1),
+            error_data: Some(serde_json::json!({
+                "code": "tool_timeout",
+                "tool": "get_window_state",
+                "timeout_seconds": 90,
+            })),
+        };
+        let resp = build_tool_error_response(serde_json::json!(9), daemon_resp);
+        let value = serde_json::to_value(&resp).expect("serialize");
+        let structured = &value["result"]["structuredContent"];
+        assert_eq!(structured["code"], "tool_timeout");
+        assert_eq!(structured["tool"], "get_window_state");
+        assert_eq!(structured["timeout_seconds"], 90);
+        assert_eq!(structured["exit_code"], 1);
     }
 }

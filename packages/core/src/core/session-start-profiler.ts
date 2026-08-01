@@ -20,6 +20,7 @@ export interface SessionStartProfileRecord {
   timestamp: string;
   source: SessionStartSource;
   ok: boolean;
+  sessionId?: string;
   /**
    * Wall-clock session start duration. The sum of `stages` can differ from
    * `totalMs` because some stages overlap and unmeasured code runs between
@@ -51,6 +52,7 @@ export interface SessionStartProfiler {
 
 interface SessionStartProfilerOptions {
   enabled?: boolean;
+  sessionId?: string;
   now?: () => number;
   getTimestamp?: () => Date;
   writeRecord?: (record: SessionStartProfileRecord) => void;
@@ -62,10 +64,17 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
-  const noFollow = constants.O_NOFOLLOW;
-  if (noFollow === undefined) {
-    throw new Error('session-start profiler requires O_NOFOLLOW support');
-  }
+  // Windows does not expose O_NOFOLLOW, so there the JSONL profile is opened
+  // WITHOUT symlink protection — the lstat pre-check in
+  // assertSafeExistingProfileFile is the guard that still rejects a planted link
+  // before the open. That is a deliberate trade, not a no-loss fallback: the
+  // previous behaviour threw here, refusing to profile on Windows at all, and
+  // append-only startup diagnostics are not worth that. Key the trade on the
+  // platform, not on the flag's presence: every other platform Node runs on
+  // exposes O_NOFOLLOW, and `?? 0` alone would silently drop the hardening on
+  // any future platform that lacked it for an unrelated reason.
+  const noFollow =
+    process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
   return (
     (constants.O_APPEND ?? 0) |
     (constants.O_CREAT ?? 0) |
@@ -148,6 +157,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
   private readonly now: () => number;
   private readonly getTimestamp: () => Date;
   private readonly writeRecord: (record: SessionStartProfileRecord) => void;
+  private readonly sessionId: string | undefined;
   private readonly startMs: number;
   private readonly stages: Record<string, number> = {};
   private failedStage: string | undefined;
@@ -157,12 +167,14 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
     source: SessionStartSource,
     options: Required<
       Pick<SessionStartProfilerOptions, 'now' | 'getTimestamp' | 'writeRecord'>
-    >,
+    > &
+      Pick<SessionStartProfilerOptions, 'sessionId'>,
   ) {
     this.source = source;
     this.now = options.now;
     this.getTimestamp = options.getTimestamp;
     this.writeRecord = options.writeRecord;
+    this.sessionId = options.sessionId;
     this.startMs = this.now();
   }
 
@@ -201,6 +213,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
         timestamp: this.getTimestamp().toISOString(),
         source: this.source,
         ok: attrs.ok,
+        ...(this.sessionId !== undefined ? { sessionId: this.sessionId } : {}),
         totalMs: roundMs(this.now() - this.startMs),
         stages: { ...this.stages },
         ...(attrs.extraHistoryLength !== undefined
@@ -260,5 +273,6 @@ export function createSessionStartProfiler(
     now: options.now ?? (() => performance.now()),
     getTimestamp: options.getTimestamp ?? (() => new Date()),
     writeRecord: options.writeRecord ?? writeProfileRecord,
+    sessionId: options.sessionId,
   });
 }

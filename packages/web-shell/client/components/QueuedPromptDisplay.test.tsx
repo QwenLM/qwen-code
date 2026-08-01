@@ -2,6 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+  type UserMessageContentParser,
+} from '../customization';
 import { getTranslator } from '../i18n';
 import { QueuedPromptDisplay, type QueuedPrompt } from './QueuedPromptDisplay';
 
@@ -30,10 +35,10 @@ afterEach(() => {
 
 function setup(
   overrides: Partial<React.ComponentProps<typeof QueuedPromptDisplay>> = {},
+  customization: WebShellCustomization = {},
 ) {
   const handlers = {
     onDelete: vi.fn(),
-    onInsert: vi.fn(),
     onEdit: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
@@ -43,12 +48,15 @@ function setup(
         { id: 2, text: '排队消息二' },
       ];
   const container = render(
-    <QueuedPromptDisplay
-      prompts={prompts}
-      t={t}
-      {...handlers}
-      {...overrides}
-    />,
+    <WebShellCustomizationProvider value={customization}>
+      <QueuedPromptDisplay
+        prompts={prompts}
+        t={t}
+        canMutateMidTurn
+        {...handlers}
+        {...overrides}
+      />
+    </WebShellCustomizationProvider>,
   );
   return { container, handlers };
 }
@@ -65,6 +73,237 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
+  it('shows server queue status without an insert action', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
+    });
+
+    expect(container.textContent).toContain('服务器排队中...');
+    expect(container.querySelector('[role="status"]')).toBeTruthy();
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeNull();
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+    expect(container.textContent).not.toContain('插入');
+  });
+
+  it('keeps a mid-turn prompt queued until injection', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain('排队中...');
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    const status = container.querySelector('[role="status"]');
+    expect(status?.previousElementSibling?.textContent).toBe('补充信息');
+    expect(status?.nextElementSibling?.querySelectorAll('button')).toHaveLength(
+      2,
+    );
+    expect(
+      [...container.querySelectorAll('button')].every(
+        (button) => !button.disabled,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps actions disabled when an older daemon returns no message id', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],
+    });
+
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+  });
+
+  it('hides mid-turn mutation actions without the capability', () => {
+    const { container } = setup({
+      canMutateMidTurn: false,
+      prompts: [
+        {
+          id: 1,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    expect(container.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('keeps the spinner while a prompt is still submitting', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '正在发送', serverState: 'submitting' }],
+    });
+
+    expect(container.textContent).toContain('提交中...');
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeTruthy();
+  });
+
+  it('renders queued reference annotations as tags', () => {
+    const serialized = '<context id="orders">orders</context>';
+    const text = `inspect ${serialized} now`;
+    const start = text.indexOf(serialized);
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text,
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start,
+              end: start + serialized.length,
+              text: serialized,
+              reference: {
+                id: 'orders',
+                kind: 'data-table',
+                label: 'Table',
+                value: 'orders',
+                serialized,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain('inspect');
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('parses the complete legacy queued prompt before rendering its tag', () => {
+    const serialized = `<context>${'x'.repeat(300)}</context>`;
+    const text = `${serialized} explain the table`;
+    const parser = vi.fn(() => [
+      {
+        type: 'tag' as const,
+        tag: { id: 'orders', value: 'orders', serialized },
+      },
+      { type: 'text' as const, text: ' explain the table' },
+    ]);
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      { parseUserMessageContent: parser },
+    );
+
+    expect(parser).toHaveBeenCalledWith(text);
+    expect(container.textContent).toContain('orders');
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('falls back to raw queued text when parser output cannot recreate it', () => {
+    const text = '<context id="orders">orders</context>';
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      {
+        parseUserMessageContent: () => [
+          { type: 'text', text: 'different content' },
+        ],
+      },
+    );
+
+    expect(container.textContent).toContain(text);
+    expect(container.textContent).not.toContain('different content');
+  });
+
+  it('falls back to raw queued text when a tag field is malformed', () => {
+    const text = '<context id="orders">orders</context>';
+    const malformedParser = (() => [
+      {
+        type: 'tag',
+        tag: { id: 'orders', serialized: 1 },
+      },
+    ]) as unknown as UserMessageContentParser;
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      { parseUserMessageContent: malformedParser },
+    );
+
+    expect(container.textContent).toContain(text);
+  });
+
+  it('omits an atomic tag that exceeds the visible preview budget', () => {
+    const visibleTag = 'x'.repeat(241);
+    const serialized = `<context>${visibleTag}</context>`;
+    const { container } = setup(
+      { prompts: [{ id: 1, text: serialized }] },
+      {
+        parseUserMessageContent: () => [
+          {
+            type: 'tag',
+            tag: { id: 'orders', value: visibleTag, serialized },
+          },
+        ],
+      },
+    );
+
+    expect(container.textContent).toContain('...');
+    expect(container.textContent).not.toContain(visibleTag);
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('truncates a text-only queued prompt at the visible preview budget', () => {
+    const text = 'x'.repeat(300);
+    const { container } = setup({ prompts: [{ id: 1, text }] });
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${text.slice(0, 240)}...`);
+  });
+
+  it('truncates trailing text after an atomic tag consumes the visible preview budget', () => {
+    const visibleTag = 'x'.repeat(240);
+    const serialized = `<context>${visibleTag}</context>`;
+    const trailingText = ' explain the table';
+    const { container } = setup(
+      { prompts: [{ id: 1, text: `${serialized}${trailingText}` }] },
+      {
+        parseUserMessageContent: () => [
+          {
+            type: 'tag',
+            tag: { id: 'orders', value: visibleTag, serialized },
+          },
+          { type: 'text', text: trailingText },
+        ],
+      },
+    );
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${visibleTag}...`);
+  });
+
+  it('falls back to raw queued text when parsing throws', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container } = setup(
+      { prompts: [{ id: 1, text: 'raw <broken /> content' }] },
+      {
+        parseUserMessageContent: () => {
+          throw new Error('bad host payload');
+        },
+      },
+    );
+
+    expect(container.textContent).toContain('raw <broken /> content');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('passes the prompt id to per-row delete', () => {
     const { container, handlers } = setup({
       prompts: [{ id: 42, text: 'only one' }],
@@ -76,14 +315,11 @@ describe('QueuedPromptDisplay', () => {
     expect(handlers.onDelete).toHaveBeenCalledWith(42);
   });
 
-  it('disables insert for a command prompt', () => {
+  it('does not render an insert action for a command prompt', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '/help me' }],
     });
-    const insert = [...container.querySelectorAll('button')].find((b) =>
-      (b.textContent || '').includes(t('queue.insert')),
-    );
-    expect(insert).toBeTruthy();
-    expect((insert as HTMLButtonElement).disabled).toBe(true);
+    expect(container.querySelectorAll('button')).toHaveLength(2);
+    expect(container.textContent).not.toContain('插入');
   });
 });

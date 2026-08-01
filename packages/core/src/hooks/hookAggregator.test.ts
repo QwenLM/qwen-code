@@ -580,6 +580,34 @@ describe('HookAggregator', () => {
         result.finalOutput?.hookSpecificOutput?.['otherField'],
       ).toBeUndefined();
     });
+
+    it('falls through to mergeSimple/DefaultHookOutput for MessageDisplay (no control-effect merge logic)', () => {
+      // MessageDisplay is fire-and-forget with no control effects, so it deliberately
+      // has no case in aggregateResults's switch and no case in createSpecificHookOutput
+      // — this pins that it lands in the same default path as Notification/PostCompact,
+      // not the OR-logic (mergeWithOrLogic) path used by control-affecting events.
+      const outputs: HookOutput[] = [
+        { hookSpecificOutput: { additionalContext: 'a' } },
+        { hookSpecificOutput: { additionalContext: 'b' } },
+      ];
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.MessageDisplay,
+        success: true,
+        output,
+        duration: 10,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.MessageDisplay,
+      );
+
+      expect(
+        result.finalOutput?.hookSpecificOutput?.['additionalContext'],
+      ).toBe('a\nb');
+      expect(result.finalOutput?.constructor.name).toBe('DefaultHookOutput');
+    });
   });
 
   describe('createSpecificHookOutput', () => {

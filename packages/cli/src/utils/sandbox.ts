@@ -26,6 +26,11 @@ import { writeStderrLine } from './stdioHelpers.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  SKIP_UPDATE_CHECK_ENV_VAR,
+} from './processUtils.js';
 
 const execAsync = promisify(exec);
 
@@ -60,6 +65,20 @@ const BUILTIN_SEATBELT_PROFILES = [
   'restrictive-closed',
   'restrictive-proxied',
 ];
+
+export function getSandboxPassthroughEnvArgs(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    SKIP_UPDATE_CHECK_ENV_VAR,
+    CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+    HOST_UPDATE_RELAUNCH_ENV_VAR,
+  ].flatMap((envVar) =>
+    env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
+  );
+}
 
 export function resolveSeatbeltProfileFile(
   profile: string,
@@ -193,6 +212,7 @@ export async function start_sandbox(
   nodeArgs: string[] = [],
   cliConfig?: Config,
   cliArgs: string[] = [],
+  childEnv?: Readonly<Record<string, string>>,
 ): Promise<number> {
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
@@ -278,6 +298,9 @@ export async function start_sandbox(
       'sh',
       '-c',
       [
+        ...(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+          ? ['ELECTRON_RUN_AS_NODE=1']
+          : []),
         `SANDBOX=sandbox-exec`,
         `NODE_OPTIONS="${nodeOptions}"`,
         ...finalArgv.map((arg) => quote([arg])),
@@ -342,6 +365,7 @@ export async function start_sandbox(
     process.stdin.pause();
     sandboxProcess = spawn(config.command, args, {
       stdio: 'inherit',
+      ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
     });
     return new Promise((resolve, reject) => {
       sandboxProcess?.on('error', reject);
@@ -628,14 +652,7 @@ export async function start_sandbox(
       `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
     );
   }
-  for (const envVar of [
-    'QWEN_DEBUG_LOG_FILE',
-    'QWEN_CODE_LEGACY_MCP_BLOCKING',
-  ] as const) {
-    if (process.env[envVar] !== undefined) {
-      args.push('--env', `${envVar}=${process.env[envVar]}`);
-    }
-  }
+  args.push(...getSandboxPassthroughEnvArgs());
   if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
     args.push(
       '--env',
@@ -757,6 +774,10 @@ export async function start_sandbox(
         }
       }
     }
+  }
+
+  for (const name of Object.keys(childEnv ?? {})) {
+    args.push('--env', name);
   }
 
   // copy NODE_OPTIONS
@@ -896,6 +917,7 @@ export async function start_sandbox(
   process.stdin.pause();
   sandboxProcess = spawn(config.command, args, {
     stdio: 'inherit',
+    ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
   });
 
   return new Promise<number>((resolve, reject) => {

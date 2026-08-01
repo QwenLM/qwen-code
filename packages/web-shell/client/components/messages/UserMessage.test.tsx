@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
+import { I18nProvider } from '../../i18n';
 import { UserMessage } from './UserMessage';
 
 (
@@ -29,10 +30,300 @@ function render(node: ReactNode): HTMLElement {
   return container;
 }
 
+function referenceAnnotation(
+  content: string,
+  text: string,
+  reference: {
+    id: string;
+    kind?: string;
+    label?: string;
+    value?: string;
+    serialized?: string;
+    removable?: boolean;
+  },
+) {
+  const start = content.indexOf(text);
+  if (start < 0) {
+    throw new Error(`Missing annotation text: ${text}`);
+  }
+  return {
+    type: 'reference' as const,
+    start,
+    end: start + text.length,
+    text,
+    reference,
+  };
+}
+
+function findByTitle(container: HTMLElement, title: string): Element | null {
+  return (
+    Array.from(container.querySelectorAll('[title]')).find(
+      (element) => element.getAttribute('title') === title,
+    ) ?? null
+  );
+}
+
 describe('UserMessage', () => {
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');
+  });
+
+  it('renders an accessible retry action for a failed send', () => {
+    const onRetrySend = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          sendFailed
+          onRetrySend={onRetrySend}
+        />
+      </I18nProvider>,
+    );
+
+    expect(container.textContent).toContain('Failed to send');
+    const retry = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Retry sending message"]',
+    );
+    expect(retry?.type).toBe('button');
+    expect(retry?.title).toBe('Retry sending message');
+    expect(retry?.textContent).toBe('Try again');
+
+    act(() => retry?.click());
+    expect(onRetrySend).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not render send failure controls by default', () => {
+    const container = render(<UserMessage content="hello world" />);
+
+    expect(container.textContent).not.toContain('Failed to send');
+    expect(
+      container.querySelector('button[aria-label="Retry sending message"]'),
+    ).toBeNull();
+  });
+
+  it('renders file references as chips from input annotations', () => {
+    const content = 'list @.qwen/ files';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@.qwen/', {
+            id: 'file:@.qwen/',
+            kind: 'file',
+            value: '.qwen/',
+            serialized: '@.qwen/',
+          }),
+        ]}
+      />,
+    );
+    const chip = container.querySelector('[title="@.qwen/"]');
+
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toBe('.qwen/');
+    expect(container.textContent).toContain('list .qwen/ files');
+  });
+
+  it('uses configured composer tag icons for annotation chips', () => {
+    const content = 'list @.qwen/ files';
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          composerTagIcons: { file: '/custom-file.svg' },
+        }}
+      >
+        <UserMessage
+          content={content}
+          inputAnnotations={[
+            referenceAnnotation(content, '@.qwen/', {
+              id: 'file:@.qwen/',
+              kind: 'file',
+              value: '.qwen/',
+              serialized: '@.qwen/',
+            }),
+          ]}
+        />
+      </WebShellCustomizationProvider>,
+    );
+    const icon = container.querySelector<HTMLElement>(
+      '[title="@.qwen/"] [aria-hidden="true"]',
+    );
+
+    expect(icon).not.toBeNull();
+    expect(icon?.style.getPropertyValue('--user-message-tag-icon-url')).toBe(
+      'url("/custom-file.svg")',
+    );
+  });
+
+  it('renders extension and MCP references as chips from input annotations', () => {
+    const content = '@ext:browser and @mcp:docs';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@ext:browser', {
+            id: 'extension:@ext:browser',
+            kind: 'extension',
+            value: 'browser',
+            serialized: '@ext:browser',
+          }),
+          referenceAnnotation(content, '@mcp:docs', {
+            id: 'mcp:@mcp:docs',
+            kind: 'mcp',
+            value: 'docs',
+            serialized: '@mcp:docs',
+          }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelector('[title="@ext:browser"]')).not.toBeNull();
+    expect(container.querySelector('[title="@mcp:docs"]')).not.toBeNull();
+    expect(container.textContent).toContain('browser and docs');
+  });
+
+  it.each(['extension', 'file', 'mcp', 'skill'] as const)(
+    'renders the built-in %s icon for annotation chips',
+    (kind) => {
+      const serialized = `@${kind}:reference`;
+      const container = render(
+        <UserMessage
+          content={serialized}
+          inputAnnotations={[
+            referenceAnnotation(serialized, serialized, {
+              id: `${kind}:reference`,
+              kind,
+              value: kind,
+              serialized,
+            }),
+          ]}
+        />,
+      );
+
+      expect(
+        container.querySelector(`[title="${serialized}"] [aria-hidden="true"]`),
+      ).not.toBeNull();
+    },
+  );
+
+  it('does not render inline email addresses as chips', () => {
+    const container = render(<UserMessage content="mail me at a@b.test" />);
+
+    expect(container.querySelector('[title="@b.test"]')).toBeNull();
+    expect(container.textContent).toContain('a@b.test');
+  });
+
+  it('keeps references as text without input annotations', () => {
+    const container = render(<UserMessage content="open @dataset:users" />);
+
+    expect(container.querySelector('[title="@dataset:users"]')).toBeNull();
+    expect(container.textContent).toContain('open @dataset:users');
+  });
+
+  it('renders extensionless file references from input annotations', () => {
+    const content = 'open @Makefile and @src/Makefile';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@Makefile', {
+            id: 'file:@Makefile',
+            kind: 'file',
+            value: 'Makefile',
+            serialized: '@Makefile',
+          }),
+          referenceAnnotation(content, '@src/Makefile', {
+            id: 'file:@src/Makefile',
+            kind: 'file',
+            value: 'src/Makefile',
+            serialized: '@src/Makefile',
+          }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelector('[title="@Makefile"]')).not.toBeNull();
+    expect(container.querySelector('[title="@src/Makefile"]')).not.toBeNull();
+    expect(container.textContent).toContain('open Makefile and src/Makefile');
+  });
+
+  it('keeps MCP resource trailing punctuation from input annotations', () => {
+    const serialized = '@docs\\:res\\://doc.';
+    const content = `open ${serialized} now`;
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, serialized, {
+            id: `mcp:${serialized}`,
+            kind: 'mcp',
+            value: 'docs:res://doc.',
+            serialized,
+          }),
+        ]}
+      />,
+    );
+
+    expect(findByTitle(container, serialized)).not.toBeNull();
+    expect(container.textContent).toContain('open docs:res://doc. now');
+  });
+
+  it('keeps escaped trailing punctuation from input annotations', () => {
+    const serialized = '@path\\:';
+    const content = `open ${serialized}`;
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, serialized, {
+            id: `file:${serialized}`,
+            kind: 'file',
+            value: 'path:',
+            serialized,
+          }),
+        ]}
+      />,
+    );
+
+    expect(findByTitle(container, serialized)).not.toBeNull();
+    expect(container.textContent).toContain('open path:');
+  });
+
+  it('renders custom provider references from input annotations', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          composerTagIcons: { dataset: '/dataset.svg' },
+        }}
+      >
+        <UserMessage
+          content="open @dataset:users"
+          inputAnnotations={[
+            {
+              type: 'reference',
+              start: 5,
+              end: 19,
+              text: '@dataset:users',
+              reference: {
+                id: 'dataset:users',
+                kind: 'dataset',
+                label: 'Dataset',
+                value: 'users',
+                serialized: '@dataset:users',
+              },
+            },
+          ]}
+        />
+      </WebShellCustomizationProvider>,
+    );
+    const chip = container.querySelector('[title="@dataset:users"]');
+    const icon = chip?.querySelector<HTMLElement>('[aria-hidden="true"]');
+
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toBe('Datasetusers');
+    expect(icon?.style.getPropertyValue('--user-message-tag-icon-url')).toBe(
+      'url("/dataset.svg")',
+    );
   });
 
   it('renders images when provided', () => {
@@ -52,17 +343,35 @@ describe('UserMessage', () => {
     const container = render(
       <WebShellCustomizationProvider
         value={{
-          renderUserMessageContent: ({ content }) => (
-            <span data-testid="tag-chip">{content.slice(1)}</span>
+          renderUserMessageContent: ({ content, inputAnnotations }) => (
+            <span data-testid="tag-chip">
+              {content.slice(1)}:{inputAnnotations?.length ?? 0}
+            </span>
           ),
         }}
       >
-        <UserMessage content="@.husky/_/husky.sh xuyao" />
+        <UserMessage
+          content="@.husky/_/husky.sh xuyao"
+          inputAnnotations={[
+            {
+              type: 'reference',
+              start: 0,
+              end: 19,
+              text: '@.husky/_/husky.sh',
+              reference: {
+                id: 'file:@.husky/_/husky.sh',
+                kind: 'file',
+                value: '.husky/_/husky.sh',
+                serialized: '@.husky/_/husky.sh',
+              },
+            },
+          ]}
+        />
       </WebShellCustomizationProvider>,
     );
 
     expect(container.querySelector('[data-testid="tag-chip"]')).not.toBeNull();
-    expect(container.textContent).toContain('.husky/_/husky.sh xuyao');
+    expect(container.textContent).toContain('.husky/_/husky.sh xuyao:1');
   });
 
   it('renders parsed user-message tag parts', () => {

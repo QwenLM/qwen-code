@@ -24,6 +24,7 @@ import {
   extractDaemonTraceContext,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
+  withDaemonSpan,
   withDaemonRequestSpan,
 } from './daemon-tracing.js';
 
@@ -151,6 +152,46 @@ describe('daemon-tracing', () => {
     expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
   });
 
+  it('starts a daemon span under an explicit remote parent context', async () => {
+    const parentContext = extractDaemonTraceContext({
+      _meta: {
+        [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-01`,
+      },
+    });
+    const span = {
+      setStatus: vi.fn(),
+      end: vi.fn(),
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      recordException: vi.fn(),
+    } as unknown as Span;
+    const startActiveSpan = vi.fn(
+      async (
+        _name: string,
+        _options: unknown,
+        _parent: unknown,
+        fn: (span: Span) => Promise<string>,
+      ) => await fn(span),
+    );
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan,
+    } as unknown as Tracer);
+
+    await expect(
+      withDaemonSpan('child', {}, async () => 'ok', {
+        parentContext: parentContext!,
+      }),
+    ).resolves.toBe('ok');
+
+    expect(startActiveSpan).toHaveBeenCalledWith(
+      'child',
+      expect.objectContaining({ kind: expect.any(Number) }),
+      parentContext!,
+      expect.any(Function),
+    );
+    expect(span.end).toHaveBeenCalledOnce();
+  });
+
   it('strips reserved metadata when no active daemon span exists', () => {
     const injected = injectDaemonTraceContext({
       prompt: [],
@@ -226,11 +267,15 @@ describe('daemon-tracing', () => {
 
   it('includes clientId and permissionRequestId in request span attributes', async () => {
     const startActiveSpan = mockTracerStartActiveSpan();
+    const startTime = new Date('2026-07-15T00:00:00.000Z');
 
     await withDaemonRequestSpan(
       {
         method: 'POST',
         route: 'POST /session/:id/permission/:requestId',
+        startTime,
+        deferredRuntimeWaitMs: 42.5,
+        deferredRuntimePath: 'joined',
         workspaceHash: 'abc123',
         sessionId: 'sess-1',
         clientId: 'client-42',
@@ -248,7 +293,10 @@ describe('daemon-tracing', () => {
           'session.id': 'sess-1',
           'qwen-code.client_id': 'client-42',
           'qwen-code.daemon.permission.request_id': 'perm-99',
+          'qwen-code.daemon.runtime.wait_ms': 42.5,
+          'qwen-code.daemon.runtime.path': 'joined',
         }),
+        startTime,
       }),
       expect.any(Function),
     );
@@ -269,6 +317,8 @@ describe('daemon-tracing', () => {
     ).attributes;
     expect(attrs).not.toHaveProperty('qwen-code.client_id');
     expect(attrs).not.toHaveProperty('qwen-code.daemon.permission.request_id');
+    expect(attrs).not.toHaveProperty('qwen-code.daemon.runtime.wait_ms');
+    expect(attrs).not.toHaveProperty('qwen-code.daemon.runtime.path');
   });
 
   it('addDaemonRequestAttribute sets attribute on the active span', () => {
@@ -290,5 +340,20 @@ describe('daemon-tracing', () => {
     expect(() =>
       addDaemonRequestAttribute('qwen-code.prompt_id', 'orphan'),
     ).not.toThrow();
+  });
+
+  it('bridge telemetry sets attributes on the active span', () => {
+    const setAttributes = vi.fn();
+    vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttributes,
+    } as unknown as Span);
+
+    createDaemonBridgeTelemetry().setActiveSpanAttributes?.({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
+
+    expect(setAttributes).toHaveBeenCalledWith({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
   });
 });

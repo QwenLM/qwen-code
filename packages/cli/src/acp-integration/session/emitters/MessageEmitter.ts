@@ -6,12 +6,16 @@
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SubagentMeta } from '../types.js';
-import type { Usage } from '@agentclientprotocol/sdk';
 import {
+  createTranscriptMessageUpdate,
+  createTranscriptUsageUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  apiActivityTracker,
   getActiveGoal,
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
-import { BaseEmitter } from './BaseEmitter.js';
+import { BaseEmitter } from './base-emitter.js';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
 
 /**
@@ -92,16 +96,14 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     options: { source?: string } = {},
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    const _meta = {
-      ...(epochMs != null ? { timestamp: epochMs } : {}),
-      ...(options.source ? { source: options.source } : {}),
-    };
-    await this.sendUpdate({
-      sessionUpdate: 'user_message_chunk',
-      content: { type: 'text', text },
-      ...(Object.keys(_meta).length > 0 ? { _meta } : {}),
-    });
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'user',
+        text,
+        timestamp,
+        ...(options.source ? { extra: { source: options.source } } : {}),
+      }),
+    );
   }
 
   /**
@@ -115,15 +117,15 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const _meta = this.buildChunkMeta(
-      BaseEmitter.toEpochMs(timestamp),
-      subagentMeta,
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        thought: true,
+        text,
+        timestamp,
+        ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
     );
-    await this.sendUpdate({
-      sessionUpdate: 'agent_thought_chunk',
-      content: { type: 'text', text },
-      ...(_meta ? { _meta } : {}),
-    });
   }
 
   /**
@@ -137,14 +139,28 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const _meta = this.buildChunkMeta(
-      BaseEmitter.toEpochMs(timestamp),
-      subagentMeta,
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        timestamp,
+        ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
     );
+  }
+
+  async emitSlashCommandOutput(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(_meta ? { _meta } : {}),
+      _meta: {
+        source: 'slash_command',
+        ...(epochMs != null ? { timestamp: epochMs } : {}),
+      },
     });
   }
 
@@ -157,14 +173,6 @@ export class MessageEmitter extends BaseEmitter {
     durationMs?: number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const usage: Usage = {
-      inputTokens: usageMetadata.promptTokenCount ?? 0,
-      outputTokens: usageMetadata.candidatesTokenCount ?? 0,
-      totalTokens: usageMetadata.totalTokenCount ?? 0,
-      thoughtTokens: usageMetadata.thoughtsTokenCount,
-      cachedReadTokens: usageMetadata.cachedContentTokenCount,
-    };
-
     // ORDERING INVARIANT: this runs before PlanEmitter.emitPlan within a turn —
     // usage advances the cumulative accumulator, then the plan update snapshots
     // it. Reordering or batching emissions so a plan is sent before its turn's
@@ -187,29 +195,45 @@ export class MessageEmitter extends BaseEmitter {
           : total;
       cumulative.promptTokens = addFinite(
         cumulative.promptTokens,
-        usage.inputTokens,
+        usageMetadata.promptTokenCount,
       );
       cumulative.candidateTokens = addFinite(
         cumulative.candidateTokens,
-        usage.outputTokens,
+        usageMetadata.candidatesTokenCount,
       );
       cumulative.cachedTokens = addFinite(
         cumulative.cachedTokens,
-        usage.cachedReadTokens,
+        usageMetadata.cachedContentTokenCount,
       );
       cumulative.apiTimeMs = addFinite(cumulative.apiTimeMs, durationMs);
     }
 
-    const meta =
-      typeof durationMs === 'number'
-        ? { usage, durationMs, ...subagentMeta }
-        : { usage, ...subagentMeta };
+    // A live model round is discriminated by a present `durationMs` (replay
+    // frames omit it). Only then do we drain the model-API-error / auto-retry
+    // counters onto this frame's `_meta`, so the daemon host's metrics ring
+    // windows the increments alongside token burn and LLM latency. Draining on
+    // a replayed frame would consume real pending counts the bridge ignores for
+    // replay, silently dropping them — hence the `durationMs` guard. Absent /
+    // zero keys keep no-error frames byte-identical to before.
+    let activityMeta: Record<string, unknown> = {};
+    if (typeof durationMs === 'number') {
+      const activity = apiActivityTracker.drain();
+      activityMeta = {
+        ...(activity.errors > 0 ? { apiErrors: activity.errors } : {}),
+        ...(activity.retries > 0 ? { apiRetries: activity.retries } : {}),
+      };
+    }
 
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text },
-      _meta: meta,
-    });
+    await this.sendUpdate(
+      createTranscriptUsageUpdate(usageMetadata, {
+        text,
+        extra: {
+          ...(typeof durationMs === 'number' ? { durationMs } : {}),
+          ...activityMeta,
+          ...subagentMeta,
+        },
+      }),
+    );
   }
 
   /**
@@ -234,21 +258,5 @@ export class MessageEmitter extends BaseEmitter {
     return isThought
       ? this.emitAgentThought(text, timestamp, subagentMeta)
       : this.emitAgentMessage(text, timestamp, subagentMeta);
-  }
-
-  private buildChunkMeta(
-    epochMs: number | undefined,
-    subagentMeta?: SubagentMeta,
-  ): Record<string, unknown> | undefined {
-    const meta: Record<string, unknown> = {
-      ...(subagentMeta?.parentToolCallId
-        ? { parentToolCallId: subagentMeta.parentToolCallId }
-        : {}),
-      ...(subagentMeta?.subagentType
-        ? { subagentType: subagentMeta.subagentType }
-        : {}),
-      ...(epochMs != null ? { timestamp: epochMs } : {}),
-    };
-    return Object.keys(meta).length > 0 ? meta : undefined;
   }
 }

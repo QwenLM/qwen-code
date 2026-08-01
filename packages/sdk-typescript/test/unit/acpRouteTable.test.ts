@@ -463,6 +463,12 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp');
   });
 
+  it('POST /workspace/mcp/reload maps to _qwen/workspace/mcp/reload', () => {
+    const result = matchRoute('/workspace/mcp/reload', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/reload');
+  });
+
   it('GET /workspace/skills maps to _qwen/workspace/skills', () => {
     const result = matchRoute('/workspace/skills', 'GET');
     expect(result).not.toBeNull();
@@ -900,6 +906,11 @@ describe('acpRouteTable – matchRoute', () => {
     expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
   });
 
+  it('keeps rewind routes off ACP so strict REST auth cannot be bypassed', () => {
+    expect(matchRoute('/session/s12/rewind/snapshots', 'GET')).toBeNull();
+    expect(matchRoute('/session/s12/rewind', 'POST')).toBeNull();
+  });
+
   // ---- Unknown/unmatched routes ---------------------------------------
 
   it('returns null for unknown path', () => {
@@ -946,9 +957,9 @@ describe('acpRouteTable – query param coercion', () => {
     };
   }
 
-  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+  it('GET /file forwards typed range and cursor params', () => {
     const { method, params } = extract(
-      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10&cursor=next%201',
       'GET',
     );
     expect(method).toBe('_qwen/file/read');
@@ -957,6 +968,7 @@ describe('acpRouteTable – query param coercion', () => {
       maxBytes: 123,
       line: 4,
       limit: 10,
+      cursor: 'next 1',
     });
     // The daemon requires real numbers — a regression to strings would break it.
     expect(typeof params['maxBytes']).toBe('number');

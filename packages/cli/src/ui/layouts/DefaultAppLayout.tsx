@@ -8,6 +8,7 @@ import type React from 'react';
 import { useEffect, useRef } from 'react';
 import { Box } from 'ink';
 import { MainContent } from '../components/MainContent.js';
+import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
@@ -17,12 +18,13 @@ import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
+import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
-import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
@@ -33,8 +35,9 @@ export const DefaultAppLayout: React.FC = () => {
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
     uiState.terminalHeight,
+    uiState.useTerminalBuffer,
   );
   const dialogMaxHeight = getDialogMaxHeight(
     uiState.terminalHeight,
@@ -45,7 +48,7 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
     !uiState.isFeedbackDialogOpen &&
-    uiState.streamingState !== StreamingState.WaitingForConfirmation;
+    uiState.streamingState === StreamingState.Responding;
 
   // Clear terminal on view switch so previous view's <Static> output
   // is removed. refreshStatic clears the terminal and bumps the
@@ -66,6 +69,9 @@ export const DefaultAppLayout: React.FC = () => {
           {/* Agent view: chat history + agent-specific composer */}
           <AgentChatView agentId={activeView} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {!uiState.dialogsVisible && uiState.updateInfo && (
+              <UpdateNotification message={uiState.updateInfo.message} />
+            )}
             <AgentComposer key={activeView} agentId={activeView} />
             <ExitWarning />
           </Box>
@@ -75,6 +81,9 @@ export const DefaultAppLayout: React.FC = () => {
           {/* Main view: conversation history + main composer / dialogs */}
           <MainContent />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {!uiState.dialogsVisible && uiState.updateInfo && (
+              <UpdateNotification message={uiState.updateInfo.message} />
+            )}
             {uiState.dialogsVisible ? (
               <Box
                 marginX={2}
@@ -135,7 +144,14 @@ export const DefaultAppLayout: React.FC = () => {
               panel wants the full terminal width.
             */}
             {!uiState.dialogsVisible && (
-              <LiveAgentPanel width={uiState.terminalWidth} />
+              <LiveAgentPanel
+                width={uiState.terminalWidth}
+                maxRows={
+                  uiState.useTerminalBuffer
+                    ? getLiveAgentPanelVpMaxRows(uiState.terminalHeight)
+                    : undefined
+                }
+              />
             )}
           </Box>
         </>

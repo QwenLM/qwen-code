@@ -187,6 +187,7 @@ describe('getExtensionSuggestions', () => {
     expect(suggestions[0]!.sourceBadge).toBe('Extension');
     expect(suggestions[0]!.description).toBe('Test description');
     expect(suggestions[0]!.isDirectory).toBe(false);
+    expect(suggestions[0]!.category).toBe('extension');
   });
 
   it('returns empty when folder is not trusted', () => {

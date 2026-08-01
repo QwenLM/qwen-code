@@ -30,11 +30,13 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "dingtalk",
       "clientId": "$DINGTALK_CLIENT_ID",
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "useConnectionManager": true,
       "senderPolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via DingTalk.",
       "groupPolicy": "open",
+      "atSender": true,
       "groups": {
         "*": { "requireMention": true }
       }
@@ -61,6 +63,12 @@ Or define them in the `env` section of `settings.json`:
 }
 ```
 
+### Connection Recovery
+
+`useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
+
+Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
+
 ## Running
 
 ```bash
@@ -73,6 +81,36 @@ qwen channel start
 
 Open DingTalk and send a message to the bot. You should see a 👀 emoji reaction appear while the agent processes, followed by the response.
 
+## Daemon Webhook Delivery
+
+When the channel runs under `qwen serve`, authenticated external Webhook events can trigger unattended agent tasks and deliver the final Markdown response to either a DingTalk user or group. Use the existing Webhook target fields; no separate channel type is required:
+
+```json
+{
+  "webhooks": {
+    "sources": {
+      "manual-test": {
+        "secretEnv": "QWEN_CHANNEL_DINGTALK_TEST_SECRET",
+        "targets": {
+          "operator": {
+            "chatId": "DINGTALK_USER_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": false
+          },
+          "team": {
+            "chatId": "OPEN_CONVERSATION_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Every target must set `isGroup` explicitly. For a direct message, `chatId` is the recipient's DingTalk user ID. For a group message, `chatId` is the group's `openConversationId`. Thread targets and incoming robot Webhook URLs are not supported for proactive delivery. See [Webhook-triggered tasks](./overview#webhook-triggered-tasks) for the complete channel configuration and request format.
+
 ## Group Chats
 
 DingTalk bots work in both DM and group conversations. To enable group support:
@@ -82,6 +120,8 @@ DingTalk bots work in both DM and group conversations. To enable group support:
 3. @mention the bot in the group to trigger a response
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
+
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Mentioned replies use plain text so the @ is visible; replies without a mention use Markdown formatting.
 
 ### Finding a Group's Conversation ID
 

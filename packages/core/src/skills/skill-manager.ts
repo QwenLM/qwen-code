@@ -36,6 +36,7 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -254,13 +255,6 @@ export class SkillManager {
     debugLogger.debug(
       `Listing skills${options.level ? ` at level: ${options.level}` : ''}${options.force ? ' (forced refresh)' : ''}`,
     );
-    const skills: SkillConfig[] = [];
-    const seenNames = new Set<string>();
-
-    const levelsToCheck: SkillLevel[] = options.level
-      ? [options.level]
-      : ['project', 'user', 'extension', 'bundled'];
-
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
 
@@ -271,6 +265,30 @@ export class SkillManager {
     } else {
       debugLogger.debug('Using cached skills');
     }
+
+    const skills = this.collectCachedSkills(options.level);
+    debugLogger.info(`Listed ${skills.length} unique skills`);
+    return skills;
+  }
+
+  /**
+   * Returns the currently committed cache without triggering discovery.
+   *
+   * Status and diagnostics callers must use this method instead of
+   * `listSkills()` so a read-only request cannot turn a cold cache into a
+   * filesystem scan. `null` means no refresh has committed yet.
+   */
+  getCachedSkills(level?: SkillLevel): SkillConfig[] | null {
+    if (this.skillsCache === null) return null;
+    return this.collectCachedSkills(level);
+  }
+
+  private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    const levelsToCheck: SkillLevel[] = level
+      ? [level]
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
@@ -299,8 +317,6 @@ export class SkillManager {
     // programmatic consumers — notably SkillTool's model-facing
     // `<available_skills>` description — are not reordered by priority.
     skills.sort((a, b) => a.name.localeCompare(b.name));
-
-    debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
   }
 
@@ -900,12 +916,32 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+      case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.resolve(
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
         );
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
+          if (!path.isAbsolute(homeExpanded)) {
+            debugLogger.warn(
+              `Custom skill directory "${customDir}" is relative; ` +
+                `resolved to "${expanded}" against the working directory`,
+            );
+          }
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':
@@ -926,6 +962,11 @@ export class SkillManager {
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
 

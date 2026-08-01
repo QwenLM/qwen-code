@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import * as lark from '@larksuiteoapi/node-sdk';
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
 } from '@qwen-code/channel-base';
 import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
@@ -216,6 +218,12 @@ export class FeishuChannel extends ChannelBase {
       await this.connectWebhook(webhookPort, verificationToken, encryptKey);
     } else {
       // WebSocket mode (default, like DingTalk Stream)
+      const token = await this.getTenantAccessToken();
+      if (!token) {
+        throw new Error(
+          `Channel "${this.name}" failed to authenticate Feishu credentials.`,
+        );
+      }
       await this.connectWebSocket();
     }
 
@@ -679,10 +687,34 @@ export class FeishuChannel extends ChannelBase {
     await this.sendMessageInternal(target.chatId, text, true);
   }
 
+  protected override async pushProactiveDelivery(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.sendMessageInternal(
+        target.chatId,
+        text,
+        true,
+        target.isGroup === false ? 'open_id' : 'chat_id',
+      );
+    } catch (error) {
+      if (isChannelProactiveDeliveryError(error)) {
+        throw error;
+      }
+      throw new ChannelProactiveDeliveryError(
+        'transient',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
+  }
+
   private async sendMessageInternal(
     chatId: string,
     text: string,
     throwOnFailure: boolean,
+    receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
   ): Promise<void> {
     const token = await this.getTenantAccessToken();
     if (!token) {
@@ -690,7 +722,10 @@ export class FeishuChannel extends ChannelBase {
         `[Feishu:${this.name}] Cannot send: no access token.\n`,
       );
       if (throwOnFailure) {
-        throw new Error('Feishu sendMessage failed: no access token');
+        throw new ChannelProactiveDeliveryError(
+          'transient',
+          'Feishu sendMessage failed: no access token',
+        );
       }
       return;
     }
@@ -715,7 +750,7 @@ export class FeishuChannel extends ChannelBase {
 
       try {
         const resp = await fetch(
-          `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
+          `${BASE_URL}/im/v1/messages?receive_id_type=${receiveIdType}`,
           {
             method: 'POST',
             headers: {
@@ -734,22 +769,27 @@ export class FeishuChannel extends ChannelBase {
             `[Feishu:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
           );
           if (throwOnFailure) {
-            throw new Error(`Feishu sendMessage failed: HTTP ${resp.status}`);
+            throw new ChannelProactiveDeliveryError(
+              resp.status === 408 || resp.status === 429 || resp.status >= 500
+                ? 'transient'
+                : 'permanent',
+              `Feishu sendMessage failed: HTTP ${resp.status}`,
+            );
           }
         }
       } catch (err) {
-        if (
-          throwOnFailure &&
-          err instanceof Error &&
-          err.message.startsWith('Feishu sendMessage failed:')
-        ) {
+        if (throwOnFailure && err instanceof ChannelProactiveDeliveryError) {
           throw err;
         }
         process.stderr.write(
           `[Feishu:${this.name}] sendMessage error: ${err}\n`,
         );
         if (throwOnFailure) {
-          throw err;
+          throw new ChannelProactiveDeliveryError(
+            'transient',
+            'Feishu sendMessage failed: network error',
+            { cause: err },
+          );
         }
       }
     }

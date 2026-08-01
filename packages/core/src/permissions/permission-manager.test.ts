@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   parseRule,
   parseRules,
@@ -18,12 +20,14 @@ import {
   getSpecifierKind,
   toolMatchesRuleToolName,
   splitCompoundCommand,
+  splitCompoundCommandSegments,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -88,6 +92,7 @@ describe('getSpecifierKind', () => {
 
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
+    expect(getSpecifierKind('zoom_image')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
     expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
@@ -115,7 +120,8 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('edit', 'edit')).toBe(true);
   });
 
-  it('"Read" (read_file) covers grep_search, glob, list_directory', async () => {
+  it('"Read" (read_file) covers all read-only file tools', async () => {
+    expect(toolMatchesRuleToolName('read_file', 'zoom_image')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'grep_search')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'glob')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
@@ -475,13 +481,154 @@ describe('splitCompoundCommand', () => {
   });
 
   it('handles escaped characters', async () => {
-    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&& b']);
+    // A backslash escapes exactly one character, so `\&` is a literal
+    // ampersand argument and the command really is a single one.
+    expect(splitCompoundCommand('echo a \\& b')).toEqual(['echo a \\& b']);
+  });
+
+  it('escapes only the first of two ampersands', async () => {
+    // `echo a \&& b` is not an escaped `&&`: the backslash consumes the first
+    // ampersand and the second is a live async operator. `bash -x` runs it as
+    // two commands, `echo a '&'` and `b`, so the splitter has to see two.
+    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
   it('trims whitespace around sub-commands', async () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
       'git status',
       'rm -rf /',
+    ]);
+  });
+
+  // The async operator. Everything after a bare `&` is a separate command that
+  // the shell will run, so leaving it joined let one segment's allow rule
+  // authorise whatever followed it.
+  it('splits on the async operator', async () => {
+    expect(splitCompoundCommand('git status & rm -rf /tmp/x')).toEqual([
+      'git status',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('splits on repeated async operators', async () => {
+    expect(splitCompoundCommand('a & b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('drops the empty segment after a trailing async operator', async () => {
+    expect(splitCompoundCommand('npm test &')).toEqual(['npm test']);
+  });
+
+  it('splits an unquoted URL query the way the shell does', async () => {
+    // Not a special case: an unquoted `&` in a URL really is the async
+    // operator, and bash runs `b=2` as its own command.
+    expect(splitCompoundCommand('curl http://x?a=1&b=2')).toEqual([
+      'curl http://x?a=1',
+      'b=2',
+    ]);
+  });
+
+  it.each([
+    ['build &> log.txt'],
+    ['build &>> log.txt'],
+    ['ls /nope 2>&1'],
+    ['echo err >&2'],
+    ['ls /nope > out.txt 2>& 1'],
+    // Input-descriptor duplication: the `<` branch of the backward scan.
+    ['exec 3<&4'],
+    ['cat <&3'],
+  ])('does not split %s, where & belongs to a redirection', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it.each([["echo 'x & y'"], ['echo "x & y"']])(
+    'does not split %s, where & is quoted',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual([command]);
+    },
+  );
+
+  // Over-correction guard: the longer operators must keep winning over the
+  // bare `&`, so these two pass both before and after the change.
+  it.each([
+    ['a && b', ['a', 'b']],
+    ['a |& b', ['a', 'b']],
+  ])('keeps %s splitting on the longer operator', async (command, expected) => {
+    expect(splitCompoundCommand(command)).toEqual(expected);
+  });
+
+  it('splits a mix of long and bare operators', async () => {
+    expect(splitCompoundCommand('a && b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  // The backward scan for a redirection has to respect escaping. `\>` is a
+  // literal `>` argument, so bash backgrounds the `echo` and then runs the
+  // `rm`; reading it as a redirection kept both in one segment and let the
+  // `echo`'s allow rule authorise the `rm`.
+  it.each([
+    ['echo a \\> & rm -rf /tmp/x', ['echo a \\>', 'rm -rf /tmp/x']],
+    ['echo a \\< & rm -rf /tmp/x', ['echo a \\<', 'rm -rf /tmp/x']],
+  ])('splits %s, where the redirection is escaped', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('keeps an escaped backslash before a real redirection unsplit', async () => {
+    // Two backslashes are a literal backslash, so the `>` really is a
+    // redirection and the `&` really does duplicate a descriptor.
+    expect(splitCompoundCommand('echo a \\\\>& 2')).toEqual([
+      'echo a \\\\>& 2',
+    ]);
+  });
+
+  // Inside `$(( … ))` / `(( … ))` a bare `&` is bitwise AND. Splitting there
+  // produced two fragments that match no rule, so an otherwise allowed command
+  // stopped matching its own allow rule.
+  it.each([
+    ['VAR=$(( FLAGS & MASK ))'],
+    ['(( a & b ))'],
+    ['echo $(( (x & y) + z ))'],
+  ])('does not split %s, where & is arithmetic', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it('still splits a bare & that follows an arithmetic expansion', async () => {
+    // Over-correction guard: the depth counter has to come back down.
+    expect(splitCompoundCommand('echo $(( a & b )) & rm -rf /tmp/x')).toEqual([
+      'echo $(( a & b ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // The backward scan runs off the front of the string: nothing precedes the
+  // `&`, so it cannot be part of a redirection and is the async operator.
+  it.each([['& echo hi'], ['   & echo hi']])(
+    'treats the leading & in %s as the async operator',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual(['echo hi']);
+    },
+  );
+});
+
+// ─── splitCompoundCommandSegments ────────────────────────────────────────────
+
+describe('splitCompoundCommandSegments', () => {
+  it('reports the operator that terminated each segment', async () => {
+    expect(splitCompoundCommandSegments('a & b && c | d')).toEqual([
+      { command: 'a', terminator: '&' },
+      { command: 'b', terminator: '&&' },
+      { command: 'c', terminator: '|' },
+      { command: 'd', terminator: '' },
+    ]);
+  });
+
+  it('reports an empty terminator for a single command', async () => {
+    expect(splitCompoundCommandSegments('git status')).toEqual([
+      { command: 'git status', terminator: '' },
+    ]);
+  });
+
+  it('keeps the async terminator on a trailing background command', async () => {
+    expect(splitCompoundCommandSegments('npm test &')).toEqual([
+      { command: 'npm test', terminator: '&' },
     ]);
   });
 });
@@ -539,6 +686,14 @@ describe('resolvePathPattern', () => {
 describe('matchesPathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project';
+  const withTempRoot = (run: (root: string) => void): void => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      run(root);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
 
   it('matches dotfiles (e.g. .env)', async () => {
     expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
@@ -618,6 +773,227 @@ describe('matchesPathPattern', () => {
         cwd,
       ),
     ).toBe(false);
+  });
+
+  it('matches a path after resolving parent-directory traversal', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const nestedDir = path.join(root, 'workspace', 'nested');
+      fs.mkdirSync(protectedDir);
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      expect(
+        matchesPathPattern(
+          `/${path.basename(protectedDir)}/**`,
+          `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the canonical target of a symlinked path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'existing.txt'), 'protected');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+        ),
+      ).toBe(false);
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes through a file that causes ENOTDIR', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'config.json', 'nested.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes a symlinked project root in restrictive rules', () => {
+    withTempRoot((root) => {
+      const realRoot = path.join(root, 'real');
+      const linkedRoot = path.join(root, 'linked');
+      const protectedDir = path.join(realRoot, 'protected');
+      fs.mkdirSync(protectedDir, { recursive: true });
+      fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+      fs.symlinkSync(realRoot, linkedRoot, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(protectedDir, 'file.txt'),
+          linkedRoot,
+          linkedRoot,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes the nearest existing ancestor for a new path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'new', 'file.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the target of a dangling symlink', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const target = path.join(protectedDir, 'new.txt');
+      const link = path.join(root, 'link.txt');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(target, link, 'file');
+
+      expect(
+        matchesPathPattern('/protected/**', link, root, root, 'canonical'),
+      ).toBe(true);
+    });
+  });
+
+  // Title names the platform assumption so a future realpath-based resolution
+  // in matchesPathPattern is seen to break it, not silently re-asserted.
+  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      fs.mkdirSync(projectDir);
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'safe'));
+
+      fs.symlinkSync(
+        path.join(outsideDir, 'dir'),
+        path.join(projectDir, 'inner'),
+        'dir',
+      );
+      const link = path.join(projectDir, 'link.txt');
+      fs.symlinkSync(
+        `inner${path.sep}..${path.sep}safe${path.sep}new.txt`,
+        link,
+      );
+
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
+      expect(
+        matchesPathPattern(
+          `/${targetRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+      expect(
+        matchesPathPattern(
+          `/${otherRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      const outsideSafeDir = path.join(outsideDir, 'safe');
+      fs.mkdirSync(path.join(projectDir, 'safe'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(outsideSafeDir);
+      fs.writeFileSync(path.join(outsideSafeDir, 'file.txt'), 'outside');
+
+      const link = path.join(projectDir, 'link');
+      fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
+      const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
+      expect(
+        matchesPathPattern(
+          `/${targetRoot}/safe/**`,
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+      expect(
+        matchesPathPattern(
+          `/${otherRoot}/safe/**`,
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it('preserves matching against the lexical symlink path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern('/link/**', path.join(link, 'new.txt'), root, root),
+      ).toBe(true);
+    });
   });
 });
 
@@ -857,6 +1233,25 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_click')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP rule against its provider-safe name', () => {
+    const legacyName = 'mcp__zybio__literature.search_pubmed';
+    const providerSafeName = normalizeToolNameForProvider(legacyName);
+
+    expect(providerSafeName).not.toBe(legacyName);
+    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+  });
+
+  it('keeps exact provider-safe MCP permission matches collision-safe', () => {
+    const dottedName = 'mcp__zybio__literature.search';
+    const slashedName = 'mcp__zybio__literature/search';
+    const dottedProviderName = normalizeToolNameForProvider(dottedName);
+    const slashedProviderName = normalizeToolNameForProvider(slashedName);
+
+    expect(dottedProviderName).not.toBe(slashedProviderName);
+    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
+    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+  });
+
   it('MCP server-level match (2-part pattern)', async () => {
     const rule = parseRule('mcp__puppeteer');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
@@ -864,10 +1259,34 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP server rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
+  });
+
   it('MCP wildcard match', async () => {
     const rule = parseRule('mcp__puppeteer__*');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
+  });
+
+  it('matches a legacy dotted MCP wildcard rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db__*');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
   });
 
   it('MCP intra-segment wildcard match (e.g. mcp__chrome__use_*)', async () => {
@@ -1257,6 +1676,38 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
+    it('matches a legacy truncated MCP permission alias', async () => {
+      const rawName = `mcp__server__${'x'.repeat(80)}`;
+      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
+      const providerSafeName = normalizeToolNameForProvider(rawName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: [legacyName] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+          toolAliases: [legacyName],
+        }),
+      ).toBe('allow');
+    });
+
+    it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {
+      const legacyName = 'mcp__server__literature.search_pubmed';
+      const providerSafeName = normalizeToolNameForProvider(legacyName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['mcp__server__literature.*'] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+        }),
+      ).toBe('deny');
+    });
+
     it('deny takes precedence over ask and allow', async () => {
       const pm2 = new PermissionManager(
         makeConfig({
@@ -1486,19 +1937,15 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
-    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(FOO="bar baz" tail -f /var/log/app.log)'],
-        }),
-      );
+    it('asks by default for wrapped commands with environment prefixes', async () => {
+      const pm2 = new PermissionManager(makeConfig({}));
       pm2.initialize();
       expect(
         await pm2.evaluate({
           toolName: 'monitor',
           command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
         }),
-      ).toBe('allow');
+      ).toBe('ask');
     });
 
     it('Monitor(...) deny rule sees shell wrapper suffix commands', async () => {
@@ -1856,6 +2303,53 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('denies an equivalent path containing parent traversal', async () => {
+      expect(
+        await pm.evaluate({
+          toolName: 'edit',
+          filePath: '/project/work/../src/generated/code.ts',
+        }),
+      ).toBe('deny');
+    });
+
+    it('canonicalizes restrictive rules without widening allow rules', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+        fs.symlinkSync(protectedDir, link, 'dir');
+        const filePath = path.join(link, 'file.txt');
+
+        const denyManager = new PermissionManager(
+          makeConfig({
+            permissionsDeny: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        denyManager.initialize();
+        expect(await denyManager.evaluate({ toolName: 'edit', filePath })).toBe(
+          'deny',
+        );
+
+        const allowManager = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        allowManager.initialize();
+        expect(
+          await allowManager.evaluate({ toolName: 'edit', filePath }),
+        ).toBe('default');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('allows reading in an allowed directory', async () => {
       expect(
         await pm.evaluate({
@@ -1964,9 +2458,17 @@ describe('PermissionManager', () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('zoom_image')).toBe(false);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
       expect(await pm.isToolEnabled('edit')).toBe(false);
       expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
+    it('coreTools allowlist: ZoomImage alias enables zoom_image', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['ZoomImage'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('zoom_image')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
     it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
@@ -2222,6 +2724,33 @@ describe('PermissionManager', () => {
         }),
       ).toBe(true);
     });
+
+    it('matches an ask rule through a symlinked path', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.symlinkSync(protectedDir, link, 'dir');
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAsk: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        pm.initialize();
+
+        expect(
+          pm.hasMatchingAskRule({
+            toolName: 'edit',
+            filePath: path.join(link, 'file.txt'),
+          }),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -2230,6 +2759,7 @@ describe('PermissionManager', () => {
 describe('getRuleDisplayName', () => {
   it('maps read tools to "Read" meta-category', async () => {
     expect(getRuleDisplayName('read_file')).toBe('Read');
+    expect(getRuleDisplayName('zoom_image')).toBe('Read');
     expect(getRuleDisplayName('grep_search')).toBe('Read');
     expect(getRuleDisplayName('glob')).toBe('Read');
     expect(getRuleDisplayName('list_directory')).toBe('Read');
@@ -2269,6 +2799,14 @@ describe('buildPermissionRules', () => {
         filePath: '/Users/alice/.secrets',
       });
       // read_file is file-targeted → dirname gives /Users/alice, plus /** glob
+      expect(rules).toEqual(['Read(//Users/alice/**)']);
+    });
+
+    it('generates Read rule scoped to parent directory for zoom_image', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'zoom_image',
+        filePath: '/Users/alice/chart.png',
+      });
       expect(rules).toEqual(['Read(//Users/alice/**)']);
     });
 
@@ -2746,6 +3284,33 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
   });
+
+  it('matches a deny rule through a symlinked path', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.findMatchingDenyRule({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe('Edit(/protected/**)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── AUTO mode dangerous-rule stash ────────────────────────────────────
@@ -2982,6 +3547,42 @@ describe('PermissionManager — compound shell write attribution', () => {
         cwd: '/repo',
       }),
     ).toBe(false);
+  });
+
+  it('does not treat canonical-only allow matches as relevant', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const allowedDir = path.join(root, 'allowed');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(allowedDir);
+      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
+      fs.symlinkSync(allowedDir, link, 'dir');
+
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Edit(/allowed/**)'],
+          cwd: root,
+          projectRoot: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe(false);
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'run_shell_command',
+          command: `echo allowed > ${path.join(link, 'file.txt')}`,
+          cwd: root,
+        }),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
