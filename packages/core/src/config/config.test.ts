@@ -4776,6 +4776,224 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBeUndefined();
     });
 
+    describe('getCompactionModel', () => {
+      it('returns the compaction model when set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe('compaction-model');
+      });
+
+      it('resolves an authType-qualified compaction model selector', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('openai:compaction-model');
+      });
+
+      it('falls back to the main model when compactionModel is not set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          fastModel: 'fast-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'fast-model',
+                name: 'Fast Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        // fastModel is intentionally ignored — compaction falls back to main
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('falls back to main model when neither compactionModel nor fastModel is set', () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('returns undefined when the compaction model is voiceOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'voice-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'voice-model',
+                name: 'Voice Model',
+                voiceOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('returns undefined when the compaction model is visionOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'vision-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'vision-model',
+                name: 'Vision Model',
+                visionOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('falls back to the main model when the compaction model selector is malformed', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'deepseek-v4-flash',
+                name: 'deepseek-v4-flash',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('claude-opus-4-7');
+      });
+
+      it('returns undefined when the compaction model is not configured for the current auth type', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'missing-model',
+          modelProvidersConfig: {
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'Claude Opus 4',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+    });
+
     it('should refresh auth when switching to model with different envKey', async () => {
       // This test verifies the fix for switching between modelProvider models
       // with different envKeys (e.g., deepseek-chat with DEEPSEEK_API_KEY)

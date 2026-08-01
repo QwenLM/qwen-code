@@ -40,9 +40,7 @@ export interface UpdateGoalToolParams {
   blockerKind?: 'authority' | 'external' | 'repeated';
 }
 
-export interface GoalToolResult extends ToolResult {
-  terminateTurn?: boolean;
-}
+export type GoalToolResult = ToolResult;
 
 type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker'> & {
   getSnapshotForPermit?: GoalRuntime['getSnapshotForPermit'];
