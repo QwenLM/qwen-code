@@ -56,6 +56,11 @@ function testBootstrapBridgeConfiguration() {
     ),
   );
   assert.deepEqual(capability.windows, ['main']);
+  assert.equal(
+    capability.remote,
+    undefined,
+    'The bootstrap capability must not grant remote IPC access.',
+  );
   assert.deepEqual(capability.permissions, [
     'core:event:allow-listen',
     'core:event:allow-unlisten',

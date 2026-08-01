@@ -174,7 +174,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps process-environment compatibility fallbacks.',
+        'Embedded server construction keeps a process-environment compatibility fallback.',
       accesses: { whole: 1 },
     },
   ],

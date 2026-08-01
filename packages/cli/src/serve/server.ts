@@ -1198,7 +1198,6 @@ export function createServeApp(
             o.startsWith('moz-extension://'),
         )
       : [];
-
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }

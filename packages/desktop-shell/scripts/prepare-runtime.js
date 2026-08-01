@@ -118,7 +118,14 @@ console.log(
 );
 
 async function installNodeRuntime(destination, desktopTarget) {
+  const nvmrc = fs.readFileSync(path.join(repoRoot, '.nvmrc'), 'utf8').trim();
   const nodeVersion = process.versions.node;
+  if (!nodeVersion.startsWith(`${nvmrc}.`)) {
+    throw new Error(
+      `Node ${nodeVersion} does not match .nvmrc major version ${nvmrc}. ` +
+        'Run the correct Node or update .nvmrc.',
+    );
+  }
   const archiveName = nodeArchiveName(nodeVersion, desktopTarget);
   const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
   const temporaryRoot = fs.mkdtempSync(
@@ -184,7 +191,7 @@ function nodeArchiveName(version, desktopTarget) {
 }
 
 async function download(url, destination) {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
   if (!response.ok || !response.body) {
     throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
   }
@@ -209,11 +216,7 @@ function verifyChecksum(archivePath, archiveName, checksums) {
 }
 
 function extractNodeArchive(archivePath, destination) {
-  if (archivePath.endsWith('.zip')) {
-    execFileSync('unzip', ['-q', archivePath, '-d', destination]);
-  } else {
-    execFileSync('tar', ['-xf', archivePath, '-C', destination]);
-  }
+  execFileSync('tar', ['-xf', archivePath, '-C', destination]);
 }
 
 function writeLaunchers(desktopTarget) {

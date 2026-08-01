@@ -30,7 +30,6 @@ const logRoot =
     : path.join(isolatedState, appId, 'logs');
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
-const previousSize = 0;
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -71,7 +70,7 @@ child.on('exit', (code, signal) => {
 child.unref();
 
 try {
-  await waitForReady(previousSize);
+  await waitForReady();
   completed = true;
   console.log(`Packaged desktop runtime ready: ${executable}`);
 } finally {
@@ -87,16 +86,14 @@ function captureProcessOutput(stream, name) {
   });
 }
 
-async function waitForReady(offset) {
+async function waitForReady() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (exitFailure) throw exitFailure;
-    const contents = fs
-      .readFileSync(logPath, {
-        encoding: 'utf8',
-        flag: 'a+',
-      })
-      .slice(offset);
+    const contents = fs.readFileSync(logPath, {
+      encoding: 'utf8',
+      flag: 'a+',
+    });
     if (
       contents.includes('qwen serve listening on http://127.0.0.1:') &&
       fs.statSync(runtimeInfoPath, { throwIfNoEntry: false })?.isFile()
@@ -107,12 +104,10 @@ async function waitForReady(offset) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  const contents = fs
-    .readFileSync(logPath, {
-      encoding: 'utf8',
-      flag: 'a+',
-    })
-    .slice(offset);
+  const contents = fs.readFileSync(logPath, {
+    encoding: 'utf8',
+    flag: 'a+',
+  });
   const runtimeInfo = fs
     .statSync(runtimeInfoPath, { throwIfNoEntry: false })
     ?.isFile()

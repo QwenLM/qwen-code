@@ -2942,6 +2942,7 @@ describe('createServeApp', () => {
     afterEach(async () => {
       await fsp.rm(webShellDir, { recursive: true, force: true });
     });
+
     it('serves the shell at the root with security headers', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app).get('/').set('Host', host);

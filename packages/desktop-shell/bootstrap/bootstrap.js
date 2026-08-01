@@ -52,6 +52,7 @@ async function chooseWorkspace() {
 }
 
 async function retryRuntime() {
+  if (!invoke) return;
   setStatus(
     'starting',
     'Restarting Qwen Code',
@@ -70,6 +71,7 @@ async function retryRuntime() {
 }
 
 async function installUpdate() {
+  if (!invoke) return;
   update.disabled = true;
   update.textContent = `Installing ${updateVersion || 'update'}…`;
   try {

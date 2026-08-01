@@ -4742,6 +4742,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(shell.status).toBe(200);
       expect(await shell.text()).toBe('<html>shell</html>');
 
+      const headShell = await fetch(`${handle.url}/`, { method: 'HEAD' });
+      expect(headShell.status).toBe(200);
+
       const asset = await fetch(`${handle.url}/assets/app.js`);
       expect(asset.status).toBe(200);
       await expect(handle.runtimeReady).resolves.toBeUndefined();

@@ -59,7 +59,6 @@ fn main() {
             choose_workspace,
             open_logs,
             restart_runtime,
-            check_for_update,
             install_update,
         ])
         .setup(setup_app);
@@ -227,17 +226,6 @@ fn open_logs(state: State<'_, ApplicationState>) -> Result<(), String> {
     }
     open::that_detached(&state.log_path)
         .map_err(|error| format!("Failed to open desktop logs: {error}"))
-}
-
-#[tauri::command]
-async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
-    let update = app
-        .updater()
-        .map_err(|error| format!("Failed to initialize updater: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("Failed to check for updates: {error}"))?;
-    Ok(update.map(|update| update.version))
 }
 
 #[tauri::command]
@@ -426,8 +414,12 @@ fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
 }
 
 fn is_bootstrap_url(url: &Url) -> bool {
-    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
+    if url.scheme() == "tauri" && url.host_str() == Some("localhost") {
+        return true;
+    }
+    cfg!(target_os = "windows")
+        && matches!(url.scheme(), "http" | "https")
+        && url.host_str() == Some("tauri.localhost")
 }
 
 fn origin_of(url: &Url) -> Result<Url, String> {
@@ -504,9 +496,15 @@ mod tests {
         assert!(is_bootstrap_url(
             &Url::parse("tauri://localhost/").expect("tauri bootstrap")
         ));
-        assert!(is_bootstrap_url(
-            &Url::parse("http://tauri.localhost/").expect("windows bootstrap")
-        ));
+        if cfg!(target_os = "windows") {
+            assert!(is_bootstrap_url(
+                &Url::parse("http://tauri.localhost/").expect("windows bootstrap")
+            ));
+        } else {
+            assert!(!is_bootstrap_url(
+                &Url::parse("http://tauri.localhost/").expect("not a bootstrap origin")
+            ));
+        }
     }
 
     #[test]
