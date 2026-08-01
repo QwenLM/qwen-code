@@ -45,6 +45,7 @@ import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
   sessionId: string;
@@ -1871,6 +1872,45 @@ describe('DaemonSessionProvider', () => {
       'mid-old',
       { clientId: 'client-current' },
     );
+  });
+
+  it('forwards the persisted client id of the target session on cross-session removal', async () => {
+    window.sessionStorage.clear();
+    const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removeMidTurnMessage,
+    });
+    sdkMocks.sessions.push(session);
+    // The message was queued under session-old's OWN client id; the bridge
+    // removes only on an exact originator match, so after switching to
+    // session-current the removal must forward session-old's persisted id —
+    // forwarding the current session's id would resolve to a foreign originator
+    // and the bridge would reject a valid removal.
+    persistStableClientId('client-old', 'session-old');
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removeMidTurnMessage('mid-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
+      'session-old',
+      'mid-old',
+      { clientId: 'client-old' },
+    );
+    window.sessionStorage.clear();
   });
 
   it('rejects stale-session pending prompt refreshes', async () => {

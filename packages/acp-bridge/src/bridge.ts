@@ -7817,7 +7817,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // caller's clientId doesn't match the queued originator) — log it
         // like the enqueue / pending-removal siblings so it shows in daemon logs.
         writeStderrLine(
-          `[mid-turn] session=${entry.sessionId} remove missed messageId=${messageId} (already drained or originator mismatch)`,
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or originator mismatch)`,
         );
         return { removed: false };
       }

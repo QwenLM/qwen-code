@@ -32,7 +32,10 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
-import { persistStableClientId } from './clientLifecycle.js';
+import {
+  getPersistedClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -1080,14 +1083,21 @@ export function createDaemonSessionActions({
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
         // The bridge removes a mid-turn message only on an exact originator
-        // match, so forward our clientId like the same-session path does —
-        // without it the removal resolves to an undefined originator and never
-        // matches the id stamped at enqueue.
+        // match. The originator is the client id that was attached to the
+        // TARGET session when the message was queued — with per-session client
+        // ids that differs from the currently selected session's id, so
+        // forwarding our own id would resolve to a foreign originator and the
+        // bridge would reject a valid removal after a session switch. Prefer
+        // the target session's persisted id; fall back to our own when nothing
+        // is persisted (a shared caller-provided client id covers every
+        // session).
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
         return await session.client.removeMidTurnMessage(
           opts.sessionId,
           messageId,
           {
-            ...(session.clientId ? { clientId: session.clientId } : {}),
+            ...(targetClientId ? { clientId: targetClientId } : {}),
           },
         );
       }

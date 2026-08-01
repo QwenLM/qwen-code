@@ -281,25 +281,38 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
   it('edits by removing the daemon message before restoring the composer', async () => {
     const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
       messageId: 'mid-edit',
     });
-    vi.mocked(actions.removeMidTurnMessage).mockResolvedValue({
-      removed: true,
-    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
     const { editor } = mount('responding', actions);
 
     act(() => latest.enqueuePrompt('修改我'));
     await act(async () => {});
-    await act(async () => latest.editQueuedPrompt(1));
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    await act(async () => {});
+
+    // Restoration must WAIT for the daemon removal: handing the composer back
+    // while the message is still queued would let the user resubmit a message
+    // that remains in the mid-turn queue.
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(actions.removeMidTurnMessage).toHaveBeenCalledWith('mid-edit', {
+      sessionId: 'session-1',
+    });
+
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
 
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).toHaveBeenCalledWith('修改我');
     expect(editor.focus).toHaveBeenCalled();
-    expect(actions.removeMidTurnMessage).toHaveBeenCalledWith('mid-edit', {
-      sessionId: 'session-1',
-    });
   });
 
   it('keeps the row when removal loses the race with drain or idle', async () => {
@@ -317,11 +330,15 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     await act(async () => {});
     await act(async () => latest.removeQueuedPrompt(1));
 
+    // An active-turn rejection parks the row with a `delete` failed-action flag
+    // (cleared of the in-flight marker) so the idle pass drops it without
+    // resending.
     expect(latest.queuedPrompts).toMatchObject([
       {
         text: '竞态消息',
         midTurnState: 'queued',
         isRemoving: false,
+        midTurnFailedAction: 'delete',
       },
     ]);
     expect(reportError).toHaveBeenCalled();
