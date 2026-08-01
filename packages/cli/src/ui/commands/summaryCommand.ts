@@ -297,8 +297,10 @@ export const summaryCommand: SlashCommand = {
       ).replaceAll(path.sep, '/');
 
       // Compute the default-target flag before the guards so an explicitly
-      // spelled default path (`.qwen/PROJECT_SUMMARY.md` or `.qwen/`) behaves
-      // exactly like the no-arg command and always overwrites.
+      // spelled default path (`.qwen/PROJECT_SUMMARY.md` or `.qwen/`) is
+      // treated as the default target for the overwrite guard and always
+      // overwrites. Unlike the no-arg command, a spelled path still runs the
+      // custom-path symlink containment checks.
       const isDefaultTarget = summaryPath === defaultSummaryPath;
 
       const existingStat = await fsPromises.stat(summaryPath).catch(() => null);
