@@ -1,7 +1,7 @@
 ## Unreleased
 
-* Breaking: Require Node.js 22 or later, matching the supported Qwen Code runtime.
-* Security: Update `@modelcontextprotocol/sdk` to 1.30.0 and require `@hono/node-server` 2.0.12, removing the vulnerable Hono 1.x dependency path.
+* Breaking: Require Node.js 22 or later, matching the supported Qwen Code runtime. The `engines` field is advisory unless `engine-strict` is enabled, so Node.js 18/20 installs emit an `EBADENGINE` warning rather than failing.
+* Security: Update `@modelcontextprotocol/sdk` to 1.30.0 and require `@hono/node-server` `^2.0.12`, removing the vulnerable Hono 1.x dependency path.
 
 ## [0.0.61](https://github.com/mobile-next/mobile-mcp/releases/tag/0.0.61) (2026-07-02)
 * Fix: Catch system signals for clean v8 exit ([#366](https://github.com/mobile-next/mobile-mcp/pull/366))

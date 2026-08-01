@@ -91,8 +91,12 @@ export const createMcpServer = (): McpServer => {
 
   type ZodSchemaShape = Record<string, z.ZodType>;
 
-  // Workspaces can resolve the SDK and this package through different Zod copies.
-  // The SDK supports both at runtime; this preserves the local schema inference.
+  // In the monorepo workspace the SDK resolves the root Zod (v3) while this
+  // package resolves its own Zod (v4), so their schema types are nominally
+  // incompatible even though the SDK validates both at runtime. The published
+  // package resolves a single Zod copy and never needs this bridge; it only
+  // spans the dev-only workspace layout. Aligning the workspace on one Zod copy
+  // would let this cast be deleted entirely.
   const sdkInputSchema = <Schema extends ZodSchemaShape>(schema: Schema) =>
     schema as unknown as Schema & ZodRawShapeCompat;
 
