@@ -10249,7 +10249,6 @@ class QwenAgent implements Agent {
                 await sourceSession.assertCanStartTurn();
                 const sourceConfig = sourceSession.getConfig();
                 const recording = sourceConfig.getChatRecordingService();
-                if (recording) await recording.flush();
                 const sessionService = sourceConfig.getSessionService();
 
                 let baseName: string;
@@ -10271,10 +10270,16 @@ class QwenAgent implements Agent {
                   sessionService,
                 );
                 const newSessionId = randomUUID();
-                await sessionService.forkSession(sessionId, newSessionId, {
-                  title,
-                  ...(atRecordId !== undefined ? { atRecordId } : {}),
-                });
+                const fork = () =>
+                  sessionService.forkSession(sessionId, newSessionId, {
+                    title,
+                    ...(atRecordId !== undefined ? { atRecordId } : {}),
+                  });
+                if (recording) {
+                  await recording.runWithWriteBarrier(fork);
+                } else {
+                  await fork();
+                }
                 return { newSessionId, title, displayName: title };
               },
             );

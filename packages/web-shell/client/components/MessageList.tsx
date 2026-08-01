@@ -3701,6 +3701,7 @@ export const MessageList = memo(
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
+                !isResponding &&
                 branchRecordId !== undefined
               }
               isLocateFlashing={displayItemMatchesLocateTarget(
@@ -3740,6 +3741,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        isResponding,
         workspaceCwd,
         showRetryHint,
         onRetryClick,

@@ -12856,10 +12856,19 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('does not branch a live session when its recording flush fails', async () => {
+  it('does not branch a live session when its write barrier fails', async () => {
     const recording = makeRecordingService();
-    recording.flush.mockRejectedValue(new Error('flush failed'));
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new Error('write barrier failed'),
+    );
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
     const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -12869,7 +12878,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
         cwd: '/tmp',
         sessionId: liveSessionId,
       }),
-    ).rejects.toThrow('flush failed');
+    ).rejects.toThrow('write barrier failed');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
     expect(SessionService).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
@@ -12901,7 +12911,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
       },
     );
 
-    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
     expect(innerConfig.getSessionService).toHaveBeenCalledOnce();
     expect(SessionService).not.toHaveBeenCalled();
     expect(sessionService.forkSession).toHaveBeenCalledWith(

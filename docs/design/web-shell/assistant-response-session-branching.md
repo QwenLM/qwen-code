@@ -2,13 +2,14 @@
 
 ## Document Status
 
-- Status: Proposed
+- Status: Implemented
 - Date: 2026-07-30
 - Scope: Web Shell, daemon session protocol, ACP bridge, session recording,
   transcript replay, and session persistence
 - Review status: design v6 passed strict review; the 2026-08-01 PR review
   amendments preserve the architecture while making checkpoint emission and
-  already-missing backup handling best-effort
+  already-missing backup handling best-effort, hiding Branch during active
+  turns, and restoring the cross-process writer barrier around fork creation
 
 ## 1. Summary
 
@@ -439,7 +440,10 @@ with HTTP status `409`. There is no fallback to the current session tail.
 ### 11.2 UI behavior
 
 Add optional `branchRecordId` metadata to the Assistant transcript/message
-model. The Branch action is rendered only when this field exists.
+model. The Branch action is rendered only when this field exists and no turn is
+currently active. Temporarily hiding the action while a later turn is running
+prevents the request from waiting behind that turn longer than the client action
+timeout and then committing a branch after the client has given up.
 
 While a branch request is pending, disable the selected action. On success,
 switch to the returned session. On `branch_point_invalid`, refresh the source
@@ -483,7 +487,10 @@ after the prompt releases it.
 
 The Bridge queue provides request ordering and lifecycle coordination. The
 Agent lock protects transcript ownership even for callers that bypass the HTTP
-route.
+route. For a live recorded session, branch read, validation, and creation also
+run inside the recorder's write barrier so the writer lease is asserted before
+and after the filesystem transaction. The Agent lock is process-local and does
+not replace this cross-process ownership check.
 
 ## 13. Historical Fork Construction
 

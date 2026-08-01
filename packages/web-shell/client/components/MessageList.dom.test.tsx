@@ -312,6 +312,7 @@ function renderInto(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
 ) {
@@ -325,6 +326,7 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
+          onBranchSession={opts.onBranchSession}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -1941,6 +1943,36 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
     click(c.querySelector('[data-testid="branch-anchored"]')!);
     expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('hides branch actions while a later turn is responding', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const messages = [userMsg('u1'), anchored, userMsg('u2'), asstMsg('live')];
+
+    renderInto(root, messages, undefined, {
+      isResponding: false,
+      onBranchSession,
+    });
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).not.toBeNull();
+
+    renderInto(root, messages, undefined, {
+      isResponding: true,
+      onBranchSession,
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).toBeNull();
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {

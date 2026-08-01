@@ -369,8 +369,8 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
-    getTranscriptCursor?: ReturnType<typeof vi.fn>;
-    recordBranchCheckpointTransaction?: ReturnType<typeof vi.fn>;
+    getTranscriptCursor: ReturnType<typeof vi.fn>;
+    recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -575,6 +575,8 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      getTranscriptCursor: vi.fn().mockReturnValue({ recordId: null }),
+      recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
     };
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
