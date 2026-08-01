@@ -192,7 +192,7 @@ export function SpecularComposerEffect({
     };
 
     const startLoop = () => {
-      if (!running && canvas.isConnected) {
+      if (!running && !disposed) {
         running = true;
         lastFrame = performance.now();
         frameId = window.requestAnimationFrame(draw);
@@ -303,12 +303,26 @@ export function SpecularComposerEffect({
     };
 
     const resizeObserver = new ResizeObserver(resize);
-    const onContextLost = (event: Event) => {
-      event.preventDefault();
+    let disposed = false;
+    const teardown = () => {
+      if (disposed) return;
+      disposed = true;
       running = false;
       window.cancelAnimationFrame(frameId);
+      frameId = 0;
       resizeObserver.disconnect();
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener(
+        'pointerleave',
+        onPointerLeave,
+      );
+      target.removeEventListener('focusin', onFocusIn);
+      target.removeEventListener('focusout', onFocusOut);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
       canvas.remove();
+    };
+    const onContextLost = () => {
+      teardown();
     };
     canvas.addEventListener('webglcontextlost', onContextLost);
     resizeObserver.observe(target);
@@ -326,18 +340,7 @@ export function SpecularComposerEffect({
     startLoop();
 
     return () => {
-      running = false;
-      window.cancelAnimationFrame(frameId);
-      resizeObserver.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      document.documentElement.removeEventListener(
-        'pointerleave',
-        onPointerLeave,
-      );
-      target.removeEventListener('focusin', onFocusIn);
-      target.removeEventListener('focusout', onFocusOut);
-      canvas.removeEventListener('webglcontextlost', onContextLost);
-      canvas.remove();
+      teardown();
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
       gl.deleteShader(vertexShader);

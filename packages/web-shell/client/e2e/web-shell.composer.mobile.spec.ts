@@ -44,6 +44,10 @@ test('keeps the composer usable after WebGL context loss', async ({
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoSession(page, scenario, daemon);
+  const hasWebgl2 = await page.evaluate(
+    () => !!document.createElement('canvas').getContext('webgl2'),
+  );
+  test.skip(!hasWebgl2, 'WebGL2 is unavailable on this runner');
   const canvas = page.locator('[data-web-shell-composer-specular] canvas');
   await expect(canvas).toBeVisible();
 

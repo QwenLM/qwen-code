@@ -549,12 +549,26 @@ describe('specular effect WebGL cleanup', () => {
       container.querySelector('[data-web-shell-composer-specular] canvas'),
     ).not.toBeNull();
 
-    const canvas = container.querySelector('canvas')!;
-    const contextLost = new Event('webglcontextlost', { cancelable: true });
-    act(() => canvas.dispatchEvent(contextLost));
+    const removeWindowListenerSpy = vi.spyOn(window, 'removeEventListener');
+    const removeDocumentListenerSpy = vi.spyOn(
+      document.documentElement,
+      'removeEventListener',
+    );
 
-    expect(contextLost.defaultPrevented).toBe(true);
+    const canvas = container.querySelector(
+      '[data-web-shell-composer-specular] canvas',
+    )!;
+    act(() => canvas.dispatchEvent(new Event('webglcontextlost')));
+
     expect(cancelAnimationFrameSpy).toHaveBeenCalled();
+    expect(removeWindowListenerSpy).toHaveBeenCalledWith(
+      'pointermove',
+      expect.any(Function),
+    );
+    expect(removeDocumentListenerSpy).toHaveBeenCalledWith(
+      'pointerleave',
+      expect.any(Function),
+    );
     expect(
       container.querySelector('[data-web-shell-composer-specular] canvas'),
     ).toBeNull();
