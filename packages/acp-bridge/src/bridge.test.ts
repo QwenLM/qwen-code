@@ -10879,6 +10879,37 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('Live transcript persistence', () => {
+    it('forwards direct dialogue to the owning ACP child', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const entries = [
+        { role: 'user' as const, text: '你好' },
+        { role: 'assistant' as const, text: '你好！' },
+      ];
+
+      await bridge.appendSessionLiveTranscript(
+        session.sessionId,
+        entries,
+        'qwen3.5-omni-plus-realtime',
+      );
+
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript,
+        params: {
+          sessionId: session.sessionId,
+          entries,
+          model: 'qwen3.5-omni-plus-realtime',
+        },
+      });
+      await bridge.shutdown();
+    });
+  });
+
   describe('parentSessionId', () => {
     it('carries parentSessionId from a spawn into the session summary', async () => {
       const bridge = makeBridge({

@@ -220,6 +220,10 @@ export interface RealtimeTranscriptEntry {
   text: string;
 }
 
+export interface RealtimeDirectTranscriptEvent extends RealtimeEventContext {
+  entries: readonly RealtimeTranscriptEntry[];
+}
+
 export interface RealtimeDelegateCall extends RealtimeResponseEvent {
   itemId?: string;
   callId: string;
@@ -259,6 +263,7 @@ export interface QwenRealtimeCallbacks {
   onDelegateCall?: (event: RealtimeDelegateCall) => void;
   onResponseCreated?: (event: RealtimeResponseCreatedEvent) => void;
   onResponseDone?: (event: RealtimeResponseEvent) => void;
+  onDirectTranscript?: (event: RealtimeDirectTranscriptEvent) => void;
   onBargeIn?: (event: RealtimeResponseEvent) => void;
   onIgnoredEvent?: (event: RealtimeIgnoredEvent) => void;
   onAudioDropped?: (event: RealtimeEventContext) => void;
@@ -581,6 +586,15 @@ export function openQwenRealtimeSession(
     const consumedInputItemIds = new Set<string>();
     const transcriptEntries: RealtimeTranscriptEntry[] = [];
     let lastHandoffEntryCount = 0;
+    const pendingDirectTranscriptEntries: RealtimeTranscriptEntry[] = [];
+    const collectedDirectResponseIds = new Set<string>();
+    const collectedDirectInputItemIds = new Set<string>();
+    const responseAuthorities = new Map<string, RealtimeResponseAuthority>();
+    const delegatedResponseIds = new Set<string>();
+    const responseOutputText = new Map<
+      string,
+      { text: string; audioTranscript: string }
+    >();
     let newInputEntry = false;
     let newOutputEntry = false;
     let resolveClosed: (info: RealtimeCloseInfo) => void = () => undefined;
@@ -857,6 +871,7 @@ export function openQwenRealtimeSession(
     const consumeInputItem = (itemId: string): void => {
       completedInputTranscripts.delete(itemId);
       committedInputItemIds.delete(itemId);
+      collectedDirectInputItemIds.delete(itemId);
       consumedInputItemIds.add(itemId);
       while (consumedInputItemIds.size > MAX_TRACKED_INPUT_ITEMS) {
         const oldest = consumedInputItemIds.values().next().value;
@@ -900,12 +915,101 @@ export function openQwenRealtimeSession(
       transcriptEntries.push({ role, text });
     };
 
+    const deliverDirectTranscript = (
+      entries: readonly RealtimeTranscriptEntry[],
+    ): void => {
+      if (entries.length === 0) return;
+      const copiedEntries = entries.map((entry) => ({ ...entry }));
+      if (!callbacks.onDirectTranscript) {
+        pendingDirectTranscriptEntries.push(...copiedEntries);
+        return;
+      }
+      if (
+        !callback(() =>
+          callbacks.onDirectTranscript?.({
+            callEpoch: config.callEpoch,
+            entries: copiedEntries,
+          }),
+        )
+      ) {
+        pendingDirectTranscriptEntries.push(...copiedEntries);
+      }
+    };
+
+    const collectDirectTranscript = (responseId: string): void => {
+      if (
+        collectedDirectResponseIds.has(responseId) ||
+        responseAuthorities.get(responseId) !== 'direct' ||
+        delegatedResponseIds.has(responseId)
+      ) {
+        return;
+      }
+      const inputItemId = responseInputItemIds.get(responseId);
+      const input = inputItemId
+        ? completedInputTranscripts.get(inputItemId)
+        : undefined;
+      const output = responseOutputText.get(responseId);
+      const assistant = output?.audioTranscript || output?.text;
+      const entries: RealtimeTranscriptEntry[] = [];
+      if (inputItemId && input?.trim()) {
+        collectedDirectInputItemIds.add(inputItemId);
+        entries.push({ role: 'user', text: input });
+      }
+      if (assistant?.trim()) {
+        entries.push({ role: 'assistant', text: assistant });
+      }
+      if (entries.length === 0) return;
+      collectedDirectResponseIds.add(responseId);
+      deliverDirectTranscript(entries);
+    };
+
     const takeTranscriptTail = (): readonly RealtimeTranscriptEntry[] => {
-      const tail = transcriptEntries
-        .slice(lastHandoffEntryCount)
-        .map((entry) => ({ ...entry }));
-      lastHandoffEntryCount = transcriptEntries.length;
-      return tail;
+      for (const responseId of responseAuthorities.keys()) {
+        collectDirectTranscript(responseId);
+      }
+      const delegatedInputItemIds = new Set(
+        [...delegatedResponseIds]
+          .map((responseId) => responseInputItemIds.get(responseId))
+          .filter((itemId): itemId is string => itemId !== undefined),
+      );
+      for (const [itemId, text] of completedInputTranscripts) {
+        if (
+          collectedDirectInputItemIds.has(itemId) ||
+          delegatedInputItemIds.has(itemId) ||
+          !text.trim()
+        ) {
+          continue;
+        }
+        collectedDirectInputItemIds.add(itemId);
+        deliverDirectTranscript([{ role: 'user', text }]);
+      }
+      return pendingDirectTranscriptEntries.splice(0).map((entry) => ({
+        ...entry,
+      }));
+    };
+
+    const takeHandoffTranscriptTail =
+      (): readonly RealtimeTranscriptEntry[] => {
+        const tail = transcriptEntries
+          .slice(lastHandoffEntryCount)
+          .map((entry) => ({ ...entry }));
+        lastHandoffEntryCount = transcriptEntries.length;
+        return tail;
+      };
+
+    const updateResponseOutputText = (
+      responseId: string,
+      source: RealtimeOutputTextEvent['source'],
+      text: string,
+      done: boolean,
+    ): void => {
+      const current = responseOutputText.get(responseId) ?? {
+        text: '',
+        audioTranscript: '',
+      };
+      const key = source === 'audio_transcript' ? 'audioTranscript' : 'text';
+      current[key] = done ? text : `${current[key]}${text}`;
+      responseOutputText.set(responseId, current);
     };
 
     const takeHandoffTranscript = (
@@ -920,7 +1024,7 @@ export function openQwenRealtimeSession(
       ) {
         transcriptEntries.push({ role: 'user', text: trimmed });
       }
-      const transcript = takeTranscriptTail();
+      const transcript = takeHandoffTranscriptTail();
       newInputEntry = true;
       newOutputEntry = true;
       return transcript;
@@ -1065,6 +1169,7 @@ export function openQwenRealtimeSession(
       call.arguments = rawArguments;
       call.dispatched = true;
       const activeTranscript = takeHandoffTranscript(request);
+      delegatedResponseIds.add(call.responseId);
       const steering = activeHandoffCallId !== undefined;
       if (steering) {
         if (
@@ -1547,6 +1652,7 @@ export function openQwenRealtimeSession(
               : 'direct';
           activeResponseId = responseId;
           activeResponseAuthority = responseAuthority;
+          responseAuthorities.set(responseId, responseAuthority);
           newOutputEntry = true;
           if (activeResponseAuthority === 'direct') {
             bindResponseInput(responseId);
@@ -1635,6 +1741,12 @@ export function openQwenRealtimeSession(
           }
           appendTranscriptDelta('assistant', delta, newOutputEntry);
           newOutputEntry = false;
+          updateResponseOutputText(
+            responseId,
+            type.includes('audio_transcript') ? 'audio_transcript' : 'text',
+            delta,
+            false,
+          );
           callback(() =>
             callbacks.onOutputTextDelta?.({
               ...eventContext(message),
@@ -1668,6 +1780,12 @@ export function openQwenRealtimeSession(
           }
           applyTranscriptDone('assistant', text, newOutputEntry);
           newOutputEntry = false;
+          updateResponseOutputText(
+            responseId,
+            type.includes('audio_transcript') ? 'audio_transcript' : 'text',
+            text,
+            true,
+          );
           callback(() =>
             callbacks.onOutputTextDone?.({
               ...eventContext(message),
@@ -1881,6 +1999,7 @@ export function openQwenRealtimeSession(
           }
           if (cancelledResponseIds.has(responseId)) {
             const responseInputItemId = responseInputItemIds.get(responseId);
+            collectDirectTranscript(responseId);
             cancelledResponseIds.delete(responseId);
             completePendingCallsForResponse(responseId, 'cancelled');
             consumeResponseInput(responseId);
@@ -1903,6 +2022,10 @@ export function openQwenRealtimeSession(
               }),
             );
             queueMicrotask(flushResponseCreate);
+            responseAuthorities.delete(responseId);
+            delegatedResponseIds.delete(responseId);
+            responseOutputText.delete(responseId);
+            collectedDirectResponseIds.delete(responseId);
             break;
           }
           if (!isCurrentResponse(message, type, responseId)) break;
@@ -1917,11 +2040,16 @@ export function openQwenRealtimeSession(
             if (terminal) break;
           }
           completePendingCallsForResponse(responseId, status);
+          collectDirectTranscript(responseId);
           lastCompletedResponseId = responseId;
           activeResponseId = undefined;
           activeResponseAuthority = undefined;
           activeAudioResponseId = undefined;
           consumeResponseInput(responseId);
+          responseAuthorities.delete(responseId);
+          delegatedResponseIds.delete(responseId);
+          responseOutputText.delete(responseId);
+          collectedDirectResponseIds.delete(responseId);
           callback(() =>
             callbacks.onResponseDone?.({
               ...eventContext(message),

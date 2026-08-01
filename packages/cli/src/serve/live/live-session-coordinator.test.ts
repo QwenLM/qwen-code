@@ -89,6 +89,7 @@ function makeHarness(
     enqueueAccepted?: boolean;
     providerError?: QwenRealtimeError;
     transcriptTail?: RealtimeTranscriptEntry[];
+    transcriptPersistenceError?: Error;
     pendingInteractions?: BridgePendingInteraction[];
   } = {},
 ) {
@@ -119,6 +120,11 @@ function makeHarness(
     })),
     updateSessionMetadata: vi.fn(),
     setSessionLiveConversationActive: vi.fn(async () => undefined),
+    appendSessionLiveTranscript: vi.fn(async () => {
+      if (options.transcriptPersistenceError) {
+        throw options.transcriptPersistenceError;
+      }
+    }),
     changeSessionCwd: vi.fn(
       async (sessionId: string, request: { path: string }) => ({
         sessionId,
@@ -491,6 +497,48 @@ describe('LiveSessionCoordinator', () => {
     });
   });
 
+  it('persists direct dialogue before admitting a following backend handoff', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    harness.callbacks.onDirectTranscript?.({
+      callEpoch: 1,
+      entries: [
+        { role: 'user', text: '先聊一下' },
+        { role: 'assistant', text: '好的。' },
+      ],
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '现在检查仓库',
+      activeTranscript: [{ role: 'user', text: '现在检查仓库' }],
+    });
+
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    expect(harness.bridge.appendSessionLiveTranscript).toHaveBeenCalledWith(
+      'live-new',
+      [
+        { role: 'user', text: '先聊一下' },
+        { role: 'assistant', text: '好的。' },
+      ],
+      'qwen3.5-omni-plus-realtime',
+    );
+    expect(
+      vi.mocked(harness.bridge.appendSessionLiveTranscript).mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(harness.bridge.sendPrompt).mock.invocationCallOrder[0] ?? 0,
+    );
+
+    await harness.finishTurn(0, [{ type: 'message', text: '检查完成。' }]);
+  });
+
   it('returns completed Agent messages at message boundaries before completing the handoff', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
@@ -693,7 +741,7 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
-  it('tracks only unresolved tool permissions for the Live coordinator', async () => {
+  it('keeps Live usable while approved and denied tool permissions resolve', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
       epoch: 1,
@@ -718,14 +766,20 @@ describe('LiveSessionCoordinator', () => {
 
     harness.publish({
       type: 'permission_resolved',
-      data: { requestId: 'permission-1' },
+      data: {
+        requestId: 'permission-1',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      },
     });
     await Promise.resolve();
     expect(harness.host.setPendingPermission).toHaveBeenLastCalledWith(1, true);
 
     harness.publish({
       type: 'permission_resolved',
-      data: { requestId: 'permission-2' },
+      data: {
+        requestId: 'permission-2',
+        outcome: { outcome: 'cancelled' },
+      },
     });
     await waitFor(() =>
       expect(harness.host.setPendingPermission).toHaveBeenLastCalledWith(
@@ -747,6 +801,23 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.host.setPendingPermission).toHaveBeenLastCalledWith(
       1,
       false,
+    );
+    expect(harness.realtime.close).not.toHaveBeenCalled();
+    expect(harness.host.failCall).not.toHaveBeenCalled();
+
+    harness.callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'after-permission',
+      authority: 'direct',
+    });
+    harness.callbacks.onOutputAudioDelta?.({
+      callEpoch: 1,
+      responseId: 'after-permission',
+      audio: new Uint8Array([7, 0]),
+    });
+    expect(harness.host.sendOutputAudio).toHaveBeenLastCalledWith(
+      1,
+      new Uint8Array([7, 0]),
     );
   });
 
@@ -771,7 +842,7 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.host.setPendingPermission).toHaveBeenCalledWith(1, true);
   });
 
-  it('flushes the remaining realtime transcript into the same Live session on stop', async () => {
+  it('persists the remaining realtime transcript without a backend turn on stop', async () => {
     const harness = makeHarness({
       transcriptTail: [
         { role: 'user', text: '最后一个问题' },
@@ -785,19 +856,71 @@ describe('LiveSessionCoordinator', () => {
     });
 
     const stopped = harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
-    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
     await expect(stopped).resolves.toBeUndefined();
 
-    expect(harness.promptRequests[0]).toEqual({
-      sessionId: 'live-new',
-      prompt: 'user: 最后一个问题\nassistant: 最后一个回答',
-      modelPrompt:
-        '<realtime_delegation>\n  <source>transcript_tail_flush</source>\n  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>\n  <transcript_delta>user: 最后一个问题\nassistant: 最后一个回答</transcript_delta>\n</realtime_delegation>',
-    });
+    expect(harness.bridge.appendSessionLiveTranscript).toHaveBeenCalledWith(
+      'live-new',
+      [
+        { role: 'user', text: '最后一个问题' },
+        { role: 'assistant', text: '最后一个回答' },
+      ],
+      'qwen3.5-omni-plus-realtime',
+    );
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(harness.pendingTurns).toHaveLength(0);
     expect(harness.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
+  });
 
-    await harness.finishTurn(0, [{ type: 'message', text: '已记录。' }]);
+  it('stops immediately while backend work continues and persists the final realtime tail', async () => {
+    const harness = makeHarness({
+      transcriptTail: [{ role: 'user', text: '先停下语音' }],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '执行长任务',
+      activeTranscript: [{ role: 'user', text: '执行长任务' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toBeUndefined();
+
+    expect(harness.bridge.appendSessionLiveTranscript).toHaveBeenCalledWith(
+      'live-new',
+      [{ role: 'user', text: '先停下语音' }],
+      'qwen3.5-omni-plus-realtime',
+    );
+    expect(harness.pendingTurns).toHaveLength(1);
+    expect(harness.realtime.close).toHaveBeenCalledOnce();
+
+    await harness.finishTurn(0, [{ type: 'message', text: '后台已完成。' }]);
+  });
+
+  it('reports a final transcript persistence failure while stopping', async () => {
+    const harness = makeHarness({
+      transcriptTail: [{ role: 'user', text: '最后一句' }],
+      transcriptPersistenceError: new Error('disk unavailable'),
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toEqual({
+      error: 'Live Voice could not persist the final transcript.',
+    });
   });
 
   it('reports provider configuration failures without retrying', async () => {

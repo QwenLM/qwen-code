@@ -30,7 +30,10 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
-import { isCompatibleLiveSessionSource } from './session-source.js';
+import {
+  isCompatibleLiveSessionSource,
+  readLoadableLiveConversationMetadata,
+} from './session-source.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -1043,13 +1046,20 @@ export class LiveTaskService {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
     const service = new SessionService(task.runtime.workspaceCwd);
-    const parentSessionId = await service.readParentSessionId(
-      task.summary.sessionId,
-    );
+    const metadata =
+      task.runtime.provenance === 'live-conversation'
+        ? await readLoadableLiveConversationMetadata(
+            task.summary.sessionId,
+            (sessionId) => service.readCreationMetadata(sessionId),
+          )
+        : await service.readCreationMetadata(task.summary.sessionId);
+    if (metadata === undefined) {
+      throw new SessionNotFoundError(task.summary.sessionId);
+    }
     await task.runtime.bridge.resumeSession({
       sessionId: task.summary.sessionId,
       workspaceCwd: task.runtime.workspaceCwd,
-      ...(parentSessionId ? { parentSessionId } : {}),
+      ...metadata,
     });
     if (task.runtime.provenance === 'live-conversation') {
       const directory = await this.options.materializeConversationDirectory(

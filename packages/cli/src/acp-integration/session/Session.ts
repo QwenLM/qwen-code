@@ -1048,7 +1048,7 @@ function readTelemetryPromptId(payload: unknown): string | undefined {
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user') {
+  if (record.type !== 'user' || record.subtype === 'realtime_message') {
     return false;
   }
   return (
@@ -1891,7 +1891,7 @@ export class Session implements SessionContext {
   async #syncLiveToolDeclarations(): Promise<void> {
     const geminiClient = this.config.getGeminiClient();
     if (!geminiClient) {
-      throw new Error('The Live Coordinator model client is unavailable.');
+      throw new Error('The Live backend model client is unavailable.');
     }
     await geminiClient.setTools();
   }
@@ -1912,6 +1912,48 @@ export class Session implements SessionContext {
       this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
     }
     await this.config.getGeminiClient()?.refreshSystemInstruction();
+  }
+
+  async appendLiveConversationTranscript(
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void> {
+    if (this.liveConversationActive !== true) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Live conversation is not active for this session.',
+      );
+    }
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw RequestError.internalError(
+        undefined,
+        'Chat recording service unavailable',
+      );
+    }
+    await recording.recordRealtimeConversation(entries, model);
+    for (const entry of entries) {
+      try {
+        await this.sendUpdate({
+          sessionUpdate:
+            entry.role === 'user'
+              ? 'user_message_chunk'
+              : 'agent_message_chunk',
+          content: { type: 'text', text: entry.text },
+          _meta: {
+            source: 'realtime_voice',
+            qwenDiscreteMessage: true,
+          },
+        });
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit persisted realtime transcript: ${this.#formatError(error)}`,
+        );
+      }
+    }
   }
 
   async #consumeLiveEndInstruction(): Promise<void> {

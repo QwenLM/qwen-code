@@ -298,7 +298,8 @@ export interface ChatRecord {
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
     | 'goal_state'
-    | 'goal_runtime';
+    | 'goal_runtime'
+    | 'realtime_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -1435,6 +1436,27 @@ export class ChatRecordingService {
     }
   }
 
+  async recordRealtimeConversation(
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void> {
+    for (const entry of entries) {
+      const record: ChatRecord = {
+        ...this.createBaseRecord(entry.role),
+        subtype: 'realtime_message',
+        message:
+          entry.role === 'user'
+            ? createUserContent([{ text: entry.text }])
+            : createModelContent([{ text: entry.text }]),
+        ...(entry.role === 'assistant' ? { model } : {}),
+      };
+      await this.appendRecordStrict(record);
+    }
+  }
+
   /**
    * Fire-and-forget: after an assistant turn is recorded, attempt to generate
    * a short session title from the conversation so far. Runs at most once per
@@ -1710,7 +1732,8 @@ export class ChatRecordingService {
         record.subtype !== 'goal_runtime' &&
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
-        record.subtype !== 'mid_turn_user_message'
+        record.subtype !== 'mid_turn_user_message' &&
+        record.subtype !== 'realtime_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.

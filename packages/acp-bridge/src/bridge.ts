@@ -7400,6 +7400,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async appendSessionLiveTranscript(sessionId, entries, model) {
+      await requestSessionStatus<Record<string, unknown>>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript,
+        { entries, model },
+      );
+    },
+
     async setSessionApprovalMode(sessionId, mode, opts, context) {
       // Forwards through `qwen/control/session/approval_mode` so the
       // change lands inside the ACP child's own `Config` (per-session

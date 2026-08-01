@@ -15,6 +15,11 @@ and behavior. A Qwen or WebShell incompatibility is a stop condition: document
 the exact incompatibility and obtain explicit approval before implementing any
 substitution, approximation, fallback, or optimization.
 
+The reference anchors were refreshed against Codex `origin/main` at
+`f0c30e528a54bdf0fa9a4d52ff74b34383434811` on 2026-08-01. The relevant
+Realtime prompt, session, Appshot, task-context, and permission behavior is
+unchanged.
+
 This document supersedes the earlier design for these areas:
 
 - conversation ownership and response authority;

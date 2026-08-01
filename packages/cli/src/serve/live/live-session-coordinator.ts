@@ -52,8 +52,6 @@ const MAX_COORDINATOR_RESULT_CHARS = 48_000;
 const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
 const SESSION_SCAN_SIZE = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
-const REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION =
-  'The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.';
 
 function writeLiveDiagnostic(
   event: string,
@@ -195,6 +193,7 @@ interface LiveCallContext {
   stopCompletion?: Promise<void | { error: string }>;
   finishStop?: (outcome?: { error: string }) => void;
   diagnosticInputCapture?: LiveAudioCapture;
+  transcriptPersistence: Promise<void>;
 }
 
 interface DelegateAdmission {
@@ -337,7 +336,6 @@ function isCompatibleLiveSession(item: SessionListItem): boolean {
 function buildDelegationPrompt(
   request: string,
   activeTranscript: readonly RealtimeTranscriptEntry[],
-  source: 'handoff' | 'transcript_tail_flush' = 'handoff',
 ): string {
   const boundedRequest = request.slice(0, MAX_COORDINATOR_REQUEST_CHARS);
   const transcriptDelta = activeTranscript
@@ -346,9 +344,6 @@ function buildDelegationPrompt(
     .slice(0, MAX_COORDINATOR_REQUEST_CHARS);
   return [
     '<realtime_delegation>',
-    ...(source === 'transcript_tail_flush'
-      ? ['  <source>transcript_tail_flush</source>']
-      : []),
     `  <input>${escapeXml(boundedRequest)}</input>`,
     ...(transcriptDelta
       ? [`  <transcript_delta>${escapeXml(transcriptDelta)}</transcript_delta>`]
@@ -468,6 +463,7 @@ export class LiveSessionCoordinator {
       inputAwaitingResponse: false,
       outputCaption: '',
       stopping: false,
+      transcriptPersistence: Promise.resolve(),
     };
     this.active = context;
     this.options.host.setProviderReachability({ state: 'checking' });
@@ -774,6 +770,10 @@ export class LiveSessionCoordinator {
             );
           });
       },
+      onDirectTranscript: ({ entries }) => {
+        if (!this.isCurrentSocket(context, generation)) return;
+        this.queueRealtimeTranscript(context, entries);
+      },
       onResponseCreated: ({ responseId, authority }) => {
         if (!this.isCurrentSocket(context, generation)) return;
         closeLiveAudioCapture(diagnosticAudioCapture, 'next_response');
@@ -1001,8 +1001,9 @@ export class LiveSessionCoordinator {
         if (admissions.some((admitted) => !admitted)) {
           throw new Error('A realtime handoff was not admitted.');
         }
+        await context.transcriptPersistence;
         if (transcriptTail.length > 0) {
-          await this.enqueueTranscriptTail(context, transcriptTail);
+          await this.persistRealtimeTranscript(context, transcriptTail);
         }
         await this.finishGracefulStop(context);
       })
@@ -1014,38 +1015,41 @@ export class LiveSessionCoordinator {
     return context.stopCompletion;
   }
 
-  private enqueueTranscriptTail(
+  private queueRealtimeTranscript(
+    context: LiveCallContext,
+    transcript: readonly RealtimeTranscriptEntry[],
+  ): void {
+    if (transcript.length === 0) return;
+    const next = context.transcriptPersistence.then(() =>
+      this.persistRealtimeTranscript(context, transcript),
+    );
+    context.transcriptPersistence = next;
+    void next.catch((error: unknown) => {
+      if (context.stopping) return;
+      this.failContext(
+        context,
+        `Live Voice could not persist the realtime transcript: ${errorMessage(error)}`,
+        undefined,
+      );
+    });
+  }
+
+  private async persistRealtimeTranscript(
     context: LiveCallContext,
     transcript: readonly RealtimeTranscriptEntry[],
   ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      let admitted = false;
-      void (async () => {
-        const locator = await this.ensureCoordinator(context);
-        if (!this.isActive(context)) {
-          throw new DOMException('Live call ended.', 'AbortError');
-        }
-        const displayTranscript = transcript
-          .map((entry) => `${entry.role}: ${entry.text}`)
-          .join('\n');
-        await this.runCoordinatorTurn(
-          context,
-          locator,
-          displayTranscript,
-          buildDelegationPrompt(
-            REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION,
-            transcript,
-            'transcript_tail_flush',
-          ),
-          () => {
-            admitted = true;
-            resolve();
-          },
-        );
-      })().catch((error: unknown) => {
-        if (!admitted) reject(error);
-      });
-    });
+    const runtime = context.runtime;
+    const sessionId = context.coordinator?.sessionId;
+    const model = context.credential?.realtimeModel;
+    if (!runtime || !sessionId || !model || !this.isActive(context)) {
+      throw new Error('Live conversation session is unavailable.');
+    }
+    await runtime.bridge.appendSessionLiveTranscript(
+      sessionId,
+      transcript,
+      model,
+    );
+    context.coordinatorPromptAdmitted = true;
   }
 
   private async finishGracefulStop(
@@ -1164,6 +1168,7 @@ export class LiveSessionCoordinator {
     let persisted = false;
     let sentMessages = 0;
     try {
+      await context.transcriptPersistence;
       const locator = await this.ensureCoordinator(context);
       if (!this.isActive(context)) return false;
       await this.runCoordinatorTurn(
@@ -1326,7 +1331,7 @@ export class LiveSessionCoordinator {
     try {
       if (requirePersistedSource && session.sourcePersisted !== true) {
         throw new Error(
-          'Live coordinator source metadata was not persisted safely.',
+          'Live session source metadata was not persisted safely.',
         );
       }
       const conversationCwd =
@@ -1337,7 +1342,7 @@ export class LiveSessionCoordinator {
       if (!requirePersistedSource && session.hasActivePrompt === true) {
         if (session.currentCwd !== conversationCwd) {
           throw new Error(
-            'Active Live coordinator is outside its isolated conversation directory.',
+            'Active Live session is outside its isolated conversation directory.',
           );
         }
         await runtime.bridge.setSessionLiveConversationActive(
@@ -1352,7 +1357,7 @@ export class LiveSessionCoordinator {
         managedRelocation: 'live-conversation',
       });
       if (changed.newCwd !== conversationCwd) {
-        throw new Error('Live coordinator directory relocation was rejected.');
+        throw new Error('Live session directory relocation was rejected.');
       }
       session.currentCwd = changed.newCwd;
       await runtime.bridge.setSessionLiveConversationActive(
@@ -1503,15 +1508,15 @@ export class LiveSessionCoordinator {
         await turn;
         await collect;
       } catch (error) {
-        if (timedOut) throw new Error('Coordinator turn timed out.');
+        if (timedOut) throw new Error('Live backend turn timed out.');
         throw error;
       }
       if (!stopReason) {
-        if (timedOut) throw new Error('Coordinator turn timed out.');
+        if (timedOut) throw new Error('Live backend turn timed out.');
         if (signal.aborted) {
-          throw new DOMException('Coordinator turn cancelled.', 'AbortError');
+          throw new DOMException('Live backend turn cancelled.', 'AbortError');
         }
-        throw new Error('Coordinator event stream ended before the turn.');
+        throw new Error('Live backend event stream ended before the turn.');
       }
       return { text, stopReason };
     } finally {

@@ -21,6 +21,13 @@ const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());
 const persistedSessionLoadDelays = vi.hoisted(() => new Map<string, number>());
 const parentSessions = vi.hoisted(() => new Map<string, string>());
+const sessionSources = vi.hoisted(
+  () =>
+    new Map<
+      string,
+      { parentSessionId?: string; sourceType?: string; sourceId?: string }
+    >(),
+);
 const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
@@ -51,6 +58,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
       readParentSessionId(sessionId: string) {
         return Promise.resolve(parentSessions.get(sessionId));
+      }
+
+      readCreationMetadata(sessionId: string) {
+        return Promise.resolve(
+          sessionSources.get(sessionId) ?? {
+            ...(parentSessions.has(sessionId)
+              ? { parentSessionId: parentSessions.get(sessionId) }
+              : {}),
+          },
+        );
       }
 
       removeSession(sessionId: string) {
@@ -288,6 +305,7 @@ beforeEach(() => {
   persistedSessionOwners.clear();
   persistedSessionLoadDelays.clear();
   parentSessions.clear();
+  sessionSources.clear();
   removeSessionMock.mockClear();
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
@@ -770,6 +788,40 @@ describe('LiveTaskService', () => {
       path: '/conversations/task-1',
       allowedRoots: ['/conversations'],
       managedRelocation: 'live-conversation',
+    });
+    expect(harness.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it('restores Live source identity before following a cold Live task', async () => {
+    const harness = makeHarness();
+    const sourceId = `${LIVE_SESSION_SOURCE_PREFIX}call-2`;
+    const summary: BridgeSessionSummary = {
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Prior Live task',
+      sourceType: 'default',
+      sourceId,
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set('task-1', summary);
+    persistedSessions.set('task-1', persisted('task-1'));
+    persistedSessionOwners.set('task-1', '/conversations');
+    sessionSources.set('task-1', { sourceType: 'default', sourceId });
+    listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
+
+    await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: { threadId: 'task-1', prompt: 'continue this Live task' },
+    });
+
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId: 'task-1',
+      workspaceCwd: '/conversations',
+      sourceType: 'default',
+      sourceId,
     });
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });

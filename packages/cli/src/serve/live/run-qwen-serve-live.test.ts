@@ -117,10 +117,8 @@ describe('qwen serve Live Host discovery', () => {
       });
       expect(disabled.status).toBe(200);
       expect(await disabled.json()).toMatchObject({ enabled: false });
-      await vi.waitFor(async () => {
-        await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
-          code: 'ENOENT',
-        });
+      await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
+        code: 'ENOENT',
       });
       const capabilities = await fetch(`${handle.url}/capabilities`, {
         headers: { Authorization: `Bearer ${token}` },

@@ -26573,7 +26573,7 @@ describe('Live Appshot server integration', () => {
     }
   });
 
-  it('never probes ordinary Computer Use tools for Live readiness', async () => {
+  it('never probes ordinary workspace tools for Live readiness', async () => {
     const setup = await setupAppshotProbe();
     try {
       setup.connectHost('host_live_appshot_nonce_periodic');

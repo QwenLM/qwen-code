@@ -224,6 +224,7 @@ describe('qwen-realtime-session', () => {
       onOutputAudioDelta: vi.fn(),
       onOutputAudioDone: vi.fn(),
       onResponseDone: vi.fn(),
+      onDirectTranscript: vi.fn(),
     } satisfies QwenRealtimeCallbacks;
     const session = await connect(socket, callbacks);
 
@@ -271,11 +272,35 @@ describe('qwen-realtime-session', () => {
     expect(callbacks.onResponseDone).toHaveBeenCalledWith(
       expect.objectContaining({ responseId: 'response-direct' }),
     );
+    expect(callbacks.onDirectTranscript).toHaveBeenCalledWith({
+      callEpoch: 7,
+      entries: [
+        { role: 'user', text: '你好' },
+        { role: 'assistant', text: '你好！' },
+      ],
+    });
+    expect(session.takeTranscriptTail()).toEqual([]);
+    expect(sentTypes(socket)).toEqual(['session.update']);
+  });
+
+  it('returns undelivered direct dialogue once when no transcript callback is configured', async () => {
+    const socket = new FakeSocket();
+    const session = await connect(socket);
+
+    commitFinalInput(socket, 'input-direct', '你好');
+    responseCreated(socket, 'response-direct');
+    socket.message({
+      type: 'response.audio_transcript.done',
+      response_id: 'response-direct',
+      transcript: '你好！',
+    });
+    responseDone(socket, 'response-direct');
+
     expect(session.takeTranscriptTail()).toEqual([
       { role: 'user', text: '你好' },
       { role: 'assistant', text: '你好！' },
     ]);
-    expect(sentTypes(socket)).toEqual(['session.update']);
+    expect(session.takeTranscriptTail()).toEqual([]);
   });
 
   it('uses the active response when response.done omits its identifier', async () => {
@@ -578,6 +603,7 @@ describe('qwen-realtime-session', () => {
       onDelegateCall: vi.fn(),
       onResponseCreated: vi.fn(),
       onOutputTextDone: vi.fn(),
+      onDirectTranscript: vi.fn(),
     } satisfies QwenRealtimeCallbacks;
     const session = await connect(socket, callbacks);
 
@@ -598,6 +624,11 @@ describe('qwen-realtime-session', () => {
     });
     session.completeHandoff({ callEpoch: 7, callId: 'call-work' });
     responseCreated(socket, 'response-work-result');
+    socket.message({
+      type: 'response.audio_transcript.done',
+      response_id: 'response-work-result',
+      transcript: '任务完成。',
+    });
     responseDone(socket, 'response-work-result');
 
     commitFinalInput(socket, 'input-chat', '谢谢');
@@ -620,6 +651,14 @@ describe('qwen-realtime-session', () => {
     expect(callbacks.onOutputTextDone).toHaveBeenLastCalledWith(
       expect.objectContaining({ text: '不客气。' }),
     );
+    expect(callbacks.onDirectTranscript).toHaveBeenCalledOnce();
+    expect(callbacks.onDirectTranscript).toHaveBeenCalledWith({
+      callEpoch: 7,
+      entries: [
+        { role: 'user', text: '谢谢' },
+        { role: 'assistant', text: '不客气。' },
+      ],
+    });
   });
 
   it('keeps the replacement response alive when VAD interrupts audio', async () => {

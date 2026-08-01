@@ -1363,14 +1363,14 @@ export function createServeApp(
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
   });
-  const publishLiveVoiceEnabled = (enabled: boolean): void => {
+  const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
     const updateDiscovery = (
       app.locals as {
         setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
       }
     ).setLiveDiscoveryEnabled;
     if (!updateDiscovery) return;
-    void updateDiscovery(enabled).catch((error) => {
+    await updateDiscovery(enabled).catch((error) => {
       daemonLog?.warn(
         `failed to update Live Host discovery: ${
           error instanceof Error ? error.message : String(error)
@@ -1392,7 +1392,7 @@ export function createServeApp(
         message: 'Checking the dedicated Live Appshot channel.',
       });
       invalidateServeFeaturesCache();
-      publishLiveVoiceEnabled(true);
+      await publishLiveVoiceEnabled(true);
       void verifyLiveAppshotChannel();
       return;
     }
@@ -1411,7 +1411,7 @@ export function createServeApp(
       state: 'unavailable',
       message: 'The Live Appshot channel is unavailable.',
     });
-    publishLiveVoiceEnabled(false);
+    await publishLiveVoiceEnabled(false);
   };
   (
     app.locals as {

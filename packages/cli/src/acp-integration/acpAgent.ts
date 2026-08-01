@@ -8585,6 +8585,72 @@ class QwenAgent implements Agent {
         await this.sessionOrThrow(sessionId).setLiveConversationActive(active);
         return { sessionId, active };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript: {
+        const sessionId = params['sessionId'];
+        const entries = params['entries'];
+        const model = params['model'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof model !== 'string' ||
+          model.length === 0 ||
+          model.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing realtime model',
+          );
+        }
+        if (!Array.isArray(entries) || entries.length > 128) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid realtime transcript entries',
+          );
+        }
+        const transcript: Array<{
+          role: 'user' | 'assistant';
+          text: string;
+        }> = [];
+        let totalLength = 0;
+        for (const entry of entries) {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          const role = (entry as Record<string, unknown>)['role'];
+          const text = (entry as Record<string, unknown>)['text'];
+          if (
+            (role !== 'user' && role !== 'assistant') ||
+            typeof text !== 'string' ||
+            text.length === 0 ||
+            text.length > 32_768
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          totalLength += text.length;
+          if (totalLength > 131_072) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Realtime transcript is too large',
+            );
+          }
+          transcript.push({ role, text });
+        }
+        await this.sessionOrThrow(sessionId).appendLiveConversationTranscript(
+          transcript,
+          model,
+        );
+        return { sessionId, persisted: transcript.length };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
         const sessionId = params['sessionId'];
         const displayText = params['displayText'];

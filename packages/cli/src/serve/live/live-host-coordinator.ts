@@ -761,7 +761,7 @@ export class LiveHostCoordinator {
     ) {
       return Promise.reject(
         new Error(
-          'Appshot is available only to the active Live Coordinator with a ready Host.',
+          'Appshot is available only to the active Live session with a ready Host.',
         ),
       );
     }

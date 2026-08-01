@@ -1084,6 +1084,37 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordRealtimeConversation', () => {
+    it('durably records direct Realtime dialogue as non-model history', async () => {
+      await chatRecordingService.recordRealtimeConversation(
+        [
+          { role: 'user', text: '你好' },
+          { role: 'assistant', text: '你好！' },
+        ],
+        'qwen3.5-omni-plus-realtime',
+      );
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({
+        type: 'user',
+        subtype: 'realtime_message',
+        provenance: 'real_user',
+        message: { role: 'user', parts: [{ text: '你好' }] },
+      });
+      expect(records[1]).toMatchObject({
+        type: 'assistant',
+        subtype: 'realtime_message',
+        provenance: 'assistant_output',
+        model: 'qwen3.5-omni-plus-realtime',
+        message: { role: 'model', parts: [{ text: '你好！' }] },
+      });
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
+    });
+  });
+
   describe('recordToolResult', () => {
     it('should record tool result with Parts', async () => {
       // First record a user and assistant message to set up the chain

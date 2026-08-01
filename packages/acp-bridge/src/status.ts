@@ -144,6 +144,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',
   sessionLiveConversation: 'qwen/control/session/live-conversation',
+  sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',

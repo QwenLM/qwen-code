@@ -136,12 +136,12 @@ describe('Live routes', () => {
     });
   });
 
-  it('returns 503 when Conversations computer-use tools are unavailable', async () => {
+  it('returns 503 when the built-in Appshot channel is unavailable', async () => {
     const { app, coordinator } = harness();
     connectReady(coordinator);
     coordinator.setAppshotReadiness({
       state: 'unavailable',
-      message: 'Computer Use is disabled in the Conversations runtime.',
+      message: 'The built-in Appshot channel is unavailable.',
     });
 
     const status = await request(app).get('/live/status');
@@ -149,7 +149,7 @@ describe('Live routes', () => {
     expect(status.body).toMatchObject({
       available: false,
       blocker: 'appshot',
-      message: 'Computer Use is disabled in the Conversations runtime.',
+      message: 'The built-in Appshot channel is unavailable.',
       requirements: { appshot: 'unavailable' },
     });
 

@@ -205,6 +205,12 @@ describe('computeInitialTurnFromHistory', () => {
             message: { parts: [{ text: 'answer 1' }] },
           }),
           chatRecord({
+            uuid: 'realtime-user',
+            timestamp: '2026-05-17T07:27:19.000Z',
+            subtype: 'realtime_message',
+            message: { parts: [{ text: 'voice question' }] },
+          }),
+          chatRecord({
             uuid: 'user-2',
             timestamp: '2026-05-17T07:27:20.446Z',
             message: { parts: [{ text: '2' }] },
@@ -356,6 +362,7 @@ describe('Session', () => {
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
+    refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
@@ -509,6 +516,7 @@ describe('Session', () => {
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       isInitialized: vi.fn().mockReturnValue(true),
+      refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
@@ -546,6 +554,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
@@ -584,6 +593,7 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      setLiveAppendSystemPrompt: vi.fn(),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
@@ -759,6 +769,47 @@ describe('Session', () => {
     } finally {
       await fs.unlink(screenshotPath).catch(() => undefined);
     }
+  });
+
+  it('persists Realtime-owned dialogue without adding a backend model turn', async () => {
+    await session.setLiveConversationActive(true);
+    vi.spyOn(session, 'isIdle').mockReturnValue(false);
+    const entries = [
+      { role: 'user' as const, text: '你好' },
+      { role: 'assistant' as const, text: '你好！' },
+    ];
+
+    await session.appendLiveConversationTranscript(
+      entries,
+      'qwen3.5-omni-plus-realtime',
+    );
+
+    expect(
+      mockChatRecordingService.recordRealtimeConversation,
+    ).toHaveBeenCalledWith(entries, 'qwen3.5-omni-plus-realtime');
+    expect(mockChat.addHistory).not.toHaveBeenCalled();
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: '你好' },
+        _meta: {
+          source: 'realtime_voice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '你好！' },
+        _meta: {
+          source: 'realtime_voice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
   });
 
   it('rejects a conflicting tool at the reserved Live Appshot name', async () => {

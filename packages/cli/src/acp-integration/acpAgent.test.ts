@@ -1813,6 +1813,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
+        appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
@@ -3065,6 +3066,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockResolvedValue({ accepted: true }),
         enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+        appendLiveConversationTranscript: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),
@@ -4222,6 +4224,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'default',
       'realtime_voice:p1:h1:a1:call-1',
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('persists trusted direct Realtime dialogue without prompting the backend', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const entries = [
+      { role: 'user', text: '你好' },
+      { role: 'assistant', text: '你好！' },
+    ];
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript, {
+        sessionId,
+        entries,
+        model: 'qwen3.5-omni-plus-realtime',
+      }),
+    ).resolves.toEqual({ sessionId, persisted: 2 });
+
+    expect(
+      lastSessionMock?.appendLiveConversationTranscript,
+    ).toHaveBeenCalledWith(entries, 'qwen3.5-omni-plus-realtime');
+    expect(lastSessionMock?.prompt).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

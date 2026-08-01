@@ -1390,6 +1390,16 @@ export interface AcpSessionBridge {
     active: boolean,
   ): Promise<void>;
 
+  /** Persist Realtime-owned dialogue without starting a backend model turn. */
+  appendSessionLiveTranscript(
+    sessionId: string,
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void>;
+
   /**
    * Change the approval mode of a live session and broadcast an
    * `approval_mode_changed` event. `opts.persist === true` also writes

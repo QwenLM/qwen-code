@@ -389,10 +389,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
-  // Process-global Live Voice control plane. Advertisement requires both the
-  // ACP HTTP transport and the restart-time Live gate. `/live/status` remains
-  // the dynamic readiness gate for Host, permissions, self-checks, and provider
-  // reachability only after the feature has been enabled at daemon startup.
+  // Process-global Live Voice control plane. Advertisement requires a macOS
+  // WebShell daemon with native Host integration and the hot-applied enabled
+  // gate. `/live/status` remains the dynamic readiness surface for the Host,
+  // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 

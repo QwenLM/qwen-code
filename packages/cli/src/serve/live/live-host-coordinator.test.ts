@@ -114,7 +114,7 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
-  it('routes one correlated Appshot only for the active Coordinator', async () => {
+  it('routes one correlated Appshot only for the active Live session', async () => {
     const value = coordinator();
     const socket = connectReady(value);
     const call = value.start('resume');
@@ -124,7 +124,7 @@ describe('LiveHostCoordinator', () => {
     });
 
     await expect(value.captureScreenContext('worker-1')).rejects.toThrow(
-      'active Live Coordinator',
+      'active Live session',
     );
     const capture = value.captureScreenContext('coordinator-1');
     const request = socket
@@ -177,7 +177,7 @@ describe('LiveHostCoordinator', () => {
     expect(value.setPendingPermission(call.epoch + 1, true)).toBe(false);
   });
 
-  it('lets the current Coordinator finish Appshot during stop drain', async () => {
+  it('lets the active Live session finish Appshot during stop drain', async () => {
     let finishStop: (() => void) | undefined;
     const value = coordinator({
       handlers: {
