@@ -218,7 +218,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
     add('2');
-    add('3');
+    // Code quality is three checklist slices, not one agent (see agent-briefs).
+    // All three are required at every effort: the split exists because a single
+    // agent holding the whole list finishes one item, so dropping two slices at
+    // medium would not save a lens — it would restore the failure the split fixed.
+    add('3a');
+    add('3b');
+    add('3c');
     add('4');
     add('5');
     // The three adversarial personas are a high-effort dimension. A `medium`

@@ -11,6 +11,7 @@
 import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { composeReviewCommand } from './review/compose-review.js';
+import { findingsCommand } from './review/findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
@@ -24,6 +25,7 @@ import { agentPromptCommand } from './review/agent-prompt.js';
 import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
+import { extractStepCommand } from './review/extract-step.js';
 import { scriptLintCommand } from './review/script-lint.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
@@ -49,18 +51,20 @@ export const reviewCommand: CommandModule = {
       .command(buildTestCommand)
       .command(baseTreeCommand)
       .command(testDeltaCommand)
+      .command(extractStepCommand)
       .command(scriptLintCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
       .command(presubmitCommand)
       .command(testEfficacyCommand)
       .command(testPlanCommand)
+      .command(findingsCommand)
       .command(composeReviewCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

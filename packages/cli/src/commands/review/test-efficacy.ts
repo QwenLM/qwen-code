@@ -1129,17 +1129,10 @@ export function safeRmWithin(worktree: string, relPath: string): void {
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
-export function probeCreateFailureDetail(
-  err: unknown,
-  sweepStderr: string,
-): string {
-  return worktreeCreateFailureDetail('probe', err, sweepStderr);
-}
-
 /**
  * The warning for a probe worktree that survived its discard.
  *
- * Pure, and for the same reason as its sibling above: the branch it lives on
+ * Pure, and for the same reason as `worktreeCreateFailureDetail`: the branch it lives on
  * fires only when the path outlives both `worktree remove` and `rmSync`, which
  * no portable test can force. The reason is what makes it useful — whoever has
  * to delete the tree by hand needs to know WHY it would not go, and a bare
@@ -1541,6 +1534,56 @@ export function runOneHunkProbe(
   }
 }
 
+/**
+ * The positive control: append one always-failing test to a GREEN probe file,
+ * run that file, restore. Red = the harness demonstrably executes assertions
+ * (true), green = it does not (false). Restore is by content in finally, the
+ * same discipline as every other probe edit in this file.
+ *
+ * `null` is the THIRD outcome, and it is not the same as `false`: the control
+ * never ran, so nothing was demonstrated either way. Returning `false` there
+ * would state as fact that an injected test stayed green when none was ever
+ * injected — the fabricated verdict this file's budget path already refuses
+ * ("never a fabricated true or false"), and it would additionally discard the
+ * whole mutant/hunk window over an I/O error.
+ *
+ * KNOWN BOUND: it validates ONE file, not the collection. The injection goes
+ * into `greenProbes[0]`, so a collector that silently drops a DIFFERENT probe
+ * file still passes the control while that file's survivors stand. The
+ * per-file baseline gate bounds the residual window — a file that collected
+ * nothing is never scored green to begin with — so what is left is a collector
+ * that runs one file and skips another. Named because a `true` here is read as
+ * covering the whole run.
+ */
+export function runControlMutant(
+  probeTree: string,
+  probeFile: string,
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): boolean | null {
+  const abs = join(probeTree, probeFile);
+  let original: string;
+  try {
+    original = readFileSync(abs, 'utf8');
+  } catch {
+    return null; // cannot even read the probe file — nothing was demonstrated
+  }
+  try {
+    writeFileSync(
+      abs,
+      `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
+      'utf8',
+    );
+    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
+    // `gated` is the runner's "went red" verdict; anything else — still green,
+    // collected nothing, crashed — means the control did NOT demonstrate a
+    // working kill path.
+    return perFile.some((r) => r.verdict === 'gated');
+  } finally {
+    writeFileSync(abs, original, 'utf8');
+  }
+}
+
 export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
@@ -1705,6 +1748,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let hunksSkippedForBudget = 0;
   let hunksSkippedForCap = 0;
   let hunksSkippedForBaseline = 0;
+  /** Null until the positive control ran; false = dead runner, survivors lie. */
+  let harnessValidated: boolean | null = null;
+  // Its OWN counter, not the budget's or the baseline's: a control that came
+  // back red stops the run with candidates still unprobed, and folding them
+  // into `skippedForBudget` would say the window ran out when it did not. The
+  // note explains why; these numbers are what a reader can count.
+  let mutantsSkippedForControl = 0;
+  let hunksSkippedForControl = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1837,7 +1888,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
       // need no probe, still ship.
-      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
+      const detail = worktreeCreateFailureDetail(
+        'probe',
+        e,
+        String(sweep?.stderr ?? ''),
+      );
       for (const file of probes) {
         results.push({ file, verdict: 'inconclusive' as const, detail });
       }
@@ -1895,7 +1950,54 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           );
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
-          for (const c of candidates) {
+          // POSITIVE CONTROL, before any real mutant spends the window: inject
+          // one test that must fail into a green probe file and confirm the
+          // runner actually goes red. A runner that stays green while executing
+          // a false assertion is not running assertions at all — and against a
+          // dead runner every real mutant "survives", which is precisely the
+          // false gap-report this command exists to prevent. Control green →
+          // every survivor this run would report is re-classed inconclusive.
+          // (A live review measured the cost of lacking this: four survivors
+          // reported off a runner whose collected suite never covered them.)
+          // The control pays for its run like any other experiment: without
+          // this check it silently ate one budgeted slot and skippedForBudget
+          // under-reported by one. No budget for the control — and equally, a
+          // control that could not be set up at all — means nothing was
+          // validated (null), never a fabricated true or false.
+          // Nothing to pre-set here: both loops below run with
+          // `harnessValidated` still null, re-check the same budget against a
+          // later clock, and set their own counters. Assigning full counts
+          // first was dead in every path and worse than dead in one — the hunk
+          // loop pushes collocated-probe inconclusives BEFORE its budget
+          // check, so its own figure excludes them and this one did not.
+          if (fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
+            harnessValidated = runControlMutant(
+              probeTree,
+              greenProbes[0],
+              mutantDeadline,
+              now,
+            );
+            if (harnessValidated === null) {
+              // The probe file could not be read, so no test was injected and
+              // no run happened. That is not a verdict about the runner —
+              // fall through and let the mutants spend the window as usual.
+              noteMutants(
+                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+              );
+            }
+          }
+          if (harnessValidated === false) {
+            // Three causes share this shape — a runner that executes nothing,
+            // a collector that skips the injected test, a reporter that drops
+            // failures — and none of them can kill, so spending the rest of
+            // the window would only manufacture survivors to re-class.
+            mutantsSkippedForControl = candidates.length;
+            hunksSkippedForControl = hunkCandidates.length;
+            noteMutants(
+              'positive control FAILED (the injected always-failing test did not turn the run red — a dead runner, a collector that skipped it, or a reporter that dropped the failure): nothing here can kill, every would-be survivor is reported inconclusive, and the remaining mutant/hunk window was not spent',
+            );
+          }
+          for (const c of harnessValidated === false ? [] : candidates) {
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
@@ -1920,7 +2022,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // the budget first, and a hunk probe is what the leftovers buy. It
           // also means a diff whose mutants consumed the window reports zero
           // hunk probes with `skippedForBudget` set — never a silent zero.
-          for (const h of hunkCandidates) {
+          for (const h of harnessValidated === false ? [] : hunkCandidates) {
             // A hunk whose OWN collocated test the baseline dropped (red, or the
             // case this exists for: a probe-tree import error that collected
             // nothing) cannot be scored `survived`: the other probes passing
@@ -2037,6 +2139,34 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   }
 
+  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
+  // them before findings are derived, keeping the control's verdict upstream
+  // of everything a reader acts on.
+  if (harnessValidated === false) {
+    const detail =
+      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
+    for (const m of mutantResults) {
+      if (m.verdict === 'survived') {
+        m.verdict = 'inconclusive';
+        m.detail = detail;
+      }
+    }
+    for (const h of hunkResults) {
+      if (h.verdict === 'survived') {
+        h.verdict = 'inconclusive';
+        h.detail = detail;
+      }
+    }
+    // The file-level revert probe's "inert" is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too.
+    for (const r of results) {
+      if (r.verdict === 'inert') {
+        r.verdict = 'inconclusive';
+        r.detail = detail;
+      }
+    }
+  }
+
   const findings = [
     ...unreachable.map((f) => ({
       file: f,
@@ -2096,8 +2226,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: mutantsSkippedForBudget,
       skippedForCap: mutantsSkippedForCap,
       skippedForBaseline: mutantsSkippedForBaseline,
+      skippedForControl: mutantsSkippedForControl,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
+    /**
+     * `true` — an injected always-failing test turned the runner red, so this
+     * harness can kill. `false` — it stayed green: nothing here can kill, and
+     * every survivor was re-classed. `null` — the control never ran (no green
+     * baseline, no candidates, no budget, or the probe file was unreadable):
+     * the run is neither validated nor refuted, and it is NOT a survivor claim.
+     */
+    harnessValidated,
     hunks: {
       probed: hunkResults,
       killed: hunkResults.filter((h) => h.verdict === 'killed').length,
@@ -2107,6 +2246,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: hunksSkippedForBudget,
       skippedForCap: hunksSkippedForCap,
       skippedForBaseline: hunksSkippedForBaseline,
+      skippedForControl: hunksSkippedForControl,
     },
     findings,
     cleanupFailure,
