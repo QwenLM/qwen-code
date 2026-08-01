@@ -21,6 +21,11 @@ type SettingInputPromptProps = {
   terminalWidth: number;
 };
 
+const isPrintableAscii = (character: string) => {
+  const charCode = character.charCodeAt(0);
+  return charCode >= 32 && charCode <= 126;
+};
+
 /**
  * A simple password input component that masks the input with asterisks.
  */
@@ -38,7 +43,10 @@ const PasswordInput = ({
   useKeypress(
     (key: Key) => {
       if (key.paste) {
-        const pastedValue = key.sequence.replace(/[^\x20-\x7e]/g, '');
+        const pastedValue = key.sequence
+          .split('')
+          .filter(isPrintableAscii)
+          .join('');
         if (pastedValue) {
           onChange(value + pastedValue);
         }
@@ -65,9 +73,7 @@ const PasswordInput = ({
 
       // Handle printable characters
       if (key.sequence && !key.ctrl && !key.meta && key.sequence.length === 1) {
-        const charCode = key.sequence.charCodeAt(0);
-        // Only accept printable ASCII characters (32-126)
-        if (charCode >= 32 && charCode <= 126) {
+        if (isPrintableAscii(key.sequence)) {
           onChange(value + key.sequence);
         }
       }

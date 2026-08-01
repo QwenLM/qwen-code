@@ -108,7 +108,7 @@ describe('SettingInputPrompt', () => {
     expect(lastFrame()).toContain('Enter your password');
   });
 
-  it('accepts pasted sensitive values', () => {
+  it('sanitizes pasted sensitive values', () => {
     const secret = 'AIza-test-key';
     const { lastFrame } = render(
       <SettingInputPrompt
@@ -123,7 +123,7 @@ describe('SettingInputPrompt', () => {
 
     act(() => {
       mockedUseKeypress.mock.calls.at(-1)?.[0](
-        makeKey({ paste: true, sequence: secret }),
+        makeKey({ paste: true, sequence: `${secret}\r\n\x1b` }),
       );
     });
 
