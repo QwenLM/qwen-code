@@ -85,6 +85,14 @@ JSON output. A call cancelled before tool resolution can omit `tool` and
 `invocation` from the public `CancelledToolCall` variant, so consumers of that
 variant must guard those fields before use.
 
+Per-call terminal errors no longer reject the scheduler's public entry
+points. `CoreToolScheduler.schedule()` and `handleConfirmationResponse()`
+resolve with a failing tool recorded as a terminal `error` call instead of
+throwing, so one tool's failure no longer aborts its siblings. Embedders
+that previously awaited a rejection to detect a tool failure must inspect
+the returned calls' terminal `status` (and the new `executionStatus`)
+instead.
+
 The first release covers `CoreToolScheduler` and ACP `Session.runTool`.
 Speculation, direct `/fork` execution, MCP-internal retries, provisional
 subagent result reconciliation, shell exit metadata, retryability, ownership,
