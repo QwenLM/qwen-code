@@ -77,7 +77,9 @@ function parseDefaultFlag(args: string): {
   persistDefault: boolean;
   remaining: string;
 } {
-  const persistDefault = /(?:^|\s)--default(?:\s|$)/.test(args);
+  const leadingTokens = args.trim().split(/\s/);
+  const persistDefault =
+    leadingTokens[0] === '--default' || leadingTokens[1] === '--default';
   const remaining = persistDefault
     ? args.replace(/(?:^|\s)--default(?:\s|$)/, ' ').trim()
     : args;

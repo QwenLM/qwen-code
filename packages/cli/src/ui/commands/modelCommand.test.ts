@@ -2768,7 +2768,7 @@ describe('modelCommand', () => {
       });
     });
 
-    it('should not reject --default when prompt text contains --vision', async () => {
+    it('should reject --default with an inline prompt even when the prompt mentions --vision', async () => {
       const setValue = vi.fn();
       const settings = {
         ...createMockSettings(setValue),
@@ -2795,6 +2795,42 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'error',
         content: expect.stringContaining('Cannot combine --default'),
+      });
+    });
+
+    it('should not treat --default inside an inline prompt as a persistence flag', async () => {
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model qwen-max what does --default do',
+          name: 'model',
+          args: 'qwen-max what does --default do',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-plus',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getAvailableModelsForAuthType: vi
+              .fn()
+              .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+            switchModel,
+          },
+          settings: createMockSettings(vi.fn()),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        'qwen-max what does --default do',
+      );
+
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'submit_prompt',
+        content: 'what does --default do',
+        modelOverride: 'qwen-max',
       });
     });
 
