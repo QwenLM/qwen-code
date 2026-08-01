@@ -1721,77 +1721,37 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('recovers JSON-serialized tool calls emitted as text', async () => {
-      vi.spyOn(Date, 'now').mockReturnValue(456);
-      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
-        getTool: vi.fn((name: string) =>
-          name === 'agent' ? ({ name } as unknown) : undefined,
-        ),
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-      const leakedJson = JSON.stringify([
+    it('emits ordinary leading JSON text without converting it to tool calls', async () => {
+      const ordinaryJson = JSON.stringify([
         {
-          name: 'agent',
-          prompt: 'inspect the failing tests',
-          subagent_type: 'general-purpose',
-          run_in_background: true,
+          name: 'read_file',
+          file_path: '/tmp/example.txt',
         },
       ]);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  role: 'model',
-                  parts: [{ text: leakedJson }],
-                },
-                finishReason: 'STOP',
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-        })(),
+        streamResponse(stopResponse([{ text: ordinaryJson }])),
       );
 
       const stream = await chat.sendMessageStream(
         'test-model',
-        { message: 'dispatch agents' },
-        'prompt-id-json-tool-leak',
+        { message: 'show json' },
+        'prompt-id-leading-json-text',
       );
       const events: StreamEvent[] = [];
       for await (const event of stream) events.push(event);
 
-      const emittedParts = events.flatMap((event) =>
-        event.type === StreamEventType.CHUNK
-          ? (event.value.candidates?.[0]?.content?.parts ?? [])
-          : [],
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
       );
-      expect(emittedParts.some((part) => part.text === leakedJson)).toBe(false);
-      expect(emittedParts).toContainEqual({
-        functionCall: {
-          id: 'json-recovered-0-456',
-          name: 'agent',
-          args: {
-            prompt: 'inspect the failing tests',
-            subagent_type: 'general-purpose',
-            run_in_background: true,
-          },
-        },
-      });
+      const emittedText = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+        .map((part) => part.text ?? '')
+        .join('');
+      expect(emittedText).toBe(ordinaryJson);
 
       const modelTurn = chat.getHistory()[1]!;
-      expect(modelTurn.parts).toEqual([
-        {
-          functionCall: {
-            id: 'json-recovered-0-456',
-            name: 'agent',
-            args: {
-              prompt: 'inspect the failing tests',
-              subagent_type: 'general-purpose',
-              run_in_background: true,
-            },
-          },
-        },
-      ]);
+      expect(modelTurn.parts).toEqual([{ text: ordinaryJson }]);
     });
 
     it('should succeed when there is finish reason and only thought content (reasoning models)', async () => {
@@ -9334,6 +9294,146 @@ describe('GeminiChat', async () => {
     expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
     expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
       { text: 'Successful final response' },
+    ]);
+  });
+
+  it('retries a leading JSON array followed by leaked protocol closers before emission', async () => {
+    const recordAssistantTurn = vi.fn();
+    const chatWithRecording = new GeminiChat(
+      mockConfig,
+      config,
+      [],
+      {
+        recordAssistantTurn,
+        recordChatCompression: vi.fn(),
+      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      uiTelemetryService,
+    );
+    const leakedPayload =
+      JSON.stringify([
+        {
+          name: 'create_node',
+          prompt: 'investigate the regression',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+        {
+          name: 'read_ref',
+          prompt: 'open the referenced review context',
+        },
+      ]) + '</parameter></function>';
+
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: leakedPayload.slice(0, 32) }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: leakedPayload.slice(32) }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      )
+      .mockImplementationOnce(async () =>
+        streamResponse(stopResponse([{ text: 'Successful final response' }])),
+      );
+
+    const stream = await chatWithRecording.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-json-protocol-leak',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedText = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(emittedText).toBe('Successful final response');
+    expect(emittedText).not.toContain('</function>');
+    expect(chatWithRecording.getLastModelMessageText()).toBe(
+      'Successful final response',
+    );
+    expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+    expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+      { text: 'Successful final response' },
+    ]);
+  });
+
+  it('flushes buffered leading JSON text before a later structured tool call', async () => {
+    vi.mocked(
+      mockContentGenerator.generateContentStream,
+    ).mockImplementationOnce(async () =>
+      (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: '[{"example":true}]' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_read_file',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })(),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-leading-json-before-tool-call',
+    );
+    const emittedParts: Part[] = [];
+    for await (const event of stream) {
+      if (event.type !== StreamEventType.CHUNK) continue;
+      emittedParts.push(...(event.value.candidates?.[0]?.content?.parts ?? []));
+    }
+
+    expect(emittedParts).toEqual([
+      { text: '[{"example":true}]' },
+      {
+        functionCall: {
+          id: 'call_read_file',
+          name: 'read_file',
+          args: { path: '/tmp/a.txt' },
+        },
+      },
     ]);
   });
 

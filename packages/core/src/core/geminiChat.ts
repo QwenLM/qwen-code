@@ -34,7 +34,6 @@ import {
   containsXmlToolCalls,
   tryRecoverXmlToolCalls,
 } from './xml-tool-call-fallback.js';
-import { tryRecoverJsonToolCalls } from './json-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import {
   getRateLimitErrorDetails,
@@ -1239,6 +1238,42 @@ class LeadingProtocolTagLeakDetector {
 
   get blockingOutput(): boolean {
     return this.state !== 'clean';
+  }
+}
+
+const JSON_ARRAY_PROTOCOL_CLOSER_PATTERN = /^<\/parameter>\s*<\/function>\s*$/i;
+
+function startsWithJsonArrayAndProtocolClosers(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('[')) {
+    return false;
+  }
+
+  const parameterCloseIndex = trimmed.indexOf('</parameter>');
+  if (parameterCloseIndex === -1) {
+    return false;
+  }
+
+  const trailingText = trimmed.slice(parameterCloseIndex).trim();
+  if (!JSON_ARRAY_PROTOCOL_CLOSER_PATTERN.test(trailingText)) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed.slice(0, parameterCloseIndex).trim());
+    return (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.every(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          !Array.isArray(item) &&
+          typeof (item as { name?: unknown }).name === 'string',
+      )
+    );
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -4069,8 +4104,9 @@ export class GeminiChat {
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
     let deferredFinishReason: FinishReason | undefined;
-    const bufferedJsonTextChunks: GenerateContentResponse[] = [];
-    let bufferingJsonText = false;
+    const bufferedLeadingJsonTextChunks: GenerateContentResponse[] = [];
+    let bufferingLeadingJsonText = false;
+    let hasEmittedVisibleResponse = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -4234,15 +4270,30 @@ export class GeminiChat {
             .filter((part) => !part.thought && typeof part.text === 'string')
             .map((part) => part.text)
             .join('');
-          const chunkStartsJson =
-            chunkText?.trimStart().startsWith('[') ||
-            chunkText?.trimStart().startsWith('{');
-          if (!hasToolCall && (bufferingJsonText || chunkStartsJson)) {
-            bufferingJsonText = true;
-            bufferedJsonTextChunks.push(chunk);
+          if (hasToolCall && bufferedLeadingJsonTextChunks.length > 0) {
+            for (const bufferedChunk of bufferedLeadingJsonTextChunks) {
+              yield bufferedChunk;
+            }
+            bufferedLeadingJsonTextChunks.length = 0;
+            bufferingLeadingJsonText = false;
+            hasEmittedVisibleResponse = true;
+          }
+
+          const chunkStartsLeadingJsonArray =
+            !hasEmittedVisibleResponse &&
+            chunkText?.trimStart().startsWith('[');
+          if (
+            !hasToolCall &&
+            (bufferingLeadingJsonText || chunkStartsLeadingJsonArray)
+          ) {
+            bufferingLeadingJsonText = true;
+            bufferedLeadingJsonTextChunks.push(chunk);
             continue;
           }
           yield chunk;
+          if (hasToolCall || (chunkText !== undefined && chunkText.trim())) {
+            hasEmittedVisibleResponse = true;
+          }
         }
       }
     } catch (e) {
@@ -4291,6 +4342,19 @@ export class GeminiChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      hasFinishReason &&
+      contentText &&
+      startsWithJsonArrayAndProtocolClosers(contentText)
+    ) {
+      throw new InvalidStreamError(
+        'Model response leaked a malformed JSON protocol payload.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
 
     // Deferred until after the throw sites below so a protocol-tag leak
     // or stream-validation failure cannot dispatch a recovered call that
@@ -4363,41 +4427,6 @@ export class GeminiChat {
       }
     }
 
-    if (
-      streamError === null &&
-      !hasToolCall &&
-      hasFinishReason &&
-      contentText
-    ) {
-      const toolRegistry = this.config.getToolRegistry();
-      const recovery = tryRecoverJsonToolCalls(contentText, (name) =>
-        Boolean(toolRegistry.getTool(name)),
-      );
-      if (recovery.recovered) {
-        hasToolCall = true;
-        for (let i = consolidatedHistoryParts.length - 1; i >= 0; i--) {
-          if (consolidatedHistoryParts[i]!.text !== undefined) {
-            consolidatedHistoryParts.splice(i, 1);
-          }
-        }
-        consolidatedHistoryParts.push(...recovery.functionCallParts);
-        contentText = '';
-        contentParts = consolidatedHistoryParts;
-        const syntheticChunk = {
-          candidates: [
-            {
-              content: { role: 'model', parts: recovery.functionCallParts },
-            },
-          ],
-        } as GenerateContentResponse;
-        syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
-        recoveredChunk = syntheticChunk;
-        debugLogger.warn(
-          `JSON tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) [${recovery.functionCallParts.map((p) => p.functionCall?.name).join(', ')}] from plain text content`,
-        );
-      }
-    }
-
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
@@ -4442,8 +4471,8 @@ export class GeminiChat {
 
     if (recoveredChunk) {
       yield recoveredChunk;
-    } else if (bufferedJsonTextChunks.length > 0) {
-      for (const chunk of bufferedJsonTextChunks) {
+    } else if (bufferedLeadingJsonTextChunks.length > 0) {
+      for (const chunk of bufferedLeadingJsonTextChunks) {
         yield chunk;
       }
     }
