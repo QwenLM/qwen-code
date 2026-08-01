@@ -106,6 +106,16 @@ describe('extractTestPlanSection', () => {
     expect(extractTestPlanSection(hostile)).toBeNull();
   });
 
+  it('does not end the section on a spaceless # line (ATX rule)', () => {
+    // `#8176`, `#tag`, an unfenced `#!/bin/bash` are prose, not headings.
+    const s = extractTestPlanSection(
+      '## Test Plan\n\nsee #8176\n#!/usr/bin/env bash\nmore\n\n## Risk\n\nx',
+    );
+    expect(s?.content).toContain('#!/usr/bin/env bash');
+    expect(s?.content).toContain('more');
+    expect(s?.content).not.toContain('## Risk');
+  });
+
   it('returns null when there is no Test Plan section', () => {
     expect(extractTestPlanSection('## Summary\n\njust a change')).toBeNull();
   });

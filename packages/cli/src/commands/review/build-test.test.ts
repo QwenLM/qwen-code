@@ -476,6 +476,20 @@ describe('runBuildTest', () => {
     ).toContain(colored);
   });
 
+  it('caps the rescue so hostile prose cannot void the trim', () => {
+    // 40k lines matching the summary shape made the trim a no-op (1.6MB in,
+    // 1.6MB out) — the rescue saves a handful of lines, never the middle.
+    const hostile =
+      'head\n' +
+      Array.from({ length: 5000 }, (_, i) => `Test ${i} passed thing`).join(
+        '\n',
+      ) +
+      '\n' +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(hostile);
+    expect(trimmed.length).toBeLessThan(hostile.length / 4);
+  });
+
   it('buildOnly builds the same set but runs NO tests', () => {
     // For the merge-base tree an A/B probe compares against: base's suite was
     // green before this PR existed, so running it measures nothing about the
