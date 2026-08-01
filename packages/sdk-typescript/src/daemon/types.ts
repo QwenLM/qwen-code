@@ -628,7 +628,7 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /** Always false: nothing in this section is applied to a process. */
-      enforced: false;
+      enforced: boolean;
       configuredBudgetMb: number;
       effectiveBudgetMb: number;
       budgetSource: 'flag' | 'derived';

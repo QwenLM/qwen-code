@@ -234,6 +234,7 @@ describe('buildDaemonStatusResponse', () => {
     // workspaces registered, one with a live ACP child.
     const liveBridge = {
       getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const dormantBridge = {
@@ -241,6 +242,7 @@ describe('buildDaemonStatusResponse', () => {
         ...BASE_BRIDGE_SNAPSHOT,
         channelLive: false,
       }),
+      isChannelLive: () => false,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const options = makeOptions();
@@ -289,10 +291,12 @@ describe('buildDaemonStatusResponse', () => {
     // does not exist.
     const primaryBridge = {
       getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const drainingBridge = {
       getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT, // channelLive: true
+      isChannelLive: () => true,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const primaryRuntime = {
@@ -409,10 +413,12 @@ describe('buildDaemonStatusResponse', () => {
     const secondarySnapshot = vi.fn(() => BASE_BRIDGE_SNAPSHOT);
     const primaryBridge = {
       getDaemonStatusSnapshot: primarySnapshot,
+      isChannelLive: () => true,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const secondaryBridge = {
       getDaemonStatusSnapshot: secondarySnapshot,
+      isChannelLive: () => true,
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const runtimes = [

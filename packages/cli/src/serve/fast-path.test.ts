@@ -830,6 +830,10 @@ describe('serve fast path argument parsing', () => {
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
       'qwen serve: --rate-limit-prompt must be a positive integer.',
     ],
+    [
+      ['serve', '--memory-budget-mb', '512'],
+      'qwen serve: --memory-budget-mb must be an integer in [1024, 1048576].',
+    ],
   ])(
     'validates %s before bootstrapping settings and environment',
     async (argv, message) => {

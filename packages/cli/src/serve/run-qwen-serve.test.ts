@@ -1996,6 +1996,67 @@ describe('runQwenServe memory budget', () => {
       if (origEnv !== undefined) process.env['QWEN_RUNTIME_DIR'] = origEnv;
     }
   });
+
+  it('writes a stderr line when the budget comes from the flag', async () => {
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('writes no stderr line for a derived budget on a sufficient host', async () => {
+    // The gate must stay conditional: a derived budget on a host above the
+    // minimum prints nothing. If the gate were unconditional this test fails.
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).not.toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
 });
 
 describe('runQwenServe initializeTimeoutMs validation', () => {

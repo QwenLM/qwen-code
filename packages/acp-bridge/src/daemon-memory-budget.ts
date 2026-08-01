@@ -6,6 +6,9 @@
 
 import os from 'node:os';
 
+// Mirrored from the inline constants in spawnChannel.ts:getAcpMemoryArgs().
+// If those change, update these to match (the import direction is blocked by
+// the fast-path bundle closure check; reversing it is tracked as follow-up).
 export const DEFAULT_MEMORY_BUDGET_FRACTION = 0.5;
 export const MIN_MEMORY_BUDGET_MB = 1_024;
 export const MAX_MEMORY_BUDGET_MB = 1_048_576;
@@ -189,7 +192,10 @@ export function resolveDaemonMemoryBudget(
 
   const configuredBudgetMb =
     input.budgetMb === undefined
-      ? Math.floor(availableMemoryMb * DEFAULT_MEMORY_BUDGET_FRACTION)
+      ? Math.min(
+          Math.floor(availableMemoryMb * DEFAULT_MEMORY_BUDGET_FRACTION),
+          MAX_MEMORY_BUDGET_MB,
+        )
       : normalizeMemoryBudgetMb(input.budgetMb);
   // Never report a denominator the machine cannot back, in either direction:
   // an explicit budget above available memory is capped, and a derived budget
@@ -237,7 +243,7 @@ export function formatMemoryBudgetStderr(budget: DaemonMemoryBudget): string {
       );
       message +=
         ` (a derived budget needs a host with at least ~${minHostMb} MB;` +
-        ` pass --memory-budget-mb to override)`;
+        ` pass --memory-budget-mb to override — requires at least ${MIN_MEMORY_BUDGET_MB} MB available)`;
     }
   }
   return message;

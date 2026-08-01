@@ -101,6 +101,16 @@ describe('resolveDaemonMemoryBudget', () => {
     });
   });
 
+  it('caps a derived budget at the flag maximum on a very large host', () => {
+    // On a host above 2 TB the raw 50% fraction exceeds MAX_MEMORY_BUDGET_MB;
+    // the configured figure must stay within what the flag itself accepts.
+    const budget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 3 * 1024 * 1024,
+    });
+    expect(budget.configuredBudgetMb).toBe(MAX_MEMORY_BUDGET_MB);
+    expect(budget.budgetSource).toBe('derived');
+  });
+
   it('honors an explicit budget below host memory', () => {
     expect(
       resolveDaemonMemoryBudget({ budgetMb: 2_048, availableMemoryMb: 32_768 }),
@@ -277,6 +287,7 @@ describe('formatMemoryBudgetStderr', () => {
       'a derived budget needs a host with at least ~2048 MB',
     );
     expect(message).toContain('pass --memory-budget-mb to override');
+    expect(message).toContain('requires at least 1024 MB available');
   });
 
   it('does not mention the derived host floor on the flag path', () => {
