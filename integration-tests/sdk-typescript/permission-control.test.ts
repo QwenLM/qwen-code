@@ -289,19 +289,10 @@ describe('Permission Control (E2E)', () => {
       // write_file call. In default mode write_file requires permission, so
       // canUseTool always fires — a real model may answer in text and never
       // invoke the callback, which is the flake this guards against.
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex === 0) {
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: `${testDir}/signal.txt`,
-                content: 'signal test',
-              }),
-            ],
-          };
-        }
-        return { content: 'Done.' };
-      }, FAKE_SERVER_OPTIONS);
+      const fakeServer = await startFakeToolServer('write_file', {
+        file_path: helper.getPath('signal.txt'),
+        content: 'signal test',
+      });
 
       const q = query({
         prompt: 'Create a file named signal.txt',
