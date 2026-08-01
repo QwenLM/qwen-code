@@ -1170,16 +1170,17 @@ function withPostToolBatchStop(
   const calls = [...completedCalls];
   const lastCall = calls[calls.length - 1];
   const executionStatus = lastCall.response.executionStatus;
-  const { executionStatus: _es, ...responseBase } = createErrorResponse(
+  const response: ToolCallResponseInfo = createErrorResponse(
     lastCall.request,
     new Error(stopReason),
     ToolErrorType.EXECUTION_DENIED,
     executionStatus ?? 'not_started',
   );
-  const response: ToolCallResponseInfo = {
-    ...responseBase,
-    ...(executionStatus !== undefined ? { executionStatus } : {}),
-  };
+  // Preserve a missing execution status from the replaced response: a batch
+  // stop must not invent an outcome the tool never produced.
+  if (executionStatus === undefined) {
+    delete response.executionStatus;
+  }
   calls[calls.length - 1] = {
     status: 'error',
     request: lastCall.request,
@@ -1325,6 +1326,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
+  private postToolBatchConfigWarned = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
   private autoModeFallbackCallIds = new Set<string>();
@@ -2534,12 +2536,19 @@ export class CoreToolScheduler {
         if (this.postToolBatchEnabledForBatch) {
           this.postToolBatchSpanCallId = postToolBatchParentCallId;
         }
-      } catch {
+      } catch (configError) {
         // Fail safe: completion will attempt the hook once. Preserve the
         // potential parent so a transient configuration failure cannot let
         // its span end early.
         this.postToolBatchEnabledForBatch = true;
         this.postToolBatchSpanCallId = postToolBatchParentCallId;
+        if (!this.postToolBatchConfigWarned) {
+          this.postToolBatchConfigWarned = true;
+          debugLogger.warn(
+            'PostToolBatch hook detection failed; deferring span as a precaution:',
+            configError,
+          );
+        }
       }
       this.notifyToolCallsUpdate();
 
@@ -5755,6 +5764,13 @@ export class CoreToolScheduler {
                 stoppedSpan,
                 TOOL_FAILURE_KIND_POST_HOOK_STOPPED,
                 stopMessage,
+              );
+            } else {
+              // Known gap: on a mixed batch the stopped call (last completed)
+              // can differ from the deferred-span call (last validating), so
+              // post_hook_stopped has no span to attach to.
+              debugLogger.debug(
+                `PostToolBatch stop: no tool span for stopped call ${stoppedCall?.request.callId}; post_hook_stopped not recorded`,
               );
             }
           }

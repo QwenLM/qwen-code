@@ -1788,6 +1788,46 @@ describe('CoreToolScheduler', () => {
     ).toBe(true);
   });
 
+  it('resolves rather than rejects when a tool execution throws (#8180)', async () => {
+    // A per-call terminal error is reported on the returned call; schedule()
+    // must resolve, not reject, so one tool's failure cannot abort its
+    // siblings (load-bearing contract change, see the design doc).
+    const execute = vi.fn(async (): Promise<ToolResult> => {
+      throw new Error('execution blew up');
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['read_file', new MockTool({ name: 'read_file', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await expect(
+      scheduler.schedule(
+        [
+          {
+            callId: 'throws-1',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-throws',
+          },
+        ],
+        new AbortController().signal,
+      ),
+    ).resolves.toBeUndefined();
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.executionStatus).toBe('error');
+      expect(completedCall.response.error?.message).toContain(
+        'execution blew up',
+      );
+    }
+  });
+
   it('aborts and fails a tool call that exceeds the execution timeout', async () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';

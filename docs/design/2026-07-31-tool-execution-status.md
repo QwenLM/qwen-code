@@ -32,7 +32,7 @@ The terminal and execution axes are intentionally independent:
 | `error`         | any value        | Pre-execution denial, execution error, post-processing error, or batch-hook override |
 | `cancelled`     | any value        | Cancellation before, during, or after execution                                      |
 
-Only `success/error` and `success/cancelled` are invalid combinations.
+Reading each row as a (terminal, execution) pair, the only invalid combinations are `success/error` and `success/cancelled`: a call that terminates `success` can only carry execution status `success` or `not_started`.
 Execution status freezes when `invocation.execute()` settles; hooks, result
 bridging, persistence, and batch processing cannot overwrite it.
 PostToolBatch enablement and its parent tool span are snapshotted when a
@@ -63,7 +63,10 @@ execution_status in {success, error}
 
 Cancellation, `not_started`, and `unknown` are excluded. Error type, function
 name, call ID, messages, and MCP server names remain in logs or spans rather
-than metric labels.
+than metric labels. The counter deliberately omits `function_name`, so an
+execution-failure rate cannot be attributed to a specific tool from the metric
+alone; drill down through the `tool_call` logs, which carry both `call_id` and
+`function_name`.
 
 An execution span exists only after the dispatcher attempts `execute()`.
 It records the tool identity, frozen execution status, and execution error

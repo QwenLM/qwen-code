@@ -52,6 +52,10 @@ const MCP_CONNECTION_ERROR_PATTERNS = [
   /disconnected/i,
   /transport closed/i,
 ];
+// The MCP SDK's generic `RequestTimeout` code. It is emitted for both
+// client-configured timeouts (`timeout` / `resetTimeoutOnProgress`) and
+// server-side timeouts, so both collapse into a single EXECUTION_TIMEOUT
+// classification here.
 const MCP_REQUEST_TIMEOUT_CODE = -32001;
 
 function isMcpRequestTimeout(error: unknown): boolean {

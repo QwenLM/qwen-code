@@ -299,11 +299,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
   runToolTelemetrySink(() => {
     QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
   });
-  let sdkInitialized = false;
-  runToolTelemetrySink(() => {
-    sdkInitialized = isTelemetrySdkInitialized();
-  });
-  if (!sdkInitialized) return;
+  if (!isTelemetrySdkInitialized()) return;
 
   runToolTelemetrySink(() => {
     const attributes: LogAttributes = {
