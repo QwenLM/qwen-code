@@ -3867,6 +3867,75 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('registers display_image only for the main interactive TUI', async () => {
+      const interactive = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: false,
+      });
+      await interactive.initialize();
+
+      const registerToolMock = ToolRegistry.prototype.registerFactory as Mock;
+      expect(registerToolMock.mock.calls.map((call) => call[0])).toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+
+      for (const params of [
+        { interactive: false, sdkMode: false },
+        { interactive: true, sdkMode: true },
+        {
+          interactive: true,
+          sdkMode: false,
+          inputFormat: InputFormat.STREAM_JSON,
+        },
+        {
+          interactive: true,
+          sdkMode: false,
+          accessibility: { screenReader: true },
+        },
+      ]) {
+        registerToolMock.mockClear();
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+        expect(
+          registerToolMock.mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.DISPLAY_IMAGE);
+      }
+
+      registerToolMock.mockClear();
+      await interactive.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(registerToolMock.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+    });
+
+    it('forwards terminal image renderer support to the display tool', async () => {
+      const provider = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      const config = new Config({
+        ...baseParams,
+        terminalImageRenderSupportProvider: provider,
+      });
+
+      await expect(config.getTerminalImageRenderSupport()).resolves.toEqual({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      expect(provider).toHaveBeenCalledWith();
+
+      await expect(
+        new Config(baseParams).getTerminalImageRenderSupport(),
+      ).resolves.toEqual({
+        available: false,
+        reason: 'No terminal image renderer is configured.',
+      });
+    });
+
     it('registers only record_artifact by default for daemon artifact metadata', async () => {
       const config = new Config({
         ...baseParams,
