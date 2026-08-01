@@ -650,6 +650,38 @@ describe('BaseLlmClient', () => {
       expect(result.usage).toEqual(usage);
     });
 
+    it('forwards tool declarations and reports function calls without executing them', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'read_file', description: 'Read a file' },
+          ],
+        },
+      ];
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['summary']),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValueOnce([
+        { name: 'read_file', args: { path: 'README.md' } },
+      ]);
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        stream: true,
+        config: { tools },
+      });
+
+      expect(mockGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ tools }),
+        }),
+        '',
+      );
+      expect(result.hadToolCall).toBe(true);
+    });
+
     it('drops thought parts and tolerates a stream that omits usage', async () => {
       async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {
         yield createMockTextResponse('answer');

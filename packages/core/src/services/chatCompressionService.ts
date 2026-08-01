@@ -7,6 +7,8 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import type { GenerateTextResult } from '../core/baseLlmClient.js';
+import { AuthType } from '../core/contentGenerator.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import {
   type ChatCompressionInfo,
@@ -17,6 +19,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { resolveModelId } from '../utils/modelId.js';
+import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
@@ -44,9 +47,11 @@ import {
 const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
- * Hard cap on the compression sideQuery output (summary text only, since
- * thinking is disabled). Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
- * (autoCompact.ts:30) which is based on p99.99 of real compaction outputs.
+ * Hard cap on compression generation. The cold path disables thinking; the
+ * cache-sharing path inherits the main request's cache-sensitive thinking
+ * setting while keeping this same provider output ceiling. Mirrors
+ * claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is
+ * based on p99.99 of real compaction outputs.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
@@ -60,8 +65,8 @@ export const DEFAULT_PCT = 0.85;
 
 /**
  * Token budget reserved from the window for compression output. Matches
- * COMPACT_MAX_OUTPUT_TOKENS because thinking is disabled (see Task 1) and
- * maxOutputTokens is therefore the hard ceiling on total summary output.
+ * COMPACT_MAX_OUTPUT_TOKENS, the hard provider output ceiling for both
+ * compression request shapes.
  */
 export const SUMMARY_RESERVE = COMPACT_MAX_OUTPUT_TOKENS; // 20_000
 
@@ -308,6 +313,29 @@ function buildCompressionSystemPrompt(
   }
   if (parts.length === 0) return base;
   return `${base}\n\nAdditional Instructions:\n${parts.join('\n\n')}`;
+}
+
+function supportsCompressionCacheSharing(config: Config): boolean {
+  const provider = config.getContentGeneratorConfig();
+  if (provider.enableCacheControl === false) return false;
+  if (provider.authType === AuthType.USE_ANTHROPIC) return true;
+  return (
+    (provider.authType === AuthType.QWEN_OAUTH ||
+      provider.authType === AuthType.USE_OPENAI) &&
+    DashScopeOpenAICompatibleProvider.isDashScopeProvider(provider)
+  );
+}
+
+function hasStateSnapshot(summary: string): boolean {
+  const stripped = stripAnalysisBlock(summary);
+  const startTag = '<state_snapshot>';
+  const start = stripped.indexOf(startTag);
+  const end = stripped.indexOf('</state_snapshot>', start + startTag.length);
+  return (
+    start >= 0 &&
+    end > start + startTag.length &&
+    stripped.slice(start + startTag.length, end).trim().length > 0
+  );
 }
 
 export class ChatCompressionService {
@@ -563,46 +591,119 @@ export class ChatCompressionService {
       }
     }
 
-    const summaryResult = await runSideQuery(config, {
-      purpose: 'chat-compression',
-      skipOutputLanguagePreference: true,
-      model: effectiveCompactionModel,
-      // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
-      // Falls back to the main model if not set or if the payload exceeds the
-      // compaction model's context window.
-      // See https://github.com/QwenLM/qwen-code/issues/5956
-      // Stream so a slow compression inference keeps the HTTP connection alive.
-      // Non-streaming returns no bytes until the whole summary is generated, so
-      // behind a BFF gateway with a short `proxy_read_timeout` a long inference
-      // is killed with a 504 (surfaced as a 422) mid-compression, breaking the
-      // session. See https://github.com/QwenLM/qwen-code/issues/5861.
-      stream: true,
-      // Best-effort: failures fall back to NOOP and the next turn re-triggers
-      // compression anyway, so don't burn 7 retries blocking the user mid-turn.
-      maxAttempts: 1,
-      systemInstruction,
-      contents: [
-        ...slim.slimmedHistory,
-        {
-          role: 'user',
-          parts: [
+    const abortSignal = signal ?? new AbortController().signal;
+    const runColdCompression = () =>
+      runSideQuery(config, {
+        purpose: 'chat-compression',
+        skipOutputLanguagePreference: true,
+        model: effectiveCompactionModel,
+        // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
+        // Falls back to the main model if not set or if the payload exceeds the
+        // compaction model's context window.
+        // See https://github.com/QwenLM/qwen-code/issues/5956
+        // Stream so a slow compression inference keeps the HTTP connection alive.
+        // Non-streaming returns no bytes until the whole summary is generated, so
+        // behind a BFF gateway with a short `proxy_read_timeout` a long inference
+        // is killed with a 504 (surfaced as a 422) mid-compression, breaking the
+        // session. See https://github.com/QwenLM/qwen-code/issues/5861.
+        stream: true,
+        // Best-effort: failures fall back to NOOP and the next turn re-triggers
+        // compression anyway, so don't burn 7 retries blocking the user mid-turn.
+        maxAttempts: 1,
+        systemInstruction,
+        contents: [
+          ...slim.slimmedHistory,
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+              },
+            ],
+          },
+        ],
+        // Compression output is bounded by maxOutputTokens to guarantee a predictable
+        // reserve across providers (see docs/design/auto-compaction-threshold-redesign.md).
+        // Thinking is disabled because per-provider thinking-budget semantics are
+        // inconsistent (Anthropic/OpenAI count it separately, Gemini varies by model).
+        config: {
+          thinkingConfig: { includeThoughts: false },
+          maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
+        },
+        abortSignal,
+        promptId,
+      });
+
+    let summaryResult: GenerateTextResult | undefined;
+    let usedCacheSharing = false;
+    const canShareCache =
+      effectiveCompactionModel === config.getModel() &&
+      slim.stats.imagesStripped === 0 &&
+      slim.stats.documentsStripped === 0 &&
+      supportsCompressionCacheSharing(config);
+    if (canShareCache) {
+      try {
+        const generationConfig = chat.getGenerationConfig();
+        const mainSystemInstruction = generationConfig.systemInstruction;
+        delete generationConfig.systemInstruction;
+        delete generationConfig.abortSignal;
+        const sharedResult = await config.getBaseLlmClient().generateText({
+          contents: [
+            ...sideQueryHistory,
             {
-              text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+              role: 'user',
+              parts: [
+                {
+                  text:
+                    `${systemInstruction}\n\n` +
+                    'Do not call tools; tool execution is disabled for this request. ' +
+                    'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+                },
+              ],
             },
           ],
-        },
-      ],
-      // Compression output is bounded by maxOutputTokens to guarantee a predictable
-      // reserve across providers (see docs/design/auto-compaction-threshold-redesign.md).
-      // Thinking is disabled because per-provider thinking-budget semantics are
-      // inconsistent (Anthropic/OpenAI count it separately, Gemini varies by model).
-      config: {
-        thinkingConfig: { includeThoughts: false },
-        maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
-      },
-      abortSignal: signal ?? new AbortController().signal,
-      promptId,
-    });
+          model: effectiveCompactionModel,
+          systemInstruction: mainSystemInstruction,
+          config: {
+            ...generationConfig,
+            maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
+          },
+          abortSignal,
+          promptId,
+          stream: true,
+          maxAttempts: 1,
+        });
+        if (!sharedResult.hadToolCall && hasStateSnapshot(sharedResult.text)) {
+          summaryResult = sharedResult;
+          usedCacheSharing = true;
+          config
+            .getDebugLogger()
+            .debug(
+              `[chat-compression] cache-sharing request succeeded; ` +
+                `cachedContentTokenCount=` +
+                `${sharedResult.usage?.cachedContentTokenCount ?? 0}`,
+            );
+        } else {
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] cache-sharing response was unusable ` +
+                `(${sharedResult.hadToolCall ? 'tool call' : 'invalid state snapshot'}); ` +
+                `falling back to the dedicated summarizer.`,
+            );
+        }
+      } catch (error) {
+        if (abortSignal.aborted) throw error;
+        config
+          .getDebugLogger()
+          .warn(
+            `[chat-compression] cache-sharing request failed; falling back ` +
+              `to the dedicated summarizer: ${String(error)}`,
+          );
+      }
+    }
+
+    summaryResult ??= await runColdCompression();
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>
     // blocks, so a response that is ONLY <analysis>...</analysis> (no
@@ -775,7 +876,10 @@ export class ChatCompressionService {
       // can still shrink the history instead of failing with a token-count
       // error.
       //
-      // Note: compressionInputTokenCount includes the entire compression
+      // The cache-sharing request also includes the main system and tools, so
+      // its input count cannot isolate visible history with a fixed subtraction;
+      // that path uses the local visible-history delta below. On the cold path,
+      // compressionInputTokenCount includes the entire compression
       // system prompt (the <state_snapshot> instructions, ~900 tokens) PLUS
       // the short kick-off user turn ("First, reason in your <analysis>
       // block. Then, produce the <state_snapshot> XML.", ~20 tokens) — the
@@ -788,6 +892,7 @@ export class ChatCompressionService {
       // suggests. We accept that inaccuracy in favor of avoiding local
       // token estimation.
       if (
+        !usedCacheSharing &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&
@@ -845,7 +950,11 @@ export class ChatCompressionService {
           config
             .getDebugLogger()
             .debug(
-              `[chat-compression] usage metadata missing; estimated ` +
+              `[chat-compression] ${
+                usedCacheSharing
+                  ? 'cache-sharing token accounting'
+                  : 'usage metadata missing'
+              }; estimated ` +
                 `post-compression token count by preserving the ` +
                 `API-reported non-visible remainder ` +
                 `(${estimatedNonVisibleTokenCount}) and replacing the ` +
