@@ -645,6 +645,28 @@ describe('SkillTool', () => {
       );
     });
 
+    it('keeps skill execution successful when usage recording fails', async () => {
+      vi.mocked(recordAutoSkillUsage).mockRejectedValueOnce(
+        new Error('lock busy'),
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toContain(
+        'Review code for quality and best practices.',
+      );
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
+    });
+
     it('should include allowedTools in result when present', async () => {
       const skillWithTools: SkillConfig = {
         ...mockSkills[1],

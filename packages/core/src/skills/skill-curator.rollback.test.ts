@@ -109,6 +109,54 @@ describe('auto-skill curator rollback', () => {
     });
   });
 
+  it('rolls back every archive move when persisting state fails', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const directoryNames = ['auto-skill-old-one', 'auto-skill-old-two'];
+
+    for (const directoryName of directoryNames) {
+      const manifest = await writeSkill(directoryName, old);
+      await recordAutoSkillUsage(
+        projectRoot,
+        {
+          name: directoryName.replace(/^auto-skill-/, ''),
+          level: 'project',
+          filePath: manifest,
+        },
+        old,
+      );
+    }
+
+    vi.mocked(atomicFileWrite.atomicWriteJSON).mockRejectedValueOnce(
+      new Error('simulated persistence failure'),
+    );
+
+    await expect(runAutoSkillCurator(projectRoot, { now })).rejects.toThrow(
+      'simulated persistence failure',
+    );
+
+    for (const directoryName of directoryNames) {
+      const liveManifest = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        directoryName,
+        'SKILL.md',
+      );
+      const archivedManifest = path.join(
+        projectRoot,
+        '.qwen',
+        'archived-skills',
+        directoryName,
+        'SKILL.md',
+      );
+      await expect(fs.access(liveManifest)).resolves.toBeUndefined();
+      await expect(fs.access(archivedManifest)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    }
+  });
+
   it('rolls back a restore move when persisting state fails', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const old = new Date(now.getTime() - 100 * DAY_MS);
@@ -154,29 +202,43 @@ describe('auto-skill curator rollback', () => {
     });
   });
 
-  it('escalates when an archive move cannot be rolled back', async () => {
+  it('continues rolling back after an archive rollback fails', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-old', old);
+    const restoredManifest = await writeSkill('auto-skill-old-one', old);
+    const blockedManifest = await writeSkill('auto-skill-old-two', old);
     await recordAutoSkillUsage(
       projectRoot,
-      { name: 'old', level: 'project', filePath: manifest },
+      { name: 'old-one', level: 'project', filePath: restoredManifest },
       old,
     );
-    const liveDirectory = path.dirname(manifest);
-    const archivedDirectory = path.join(
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'old-two', level: 'project', filePath: blockedManifest },
+      old,
+    );
+    const restoredLiveDirectory = path.dirname(restoredManifest);
+    const blockedLiveDirectory = path.dirname(blockedManifest);
+    const restoredArchivedDirectory = path.join(
       projectRoot,
       '.qwen',
       'archived-skills',
-      'auto-skill-old',
+      'auto-skill-old-one',
+    );
+    const blockedArchivedDirectory = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-old-two',
     );
     const persistenceError = new Error('simulated persistence failure');
     vi.mocked(atomicFileWrite.atomicWriteJSON).mockImplementationOnce(
       async () => {
-        // The archive rename has completed by the time persistence starts.
-        // Recreate its source as a non-empty directory so rename-back fails.
-        await fs.mkdir(liveDirectory, { recursive: true });
-        await fs.writeFile(path.join(liveDirectory, 'rollback-blocker'), 'x');
+        await fs.mkdir(blockedLiveDirectory, { recursive: true });
+        await fs.writeFile(
+          path.join(blockedLiveDirectory, 'rollback-blocker'),
+          'x',
+        );
         throw persistenceError;
       },
     );
@@ -187,9 +249,13 @@ describe('auto-skill curator rollback', () => {
       message: expect.stringMatching(/^Rollback failed:/),
       cause: persistenceError,
     });
-    await expect(fs.access(archivedDirectory)).resolves.toBeUndefined();
+    await expect(fs.access(restoredLiveDirectory)).resolves.toBeUndefined();
+    await expect(fs.access(restoredArchivedDirectory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.access(blockedArchivedDirectory)).resolves.toBeUndefined();
     await expect(
-      fs.access(path.join(liveDirectory, 'rollback-blocker')),
+      fs.access(path.join(blockedLiveDirectory, 'rollback-blocker')),
     ).resolves.toBeUndefined();
   });
 

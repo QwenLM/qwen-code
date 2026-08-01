@@ -223,6 +223,33 @@ describe('SkillCommandLoader', () => {
     });
   });
 
+  it.each([
+    {
+      caseName: 'user-level skills',
+      skillDetail: {
+        name: 'my-skill',
+        level: 'user',
+        filePath: '/test/user/.qwen/skills/my-skill/SKILL.md',
+      },
+    },
+    {
+      caseName: 'skills without a file path',
+      skillDetail: {
+        name: 'my-skill',
+        level: 'project',
+      },
+    },
+  ])('does not record curator usage for $caseName', async ({ skillDetail }) => {
+    await recordAutoSkillCommandUsage(mockConfig, {
+      name: 'my-skill',
+      description: 'My skill',
+      kind: CommandKind.SKILL,
+      skillDetail,
+    });
+
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+  });
+
   it('keeps usage recording best-effort when persistence fails', async () => {
     recordAutoSkillUsageMock.mockRejectedValueOnce(new Error('lock busy'));
 
