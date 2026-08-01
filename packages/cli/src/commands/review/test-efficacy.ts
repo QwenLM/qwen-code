@@ -222,6 +222,12 @@ export interface HunkResult extends Omit<HunkCandidate, 'patch'> {
  */
 export const MAX_HUNK_PROBES = 6;
 
+/**
+ * At most this many REPLACEMENT mutants per run, inside the shared cap — see
+ * the selection comment for the 24x pool measurement that forced this.
+ */
+export const REPLACEMENT_SUB_CAP = 3;
+
 /** Deadline for one vitest run (baseline, mutant, or revert probe alike). */
 const PROBE_RUN_TIMEOUT_MS = 300_000;
 
@@ -730,13 +736,25 @@ export function selectMutants(
       }
     }
   }
-  // Deletions first, then replacements — the safety-verb set has the track
-  // record, so under the shared cap it spends first; within each kind, files
-  // with new tests first, as before.
-  const eligible = [...preferred, ...rest, ...replPreferred, ...replRest];
+  // Deletions first, then replacements — and replacements carry their OWN
+  // sub-cap. Measured over 40 real commits, the replacement operators produce
+  // ~24x the deletion pool (215 vs 9 candidates; guard-true drives it), and
+  // every mutant run drains the same time window hunk probes draw from last:
+  // uncapped, most diffs with any replacement candidates would leave hunk
+  // probing zero runs and the hunk-survived finding class would silently stop
+  // firing. Three slots keeps the highest-value replacements without buying
+  // coarser answers at the hunk probes' expense; what the sub-cap drops is
+  // counted in skippedForCap, never silently lost.
+  const replacements = [...replPreferred, ...replRest];
+  const eligible = [
+    ...preferred,
+    ...rest,
+    ...replacements.slice(0, REPLACEMENT_SUB_CAP),
+  ];
+  const subCapSkipped = Math.max(0, replacements.length - REPLACEMENT_SUB_CAP);
   return {
     selected: eligible.slice(0, cap),
-    skippedForCap: Math.max(0, eligible.length - cap),
+    skippedForCap: Math.max(0, eligible.length - cap) + subCapSkipped,
     derailed,
   };
 }
