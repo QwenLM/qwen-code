@@ -293,6 +293,8 @@ export interface ForkedQueryResult {
     outputTokens: number;
     cacheHitTokens: number;
   };
+  /** Resolved model id used for the query (after selector/alias resolution). */
+  model: string;
 }
 
 function extractQueryUsage(
@@ -533,7 +535,7 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage };
+      return { text: trimmed, jsonResult, usage, model };
     });
   }
 

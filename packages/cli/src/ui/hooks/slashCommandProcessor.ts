@@ -117,6 +117,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'branch',
   'btw',
+  'advisor',
   'history',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;

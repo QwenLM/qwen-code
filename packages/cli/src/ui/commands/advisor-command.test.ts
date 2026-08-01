@@ -5,7 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { advisorCommand, buildAdvisorPrompt } from './advisor-command.js';
+import { advisorCommand } from './advisor-command.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandKind } from './types.js';
@@ -34,7 +34,8 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
 );
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  BTW_MAX_INPUT_LENGTH: 4096,
+  ADVISOR_MAX_INPUT_LENGTH: 4096,
+  buildAdvisorPrompt: (focus: string) => focus,
   runForkedAgent: mockRunForkedAgent,
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
 }));
@@ -113,9 +114,10 @@ describe('advisorCommand', () => {
   });
 
   describe('interactive mode', () => {
-    it('should show pending item, add review, then clear pending', async () => {
+    it('should show pending item, add an advisor review item, then clear pending', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: '## Verdict\nSound.',
+        model: 'resolved-model',
         usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
       });
 
@@ -126,7 +128,11 @@ describe('advisorCommand', () => {
         text: 'Consulting advisor...',
       });
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        { type: MessageType.INFO, text: '## Verdict\nSound.' },
+        {
+          type: MessageType.ADVISOR,
+          text: '## Verdict\nSound.',
+          model: 'resolved-model',
+        },
         expect.any(Number),
       );
       expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
@@ -135,6 +141,7 @@ describe('advisorCommand', () => {
     it('should pass focus into the advisor prompt', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
 
@@ -151,6 +158,7 @@ describe('advisorCommand', () => {
     it('should not pass model override when advisorModel is unset', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
 
@@ -163,6 +171,7 @@ describe('advisorCommand', () => {
     it('should not pass model override when advisorModel is whitespace-only', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
       const contextWithBlankModel = createMockCommandContext({
@@ -183,6 +192,7 @@ describe('advisorCommand', () => {
     it('should pass advisorModel setting as model override', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'stronger-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
       const contextWithModel = createMockCommandContext({
@@ -201,22 +211,23 @@ describe('advisorCommand', () => {
       );
     });
 
-    it('should preserve tools for cache sharing when advisorModel is unset', async () => {
+    it('should strip tools (never preserve) on the default path, matching /btw', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
 
       await advisorCommand.action!(mockContext, '');
 
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ preserveTools: true }),
-      );
+      const callArgs = mockRunForkedAgent.mock.calls[0][0];
+      expect(callArgs).not.toHaveProperty('preserveTools');
     });
 
-    it('should not preserve tools when advisorModel differs from the cache-safe model', async () => {
+    it('should strip tools even when advisorModel is set', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'stronger-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
       const contextWithModel = createMockCommandContext({
@@ -230,14 +241,14 @@ describe('advisorCommand', () => {
 
       await advisorCommand.action!(contextWithModel, '');
 
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ preserveTools: false }),
-      );
+      const callArgs = mockRunForkedAgent.mock.calls[0][0];
+      expect(callArgs).not.toHaveProperty('preserveTools');
     });
 
     it('should forward abortSignal to runForkedAgent', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
       });
       const abortController = new AbortController();
@@ -251,6 +262,30 @@ describe('advisorCommand', () => {
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
         expect.objectContaining({ abortSignal: abortController.signal }),
       );
+    });
+
+    it('should not mutate the main conversation history', async () => {
+      const addHistory = vi.fn();
+      const setHistory = vi.fn();
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        model: 'test-model',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+      const context = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => ({
+              getChat: () => ({ addHistory, setHistory }),
+            }),
+          }),
+        },
+      });
+
+      await advisorCommand.action!(context, '');
+
+      expect(addHistory).not.toHaveBeenCalled();
+      expect(setHistory).not.toHaveBeenCalled();
     });
 
     it('should error when no conversation context is available', async () => {
@@ -325,13 +360,32 @@ describe('advisorCommand', () => {
         ui: { pendingItem: { type: 'info' } },
       });
 
-      await advisorCommand.action!(busyContext, '');
+      const result = await advisorCommand.action!(busyContext, '');
 
       expect(mockRunForkedAgent).not.toHaveBeenCalled();
-      expect(busyContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({ type: MessageType.ERROR }),
-        expect.any(Number),
-      );
+      expect(busyContext.ui.addItem).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Another operation is in progress'),
+      });
+    });
+
+    it('should block when the main turn is still in flight', async () => {
+      const busyContext = createMockCommandContext({
+        services: { config: createConfig() },
+        ui: { isIdleRef: { current: false }, pendingItem: null },
+      });
+
+      const result = await advisorCommand.action!(busyContext, '');
+
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
+      expect(busyContext.ui.addItem).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Another operation is in progress'),
+      });
     });
 
     it('should not add items after abort', async () => {
@@ -340,6 +394,7 @@ describe('advisorCommand', () => {
         abortController.abort();
         return {
           text: 'late review',
+          model: 'test-model',
           usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
         };
       });
@@ -378,13 +433,18 @@ describe('advisorCommand', () => {
     it('should show fallback text when result text is empty', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: null,
+        model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 0, cacheHitTokens: 0 },
       });
 
       await advisorCommand.action!(mockContext, '');
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        { type: MessageType.INFO, text: 'No response received.' },
+        {
+          type: MessageType.ADVISOR,
+          text: 'No response received.',
+          model: 'test-model',
+        },
         expect.any(Number),
       );
     });
@@ -394,6 +454,7 @@ describe('advisorCommand', () => {
     it('should return message result with review on success', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review text',
+        model: 'test-model',
         usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
       });
       const acpContext = createMockCommandContext({
@@ -425,34 +486,6 @@ describe('advisorCommand', () => {
         messageType: 'error',
         content: 'Advisor review failed: Model error',
       });
-    });
-  });
-
-  describe('buildAdvisorPrompt', () => {
-    it('should default to reviewing the conversation when focus is empty', () => {
-      expect(buildAdvisorPrompt('')).toContain(
-        'Review the conversation above.',
-      );
-    });
-
-    it('should include the focus text', () => {
-      const prompt = buildAdvisorPrompt('is the fix correct?');
-      expect(prompt).toContain('is the fix correct?');
-      expect(prompt).not.toContain('Review the conversation above.');
-    });
-
-    it('should contain all four required section headings', () => {
-      const prompt = buildAdvisorPrompt('');
-      expect(prompt).toContain('## Verdict');
-      expect(prompt).toContain('## Risks');
-      expect(prompt).toContain('## Missing evidence');
-      expect(prompt).toContain('## Recommendation');
-    });
-
-    it('should acknowledge the transcript may be truncated', () => {
-      const prompt = buildAdvisorPrompt('');
-      expect(prompt).toContain('may be truncated');
-      expect(prompt).not.toContain('complete evidence');
     });
   });
 });

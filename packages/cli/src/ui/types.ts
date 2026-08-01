@@ -522,6 +522,18 @@ export type HistoryItemBtw = HistoryItemBase & {
 };
 
 /**
+ * Independent second-opinion review rendered by `/advisor`. `text` is the
+ * reviewer's markdown; `model` is the resolved model id that produced it,
+ * shown in the header so a misconfigured `advisorModel` (which silently falls
+ * back to the main model) is visible to the user.
+ */
+export type HistoryItemAdvisor = HistoryItemBase & {
+  type: 'advisor';
+  text: string;
+  model: string;
+};
+
+/**
  * Away-summary recap shown when the user returns to the session after a
  * period of inactivity (or via /recap). Rendered inline as a regular
  * history item (matching Claude Code's away_summary message); scrolls
@@ -677,6 +689,7 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemAdvisor
   | HistoryItemMemorySaved
   | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
@@ -727,6 +740,7 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  ADVISOR = 'advisor',
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',

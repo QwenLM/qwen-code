@@ -221,9 +221,10 @@ The `/advisor` command runs an independent, read-only review of the conversation
 **How It Works:**
 
 - The review is sent as a separate, single-turn API call with recent conversation context (up to the last 40 messages)
-- The reviewer model **cannot execute tools** — it runs as a single-turn forked query whose tool calls are discarded, so the review never writes code or runs commands; every claim must be grounded in the visible transcript
+- The reviewer model **cannot execute tools** — tools are stripped at the request level (the same mechanism as `/btw`), so the review never writes code or runs commands; every claim must be grounded in the visible transcript
 - The main conversation is **not** interrupted; the review is shown only to you
-- The review is rendered with four fixed sections: **Verdict**, **Risks**, **Missing evidence**, and **Recommendation**
+- The review is rendered as a boxed markdown block with four fixed sections — **Verdict**, **Risks**, **Missing evidence**, and **Recommendation** — under an `/advisor · <model>` header that names the resolved reviewer model
+- Unlike `/btw`, which is fire-and-forget and leaves the session usable, `/advisor` blocks input until the review returns; over a full context window with a strong reviewer this can take tens of seconds
 - By default the main model is used; set [`advisorModel`](../configuration/settings.md#advisormodel) to route the review to a different (typically stronger) model — the recent transcript is sent to that model even when it uses another provider
 
 **Example:**
@@ -231,7 +232,10 @@ The `/advisor` command runs an independent, read-only review of the conversation
 ```
 > /advisor is my fix for the null check actually correct?
 
-  + Consulting advisor...
+  Consulting advisor...
+
+  /advisor · qwen3-max
+  ────────────────────
 
   ## Verdict
   The approach is sound, but the edge case at line 42 is unverified.
@@ -246,6 +250,8 @@ The `/advisor` command runs an independent, read-only review of the conversation
   Add a focused unit test for the null-config branch before merging.
 ```
 
+The review renders in a bordered box; the header shows the resolved reviewer model, so a mistyped `advisorModel` — which silently falls back to the main model — is visible at a glance.
+
 **Supported Execution Modes:**
 
 | Mode                 | Behavior                                            |
@@ -256,6 +262,10 @@ The `/advisor` command runs an independent, read-only review of the conversation
 > [!tip]
 >
 > Use `/advisor` for a second opinion before committing to a direction — it is especially useful for catching flawed assumptions, unverified claims, or risky next steps. Configure `advisorModel` to get the review from a different model than the one driving the main conversation.
+
+> [!note]
+>
+> `advisorModel` is set in settings only; unlike `fastModel` and `visionModel`, it has no `/model` flag counterpart yet.
 
 ### 1.8 Session Recap (`/recap`)
 
