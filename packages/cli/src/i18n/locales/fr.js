@@ -1130,6 +1130,8 @@ export default {
     "Le chemin du résumé existe déjà et n'est pas un résumé généré : {{path}}",
   'Summary path must be within the project root.':
     'Le chemin du résumé doit se trouver dans la racine du projet.',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Le chemin du résumé se termine par un séparateur mais est un fichier existant : {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Échec de la génération du résumé du contexte du projet : {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

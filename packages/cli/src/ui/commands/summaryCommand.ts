@@ -12,6 +12,7 @@ import {
   type SlashCommandActionReturn,
 } from './types.js';
 import {
+  createDebugLogger,
   getProjectSummaryPrompt,
   isSubpath,
   resolvePath,
@@ -19,6 +20,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
+
+const debugLogger = createDebugLogger('SUMMARY_COMMAND');
 
 // Resolves the real path of the nearest existing ancestor of targetPath. The
 // target file itself usually does not exist yet, but a symlinked parent directory
@@ -228,13 +231,18 @@ export const summaryCommand: SlashCommand = {
         throw new Error(t('Summary path must be within the project root.'));
       }
 
-      const isDir =
-        customPath.endsWith('/') ||
-        customPath.endsWith(path.sep) ||
-        (await fsPromises
-          .stat(resolved)
-          .then((s) => s.isDirectory())
-          .catch(() => false));
+      const hasTrailingSep =
+        customPath.endsWith('/') || customPath.endsWith(path.sep);
+      const resolvedStat = await fsPromises.stat(resolved).catch(() => null);
+      if (hasTrailingSep && resolvedStat?.isFile()) {
+        throw new Error(
+          t(
+            'Summary path ends with a separator but is an existing file: {{path}}',
+            { path: customPath },
+          ),
+        );
+      }
+      const isDir = hasTrailingSep || (resolvedStat?.isDirectory() ?? false);
 
       const summaryPath = isDir
         ? path.join(resolved, 'PROJECT_SUMMARY.md')
@@ -257,11 +265,12 @@ export const summaryCommand: SlashCommand = {
       // (e.g. a mistyped path such as `package.json`). A generated summary
       // carries a `## Summary Metadata` footer, so regenerating one is allowed.
       const existingStat = await fsPromises.stat(summaryPath).catch(() => null);
-      if (existingStat?.isFile()) {
+      if (existingStat?.isFile() && existingStat.size > 0) {
         const existing = await fsPromises
           .readFile(summaryPath, 'utf8')
           .catch(() => '');
-        if (!/\n---\n\n## Summary Metadata\n/.test(existing)) {
+        const normalized = existing.replace(/\r\n/g, '\n');
+        if (!/\n---\n\n## Summary Metadata\n/.test(normalized)) {
           throw new Error(
             t(
               'Summary path already exists and is not a generated summary: {{path}}',
@@ -306,6 +315,8 @@ export const summaryCommand: SlashCommand = {
         target.realProjectRoot,
       );
 
+      // Only the default .qwen/ target gets 0o700; a user-chosen directory
+      // keeps its existing permissions.
       await fsPromises.mkdir(path.dirname(target.summaryPath), {
         recursive: true,
         ...(target.isDefaultTarget ? { mode: 0o700 } : {}),
@@ -314,7 +325,9 @@ export const summaryCommand: SlashCommand = {
         encoding: 'utf8',
         mode: 0o600,
       });
-      await fsPromises.chmod(target.summaryPath, 0o600).catch(() => undefined);
+      await fsPromises.chmod(target.summaryPath, 0o600).catch((error) => {
+        debugLogger.debug('Failed to tighten summary file permissions:', error);
+      });
 
       return {
         filePathForDisplay: target.filePathForDisplay,

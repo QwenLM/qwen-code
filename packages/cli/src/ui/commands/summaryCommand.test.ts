@@ -366,4 +366,35 @@ describe('summaryCommand custom export path', () => {
       expect(stat.mode & 0o777).toBe(0o600);
     },
   );
+
+  it('overwrites a previously generated summary with CRLF line endings', async () => {
+    const target = path.join(projectRoot, 'crlf-summary.md');
+    await fs.writeFile(
+      target,
+      'old body\r\n\r\n---\r\n\r\n## Summary Metadata\r\n**Update time**: old\r\n',
+      'utf8',
+    );
+    const result = await run('crlf-summary.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(target, 'utf8');
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).not.toContain('old body');
+  });
+
+  it('overwrites an empty pre-created file', async () => {
+    const target = path.join(projectRoot, 'empty.md');
+    await fs.writeFile(target, '', 'utf8');
+    const result = await run('empty.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    const written = await fs.readFile(target, 'utf8');
+    expect(written).toContain('SUMMARY BODY');
+  });
+
+  it('rejects a trailing separator on an existing file', async () => {
+    await fs.writeFile(path.join(projectRoot, 'notes.md'), 'content', 'utf8');
+    const result = await run('notes.md/');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('ends with a separator');
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
 });

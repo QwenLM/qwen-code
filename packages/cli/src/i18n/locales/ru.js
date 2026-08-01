@@ -1012,6 +1012,8 @@ export default {
     'Путь сводки уже существует и не является сгенерированной сводкой: {{path}}',
   'Summary path must be within the project root.':
     'Путь сводки должен находиться в корне проекта.',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Путь сводки заканчивается разделителем, но является существующим файлом: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

@@ -21,7 +21,7 @@ These commands help you save, restore, and summarize work progress.
 | Command          | Description                                                              | Usage Examples                                                |
 | ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
 | `/init`          | Analyze current directory and create initial context file                | `/init`                                                       |
-| `/summary`       | Generate project summary based on conversation history                   | `/summary`                                                    |
+| `/summary`       | Generate project summary based on conversation history                   | `/summary` or `/summary docs/my-summary.md`                   |
 | `/compress`      | Replace chat history with summary to save Tokens                         | `/compress` or `/summarize`                                   |
 | `/compress-fast` | Fast compression without AI — strips old tool outputs and thinking parts | `/compress-fast`                                              |
 | `/resume`        | Resume a previous conversation session                                   | `/resume` or `/continue`                                      |
@@ -37,6 +37,10 @@ These commands help you save, restore, and summarize work progress.
 > [!note]
 >
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
+
+> [!note]
+>
+> `/summary` accepts an optional `[path]` argument to save the summary to a custom location within the project root. Without an argument, it saves to `.qwen/PROJECT_SUMMARY.md`. Custom-path summaries are not detected by the welcome-back flow (`ui.enableWelcomeBack`), which only reads the default `.qwen/PROJECT_SUMMARY.md` location.
 
 ### 1.2 Interface and Workspace Control
 

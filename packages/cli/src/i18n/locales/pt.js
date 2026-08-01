@@ -1004,6 +1004,8 @@ export default {
     'O caminho do resumo já existe e não é um resumo gerado: {{path}}',
   'Summary path must be within the project root.':
     'O caminho do resumo deve estar dentro da raiz do projeto.',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'O caminho do resumo termina com um separador, mas é um arquivo existente: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Falha ao gerar resumo do contexto do projeto: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

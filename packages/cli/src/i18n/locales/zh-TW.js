@@ -1305,6 +1305,8 @@ export default {
   'Summary path already exists and is not a generated summary: {{path}}':
     '摘要路徑已存在且非產生的摘要：{{path}}',
   'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路徑以分隔符結尾，但是一個已存在的檔案：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
