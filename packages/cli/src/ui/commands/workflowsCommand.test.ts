@@ -25,6 +25,7 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     outputFile: '',
     outputOffset: 0,
     notified: false,
+    isBackgrounded: true,
     abortController: new AbortController(),
     currentPhase: null,
     phases: [],
@@ -165,6 +166,27 @@ describe('workflowsCommand', () => {
     expect(result.content).toContain('Cooperative pause requested');
   });
 
+  it('explains that foreground workflows cannot be paused', async () => {
+    getMock.mockReturnValue(
+      entry({
+        runId: 'wf_foreground',
+        status: 'running',
+        isBackgrounded: false,
+      }),
+    );
+
+    const result = await workflowsCommand.action!(context, 'p wf_foreground');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Foreground workflow runs cannot be paused or resumed; only background runs support cooperative pause.',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+  });
+
   it('resumes a live paused workflow with p <runId>', async () => {
     getMock.mockReturnValue(entry({ runId: 'wf_paused', status: 'paused' }));
 
@@ -179,6 +201,29 @@ describe('workflowsCommand', () => {
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).toContain('Resume requested');
   });
+
+  it.each([
+    ['running', 'paused', 'pause'],
+    ['paused', 'resumed', 'resume'],
+  ] as const)(
+    'reports a state race when a %s workflow cannot be %s',
+    async (status, operation, registryOperation) => {
+      const operationMock =
+        registryOperation === 'pause' ? pauseMock : resumeMock;
+      operationMock.mockReturnValue(false);
+      getMock.mockReturnValue(
+        entry({ runId: 'wf_racing', status, isBackgrounded: true }),
+      );
+
+      const result = await workflowsCommand.action!(context, 'p wf_racing');
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: `Workflow wf_racing could not be ${operation} because its state changed.`,
+      });
+    },
+  );
 
   it.each([
     ['pausing', 'still pausing'],

@@ -204,6 +204,14 @@ export const workflowsCommand: SlashCommand = {
           content: `Unknown live workflow runId: ${runId}`,
         };
       }
+      if (!target.isBackgrounded) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content:
+            'Foreground workflow runs cannot be paused or resumed; only background runs support cooperative pause.',
+        };
+      }
       if (target.status === 'pausing') {
         return {
           type: 'message' as const,
