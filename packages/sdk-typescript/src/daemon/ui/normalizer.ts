@@ -1006,6 +1006,9 @@ function normalizePlanUpdate(
   // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
   // todo snapshots into per-task token/time detail.
   const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
+  const todoPlan =
+    meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
+  const planId = getString(todoPlan, 'id');
   return {
     ...base,
     type: 'tool.update',
@@ -1020,7 +1023,11 @@ function normalizePlanUpdate(
         content: { type: 'text', text: contentText },
       },
     ],
-    rawOutput: stats ? { entries, stats } : { entries },
+    rawOutput: {
+      entries,
+      ...(stats ? { stats } : {}),
+      ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+    },
   };
 }
 

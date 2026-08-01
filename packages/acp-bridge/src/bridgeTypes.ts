@@ -672,6 +672,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
  * same session must not dedupe a message it did not queue.
  */
 export interface MidTurnQueueEntry {
+  messageId: string;
   text: string;
   originatorClientId?: string;
 }
@@ -1439,7 +1440,14 @@ export interface AcpSessionBridge {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
-  ): { accepted: boolean };
+  ): { accepted: boolean; messageId?: string };
+
+  /** Remove a message that has not yet been drained into the running turn. */
+  removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

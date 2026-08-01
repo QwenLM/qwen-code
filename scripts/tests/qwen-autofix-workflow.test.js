@@ -384,9 +384,10 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
-    // Staleness bound must sit above legitimate check runtimes (review-address is
-    // capped at 120m) so an active run is never aged out mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // Staleness bound must sit above legitimate check runtimes (a review-address
+    // job runs up to its 300-minute cap) so an active run is never aged out
+    // mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -5894,7 +5895,7 @@ describe('qwen-autofix workflow', () => {
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
-    // head during the agent's ~50-minute window (observed twice in one day,
+    // head during the agent's ~120-minute window (observed twice in one day,
     // #7983/#7985 — a full verified agent run thrown away each time). The
     // per-PR head-write concurrency group cannot prevent this: it only
     // serialises THIS repo's workflows, not the PR author or the fork side.
@@ -6632,7 +6633,7 @@ describe('qwen-autofix workflow', () => {
 
   it('announces a working round up front and closes the same status comment', () => {
     // The whole point: the live run link reaches the thread BEFORE the
-    // 80-minute agent step, not after it. Without this the PR is silent from
+    // 130-minute agent step, not after it. Without this the PR is silent from
     // takeover until "Push and report", so a working round and a stuck one
     // look identical.
     expect(postStatusCommentStep.length).toBeGreaterThan(0);
@@ -8385,20 +8386,179 @@ describe('qwen-autofix workflow', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('replays the handoff decision and terminal-round transitions under bash', () => {
-    // The primary + repair steps are bounded below the 150-minute job timeout
-    // so a runaway
-    // agent fails the STEP, not the job, leaving the always() report step time to
-    // run (a job-level timeout would cancel that step too and go silent).
-    // 150 is the review-address job timeout (unique; other jobs use 5/15/180).
-    expect(workflow).toContain('timeout-minutes: 150');
+  it('bounds every long step so the round fits under the job timeout', () => {
+    // Every long step is bounded BELOW the job timeout so a runaway fails its
+    // own STEP, leaving the always() report step time to run — a job-level
+    // timeout cancels that step too and the round goes silent.
+    //
+    // The invariant is the SUM, not any single number: identify the long
+    // steps by what they EXECUTE, not by whether they already carry a bound,
+    // so a new step running one of these two scripts shows up here even if
+    // added without a bound. Cheap setup/report steps run other scripts and
+    // are covered by the SETUP_AND_REPORT_MIN reserve instead.
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
-    expect(addressStep).toContain('timeout-minutes: 80');
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    // review-address is the LAST job in the file, so the terminator has to
+    // accept end-of-input as well as the next job header.
+    const jobBlock =
+      workflow.match(
+        /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
+      )?.[0] ?? '';
+    expect(jobBlock).toBeTruthy();
+    const jobCapMin = Number(
+      jobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
+    );
+    expect(Number.isFinite(jobCapMin)).toBe(true);
 
+    const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
+    const longSteps = stepBlocks.filter((b) =>
+      /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
+        b,
+      ),
+    );
+    // Primary + repair agent steps and their two verification gates.
+    expect(longSteps).toHaveLength(4);
+    const stepCaps = longSteps.map((b) =>
+      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
+    );
+    for (const cap of stepCaps) {
+      expect(Number.isFinite(cap)).toBe(true);
+    }
+    // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
+    // runtime — this reserve is an ASSUMPTION that they stay under 25m
+    // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
+    // of them can still eat the job timeout.
+    const SETUP_AND_REPORT_MIN = 25;
+    const worstCaseMin =
+      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
+    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    expect(jobCapMin).toBeLessThanOrEqual(360);
+
+    // The pending-check staleness bound (review-scan) must sit ABOVE this job
+    // cap, or a live review-address run ages out of HAS_PENDING_CHECKS
+    // mid-flight and the PR is enqueued against its own still-running check.
+    const pendingStaleMin = Number(
+      reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1],
+    );
+    expect(Number.isFinite(pendingStaleMin)).toBe(true);
+    expect(pendingStaleMin).toBeGreaterThan(jobCapMin);
+
+    // continue-on-error makes bounding the verification gates a graceful
+    // degrade: a timed-out gate falls through to the report step.
+    for (const name of ['Verification gate', 'Repair verification gate']) {
+      const gate =
+        jobBlock.match(
+          new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {6}- name: )`),
+        )?.[0] ?? '';
+      expect(gate, `${name} is missing from review-address`).toBeTruthy();
+      expect(gate).toContain('continue-on-error: true');
+    }
+
+    // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
+    // timeout is only a backstop. Derive both from the workflow and assert
+    // the margin so the pair cannot drift silently.
+    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const budgetMs = Number(
+      addressStep.match(
+        /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
+      )?.[1],
+    );
+    expect(Number.isFinite(stepCapMin)).toBe(true);
+    expect(Number.isFinite(budgetMs)).toBe(true);
+    const marginMin = stepCapMin - budgetMs / 60000;
+    // Under the cap, or the cap fires first and the internal kill path never
+    // writes `agent-timeout` — the file the report step reads to tell a
+    // timeout apart from a crash.
+    expect(marginMin).toBeGreaterThanOrEqual(1);
+    // The repair attempt stays inside its own smaller step the same way.
+    const repairCapMin = Number(
+      repairDeterministicRejectionStep.match(/timeout-minutes: (\d+)/)?.[1],
+    );
+    const repairMs = Number(
+      repairDeterministicRejectionStep.match(/QWEN_TIMEOUT_MS: '(\d+)'/)?.[1],
+    );
+    expect(repairCapMin - repairMs / 60000).toBeGreaterThanOrEqual(1);
+
+    // The run block clamps QWEN_TIMEOUT_MS to a RANGE so a misconfigured repo
+    // variable degrades to a warning, not a misreport. Both bounds, because
+    // the floor guards the likelier mistake: this variable is the one place
+    // that wants milliseconds while everything around it says minutes.
+    expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
+    expect(addressStep).toContain('BUDGET_FLOOR_MS=60000');
+    expect(addressStep).toMatch(
+      /QWEN_TIMEOUT_MS.*MILLISECONDS in \[.*\].*clamping to/,
+    );
+    // The clamp ceiling must stay under the step backstop with the SAME margin
+    // rule as the fallback above, or the cap fires first and the internal kill
+    // path never writes `agent-timeout`.
+    const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
+    expect(Number.isFinite(clampMs)).toBe(true);
+    expect(clampMs / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    // The clamp ceiling IS the fallback budget: raising the default below the
+    // || without raising BUDGET_CAP_MS would be silently pulled back down (with
+    // a ::warning::) on every run.
+    expect(budgetMs).toBeLessThanOrEqual(clampMs);
+
+    // Replay the ACTUAL clamp block so the guard condition is executed, not
+    // merely string-matched: a flipped operator, a dropped width bound, or a
+    // missing 10# must fail here rather than survive green.
+    const clampBlock = addressStep.match(
+      /BUDGET_CAP_MS=\d+\n[\s\S]*?export QWEN_TIMEOUT_MS/,
+    )?.[0];
+    expect(clampBlock).toBeTruthy();
+    const runClamp = (value) =>
+      execFileSync(
+        'bash',
+        ['-c', `${clampBlock}\nprintf '%s' "$QWEN_TIMEOUT_MS"`],
+        { env: { ...process.env, QWEN_TIMEOUT_MS: value }, encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+    // In-range values pass through untouched; both bounds are inclusive.
+    expect(runClamp('60000')).toBe('60000');
+    expect(runClamp('7200000')).toBe('7200000');
+    // Over-cap, malformed, zero-padded (octal), and int64-overflowing values
+    // all clamp to the ceiling instead of reaching run-agent.mjs unclamped.
+    expect(runClamp('9999999')).toBe('7200000');
+    expect(runClamp('abc')).toBe('7200000');
+    expect(runClamp('09999999')).toBe('7200000');
+    expect(runClamp('9223372036854775808')).toBe('7200000');
+
+    // The FLOOR, and the reason it exists: every comment, the PR body and the
+    // operator message speak in minutes while this variable wants
+    // milliseconds. `120` is not a contrived input — it is what a maintainer
+    // told to "raise the agent time budget" types. Unclamped it arms a 120 ms
+    // timer, so every round SIGTERMs instantly and reports a timeout until
+    // TIMEOUT_WINDOW_CAP stops AutoFix on the PR, advising the human to raise
+    // the budget they just raised, with no warning anywhere in that loop.
+    for (const minutesShaped of ['1', '30', '60', '120', '999']) {
+      expect(runClamp(minutesShaped)).toBe('7200000');
+    }
+    // `0` and `000` passed the bare regex while the message claimed the value
+    // had to be positive.
+    expect(runClamp('0')).toBe('7200000');
+    expect(runClamp('000')).toBe('7200000');
+    // Just under and just over the floor, so the boundary is pinned in both
+    // directions rather than only from inside.
+    expect(runClamp('59999')).toBe('7200000');
+    expect(runClamp('60001')).toBe('60001');
+
+    // The message has to name the units, since a units confusion is the whole
+    // failure mode this branch exists for.
+    const warned = execFileSync('bash', ['-c', `${clampBlock}\n:`], {
+      env: { ...process.env, QWEN_TIMEOUT_MS: '120' },
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    expect(warned).toContain('::warning::');
+    expect(warned).toContain('MILLISECONDS');
+    expect(warned).toContain('120 means 120ms, not 120 minutes');
+  });
+
+  it('replays the handoff decision and terminal-round transitions under bash', () => {
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.
     const decision = reviewAddressReportStep.match(

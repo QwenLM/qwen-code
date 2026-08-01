@@ -3366,7 +3366,7 @@ describe('GeminiChat', async () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         },
       });
-      await chat.tryCompress('prompt-latch-force', 'test-model', true);
+      await chat.tryCompress('prompt-latch-force', true);
       // tryCompress was called with force=true, so the service got
       // consecutiveFailures=1 (carried from step 1's increment); force
       // bypasses the breaker, but the counter was still forwarded as-is.
@@ -12596,7 +12596,7 @@ describe('GeminiChat', async () => {
       mockCompressionService('compressed');
       chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
 
-      const info = await chat.tryCompress('p1', 'm1');
+      const info = await chat.tryCompress('p1');
 
       expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(chat.getHistory()).toHaveLength(3);
@@ -12607,7 +12607,7 @@ describe('GeminiChat', async () => {
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {
       mockCompressionService('compressed');
       // chat under test was constructed with telemetryService=uiTelemetryService.
-      await chat.tryCompress('p2', 'm1');
+      await chat.tryCompress('p2');
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
         200,
       );
@@ -12618,7 +12618,7 @@ describe('GeminiChat', async () => {
       const subagentChat = new GeminiChat(mockConfig, config, []);
       vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
       mockCompressionService('compressed');
-      const info = await subagentChat.tryCompress('p3', 'm1');
+      const info = await subagentChat.tryCompress('p3');
       expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(subagentChat.getLastPromptTokenCount()).toBe(200);
       expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
@@ -12627,7 +12627,7 @@ describe('GeminiChat', async () => {
     it('increments consecutiveFailures and forwards it to subsequent unforced auto-compactions', async () => {
       const compressSpy = mockCompressionService('failed-inflated');
 
-      const first = await chat.tryCompress('p1', 'm1');
+      const first = await chat.tryCompress('p1');
       expect(first.compressionStatus).toBe(
         CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
       );
@@ -12647,7 +12647,7 @@ describe('GeminiChat', async () => {
           compressionStatus: CompressionStatus.NOOP,
         },
       });
-      await chat.tryCompress('p2', 'm1');
+      await chat.tryCompress('p2');
       expect(compressSpy).toHaveBeenCalledTimes(1);
       expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(1);
     });
@@ -12655,7 +12655,7 @@ describe('GeminiChat', async () => {
     it('forwards force=true to the compression service', async () => {
       const compressSpy = mockCompressionService('compressed');
 
-      await chat.tryCompress('p1', 'm1', true);
+      await chat.tryCompress('p1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
     });
   });
@@ -12697,7 +12697,7 @@ describe('GeminiChat', async () => {
       chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
 
       for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
-        await chat.tryCompress(`p${i}`, 'm1');
+        await chat.tryCompress(`p${i}`);
         // The i-th call sees consecutiveFailures = i (counter pre-increment).
         expect(compressSpy.mock.calls[i][1].consecutiveFailures).toBe(i);
       }
@@ -12705,7 +12705,7 @@ describe('GeminiChat', async () => {
       // The next call will still be made by GeminiChat (it does not
       // short-circuit on its side), but the service's cheap-gate will NOOP.
       expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
-      await chat.tryCompress('p-last', 'm1');
+      await chat.tryCompress('p-last');
       expect(
         compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].consecutiveFailures,
       ).toBe(MAX_CONSECUTIVE_FAILURES);
@@ -12728,7 +12728,7 @@ describe('GeminiChat', async () => {
         },
       });
       for (let i = 0; i < 5; i++) {
-        await chat.tryCompress(`p-force-${i}`, 'm1', true);
+        await chat.tryCompress(`p-force-${i}`, true);
       }
       // After 5 forced failures, an unforced call must still see counter=0.
       compressSpy.mockResolvedValueOnce({
@@ -12739,7 +12739,7 @@ describe('GeminiChat', async () => {
           compressionStatus: CompressionStatus.NOOP,
         },
       });
-      await chat.tryCompress('p-unforced', 'm1');
+      await chat.tryCompress('p-unforced');
       const lastCall = compressSpy.mock.calls.at(-1);
       expect(lastCall![1].consecutiveFailures).toBe(0);
     });
@@ -12788,16 +12788,16 @@ describe('GeminiChat', async () => {
         });
 
       // Two failures → counter is 2.
-      await chat.tryCompress('p1', 'm1');
-      await chat.tryCompress('p2', 'm1');
+      await chat.tryCompress('p1');
+      await chat.tryCompress('p2');
       expect(compressSpy.mock.calls[1][1].consecutiveFailures).toBe(1);
 
       // Forced successful compress → counter resets to 0.
-      await chat.tryCompress('p-force', 'm1', true);
+      await chat.tryCompress('p-force', true);
       expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(2);
 
       // Next unforced call: counter is back to 0.
-      await chat.tryCompress('p3', 'm1');
+      await chat.tryCompress('p3');
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
     });
   });

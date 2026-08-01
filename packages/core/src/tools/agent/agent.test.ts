@@ -192,6 +192,7 @@ describe('AgentTool', () => {
     // exercises foreground execution fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -531,6 +532,23 @@ describe('AgentTool', () => {
       );
     });
 
+    it('declares the optional todo association', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          todo_id: {
+            type?: string;
+            description?: string;
+          };
+        };
+      };
+
+      expect(properties.properties.todo_id.type).toBe('string');
+      expect(properties.properties.todo_id.description).toContain(
+        'current todo list',
+      );
+      expect(agentTool.description).toContain('set `todo_id`');
+    });
+
     it('declares fork_turns for fork agents without a none option', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
@@ -723,6 +741,26 @@ describe('AgentTool', () => {
         prompt: '',
       });
       expect(result).toBe('Parameter "prompt" must be a non-empty string.');
+    });
+
+    it('should reject an empty todo_id', () => {
+      const result = agentTool.validateToolParams({
+        ...validParams,
+        todo_id: ' ',
+      });
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
+    });
+
+    it('should reject an oversized todo_id', () => {
+      const result = agentTool.validateToolParams({
+        ...validParams,
+        todo_id: 'x'.repeat(501),
+      });
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
     });
 
     it('should reject empty subagent_type', async () => {
@@ -3833,6 +3871,62 @@ describe('AgentTool', () => {
       );
     });
 
+    it('preserves display_image in the fork declarations but denies its execution', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.DISPLAY_IMAGE,
+          description: 'Display an image',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.EDIT,
+          description: 'Edit a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect images',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: [ToolNames.READ_FILE, ToolNames.DISPLAY_IMAGE],
+      });
+      await invocation.execute();
+
+      const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
+      const forkConfig = createArgs?.[1];
+      const toolConfig = createArgs?.[5];
+      expect(toolConfig?.tools).toStrictEqual([
+        ToolNames.READ_FILE,
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.EDIT,
+      ]);
+      expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(
+        forkConfig?.getToolRegistry().registerFactory,
+      ).toHaveBeenCalledWith(ToolNames.DISPLAY_IMAGE, expect.any(Function));
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),
+      );
+    });
+
     it('omitting subagent_type uses general-purpose, not fork', async () => {
       // Omission resolves to the regular general-purpose subagent, never a
       // context-inheriting fork — even in interactive mode.
@@ -6534,6 +6628,7 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-top-1');
         expect(meta.parentAgentId).toBeNull();
+        expect(meta.toolUseId).toBe('top-1');
       });
 
       it('records the launching agent id when launched from a subagent frame', async () => {
@@ -6556,6 +6651,8 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');
+        expect(meta.parentSessionId).toBe('test-session-id');
+        expect(meta.toolUseId).toBe('nested-1');
       });
     });
 

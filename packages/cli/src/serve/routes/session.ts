@@ -4451,10 +4451,10 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
-  // queue is full), so the browser keeps the message in its own queue and sends
-  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
-  // an in-memory queue.
+  // Returns `{ accepted, messageId? }`: `false` when the session is idle (or the
+  // per-session queue is full), so the browser keeps the message in its own
+  // queue and sends it as a normal next-turn prompt. Synchronous — the bridge
+  // only pushes onto an in-memory queue.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. Not a UX limit — a rejected
@@ -4495,6 +4495,31 @@ export function registerSessionRoutes(
         const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/mid-turn-messages/:messageId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/mid-turn-messages/:messageId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const messageId = req.params['messageId'];
+        if (!messageId) {
+          res
+            .status(400)
+            .json({ error: '`messageId` route parameter is required' });
+          return;
+        }
+        const result = runtime.bridge.removeMidTurnMessage(
+          sessionId,
+          messageId,
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(result);

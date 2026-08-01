@@ -181,13 +181,18 @@ describe('fullCommentBody', () => {
 });
 
 describe('isReviewWorthShowing', () => {
-  const FOOTER = '_— qwen3.7-max via Qwen Code /review_';
+  const LEGACY_FOOTER = '_— qwen3.7-max via Qwen Code /review_';
+  const VERSIONED_FOOTER =
+    '_— qwen3.8-max-preview via Qwen Code /review (v0.21.2)_';
 
-  it('filters the exact canonical LGTM template, with or without the footer', () => {
+  it('filters the exact canonical LGTM template, with or without either footer', () => {
     expect(isReviewWorthShowing('No issues found. LGTM! ✅')).toBe(false);
-    expect(isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${FOOTER}`)).toBe(
-      false,
-    );
+    expect(
+      isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${LEGACY_FOOTER}`),
+    ).toBe(false);
+    expect(
+      isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${VERSIONED_FOOTER}`),
+    ).toBe(false);
     expect(isReviewWorthShowing('')).toBe(false);
     expect(isReviewWorthShowing(undefined)).toBe(false);
   });
