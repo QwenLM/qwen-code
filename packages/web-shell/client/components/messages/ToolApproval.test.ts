@@ -194,6 +194,21 @@ describe('ToolApproval', () => {
       'proceed_once',
     ]);
 
+    // The fixture's server labels deliberately differ from the i18n strings
+    // (e.g. 'Always Allow in project' vs 'Always allow in this project'), so
+    // asserting the rendered text proves localization overrides server labels.
+    const labels = Array.from(
+      container.querySelectorAll('[data-option-label]'),
+    ).map((el) => el.textContent);
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        'Always allow for this user',
+        'Always allow in this project',
+        'Always allow for this server',
+        'Always allow for this tool',
+      ]),
+    );
+
     act(() => root.unmount());
   });
 });
