@@ -15,13 +15,9 @@ import {
 } from 'vitest';
 import {
   query,
-  isSDKAssistantMessage,
   isSDKResultMessage,
-  isSDKUserMessage,
   type SDKMessage,
   type SDKUserMessage,
-  type ToolUseBlock,
-  type ContentBlock,
 } from '@qwen-code/sdk';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import {
@@ -36,7 +32,6 @@ import {
   hasSuccessfulToolResults,
   hasErrorToolResults,
   findSystemMessage,
-  findToolCalls,
   createResultWaiter,
 } from './test-helper.js';
 
@@ -60,6 +55,22 @@ function fakeModelOptions(baseUrl: string) {
       QWEN_MODEL: 'fake-model',
     },
   };
+}
+
+function startFakeTextServer() {
+  return startFakeOpenAIServer(
+    () => ({ content: 'Done.' }),
+    FAKE_SERVER_OPTIONS,
+  );
+}
+
+function startFakeToolServer(toolName: string, input: Record<string, unknown>) {
+  return startFakeOpenAIServer(({ requestIndex }) => {
+    if (requestIndex === 0) {
+      return { toolCalls: [fakeToolCall(toolName, input)] };
+    }
+    return { content: 'Done.' };
+  }, FAKE_SERVER_OPTIONS);
 }
 
 /**
@@ -143,18 +154,26 @@ describe('Permission Control (E2E)', () => {
   });
 
   describe('canUseTool callback parameter', () => {
-    it('should invoke canUseTool callback when tool is requested', async () => {
+    it('should invoke canUseTool callback and deny tool execution', async () => {
       const toolCalls: Array<{
         toolName: string;
         input: Record<string, unknown>;
       }> = [];
+      const fileName = 'denied.txt';
+      const input = {
+        file_path: helper.getPath(fileName),
+        content: 'denied',
+      };
+      const fakeServer = await startFakeToolServer('write_file', input);
 
       const q = query({
-        prompt: 'Write a js hello world to file.',
+        prompt: `Create ${fileName}.`,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           permissionMode: 'default',
           cwd: testDir,
+          coreTools: ['write_file'],
           canUseTool: async (toolName, input) => {
             toolCalls.push({ toolName, input });
             return {
@@ -166,37 +185,36 @@ describe('Permission Control (E2E)', () => {
       });
 
       try {
-        let hasToolUse = false;
+        const messages: SDKMessage[] = [];
         for await (const message of q) {
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlock = message.message.content.find(
-              (block: ContentBlock): block is ToolUseBlock =>
-                block.type === 'tool_use',
-            );
-            if (toolUseBlock) {
-              hasToolUse = true;
-            }
-          }
+          messages.push(message);
         }
 
-        expect(hasToolUse).toBe(true);
-        expect(toolCalls.length).toBeGreaterThan(0);
-        expect(toolCalls[0].toolName).toBeDefined();
-        expect(toolCalls[0].input).toBeDefined();
+        expect(toolCalls).toEqual([{ toolName: 'write_file', input }]);
+        expect(hasErrorToolResults(messages)).toBe(true);
+        expect(helper.fileExists(fileName)).toBe(false);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should allow tool execution when canUseTool returns allow', async () => {
       let callbackInvoked = false;
+      const fileName = 'hello.txt';
+      const fakeServer = await startFakeToolServer('write_file', {
+        file_path: helper.getPath(fileName),
+        content: 'world',
+      });
 
       const q = query({
-        prompt: 'Create a file named hello.txt with content "world"',
+        prompt: `Create ${fileName}.`,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           permissionMode: 'default',
           cwd: testDir,
+          coreTools: ['write_file'],
           canUseTool: async (toolName, input) => {
             callbackInvoked = true;
             return {
@@ -208,68 +226,35 @@ describe('Permission Control (E2E)', () => {
       });
 
       try {
-        let hasToolResult = false;
+        const messages: SDKMessage[] = [];
         for await (const message of q) {
-          if (isSDKUserMessage(message)) {
-            if (
-              Array.isArray(message.message.content) &&
-              message.message.content.some(
-                (block) => block.type === 'tool_result',
-              )
-            ) {
-              hasToolResult = true;
-            }
-          }
+          messages.push(message);
         }
 
         expect(callbackInvoked).toBe(true);
-        expect(hasToolResult).toBe(true);
+        expect(hasSuccessfulToolResults(messages)).toBe(true);
+        await expect(helper.readFile(fileName)).resolves.toBe('world');
       } finally {
         await q.close();
-      }
-    });
-
-    it('should deny tool execution when canUseTool returns deny', async () => {
-      let callbackInvoked = false;
-
-      const q = query({
-        prompt: 'Create a file named test.txt',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          permissionMode: 'default',
-          canUseTool: async () => {
-            callbackInvoked = true;
-            return {
-              behavior: 'deny',
-              message: 'Tool execution denied by test',
-            };
-          },
-        },
-      });
-
-      try {
-        for await (const _message of q) {
-          // Consume all messages
-        }
-
-        expect(callbackInvoked).toBe(true);
-        // Tool use might still appear, but execution should be denied
-        // The exact behavior depends on CLI implementation
-      } finally {
-        await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should pass suggestions to canUseTool callback', async () => {
-      let receivedSuggestions: unknown = null;
+      let receivedSuggestions: unknown;
+      const fakeServer = await startFakeToolServer('write_file', {
+        file_path: helper.getPath('data.txt'),
+        content: 'data',
+      });
 
       const q = query({
-        prompt: 'Create a file named data.txt',
+        prompt: 'Create data.txt.',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           permissionMode: 'default',
           cwd: testDir,
+          coreTools: ['write_file'],
           canUseTool: async (toolName, input, options) => {
             receivedSuggestions = options?.suggestions;
             return {
@@ -282,13 +267,18 @@ describe('Permission Control (E2E)', () => {
 
       try {
         for await (const _message of q) {
-          // Consume all messages
+          // Consume all messages.
         }
 
-        // Suggestions may be null or an array, depending on CLI implementation
-        expect(receivedSuggestions !== undefined).toBe(true);
+        expect(receivedSuggestions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'allow' }),
+            expect.objectContaining({ type: 'deny' }),
+          ]),
+        );
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
@@ -343,34 +333,11 @@ describe('Permission Control (E2E)', () => {
         await fakeServer.close();
       }
     });
-
-    it('should default to deny when canUseTool is not provided', async () => {
-      const q = query({
-        prompt: 'Create a file named default.txt',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          permissionMode: 'default',
-          cwd: testDir,
-          // canUseTool not provided
-        },
-      });
-
-      try {
-        // When canUseTool is not provided, tools should be denied by default
-        // The exact behavior depends on CLI implementation
-        for await (const _message of q) {
-          // Consume all messages
-        }
-        // Test passes if no errors occur
-        expect(true).toBe(true);
-      } finally {
-        await q.close();
-      }
-    });
   });
 
   describe('setPermissionMode API', () => {
-    it('should change permission mode from default to yolo', async () => {
+    it('should continue after changing permission mode from default to yolo', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 1 + 1?',
@@ -382,6 +349,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
           debug: true,
@@ -449,10 +417,12 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
-    it('should change permission mode from yolo to plan', async () => {
+    it('should continue after changing permission mode from yolo to plan', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 3 + 3?',
@@ -464,6 +434,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'yolo',
         },
@@ -530,10 +501,12 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
-    it('should change permission mode to auto-edit', async () => {
+    it('should continue after changing permission mode to auto-edit', async () => {
+      const fakeServer = await startFakeTextServer();
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 5 + 5?',
@@ -545,6 +518,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
         },
@@ -611,6 +585,7 @@ describe('Permission Control (E2E)', () => {
         expect(secondResponseReceived).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
@@ -644,16 +619,41 @@ describe('Permission Control (E2E)', () => {
   });
 
   describe('canUseTool and setPermissionMode integration', () => {
-    it('should work together - canUseTool callback with dynamic permission mode change', async () => {
+    it('should stop invoking canUseTool after changing to yolo mode', async () => {
       const toolCalls: Array<{
         toolName: string;
         input: Record<string, unknown>;
       }> = [];
+      const firstFile = 'first.txt';
+      const secondFile = 'second.txt';
+      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: helper.getPath(firstFile),
+                content: 'first',
+              }),
+            ],
+          };
+        }
+        if (requestIndex === 2) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: helper.getPath(secondFile),
+                content: 'second',
+              }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      }, FAKE_SERVER_OPTIONS);
 
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
-        'Create a file named first.txt',
-        'Create a file named second.txt',
+        `Create ${firstFile}.`,
+        `Create ${secondFile}.`,
         resultWaiter,
       );
 
@@ -661,8 +661,10 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           permissionMode: 'default',
           cwd: testDir,
+          coreTools: ['write_file'],
           canUseTool: async (toolName, input) => {
             toolCalls.push({ toolName, input });
             return {
@@ -714,7 +716,8 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(firstResponseReceived).toBe(true);
-        expect(toolCalls.length).toBeGreaterThan(0);
+        expect(toolCalls).toHaveLength(1);
+        await expect(helper.readFile(firstFile)).resolves.toBe('first');
 
         await q.setPermissionMode('yolo');
 
@@ -731,8 +734,11 @@ describe('Permission Control (E2E)', () => {
         ]);
 
         expect(secondResponseReceived).toBe(true);
+        expect(toolCalls).toHaveLength(1);
+        await expect(helper.readFile(secondFile)).resolves.toBe('second');
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
   });
@@ -742,14 +748,19 @@ describe('Permission Control (E2E)', () => {
       it(
         'should auto-deny tools requiring confirmation without canUseTool callback',
         async () => {
+          const fileName = 'test-default-deny.txt';
+          const fakeServer = await startFakeToolServer('write_file', {
+            file_path: helper.getPath(fileName),
+            content: 'hello',
+          });
           const q = query({
-            prompt:
-              'Create a file named test-default-deny.txt with content "hello"',
+            prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'default',
               cwd: testDir,
-              // No canUseTool callback provided
+              coreTools: ['write_file'],
             },
           });
 
@@ -759,48 +770,11 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // In default mode without canUseTool, tools should be denied
-            expect(hasAnyToolResults(messages)).toBe(true);
             expect(hasErrorToolResults(messages)).toBe(true);
+            expect(helper.fileExists(fileName)).toBe(false);
           } finally {
             await q.close();
-          }
-        },
-        TEST_TIMEOUT,
-      );
-
-      it(
-        'should allow tools when canUseTool returns allow',
-        async () => {
-          let callbackInvoked = false;
-
-          const q = query({
-            prompt:
-              'Create a file named test-default-allow.txt with content "world"',
-            options: {
-              ...SHARED_TEST_OPTIONS,
-              permissionMode: 'default',
-              cwd: testDir,
-              canUseTool: async (toolName, input) => {
-                callbackInvoked = true;
-                return {
-                  behavior: 'allow',
-                  updatedInput: input,
-                };
-              },
-            },
-          });
-
-          try {
-            const messages: SDKMessage[] = [];
-            for await (const message of q) {
-              messages.push(message);
-            }
-
-            expect(callbackInvoked).toBe(true);
-            expect(hasSuccessfulToolResults(messages)).toBe(true);
-          } finally {
-            await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
@@ -809,50 +783,20 @@ describe('Permission Control (E2E)', () => {
       it(
         'should execute read-only tools without confirmation',
         async () => {
-          // Create a file so the model has something to read
-          await helper.createFile(
-            'read-only-test.txt',
-            'content for read-only test',
-          );
-
-          const q = query({
-            prompt:
-              'Use the read_file tool to read the file read-only-test.txt in the current directory.',
-            options: {
-              ...SHARED_TEST_OPTIONS,
-              permissionMode: 'default',
-              cwd: testDir,
-              // No canUseTool callback - read-only tools should still work
-            },
+          const fileName = 'read-only-test.txt';
+          await helper.createFile(fileName, 'content for read-only test');
+          const fakeServer = await startFakeToolServer('read_file', {
+            file_path: helper.getPath(fileName),
           });
 
-          try {
-            const messages: SDKMessage[] = [];
-            for await (const message of q) {
-              messages.push(message);
-            }
-
-            expect(hasAnyToolResults(messages)).toBe(true);
-          } finally {
-            await q.close();
-          }
-        },
-        TEST_TIMEOUT,
-      );
-    });
-
-    describe('yolo mode', () => {
-      it(
-        'should auto-approve all tools without canUseTool callback',
-        async () => {
           const q = query({
-            prompt:
-              'Create a file named test-yolo.txt with content "yolo mode"',
+            prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              permissionMode: 'yolo',
+              ...fakeModelOptions(fakeServer.baseUrl),
+              permissionMode: 'default',
               cwd: testDir,
-              // No canUseTool callback - tools should still execute
+              coreTools: ['read_file'],
             },
           });
 
@@ -865,22 +809,32 @@ describe('Permission Control (E2E)', () => {
             expect(hasSuccessfulToolResults(messages)).toBe(true);
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
       );
+    });
 
+    describe('yolo mode', () => {
       it(
-        'should not invoke canUseTool callback in yolo mode',
+        'should auto-approve tools without invoking canUseTool callback',
         async () => {
           let callbackInvoked = false;
+          const fileName = 'test-yolo-no-callback.txt';
+          const fakeServer = await startFakeToolServer('write_file', {
+            file_path: helper.getPath(fileName),
+            content: 'yolo',
+          });
 
           const q = query({
-            prompt: 'Create a file named test-yolo-no-callback.txt',
+            prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'yolo',
               cwd: testDir,
+              coreTools: ['write_file'],
               canUseTool: async (toolName, input) => {
                 callbackInvoked = true;
                 return {
@@ -897,11 +851,12 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            expect(hasAnyToolResults(messages)).toBe(true);
-            // canUseTool should not be invoked in yolo mode
+            expect(hasSuccessfulToolResults(messages)).toBe(true);
             expect(callbackInvoked).toBe(false);
+            await expect(helper.readFile(fileName)).resolves.toBe('yolo');
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
@@ -935,32 +890,15 @@ describe('Permission Control (E2E)', () => {
     });
 
     describe('plan mode', () => {
-      // Write tools that should never be called in plan mode
-      const WRITE_TOOLS = [
-        'edit',
-        'write_file',
-        'run_shell_command',
-        'delete_file',
-        'move_file',
-      ];
-
-      // Read tools that should be allowed in plan mode
-      const READ_TOOLS = [
-        'read_file',
-        'read_many_files',
-        'grep_search',
-        'glob',
-        'list_directory',
-        'web_fetch',
-      ];
-
       it(
         'should have permission_mode set to plan in system message',
         async () => {
+          const fakeServer = await startFakeTextServer();
           const q = query({
             prompt: 'List files in the current directory',
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'plan',
               cwd: testDir,
             },
@@ -972,33 +910,34 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // Find the init system message
             const systemMessage = findSystemMessage(messages, 'init');
             expect(systemMessage).not.toBeNull();
             expect(systemMessage!.permission_mode).toBe('plan');
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
       );
 
       it(
-        'should not call any write tools in plan mode',
+        'should block write tools in plan mode',
         async () => {
-          // Create a test file so the model has something to reference
-          await helper.createFile(
-            'test-plan-file.txt',
-            'This is test content for plan mode verification.',
-          );
+          const fileName = 'test-plan-write.txt';
+          const fakeServer = await startFakeToolServer('write_file', {
+            file_path: helper.getPath(fileName),
+            content: 'blocked',
+          });
 
           const q = query({
-            prompt:
-              'Read the file test-plan-file.txt and suggest how to improve its content.',
+            prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'plan',
               cwd: testDir,
+              coreTools: ['write_file'],
             },
           });
 
@@ -1008,88 +947,34 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // Verify permission_mode is 'plan'
-            const systemMessage = findSystemMessage(messages, 'init');
-            expect(systemMessage!.permission_mode).toBe('plan');
-
-            // Find all tool calls and verify none are write tools
-            const allToolCalls = findToolCalls(messages);
-            const writeToolCalls = allToolCalls.filter((tc) =>
-              WRITE_TOOLS.includes(tc.toolUse.name),
-            );
-
-            // No write tools should be called in plan mode
-            expect(writeToolCalls.length).toBe(0);
+            expect(hasErrorToolResults(messages)).toBe(true);
+            expect(helper.fileExists(fileName)).toBe(false);
           } finally {
             await q.close();
-          }
-        },
-        TEST_TIMEOUT,
-      );
-
-      // FIXME: This test is flaky and sometimes fails with no tool calls.
-      it.skip(
-        'should allow read-only tools without restrictions',
-        async () => {
-          // Create test files for the model to read
-          await helper.createFile('test-read-1.txt', 'Content of file 1');
-          await helper.createFile('test-read-2.txt', 'Content of file 2');
-
-          const q = query({
-            prompt:
-              'Read the contents of test-read-1.txt and test-read-2.txt files, then list files in the current directory.',
-            options: {
-              ...SHARED_TEST_OPTIONS,
-              permissionMode: 'plan',
-              cwd: testDir,
-            },
-          });
-
-          try {
-            const messages: SDKMessage[] = [];
-            for await (const message of q) {
-              messages.push(message);
-            }
-
-            // Verify permission_mode is 'plan'
-            const systemMessage = findSystemMessage(messages, 'init');
-            expect(systemMessage!.permission_mode).toBe('plan');
-
-            // Find all tool calls
-            const allToolCalls = findToolCalls(messages);
-
-            // Verify read tools were called (at least one)
-            const readToolCalls = allToolCalls.filter((tc) =>
-              READ_TOOLS.includes(tc.toolUse.name),
-            );
-            expect(readToolCalls.length).toBeGreaterThan(0);
-
-            // Verify tool results are successful (not blocked)
-            expect(hasSuccessfulToolResults(messages)).toBe(true);
-          } finally {
-            await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
       );
 
       it(
-        'should not invoke canUseTool callback in plan mode since no permission approval is expected',
+        'should allow read tools without invoking canUseTool callback',
         async () => {
           let callbackInvoked = false;
-
-          // Create a test file for reading
-          await helper.createFile(
-            'test-plan-callback.txt',
-            'Content for callback test',
-          );
+          const fileName = 'test-plan-read.txt';
+          await helper.createFile(fileName, 'plan read');
+          const fakeServer = await startFakeToolServer('read_file', {
+            file_path: helper.getPath(fileName),
+          });
 
           const q = query({
-            prompt: 'Read the file test-plan-callback.txt',
+            prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               permissionMode: 'plan',
               cwd: testDir,
+              coreTools: ['read_file'],
               canUseTool: async (toolName, input) => {
                 callbackInvoked = true;
                 return {
@@ -1106,63 +991,11 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // Verify permission_mode is 'plan'
-            const systemMessage = findSystemMessage(messages, 'init');
-            expect(systemMessage!.permission_mode).toBe('plan');
-
-            // Read tools should work without invoking canUseTool
-            // In plan mode, no permission approval is expected from user
             expect(hasSuccessfulToolResults(messages)).toBe(true);
-
-            // canUseTool should not be invoked in plan mode
-            // since plan mode is for research only, no permission interaction needed
             expect(callbackInvoked).toBe(false);
           } finally {
             await q.close();
-          }
-        },
-        TEST_TIMEOUT,
-      );
-
-      it(
-        'should only output research and plan as text, no actual changes',
-        async () => {
-          // Create a test file
-          const originalContent = 'Original content for plan mode test';
-          await helper.createFile('test-no-changes.txt', originalContent);
-
-          const q = query({
-            prompt:
-              'Read test-no-changes.txt and plan how you would modify it to add a header. Do not actually make any changes.',
-            options: {
-              ...SHARED_TEST_OPTIONS,
-              permissionMode: 'plan',
-              cwd: testDir,
-            },
-          });
-
-          try {
-            const messages: SDKMessage[] = [];
-            for await (const message of q) {
-              messages.push(message);
-            }
-
-            // Verify permission_mode is 'plan'
-            const systemMessage = findSystemMessage(messages, 'init');
-            expect(systemMessage!.permission_mode).toBe('plan');
-
-            // Verify the file was not modified
-            const fileContent = await helper.readFile('test-no-changes.txt');
-            expect(fileContent).toBe(originalContent);
-
-            // Verify no write tools were called
-            const allToolCalls = findToolCalls(messages);
-            const writeToolCalls = allToolCalls.filter((tc) =>
-              WRITE_TOOLS.includes(tc.toolUse.name),
-            );
-            expect(writeToolCalls.length).toBe(0);
-          } finally {
-            await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
@@ -1171,54 +1004,17 @@ describe('Permission Control (E2E)', () => {
 
     describe('auto-edit mode', () => {
       it(
-        'should auto-approve write/edit tools without canUseTool callback',
-        async () => {
-          const q = query({
-            prompt:
-              'Create a file named test-auto-edit.txt with content "auto-edit test"',
-            options: {
-              ...SHARED_TEST_OPTIONS,
-              permissionMode: 'auto-edit',
-              cwd: testDir,
-              // No canUseTool callback - write/edit tools should still execute
-            },
-          });
-
-          try {
-            const messages: SDKMessage[] = [];
-            for await (const message of q) {
-              messages.push(message);
-            }
-
-            // auto-edit mode should auto-approve write/edit tools
-            expect(hasSuccessfulToolResults(messages)).toBe(true);
-          } finally {
-            await q.close();
-          }
-        },
-        TEST_TIMEOUT,
-      );
-
-      it(
-        'should not invoke canUseTool callback for write/edit tools',
+        'should auto-approve write tools without invoking canUseTool callback',
         async () => {
           let callbackInvoked = false;
-          const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall('write_file', {
-                    file_path: `${testDir}/test-auto-edit-no-callback.txt`,
-                    content: 'auto-edit callback test',
-                  }),
-                ],
-              };
-            }
-            return { content: 'Done.' };
-          }, FAKE_SERVER_OPTIONS);
+          const fileName = 'test-auto-edit-no-callback.txt';
+          const fakeServer = await startFakeToolServer('write_file', {
+            file_path: helper.getPath(fileName),
+            content: 'auto-edit callback test',
+          });
 
           const q = query({
-            prompt: 'Create test-auto-edit-no-callback.txt.',
+            prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
               ...fakeModelOptions(fakeServer.baseUrl),
@@ -1241,9 +1037,11 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // auto-edit mode should auto-approve write/edit tools without invoking callback
             expect(hasSuccessfulToolResults(messages)).toBe(true);
             expect(callbackInvoked).toBe(false);
+            await expect(helper.readFile(fileName)).resolves.toBe(
+              'auto-edit callback test',
+            );
           } finally {
             await q.close();
             await fakeServer.close();
@@ -1255,19 +1053,23 @@ describe('Permission Control (E2E)', () => {
       it(
         'should execute read-only tools without confirmation',
         async () => {
-          // Create a test file in the test directory for the model to read
+          const fileName = 'test-read-file.txt';
           await helper.createFile(
-            'test-read-file.txt',
+            fileName,
             'This is a test file for read-only tool verification.',
           );
+          const fakeServer = await startFakeToolServer('read_file', {
+            file_path: helper.getPath(fileName),
+          });
 
           const q = query({
-            prompt: 'Read the contents of test-read-file.txt file',
+            prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
+              ...fakeModelOptions(fakeServer.baseUrl),
               cwd: testDir,
               permissionMode: 'auto-edit',
-              // No canUseTool callback - read-only tools should still work
+              coreTools: ['read_file'],
             },
           });
 
@@ -1277,64 +1079,13 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            expect(hasAnyToolResults(messages)).toBe(true);
+            expect(hasSuccessfulToolResults(messages)).toBe(true);
           } finally {
             await q.close();
+            await fakeServer.close();
           }
         },
         TEST_TIMEOUT,
-      );
-    });
-
-    describe('mode comparison tests', () => {
-      it.skip(
-        'should demonstrate different behaviors across all modes for write operations',
-        async () => {
-          const modes: Array<'default' | 'auto-edit' | 'yolo'> = [
-            'default',
-            'auto-edit',
-            'yolo',
-          ];
-          const results: Record<string, boolean> = {};
-
-          for (const mode of modes) {
-            const q = query({
-              prompt: `Create a file named test-${mode}.txt`,
-              options: {
-                ...SHARED_TEST_OPTIONS,
-                permissionMode: mode,
-                cwd: testDir,
-                canUseTool:
-                  mode === 'yolo' || mode === 'auto-edit'
-                    ? undefined
-                    : async (toolName, input) => {
-                        return {
-                          behavior: 'allow',
-                          updatedInput: input,
-                        };
-                      },
-              },
-            });
-
-            try {
-              const messages: SDKMessage[] = [];
-              for await (const message of q) {
-                messages.push(message);
-              }
-
-              results[mode] = hasSuccessfulToolResults(messages);
-            } finally {
-              await q.close();
-            }
-          }
-
-          // Verify expected behaviors
-          expect(results['default']).toBe(true); // Allowed via canUseTool
-          // expect(results['plan']).toBe(false); // Blocked by plan mode
-          expect(results['auto-edit']).toBe(true); // Auto-approved for write/edit tools
-          expect(results['yolo']).toBe(true); // Auto-approved for all tools
-        },
-        TEST_TIMEOUT * 4,
       );
     });
   });
