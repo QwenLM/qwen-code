@@ -341,3 +341,205 @@ describe('qwen pr review transient retry', () => {
     expect(r.attempts).toBe(1);
   });
 });
+
+// --- Install or update Qwen CLI step ---------------------------------------
+// The upgrade step ships several bash branches (already-latest skip,
+// registry-unreachable with/without an installed qwen, the sudo-then-
+// unprivileged install fallback, both-fail with/without an installed qwen, the
+// not-on-PATH error, and the version-shadowing warning). Extract the real `run`
+// block — the way retryLoopSource() does for the review loop — and drive each
+// branch against stubbed qwen/npm/sudo/timeout binaries, so a future edit that
+// breaks the `[ "$have" = "$want" ]` comparison (or a format drift between
+// `qwen --version` and `npm view … version`) cannot silently reinstall every
+// run, or never upgrade a stale host, with the suite green.
+
+function installStepSource() {
+  const doc = parse(workflow);
+  const step = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Install or update Qwen CLI',
+  );
+  return step.run;
+}
+
+// Drive the extracted install/update step. `registry` is what `npm view`
+// resolves for latest ('' = registry unreachable); `initial` is the version the
+// host's pre-installed qwen reports ('' = none, which the step observes as an
+// empty `have`); `mode` scripts the install outcome. Returns the step's stdout,
+// exit status, and the qwen version resolvable on PATH afterwards.
+function runInstallStep({ registry = '', initial = '', mode = 'ok' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'review-install-'));
+  try {
+    const bin = join(dir, 'bin');
+    execFileSync('mkdir', ['-p', bin]);
+    const stateFile = join(dir, 'qwen-state');
+    writeFileSync(stateFile, initial);
+    const write = (name, body) => {
+      const p = join(bin, name);
+      writeFileSync(p, body);
+      chmodSync(p, 0o755);
+    };
+    // qwen --version reports whatever is currently resolvable on PATH.
+    write(
+      'qwen',
+      '#!/bin/bash\nif [ "$1" = "--version" ]; then cat "$QWEN_STATE" 2>/dev/null || true; fi\nexit 0\n',
+    );
+    // npm: `view` resolves latest (fails when the registry is unreachable);
+    // `install` scripts the upgrade outcome and, on a real success, writes the
+    // requested version into the PATH state.
+    write(
+      'npm',
+      [
+        '#!/bin/bash',
+        'sub=""',
+        'for a in "$@"; do case "$a" in view) sub=view ;; install) sub=install ;; esac; done',
+        'if [ "$sub" = "view" ]; then',
+        '  if [ -z "$REGISTRY_VERSION" ]; then exit 1; fi',
+        '  printf "%s\\n" "$REGISTRY_VERSION"',
+        '  exit 0',
+        'fi',
+        'case "$INSTALL_MODE" in',
+        '  both_fail) exit 1 ;;',
+        '  shadow) exit 0 ;;',
+        '  not_on_path) : > "$QWEN_STATE"; exit 0 ;;',
+        'esac',
+        'ver=""',
+        'for a in "$@"; do case "$a" in *@qwen-code/qwen-code@*) ver="${a##*@}" ;; esac; done',
+        'printf "%s" "$ver" > "$QWEN_STATE"',
+        'exit 0',
+      ].join('\n') + '\n',
+    );
+    // sudo wraps the privileged install; fail it to force the unprivileged
+    // fallback, otherwise drop `-n` and exec the rest.
+    write(
+      'sudo',
+      '#!/bin/bash\nif [ "$INSTALL_MODE" = "sudo_fail_unpriv_ok" ]; then exit 1; fi\nshift\nexec "$@"\n',
+    );
+    // timeout <dur> <cmd...>: drop the duration, run the command.
+    write('timeout', '#!/bin/bash\nshift\nexec "$@"\n');
+
+    let stdout = '';
+    let status = 0;
+    try {
+      stdout = execFileSync('bash', ['-c', installStepSource()], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: dir,
+          QWEN_STATE: stateFile,
+          REGISTRY_VERSION: registry,
+          INSTALL_MODE: mode,
+        },
+      });
+    } catch (e) {
+      stdout = `${e.stdout ?? ''}`;
+      status = e.status ?? 1;
+    }
+    return { stdout, status, state: readFileSync(stateFile, 'utf8') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('qwen pr review cli install/update', () => {
+  it('skips the install entirely when the host already has latest', () => {
+    const r = runInstallStep({ registry: '0.21.0', initial: '0.21.0' });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('qwen 0.21.0 (latest)');
+    expect(r.stdout).not.toContain('::warning::');
+    expect(r.stdout).not.toContain('::error::');
+    expect(r.state).toBe('0.21.0');
+  });
+
+  it('reviews with the installed qwen when the registry is unreachable', () => {
+    const r = runInstallStep({ registry: '', initial: '0.20.0' });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      '::warning::npm registry unreachable; reviewing with installed qwen 0.20.0',
+    );
+    expect(r.state).toBe('0.20.0');
+  });
+
+  it('fails when the registry is unreachable and no qwen is installed', () => {
+    const r = runInstallStep({ registry: '', initial: '' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      '::error::qwen is not installed and the npm registry is unreachable',
+    );
+  });
+
+  it('upgrades a stale host via the privileged install', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '0.20.0',
+      mode: 'ok',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('qwen 0.21.0');
+    expect(r.stdout).not.toContain('::warning::');
+    expect(r.stdout).not.toContain('::error::');
+    expect(r.state).toBe('0.21.0');
+  });
+
+  it('falls back to an unprivileged install when sudo is unavailable', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '0.20.0',
+      mode: 'sudo_fail_unpriv_ok',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('qwen 0.21.0');
+    expect(r.state).toBe('0.21.0');
+  });
+
+  it('reviews with the installed qwen when every install fails', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '0.20.0',
+      mode: 'both_fail',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      '::warning::upgrade to qwen 0.21.0 failed; reviewing with installed qwen 0.20.0',
+    );
+    expect(r.state).toBe('0.20.0');
+  });
+
+  it('fails when every install fails and no qwen is installed', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '',
+      mode: 'both_fail',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      '::error::qwen is not installed and installing 0.21.0 failed',
+    );
+  });
+
+  it('fails when the install succeeds but qwen is not resolvable on PATH', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '0.20.0',
+      mode: 'not_on_path',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(
+      '::error::qwen 0.21.0 installed but not resolvable on PATH',
+    );
+  });
+
+  it('warns when a system-wide install shadows the per-run upgrade', () => {
+    const r = runInstallStep({
+      registry: '0.21.0',
+      initial: '0.20.0',
+      mode: 'shadow',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('qwen 0.20.0');
+    expect(r.stdout).toContain(
+      '::warning::wanted qwen 0.21.0 but PATH resolves 0.20.0',
+    );
+    expect(r.stdout).toContain('shadows the per-run upgrade');
+  });
+});
