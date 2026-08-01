@@ -3257,6 +3257,24 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
+    it('should use cmd.exe with chcp 65001 UTF-8 prefix on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
+      await simulateExecution('dir "foo bar"', (cp) =>
+        cp.emit('exit', 0, null),
+      );
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'cmd.exe',
+        ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
+        expect.objectContaining({ windowsVerbatimArguments: true }),
+      );
+    });
+
     it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
