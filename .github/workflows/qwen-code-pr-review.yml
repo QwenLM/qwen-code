@@ -468,16 +468,48 @@ jobs:
         with:
           node-version: '22.x'
 
-      - name: 'Install Qwen CLI if missing'
+      - name: 'Install or update Qwen CLI'
         if: "steps.context.outputs.should_run == 'true'"
         run: |-
           set -euo pipefail
+          # The self-hosted runners come with qwen pre-installed, and the fleet
+          # updater (update-ecs-runner-qwen.yml) only reaches hosts carrying an
+          # ecs-update-* label — any other ecs-qwen host keeps whatever version
+          # it was imaged with. #8005's review was posted by a 0.20.0 host a
+          # week after 0.21.x shipped. So resolve latest here and upgrade when
+          # stale; a pre-installed qwen is acceptable only as the fallback when
+          # the registry or the install is the thing that is broken.
+          want="$(npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version 2>/dev/null | tail -n 1 || true)"
+          have=''
           if command -v qwen >/dev/null 2>&1; then
-            qwen --version
+            have="$(qwen --version 2>/dev/null || true)"
+          fi
+          if [ -n "$have" ] && [ "$have" = "$want" ]; then
+            echo "qwen $have (latest)"
             exit 0
           fi
-          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
-          qwen --version
+          if [ -z "$want" ]; then
+            if [ -n "$have" ]; then
+              echo "::warning::npm registry unreachable; reviewing with installed qwen $have"
+              exit 0
+            fi
+            echo '::error::qwen is not installed and the npm registry is unreachable'
+            exit 1
+          fi
+          if ! npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@$want"; then
+            if [ -n "$have" ]; then
+              echo "::warning::upgrade to qwen $want failed; reviewing with installed qwen $have"
+              exit 0
+            fi
+            echo "::error::qwen is not installed and installing $want failed"
+            exit 1
+          fi
+          hash -r
+          actual="$(qwen --version)"
+          echo "qwen $actual"
+          if [ "$actual" != "$want" ]; then
+            echo "::warning::wanted qwen $want but PATH resolves $actual — a system-wide install shadows the per-run upgrade"
+          fi
 
       - name: 'Run review'
         id: 'review'
