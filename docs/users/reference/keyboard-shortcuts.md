@@ -4,18 +4,17 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## General
 
-| Shortcut                       | Description                                                                                                                                                                                                                                                                                               |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Esc`                          | Close dialogs and suggestions.                                                                                                                                                                                                                                                                            |
-| `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                                                                                                                                                                                                      |
-| `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                                                                                                                                                                                                       |
-| `Ctrl+L`                       | Clear the screen.                                                                                                                                                                                                                                                                                         |
-| `Ctrl+O`                       | Toggle expanded detail mode: expand or collapse all thinking blocks and tool outputs inline. Press again to collapse. When `ui.useTerminalBuffer` is off, toggling redraws the full conversation with untruncated output into terminal scrollback.                                                        |
-| `Ctrl+S`                       | Stashes non-empty input for the current project and restores it on the next launch. With empty input, allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.                                                                               |
-| `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                                                                                                                                                                                                                  |
-| `Ctrl+B`                       | While a foreground shell command is running: promote it to a background task. The child keeps running, the agent's turn unblocks, and the shell appears in `/tasks` + the Background tasks dialog. No-op when no shell is executing — Ctrl+B then falls through to its prompt-area binding (cursor-left). |
-| `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                                                                               |
-| `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `auto` → `yolo`)                                                                                                                                                                                                                                 |
+| Shortcut                       | Description                                                                                                                                                                                                                                        |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Esc`                          | Close dialogs and suggestions. With an empty prompt, cancel an ongoing request; when idle outside IDE mode, press twice to open the rewind selector.                                                                                               |
+| `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                                                                                                                                               |
+| `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                                                                                                                                                |
+| `Ctrl+L`                       | Clear the screen.                                                                                                                                                                                                                                  |
+| `Ctrl+O` / `Alt/Option+T`      | Toggle expanded detail mode: expand or collapse all thinking blocks and tool outputs inline. Press again to collapse. When `ui.useTerminalBuffer` is off, toggling redraws the full conversation with untruncated output into terminal scrollback. |
+| `Ctrl+S`                       | Stashes non-empty input for the current project and restores it on the next launch. With empty input, allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.                        |
+| `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                                                                                                                                                           |
+| `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                        |
+| `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `auto` → `yolo`)                                                                                                                                                                          |
 
 ## Input Prompt
 
@@ -23,10 +22,15 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `!`                                                   | Toggle shell mode when the input is empty.                                                                                          |
 | `?`                                                   | Toggle keyboard shortcuts display when the input is empty.                                                                          |
+| `/`                                                   | Open slash-command completion.                                                                                                      |
+| `@`                                                   | Open completion for files, folders, and other context.                                                                              |
+| `Space` (empty prompt)                                | Start voice dictation when it and a voice model are configured; hold or tap behavior follows `general.voice.mode`.                  |
 | `Ctrl+Enter` / `Cmd+Enter` / `Shift+Enter` / `Ctrl+J` | Insert a newline.                                                                                                                   |
 | `Down Arrow`                                          | Row down, then snap to end, then history next.                                                                                      |
-| `Enter`                                               | Submit the current prompt.                                                                                                          |
-| `Meta+Delete` / `Ctrl+Delete`                         | Delete the word to the right of the cursor.                                                                                         |
+| `Enter`                                               | Submit the current prompt. While a response is running, steer the current turn.                                                     |
+| `Ctrl+Q`                                              | Queue the current prompt or command for the next turn instead of steering; it runs after Qwen Code returns to idle.                 |
+| `Up Arrow` (at the top) / `Esc`                       | When queued messages are present, move them back into the input for editing.                                                        |
+| `Meta+D` / `Meta+Delete` / `Ctrl+Delete`              | Delete the word to the right of the cursor.                                                                                         |
 | `Tab`                                                 | Autocomplete the current suggestion if one exists.                                                                                  |
 | `Up Arrow`                                            | Row up, then snap to start, then history prev.                                                                                      |
 | `Ctrl+A` / `Home`                                     | Move the cursor to the beginning of the line.                                                                                       |
@@ -48,14 +52,41 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+V` / `Option+V` (Windows: `Alt+V`)              | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |
 | `Ctrl+W` / `Meta+Backspace` / `Ctrl+Backspace`        | Delete the word to the left of the cursor.                                                                                          |
 | `Ctrl+X`                                              | Open the current input in an external editor.                                                                                       |
+| `Ctrl+Z`                                              | Undo the last input edit.                                                                                                           |
+| `Ctrl+Shift+Z`                                        | Redo the last undone input edit.                                                                                                    |
+
+## Foreground Shell
+
+These shortcuts apply while an interactive foreground shell command is running.
+
+| Shortcut                            | Description                                                                                                                                                    |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Ctrl+F`                            | Toggle keyboard focus between the shell and the prompt. When no shell is running, `Ctrl+F` moves the prompt cursor right.                                      |
+| `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Scroll the focused shell up or down.                                                                                                                           |
+| `Ctrl+B`                            | Promote the shell to a background task. The child keeps running, the agent's turn unblocks, and the shell appears in `/tasks` and the Background tasks dialog. |
 
 ## Suggestions
 
-| Shortcut                | Description                            |
-| ----------------------- | -------------------------------------- |
-| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions. |
-| `Tab` / `Enter`         | Accept the selected suggestion.        |
-| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.   |
+| Shortcut                             | Description                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------ |
+| `Down Arrow` / `Ctrl+N`              | Navigate down through the suggestions.                                   |
+| `Tab` / `Enter`                      | Accept the selected suggestion.                                          |
+| `Up Arrow` / `Ctrl+P`                | Navigate up through the suggestions.                                     |
+| `Right Arrow`                        | Accept a ghost-text suggestion when the prompt is empty.                 |
+| `Ctrl+Tab` / `Ctrl+Right Arrow`      | Switch to the next completion category when category tabs are shown.     |
+| `Ctrl+Shift+Tab` / `Ctrl+Left Arrow` | Switch to the previous completion category when category tabs are shown. |
+
+## History Search
+
+Press `Ctrl+R` to search prompt history, or shell history while shell mode is active.
+
+| Shortcut                     | Description                                                |
+| ---------------------------- | ---------------------------------------------------------- |
+| `Up Arrow` / `Down Arrow`    | Navigate through matching history entries.                 |
+| `Left Arrow` / `Right Arrow` | Collapse or expand a long selected entry.                  |
+| `Tab`                        | Accept the selected entry into the prompt without sending. |
+| `Enter`                      | Submit the selected entry.                                 |
+| `Esc`                        | Close history search.                                      |
 
 ## Radio Button Select
 
