@@ -384,9 +384,10 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
-    // Staleness bound must sit above legitimate check runtimes (review-address is
-    // capped at 120m) so an active run is never aged out mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // Staleness bound must sit above legitimate check runtimes (a review-address
+    // job runs up to its 300-minute cap) so an active run is never aged out
+    // mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -8324,7 +8325,9 @@ describe('qwen-autofix workflow', () => {
     //
     // The invariant is the SUM, not any single number: identify the long
     // steps by what they EXECUTE, not by whether they already carry a bound,
-    // so a new long step added without one shows up here.
+    // so a new step running one of these two scripts shows up here even if
+    // added without a bound. Cheap setup/report steps run other scripts and
+    // are covered by the SETUP_AND_REPORT_MIN reserve instead.
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
@@ -8364,6 +8367,15 @@ describe('qwen-autofix workflow', () => {
       stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
     expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
     expect(jobCapMin).toBeLessThanOrEqual(360);
+
+    // The pending-check staleness bound (review-scan) must sit ABOVE this job
+    // cap, or a live review-address run ages out of HAS_PENDING_CHECKS
+    // mid-flight and the PR is enqueued against its own still-running check.
+    const pendingStaleMin = Number(
+      reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1],
+    );
+    expect(Number.isFinite(pendingStaleMin)).toBe(true);
+    expect(pendingStaleMin).toBeGreaterThan(jobCapMin);
 
     // continue-on-error makes bounding the verification gates a graceful
     // degrade: a timed-out gate falls through to the report step.
@@ -8407,10 +8419,12 @@ describe('qwen-autofix workflow', () => {
     expect(addressStep).toMatch(
       /QWEN_TIMEOUT_MS.*exceeds the step backstop; clamping/,
     );
-    // The clamp ceiling must stay under the step backstop.
+    // The clamp ceiling must stay under the step backstop with the SAME margin
+    // rule as the fallback above, or the cap fires first and the internal kill
+    // path never writes `agent-timeout`.
     const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
     expect(Number.isFinite(clampMs)).toBe(true);
-    expect(clampMs).toBeLessThanOrEqual(stepCapMin * 60000);
+    expect(clampMs / 60000).toBeLessThanOrEqual(stepCapMin - 1);
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {
