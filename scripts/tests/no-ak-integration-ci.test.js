@@ -57,6 +57,10 @@ describe('no-AK integration CI wiring', () => {
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const workflowTriggers = workflow.slice(
+      0,
+      workflow.indexOf('\npermissions:'),
+    );
     const gateStepMarker =
       "      - name: 'Run required no-AK integration gate'";
     const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
@@ -70,10 +74,13 @@ describe('no-AK integration CI wiring', () => {
 
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
+    expect(workflowTriggers).toContain('\n  pull_request:\n');
+    expect(workflowTriggers).toContain('\n  merge_group:\n');
 
     expect(gateStepStart).toBeGreaterThanOrEqual(0);
-    expect(gateStep).toContain("github.event_name == 'pull_request'");
-    expect(gateStep).toContain("github.event_name == 'merge_group'");
+    expect(gateStep).toContain(
+      "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+    );
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
