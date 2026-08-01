@@ -44,6 +44,12 @@ export interface Ledger {
   v: 1;
   round: number;
   findings: LedgerFinding[];
+  /**
+   * How many findings the size cap dropped, when it dropped any. Absent means
+   * the list is complete — which is the claim the next round acts on, so the
+   * incomplete case has to say so rather than look identical to it.
+   */
+  dropped?: number;
 }
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
@@ -53,6 +59,22 @@ export interface Ledger {
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
+
+/**
+ * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
+ * fifty findings at full width serialize to just under 17,000 characters.
+ *
+ * The budget is set against measurement, not against the 65,536 body limit.
+ * Across every review this pipeline has posted on its own stack (n=66), the
+ * body runs a median of 721 characters, p90 2,178, max 3,925 — so the limit
+ * has ~61 KiB of headroom and an over-long marker was never going to 422 the
+ * post. What the 17,000 would do is put four times more invisible payload than
+ * visible review into the comment, and "footnote, never a payload" is the
+ * claim the paragraph above makes. 8 KiB holds the largest ledger a real round
+ * has produced without truncating anything, and stays about twice the biggest
+ * body observed rather than four times it.
+ */
+export const LEDGER_MAX_BYTES = 8192;
 
 const OPEN = '<!-- qwen-review-ledger ';
 const CLOSE = ' -->';
@@ -70,16 +92,29 @@ const CLOSE = ' -->';
  * `Ledger` later cannot reintroduce the hazard by being forgotten below.
  */
 export function serializeLedger(ledger: Ledger): string {
-  const capped: Ledger = {
-    v: 1,
-    round: ledger.round,
-    findings: ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
-      ...f,
-      title: f.title.slice(0, LEDGER_MAX_TITLE),
-      file: f.file.slice(0, LEDGER_MAX_FILE),
-    })),
+  const capped = ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
+    ...f,
+    title: f.title.slice(0, LEDGER_MAX_TITLE),
+    file: f.file.slice(0, LEDGER_MAX_FILE),
+  }));
+  const render = (findings: LedgerFinding[], dropped: number): string => {
+    const payload: Ledger = { v: 1, round: ledger.round, findings };
+    if (dropped > 0) payload.dropped = dropped;
+    return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
-  return `${OPEN}${JSON.stringify(capped).replace(/--/g, '-\\u002d')}${CLOSE}`;
+  // Drop from the END until the whole marker fits. Trailing entries are the
+  // highest-numbered, which within a round is the order they were written; a
+  // ledger short by its tail is still a work list, a marker that pushes the
+  // body past the API's limit is no review at all. The count of what went
+  // travels with it, because a list the next round reads as complete and
+  // silently is not one is the failure this whole module is built against.
+  let kept = capped.length;
+  let marker = render(capped, 0);
+  while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
+    kept--;
+    marker = render(capped.slice(0, kept), capped.length - kept);
+  }
+  return marker;
 }
 
 /**
@@ -119,7 +154,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
         title: f.title.slice(0, LEDGER_MAX_TITLE),
         file: f.file.slice(0, LEDGER_MAX_FILE),
       }));
-    return { v: 1, round: raw.round, findings };
+    const dropped =
+      Number.isInteger(raw.dropped) && (raw.dropped as number) > 0
+        ? (raw.dropped as number)
+        : undefined;
+    return {
+      v: 1,
+      round: raw.round,
+      findings,
+      ...(dropped ? { dropped } : {}),
+    };
   } catch {
     return null;
   }

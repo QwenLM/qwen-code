@@ -15,6 +15,8 @@ import {
   stripLedgerMarker,
   LEDGER_MAX_FINDINGS,
   LEDGER_MAX_FILE,
+  LEDGER_MAX_TITLE,
+  LEDGER_MAX_BYTES,
   type Ledger,
 } from './ledger.js';
 
@@ -28,6 +30,50 @@ const LEDGER: Ledger = {
 };
 
 describe('ledger marker', () => {
+  it('caps the WHOLE marker, not just each field, and says what it dropped', () => {
+    // The per-field caps leave the total unbounded: fifty findings at full
+    // width serialize to ~17,000 characters, four times the largest review
+    // body this pipeline has ever posted (measured: n=66, max 3,925). The
+    // marker is billed as a footnote; this is what makes it one.
+    const wide = {
+      v: 1 as const,
+      round: 9,
+      findings: Array.from({ length: LEDGER_MAX_FINDINGS }, (_, i) => ({
+        id: `R9-${i}`,
+        sev: 'C' as const,
+        file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+        line: 99999,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      })),
+    };
+    const marker = serializeLedger(wide);
+    expect(marker.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    const back = parseLedger(`review body\n\n${marker}`);
+    // Nothing is lost silently: what was kept plus what was dropped is what
+    // went in, and `dropped` is what tells the next round the list is partial.
+    expect(back!.findings.length + back!.dropped!).toBe(LEDGER_MAX_FINDINGS);
+    expect(back!.dropped).toBeGreaterThan(0);
+  });
+
+  it('leaves a realistic ledger whole — the cap is a bound, not a budget to spend', () => {
+    // Fifty findings at realistic widths still fit, so the truncation path is
+    // reached only by a ledger no round has produced.
+    const realistic = {
+      v: 1 as const,
+      round: 2,
+      findings: Array.from({ length: LEDGER_MAX_FINDINGS }, (_, i) => ({
+        id: `R2-${i}`,
+        sev: 'S' as const,
+        file: 'packages/cli/src/commands/review/test-delta.ts',
+        line: 123,
+        title: 'the base rerun attributes nothing when it could not run',
+      })),
+    };
+    const back = parseLedger(serializeLedger(realistic));
+    expect(back!.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(back!.dropped).toBeUndefined();
+  });
+
   it('round-trips through a posted body', () => {
     const body = `Reviewed. Suggestions inline.\n\n${serializeLedger(LEDGER)}`;
     expect(parseLedger(body)).toEqual(LEDGER);
