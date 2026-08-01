@@ -323,6 +323,7 @@ function deferred<T = void>(): {
 // WS_B).
 const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
 const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
+const WORK_A = path.resolve(path.sep, 'work', 'a');
 const EXPECTED_STAGE1_FEATURES = [
   'health',
   'daemon_status',
@@ -9060,12 +9061,12 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         sessionId: 'fake-0',
-        workspaceCwd: '/work/a',
+        workspaceCwd: WORK_A,
         attached: false,
         clientId: 'client-0',
       });
       expect(bridge.calls).toEqual([
-        { workspaceCwd: '/work/a', modelServiceId: 'qwen-prod' },
+        { workspaceCwd: WORK_A, modelServiceId: 'qwen-prod' },
       ]);
     });
 
@@ -9083,7 +9084,7 @@ describe('createServeApp', () => {
           .send({ cwd: '/work/a', sessionScope: scope });
         expect(res.status).toBe(200);
         expect(bridge.calls).toEqual([
-          { workspaceCwd: '/work/a', sessionScope: scope },
+          { workspaceCwd: WORK_A, sessionScope: scope },
         ]);
       }
     });
@@ -9106,7 +9107,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.clientId).toBe('client-existing');
       expect(bridge.calls).toEqual([
-        { workspaceCwd: '/work/a', clientId: 'client-existing' },
+        { workspaceCwd: WORK_A, clientId: 'client-existing' },
       ]);
     });
 
@@ -9166,7 +9167,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
-      expect(bridge.calls).toEqual([{ workspaceCwd: '/work/a' }]);
+      expect(bridge.calls).toEqual([{ workspaceCwd: WORK_A }]);
+      // toEqual ignores undefined-valued keys, so assert the `sessionScope` key
+      // is truly absent — that absence is the invariant this test guards.
       expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
     });
 
@@ -9204,7 +9207,7 @@ describe('createServeApp', () => {
           '{"cwd":"/work/a","__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}}}',
         );
       expect(res.status).toBe(200);
-      expect(bridge.calls[0]?.workspaceCwd).toBe('/work/a');
+      expect(bridge.calls[0]?.workspaceCwd).toBe(WORK_A);
       // No prototype pollution: Object.prototype.polluted is
       // undefined. (This is the core security property — if the
       // dangerous key landed via spread, this check would fail.)
@@ -20819,9 +20822,24 @@ describe('createServeApp', () => {
         });
       } finally {
         await Promise.all([
-          fsp.rm(tempHome, { recursive: true, force: true }),
-          fsp.rm(primary, { recursive: true, force: true }),
-          fsp.rm(secondary, { recursive: true, force: true }),
+          fsp.rm(tempHome, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(primary, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(secondary, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
         restoreEnv('QWEN_SHARED_WEBHOOK_SECRET', previousWebhookSecret);
@@ -20924,8 +20942,18 @@ describe('createServeApp', () => {
         expect((await send('next', 'next-secret')).status).toBe(401);
       } finally {
         await Promise.all([
-          fsp.rm(tempHome, { recursive: true, force: true }),
-          fsp.rm(workspace, { recursive: true, force: true }),
+          fsp.rm(tempHome, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
+          fsp.rm(workspace, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          }),
         ]);
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
@@ -21117,8 +21145,18 @@ describe('createServeApp', () => {
           });
         expect(secondWebhook.status).toBe(429);
       } finally {
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
@@ -21179,8 +21217,18 @@ describe('createServeApp', () => {
         ).toBe(true);
       } finally {
         stderrSpy.mockRestore();
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
@@ -21262,8 +21310,18 @@ describe('createServeApp', () => {
         ).toBe(true);
       } finally {
         stderrSpy.mockRestore();
-        await fsp.rm(tempHome, { recursive: true, force: true });
-        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(tempHome, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+        await fsp.rm(workspace, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }

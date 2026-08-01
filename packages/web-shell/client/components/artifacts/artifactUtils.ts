@@ -2,6 +2,7 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
+import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 
 export function artifactKindLabel(kind: string): string {
   switch (kind) {
@@ -41,8 +42,8 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
   webp: 'image/webp',
 };
 
-const MAX_IMAGE_PREVIEW_BYTES = 100 * 1024 * 1024;
-const IMAGE_PREVIEW_CHUNK_BYTES = 100 * 1024;
+const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
+const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 100 * 1024;
 
 export function getArtifactImageMimeType(
   artifact: DaemonSessionArtifact,
@@ -63,6 +64,10 @@ export function getImageMimeTypeFromPath(path: string): string | undefined {
     ? normalizedPath.split('.').pop()
     : undefined;
   return extension ? IMAGE_MIME_TYPES[extension] : undefined;
+}
+
+export function getReviewDownloadMimeType(value: string): string {
+  return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
 export async function readWorkspaceFileAsBlob(
@@ -86,31 +91,31 @@ export async function readWorkspaceFileAsBlob(
   },
 ): Promise<Blob> {
   const chunks: Uint8Array[] = [];
-  const maxBytes = options.maxBytes ?? MAX_IMAGE_PREVIEW_BYTES;
+  const maxBytes = options.maxBytes ?? MAX_WORKSPACE_FILE_BLOB_BYTES;
   const initialStat = await options.statFile(filePath);
   if (options.isCancelled?.()) {
-    throw new Error('Image loading was cancelled.');
+    throw new Error('File loading was cancelled.');
   }
   if (initialStat.sizeBytes > maxBytes) {
-    throw new Error('Image is too large to preview or download.');
+    throw new Error('File is too large to preview or download.');
   }
   let offset = 0;
   while (true) {
     if (options.isCancelled?.()) {
-      throw new Error('Image loading was cancelled.');
+      throw new Error('File loading was cancelled.');
     }
     const file = await readFileBytes(filePath, {
       offset,
-      maxBytes: IMAGE_PREVIEW_CHUNK_BYTES,
+      maxBytes: WORKSPACE_FILE_BLOB_CHUNK_BYTES,
     });
     if (options.isCancelled?.()) {
-      throw new Error('Image loading was cancelled.');
+      throw new Error('File loading was cancelled.');
     }
     if (file.sizeBytes !== initialStat.sizeBytes) {
-      throw new Error('Image changed while loading. Please retry.');
+      throw new Error('File changed while loading. Please retry.');
     }
     if (file.returnedBytes <= 0 && offset < initialStat.sizeBytes) {
-      throw new Error('Image loading made no progress.');
+      throw new Error('File loading made no progress.');
     }
     const binary = atob(file.contentBase64);
     const bytes = new Uint8Array(binary.length);
@@ -122,16 +127,45 @@ export async function readWorkspaceFileAsBlob(
     if (offset >= initialStat.sizeBytes) {
       const finalStat = await options.statFile(filePath);
       if (options.isCancelled?.()) {
-        throw new Error('Image loading was cancelled.');
+        throw new Error('File loading was cancelled.');
       }
       if (
         finalStat.sizeBytes !== initialStat.sizeBytes ||
         finalStat.modifiedMs !== initialStat.modifiedMs
       ) {
-        throw new Error('Image changed while loading. Please retry.');
+        throw new Error('File changed while loading. Please retry.');
       }
       return new Blob(chunks, { type: mimeType });
     }
+  }
+}
+
+export async function downloadWorkspaceFile(
+  workspaceActions: Pick<DaemonWorkspaceActions, 'readFileBytes' | 'stat'>,
+  workspacePath: string,
+  mimeType = 'application/octet-stream',
+  isCancelled?: () => boolean,
+): Promise<void> {
+  const blob = await readWorkspaceFileAsBlob(
+    (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+    workspacePath,
+    mimeType,
+    {
+      statFile: (filePath) => workspaceActions.stat(filePath),
+      isCancelled,
+    },
+  );
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download =
+      normalizePath(workspacePath).split('/').at(-1) ?? workspacePath;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 

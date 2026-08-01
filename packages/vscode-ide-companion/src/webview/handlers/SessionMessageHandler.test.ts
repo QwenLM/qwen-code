@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { pathToFileURL } from 'node:url';
 
 const {
   mockProcessImageAttachments,
@@ -219,7 +220,7 @@ describe('SessionMessageHandler', () => {
         type: 'resource_link',
         name: 'clipboard-123.png',
         mimeType: 'image/png',
-        uri: 'file:///tmp/clipboard/clipboard-123.png',
+        uri: pathToFileURL('/tmp/clipboard/clipboard-123.png').href,
       },
     ]);
   });
@@ -283,7 +284,7 @@ describe('SessionMessageHandler', () => {
         type: 'resource_link',
         name: 'screen shot.png',
         mimeType: 'image/png',
-        uri: 'file:///workspace/screen%20shot.png',
+        uri: pathToFileURL('/workspace/screen shot.png').href,
       },
     ]);
   });

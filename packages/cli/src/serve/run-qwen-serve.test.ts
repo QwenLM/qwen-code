@@ -53,7 +53,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
-import { ChannelDeliveryError } from './channel-delivery-ipc.js';
+import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
