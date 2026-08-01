@@ -938,6 +938,10 @@ describe('Permission Control (E2E)', () => {
               permissionMode: 'plan',
               cwd: testDir,
               coreTools: ['write_file'],
+              canUseTool: async (_toolName, input) => ({
+                behavior: 'allow',
+                updatedInput: input,
+              }),
             },
           });
 
