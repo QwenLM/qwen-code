@@ -807,6 +807,7 @@ function isUnderIgnoredDirectory(
   dirFilter: (dirPath: string) => boolean,
 ): boolean {
   const separator = filePath.lastIndexOf('/');
+  // Callers reject absolute and out-of-root paths via isValidIgnorePath().
   if (separator <= 0) {
     return false;
   }
