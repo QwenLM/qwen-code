@@ -1666,8 +1666,8 @@ function createDelegatingServeApp(
         // Web Shell static routes are mounted BEFORE bearerAuth in the runtime
         // app (a browser navigation cannot attach an Authorization header and
         // the token travels in the URL fragment, which never reaches the
-        // server). Gating them here would 401 a desktop shell / `--open`
-        // browser that races the deferred runtime startup — skip the gate and
+        // server). Gating them here would 401 a desktop shell or hand-opened
+        // browser tab that races the deferred runtime startup — skip the gate and
         // let the runtime app apply its own (pre-auth) policy once ready. When
         // the shell is not mounted (`--no-web`) there is no pre-auth route to
         // protect, so keep the gate closed instead of booting the runtime for

@@ -151,6 +151,13 @@ async function initialize() {
       'Loading Qwen Code',
       'Connecting to the local Web Shell…',
     );
+  } else if (state.error) {
+    setStatus(
+      'error',
+      'Qwen Code could not start',
+      'Review the details, open the log, or choose another workspace.',
+      state.error,
+    );
   } else {
     setStatus(
       'idle',

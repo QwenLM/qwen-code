@@ -80,6 +80,7 @@ for (const required of [
 
 fs.rmSync(runtimeDir, { recursive: true, force: true });
 fs.mkdirSync(libDir, { recursive: true });
+fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
 fs.mkdirSync(binDir, { recursive: true });
 copyDirectory(distDir, libDir);
 await installNodeRuntime(nodeDir, target);

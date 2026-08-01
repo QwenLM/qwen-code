@@ -20,8 +20,6 @@ const HEALTH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_OUTPUT_LIMIT: usize = 16 * 1024;
 static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-#[cfg(debug_assertions)]
-const TEST_RUNTIME_INFO_ENV: &str = "QWEN_DESKTOP_TEST_RUNTIME_INFO";
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,12 +94,6 @@ impl DesktopRuntime {
                     return Err(error);
                 }
             };
-        #[cfg(debug_assertions)]
-        if let Err(error) = write_test_runtime_info(&base_url, &token) {
-            stop_runtime_child(&mut child);
-            return Err(error);
-        }
-
         let child = Arc::new(Mutex::new(Some(child)));
         let stopping = Arc::new(AtomicBool::new(false));
         monitor_runtime(app.clone(), id, Arc::clone(&child), Arc::clone(&stopping));
@@ -344,16 +336,6 @@ fn parse_listening_url(line: &str) -> Option<Url> {
     } else {
         None
     }
-}
-
-#[cfg(debug_assertions)]
-fn write_test_runtime_info(base_url: &Url, token: &str) -> Result<(), String> {
-    let Some(path) = std::env::var_os(TEST_RUNTIME_INFO_ENV) else {
-        return Ok(());
-    };
-    let contents = serde_json::json!({ "url": base_url, "token": token });
-    fs::write(PathBuf::from(path), contents.to_string())
-        .map_err(|error| format!("Failed to write desktop test runtime info: {error}"))
 }
 
 fn wait_for_listening(

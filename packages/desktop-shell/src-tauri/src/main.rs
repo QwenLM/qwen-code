@@ -8,7 +8,7 @@ use runtime::DesktopRuntime;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WindowEvent};
@@ -28,6 +28,7 @@ struct BootstrapState {
     log_path: String,
     status: &'static str,
     workspace: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +43,8 @@ struct ApplicationState {
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
+    last_error: Mutex<Option<String>>,
+    window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
 }
@@ -72,17 +75,20 @@ fn main() {
     };
 
     app.run(|app_handle, event| match event {
-        RunEvent::WindowEvent { label, event, .. } if label == "main" => {
-            if matches!(
-                event,
-                WindowEvent::Moved(_)
-                    | WindowEvent::Resized(_)
-                    | WindowEvent::CloseRequested { .. }
-            ) {
-                save_window_state(app_handle);
+        RunEvent::WindowEvent { label, event, .. } if label == "main" => match event {
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                app_handle
+                    .state::<ApplicationState>()
+                    .window_dirty
+                    .store(true, Ordering::Relaxed);
             }
+            WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
+            _ => {}
+        },
+        RunEvent::Exit | RunEvent::ExitRequested { .. } => {
+            save_window_state(app_handle);
+            stop_runtime(app_handle);
         }
-        RunEvent::Exit | RunEvent::ExitRequested { .. } => stop_runtime(app_handle),
         _ => {}
     });
 }
@@ -146,6 +152,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings,
         log_path,
         origin,
+        last_error: Mutex::new(None),
+        window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
     });
@@ -156,6 +164,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let _ = handle.emit("workspace-required", ());
     }
     check_updates_silently(handle);
+    spawn_window_state_flusher(handle);
     Ok(())
 }
 
@@ -177,6 +186,7 @@ fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
             .settings
             .workspace()
             .map(|path| path.to_string_lossy().into_owned()),
+        error: lock(&state.last_error).clone(),
     }
 }
 
@@ -275,6 +285,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
         generation
     };
     stop_runtime(&app);
+    *lock(&app.state::<ApplicationState>().last_error) = None;
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ApplicationState>();
@@ -357,6 +368,7 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
         .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
         .ok();
     *lock(&state.origin) = None;
+    *lock(&state.last_error) = Some(error.clone());
     let _ = navigate_to_bootstrap(app);
     let _ = app.emit("runtime-failed", error);
 }
@@ -387,6 +399,16 @@ fn save_window_state(app: &AppHandle) {
             .settings
             .save_window(&window);
     }
+}
+
+fn spawn_window_state_flusher(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let state = app.state::<ApplicationState>();
+        if state.window_dirty.swap(false, Ordering::Relaxed) {
+            save_window_state(&app);
+        }
+    });
 }
 
 fn focus_main_window(app: &AppHandle) {

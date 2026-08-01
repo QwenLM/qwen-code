@@ -366,7 +366,7 @@ jobs:
 
   publish:
     name: 'Publish GitHub release'
-    if: '${{ inputs.dry_run == false }}'
+    if: '${{ inputs.dry_run == false && github.repository == ''QwenLM/qwen-code'' }}'
     needs:
       - 'prepare'
       - 'build'

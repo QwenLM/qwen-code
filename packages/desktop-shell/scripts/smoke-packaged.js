@@ -18,7 +18,6 @@ if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
 }
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-smoke-'));
-const runtimeInfoPath = path.join(workspace, 'runtime-info.json');
 const isolatedHome = path.join(workspace, 'home');
 const isolatedState = path.join(workspace, 'state');
 fs.mkdirSync(isolatedHome);
@@ -36,7 +35,6 @@ const child = spawn(executable, [], {
     ...process.env,
     QWEN_DESKTOP_WORKSPACE: workspace,
     QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
-    QWEN_DESKTOP_TEST_RUNTIME_INFO: runtimeInfoPath,
     HOME: isolatedHome,
     LOCALAPPDATA: isolatedState,
     XDG_STATE_HOME: isolatedState,
@@ -94,12 +92,11 @@ async function waitForReady() {
       encoding: 'utf8',
       flag: 'a+',
     });
-    if (
-      contents.includes('qwen serve listening on http://127.0.0.1:') &&
-      fs.statSync(runtimeInfoPath, { throwIfNoEntry: false })?.isFile()
-    ) {
-      const runtime = JSON.parse(fs.readFileSync(runtimeInfoPath, 'utf8'));
-      await verifyAuthenticatedShell(runtime, contents);
+    const match = contents.match(
+      /qwen serve listening on (http:\/\/127\.0\.0\.1:\d+)/,
+    );
+    if (match) {
+      await verifyPackagedShell(match[1], contents);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -108,32 +105,17 @@ async function waitForReady() {
     encoding: 'utf8',
     flag: 'a+',
   });
-  const runtimeInfo = fs
-    .statSync(runtimeInfoPath, { throwIfNoEntry: false })
-    ?.isFile()
-    ? fs.readFileSync(runtimeInfoPath, 'utf8')
-    : '<missing>';
   throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nRuntime info: ${runtimeInfo}\nSmoke workspace: ${workspace}`,
+    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
   );
 }
 
-async function verifyAuthenticatedShell({ url, token }, contents) {
-  const headers = { Authorization: `Bearer ${token}` };
-  const health = await fetch(new URL('/health', url), { headers });
-  if (!health.ok || !(await health.text()).includes('"status":"ok"')) {
-    throw smokeError(
-      `Packaged desktop health check failed: ${health.status}`,
-      contents,
-    );
-  }
-  // The shell is reached by navigating to `/#token=<token>`: the fragment
-  // never leaves the browser, so the document request itself is
-  // unauthenticated and must still return the HTML shell (the front-end
-  // reads the token from `location.hash` and sends it as a bearer). This is
-  // also the regression guard for the deferred-runtime window, where the
-  // daemon used to answer this navigation with 401 Unauthorized.
-  const shell = await fetch(new URL('/', url), {
+// The packaged smoke verifies the unauthenticated navigation boundary: the
+// shell HTML is served without a token (the token travels in the URL fragment,
+// which never reaches the server), while API routes stay bearer-gated. The
+// authenticated path is covered by smoke:runtime on the same bundle.
+async function verifyPackagedShell(baseUrl, contents) {
+  const shell = await fetch(new URL('/', baseUrl), {
     redirect: 'manual',
     headers: {
       Accept: 'text/html',
@@ -159,18 +141,10 @@ async function verifyAuthenticatedShell({ url, token }, contents) {
       contents,
     );
   }
-  // API routes stay bearer-gated even while the shell is public.
-  const unauthenticated = await fetch(new URL('/capabilities', url));
+  const unauthenticated = await fetch(new URL('/capabilities', baseUrl));
   if (unauthenticated.status !== 401) {
     throw smokeError(
       `Packaged desktop API is not token-gated: ${unauthenticated.status}`,
-      contents,
-    );
-  }
-  const capabilities = await fetch(new URL('/capabilities', url), { headers });
-  if (!capabilities.ok) {
-    throw smokeError(
-      `Packaged desktop authenticated API failed: ${capabilities.status}`,
       contents,
     );
   }
