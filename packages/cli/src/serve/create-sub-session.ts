@@ -66,7 +66,7 @@ export const MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER = 16;
  * launch is charged to. Overridable via
  * `serve.maxConcurrentSubSessionsTotal`.
  *
- * Kept below the bridge's default `maxSessions` (32): a finished sub-session
+ * The default is kept below the bridge's default `maxSessions` (32): a finished sub-session
  * stays registered (idle) for up to `sessionIdleTimeoutMs`, so a total cap at
  * the session-table limit would make the next fan-out wave fail at bridge
  * admission instead of this cap, and starve interactive sessions of slots.
