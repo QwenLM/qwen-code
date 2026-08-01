@@ -3,8 +3,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  downloadWorkspaceFile,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
+  getReviewDownloadMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -60,6 +62,14 @@ describe('artifactUtils', () => {
         mimeType: 'image/jpg',
       } as DaemonSessionArtifact),
     ).toBe('image/jpeg');
+  });
+
+  it('maps review downloads to HTML or Markdown by extension', () => {
+    expect(getReviewDownloadMimeType('report.html')).toBe('text/html');
+    expect(getReviewDownloadMimeType('report.htm')).toBe('text/html');
+    expect(getReviewDownloadMimeType('REPORT.HTML')).toBe('text/html');
+    expect(getReviewDownloadMimeType('notes.md')).toBe('text/markdown');
+    expect(getReviewDownloadMimeType('notes.markdown')).toBe('text/markdown');
   });
 
   it('stops at the file size even when byte windows stay truncated', async () => {
@@ -145,6 +155,19 @@ describe('artifactUtils', () => {
         statFile,
         maxBytes: 4,
       }),
+    ).rejects.toThrow('too large');
+    expect(readFileBytes).not.toHaveBeenCalled();
+  });
+
+  it('rejects downloads larger than the default Blob limit', async () => {
+    const readFileBytes = vi.fn();
+    const stat = vi.fn().mockResolvedValue({
+      sizeBytes: 100 * 1024 * 1024 + 1,
+      modifiedMs: 1,
+    });
+
+    await expect(
+      downloadWorkspaceFile({ readFileBytes, stat }, 'video.mp4'),
     ).rejects.toThrow('too large');
     expect(readFileBytes).not.toHaveBeenCalled();
   });
