@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  utimesSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -161,6 +162,17 @@ describe('runBaseTree', () => {
       recursive: true,
       force: true,
     });
+  });
+
+  it('sweeps a STALE lock instead of reporting busy for the whole review', () => {
+    // A builder killed without its finally leaves the lock forever; 30+ min
+    // old is a corpse, not a live install+build.
+    const lock = `${baseWorktreePath(worktree)}.lock`;
+    mkdirSync(lock, { recursive: true });
+    const old = Date.now() / 1000 - 45 * 60;
+    utimesSync(lock, old, old);
+    const r = run();
+    expect(r.available).toBe(true); // built through the corpse
   });
 
   it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
