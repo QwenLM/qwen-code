@@ -15,7 +15,6 @@ import {
 import {
   buildKittyPlaceholder,
   createRendererChildEnv,
-  encodeKittyImage,
   encodeKittyVirtualImage,
   findExecutable,
   readPngSize,
@@ -51,11 +50,6 @@ export type TerminalImageRenderResult =
       sequence: string;
       placeholder: KittyImagePlaceholder;
     }
-  | {
-      kind: 'kitty-direct';
-      sequence: string;
-      rows: number;
-    }
   | { kind: 'ansi'; lines: string[] }
   | { kind: 'unavailable'; reason: string };
 
@@ -88,28 +82,11 @@ export function supportsKittyImageProtocol(
   );
 }
 
-export function supportsKittyDirectImageProtocol(
-  env: NodeJS.ProcessEnv = process.env,
-  stdoutIsTTY = process.stdout.isTTY,
-): boolean {
-  return Boolean(
-    process.platform !== 'win32' &&
-      stdoutIsTTY &&
-      !env['TMUX'] &&
-      !env['SSH_TTY'] &&
-      !env['SSH_CLIENT'] &&
-      env['TERM_PROGRAM']?.toLowerCase() === 'warpterminal',
-  );
-}
-
 export function getTerminalImageRenderSupport(
   env: NodeJS.ProcessEnv = process.env,
   stdoutIsTTY = process.stdout.isTTY,
 ): TerminalImageRenderSupport {
   if (supportsKittyImageProtocol(env, stdoutIsTTY)) {
-    return { available: true };
-  }
-  if (supportsKittyDirectImageProtocol(env, stdoutIsTTY)) {
     return { available: true };
   }
 
@@ -173,17 +150,13 @@ export function renderTerminalImage({
     contentWidth,
     availableTerminalHeight,
   );
-  const renderer = supportsKittyDirectImageProtocol(env, stdoutIsTTY)
-    ? 'kitty-direct'
-    : supportsKittyImageProtocol(env, stdoutIsTTY)
-      ? 'kitty-placeholder'
-      : 'chafa';
-  const chafaPath = renderer === 'chafa' ? findExecutable('chafa', env) : null;
+  const useKitty = supportsKittyImageProtocol(env, stdoutIsTTY);
+  const chafaPath = useKitty ? null : findExecutable('chafa', env);
   const cacheKey = createRenderCacheKey(
     display.filePath,
     stat,
     shape,
-    renderer,
+    useKitty,
     chafaPath,
   );
   const cached = getCachedRenderResult(cacheKey);
@@ -207,12 +180,9 @@ export function renderTerminalImage({
     };
   }
 
-  const result: TerminalImageRenderResult =
-    renderer === 'kitty-direct'
-      ? renderKittyDirect(png, shape)
-      : renderer === 'kitty-placeholder'
-        ? renderKitty(png, shape)
-        : renderWithChafa(display.filePath, shape, env, chafaPath);
+  const result: TerminalImageRenderResult = useKitty
+    ? renderKitty(png, shape)
+    : renderWithChafa(display.filePath, shape, env, chafaPath);
   if (result.kind !== 'unavailable') {
     rememberRenderResult(cacheKey, result);
   }
@@ -245,7 +215,7 @@ function createRenderCacheKey(
   filePath: string,
   stat: fs.Stats,
   shape: { widthCells: number; rows: number },
-  renderer: 'kitty-direct' | 'kitty-placeholder' | 'chafa',
+  useKitty: boolean,
   chafaPath: string | null,
 ): string {
   return [
@@ -254,7 +224,7 @@ function createRenderCacheKey(
     stat.size,
     shape.widthCells,
     shape.rows,
-    renderer === 'chafa' ? (chafaPath ?? 'none') : renderer,
+    useKitty ? 'kitty' : (chafaPath ?? 'none'),
   ].join('\0');
 }
 
@@ -309,8 +279,6 @@ function estimateRenderResultBytes(result: TerminalImageRenderResult): number {
           0,
         )
       );
-    case 'kitty-direct':
-      return Buffer.byteLength(result.sequence, 'utf8');
     case 'ansi':
       return result.lines.reduce(
         (total, line) => total + Buffer.byteLength(line, 'utf8'),
@@ -388,17 +356,6 @@ function renderKitty(
       shape.rows,
     ),
     placeholder: buildKittyPlaceholder(imageId, shape.widthCells, shape.rows),
-  };
-}
-
-function renderKittyDirect(
-  png: Buffer,
-  shape: { widthCells: number; rows: number },
-): Extract<TerminalImageRenderResult, { kind: 'kitty-direct' }> {
-  return {
-    kind: 'kitty-direct',
-    sequence: encodeKittyImage(png, shape.widthCells, shape.rows),
-    rows: shape.rows,
   };
 }
 

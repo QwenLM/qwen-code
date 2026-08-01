@@ -12,7 +12,6 @@ import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
   renderTerminalImage,
-  supportsKittyDirectImageProtocol,
   supportsKittyImageProtocol,
 } from './terminal-image-renderer.js';
 
@@ -164,85 +163,34 @@ describe('terminalImageRenderer', () => {
     ).toBe(false);
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'uses direct Kitty placement without Unicode placeholders in Warp',
-    () => {
-      expect(
-        supportsKittyImageProtocol(
-          { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
-          true,
-        ),
-      ).toBe(false);
-      expect(
-        supportsKittyImageProtocol(
-          { TERM: 'xterm-kitty', TERM_PROGRAM: 'WarpTerminal' },
-          true,
-        ),
-      ).toBe(false);
-      expect(
-        supportsKittyDirectImageProtocol(
-          {
-            TERM: 'xterm-256color',
-            TERM_PROGRAM: 'WarpTerminal',
-          },
-          true,
-        ),
-      ).toBe(true);
-      expect(
-        supportsKittyDirectImageProtocol(
-          { TERM_PROGRAM: 'WarpTerminal', TMUX: '/tmp/tmux' },
-          true,
-        ),
-      ).toBe(false);
-      expect(
-        supportsKittyDirectImageProtocol(
-          { TERM_PROGRAM: 'WarpTerminal', SSH_TTY: '/dev/pts/1' },
-          true,
-        ),
-      ).toBe(false);
-      expect(
-        supportsKittyDirectImageProtocol(
-          { TERM_PROGRAM: 'WarpTerminal', SSH_CLIENT: '10.0.0.1 51234 22' },
-          true,
-        ),
-      ).toBe(false);
-      expect(
-        supportsKittyDirectImageProtocol(
-          { TERM_PROGRAM: 'WarpTerminal' },
-          false,
-        ),
-      ).toBe(false);
-      expect(
-        getTerminalImageRenderSupport(
-          {
-            PATH: tempDir,
-            TERM: 'xterm-256color',
-            TERM_PROGRAM: 'WarpTerminal',
-          },
-          true,
-        ),
-      ).toEqual({ available: true });
-
-      const result = renderTerminalImage({
-        display: {
-          type: 'terminal_image',
-          filePath: imagePath,
-          mimeType: 'image/png',
+  it('does not use Kitty Unicode placeholders in Warp', () => {
+    expect(
+      supportsKittyImageProtocol(
+        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      supportsKittyImageProtocol(
+        { TERM: 'xterm-kitty', TERM_PROGRAM: 'WarpTerminal' },
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      getTerminalImageRenderSupport(
+        {
+          PATH: tempDir,
+          TERM: 'xterm-256color',
+          TERM_PROGRAM: 'WarpTerminal',
         },
-        contentWidth: 24,
-        availableTerminalHeight: 12,
-        env: { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
-        stdoutIsTTY: true,
-      });
-
-      expect(result.kind).toBe('kitty-direct');
-      if (result.kind !== 'kitty-direct') return;
-      expect(result.sequence).toContain('\u001b_Ga=T,f=100,q=2,C=1');
-      expect(result.sequence).not.toContain('U=1');
-      expect(result.sequence).toContain('c=1,r=1');
-      expect(result.rows).toBe(1);
-    },
-  );
+        true,
+      ),
+    ).toEqual({
+      available: false,
+      reason:
+        'No compatible native image protocol was detected, and chafa is not installed.',
+    });
+  });
 
   it.runIf(process.platform !== 'win32')(
     'falls back to chafa symbol output',
@@ -267,7 +215,7 @@ describe('terminalImageRenderer', () => {
         env: {
           PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
           TERM: 'xterm-256color',
-          TERM_PROGRAM: 'Apple_Terminal',
+          TERM_PROGRAM: 'WarpTerminal',
           TEST_RENDERER_SECRET: 'must-not-reach-chafa',
         },
         stdoutIsTTY: true,
@@ -282,7 +230,7 @@ describe('terminalImageRenderer', () => {
           {
             PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
             TERM: 'xterm-256color',
-            TERM_PROGRAM: 'Apple_Terminal',
+            TERM_PROGRAM: 'WarpTerminal',
           },
           true,
         ),
@@ -307,7 +255,7 @@ describe('terminalImageRenderer', () => {
           {
             PATH: localBin,
             TERM: 'xterm-256color',
-            TERM_PROGRAM: 'Apple_Terminal',
+            TERM_PROGRAM: 'WarpTerminal',
           },
           true,
         ),
@@ -327,7 +275,7 @@ describe('terminalImageRenderer', () => {
         env: {
           PATH: localBin,
           TERM: 'xterm-256color',
-          TERM_PROGRAM: 'Apple_Terminal',
+          TERM_PROGRAM: 'WarpTerminal',
         },
         stdoutIsTTY: true,
       });
@@ -361,7 +309,7 @@ describe('terminalImageRenderer', () => {
         env: {
           PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
           TERM: 'xterm-256color',
-          TERM_PROGRAM: 'Apple_Terminal',
+          TERM_PROGRAM: 'WarpTerminal',
         },
         stdoutIsTTY: true,
       });
@@ -395,7 +343,7 @@ describe('terminalImageRenderer', () => {
         env: {
           PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
           TERM: 'xterm-256color',
-          TERM_PROGRAM: 'Apple_Terminal',
+          TERM_PROGRAM: 'WarpTerminal',
         },
         stdoutIsTTY: true,
       });
@@ -431,7 +379,7 @@ describe('terminalImageRenderer', () => {
         env: {
           PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
           TERM: 'xterm-256color',
-          TERM_PROGRAM: 'Apple_Terminal',
+          TERM_PROGRAM: 'WarpTerminal',
         },
         stdoutIsTTY: true,
       };

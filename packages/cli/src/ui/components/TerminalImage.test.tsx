@@ -6,7 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { Static, Text } from 'ink';
+import { Static } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import {
@@ -87,32 +87,6 @@ describe('TerminalImage', () => {
 
     expect(lastFrame()).toContain('▀▀');
     expect(lastFrame()).toContain('▄▄');
-  });
-
-  it('emits direct Kitty placement inline and reserves its rows', () => {
-    const sequence = '\x1b_Ga=T,f=100,q=2,C=1,c=4,r=2;payload\x1b\\';
-    const { stdout } = renderImage({
-      kind: 'kitty-direct',
-      sequence,
-      rows: 2,
-    });
-
-    const directFrame = stdout.frames.find((frame) => frame.includes(sequence));
-    expect(Buffer.from(directFrame ?? '').toString('hex')).toBe(
-      Buffer.from(`${sequence}\n\n`).toString('hex'),
-    );
-  });
-
-  it('keeps terminal controls opt-in for ordinary text', () => {
-    const sequence = '\x1b_Ga=T,f=100;payload\x1b\\';
-    const { stdout } = render(
-      <Static items={[sequence]}>
-        {(item) => <Text key="plain">{item}safe</Text>}
-      </Static>,
-    );
-
-    expect(stdout.frames.join('')).not.toContain(sequence);
-    expect(stdout.frames.join('')).toContain('safe');
   });
 
   it('shows a readable fallback when no renderer is available', () => {

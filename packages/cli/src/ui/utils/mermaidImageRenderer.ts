@@ -285,10 +285,7 @@ export function encodeKittyImage(
   widthCells: number,
   rows: number,
 ): string {
-  return encodeKittyImageCommand(
-    png,
-    `a=T,f=100,q=2,C=1,c=${widthCells},r=${rows}`,
-  );
+  return encodeKittyImageCommand(png, `a=T,f=100,c=${widthCells},r=${rows}`);
 }
 
 export function encodeKittyVirtualImage(

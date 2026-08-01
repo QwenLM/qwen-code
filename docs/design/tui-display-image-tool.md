@@ -35,16 +35,12 @@ component. The component revalidates the path against the current workspace
 before reading it. Rendering is prepared during the component's first render
 because completed tool rows enter Ink's append-only `Static` region
 immediately; an asynchronous state update would be dropped there.
-Kitty and Ghostty use the existing virtual-image and Unicode-placeholder
-approach already used for Mermaid diagrams. Warp uses the Kitty protocol's
-direct `a=T` placement because it supports the base protocol but not the
-placeholder extension. The direct command sets `C=1`, so the terminal does not
-move Ink's cursor, and an opt-in Ink text node emits the trusted command at the
-image's exact position while ordinary text continues to strip terminal control
-sequences. Other terminals try `chafa` with symbol output. `chafa` receives
-only the same allowlisted environment used by the Mermaid renderer, so API
-credentials are not forwarded. If neither path is available, the TUI shows a
-bounded text fallback naming the image.
+Kitty-compatible terminals use the existing virtual-image and
+Unicode-placeholder approach already used for Mermaid diagrams. Other
+terminals try `chafa` with symbol output. `chafa` receives only the same
+allowlisted environment used by the Mermaid renderer, so API credentials are
+not forwarded. If neither path is available, the TUI shows a bounded text
+fallback naming the image.
 
 Previews are capped at 72 columns and 24 rows, then reduced further to fit the
 available terminal space. An 8-by-16-pixel terminal cell estimate provides a
@@ -62,11 +58,14 @@ Bare mode keeps its existing minimal tool set.
 
 ## Compatibility
 
-The first version supports PNG only. Kitty and Ghostty use virtual native image
-placement; Warp uses direct native Kitty placement on macOS and Linux without
-Unicode placeholders. Direct iTerm2 placement remains excluded. Warp on
-Windows, Warp sessions inside tmux or SSH, iTerm2, and terminals without a
-native path render through `chafa` when it is installed.
+The first version supports PNG only. Kitty and Ghostty use native image
+placement. Warp is intentionally excluded because its Kitty support does not
+include the Unicode-placeholder extension used by this renderer, while direct
+placement drifts away from Ink content during scrollback and terminal reflow.
+Direct iTerm2 placement is also excluded because its inline image protocol is
+cursor-positioned and the existing asynchronous Ink path already treats it as
+unsafe. Warp, iTerm2, tmux, SSH, and terminals without a native path can still
+render through `chafa` when it is installed.
 
 ## Security and persistence
 
@@ -76,7 +75,5 @@ The renderer treats restored `resultDisplay` data as untrusted and repeats this
 check. Persisted sessions contain only the path and MIME type; if the file no
 longer exists, restore degrades to a text notice.
 
-Raw terminal output is generated only by the trusted renderer. Ink's direct
-terminal-control path is opt-in on the image component, so model-controlled
-strings cannot use it. Model-controlled strings and file contents are never
-written directly to the terminal.
+Raw terminal output is generated only by the trusted renderer. Model-controlled
+strings and file contents are never written directly to the terminal.
