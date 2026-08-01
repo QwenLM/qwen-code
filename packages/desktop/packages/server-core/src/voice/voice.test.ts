@@ -266,6 +266,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '0.0.0.0',
       '169.254.169.254',
       '100.100.100.200',
+      '[::6464:64c8]',
       '[::]',
       '[::ffff:127.0.0.1]',
       '[::ffff:7f00:1]',
@@ -299,6 +300,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '::ffff:127.0.0.1',
       '::ffff:7f00:1',
       '::a9fe:a9fe',
+      '::6464:64c8',
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(

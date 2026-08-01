@@ -308,6 +308,79 @@ describe('resolveDesktopVoiceConfig', () => {
     ).rejects.toThrow("Voice model 'qwen3-asr-flash' requires PRIVATE_ASR_KEY")
   })
 
+  it('reports an exact model provider without a baseUrl', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { PRIVATE_ASR_KEY: 'settings-key' },
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      envKey: 'PRIVATE_ASR_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' does not define a baseUrl",
+    )
+  })
+
+  it('reports an invalid baseUrl for an exact model provider', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { PRIVATE_ASR_KEY: 'settings-key' },
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl:
+                        'http://user:pass@voice.internal.example/v1',
+                      envKey: 'PRIVATE_ASR_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
+  })
+
+  it('reports an exact model provider without an envKey', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl:
+                        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' does not define an envKey",
+    )
+  })
+
   it('merges trusted settings scopes with system override precedence', async () => {
     const defaultUrl = 'http://voice.default.internal.example/v1'
     const userUrl = 'http://voice.user.internal.example/v1'
