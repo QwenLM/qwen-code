@@ -50,6 +50,7 @@ describe('reviewCommand', () => {
       'agent-prompt',
       'build-test',
       'base-tree',
+      'test-delta',
       'script-lint',
       'resolve-anchors',
       'check-coverage',
