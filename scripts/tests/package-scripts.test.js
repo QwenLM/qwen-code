@@ -543,25 +543,31 @@ describe('package scripts', () => {
     );
     const reviewJob = getWorkflowJob(workflow, 'review-address');
 
+    const issueVerification = getWorkflowStep(
+      getWorkflowJob(workflow, 'issue-autofix-verify'),
+      'Verification gate',
+    );
+    expect(issueVerification).toContain(
+      'npm run test --workspace "${p}" --if-present -- --changed "${base_oid}" --passWithNoTests',
+    );
+
     for (const verificationBody of [
-      getWorkflowStep(
-        getWorkflowJob(workflow, 'issue-autofix'),
-        'Verification gate',
-      ),
+      issueVerification,
       reviewVerificationRunner,
     ]) {
-      expect(verificationBody).toContain(
-        'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
-      );
       expect(verificationBody).toContain(
         'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
       );
       expect(verificationBody).toContain('pkg.scripts?.test');
-      expect(verificationBody).toContain('!= *vitest*');
       expect(verificationBody).not.toContain(
         'npm run test --workspace "${p}" --if-present\n',
       );
     }
+    expect(issueVerification).toContain('== *vitest*');
+    expect(reviewVerificationRunner).toContain('!= *vitest*');
+    expect(reviewVerificationRunner).toContain(
+      'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
+    );
 
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
       'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
