@@ -6390,6 +6390,7 @@ export class Session implements SessionContext {
     );
     // Advance the queue when the transport settles OR when the caller's
     // signal aborts — an orphaned RPC must not wedge later requests.
+    let abortListener: (() => void) | undefined;
     const tail = Promise.race([
       transportRequest.then(
         () => undefined,
@@ -6397,9 +6398,12 @@ export class Session implements SessionContext {
       ),
       new Promise<void>((resolve) => {
         if (signal.aborted) return resolve();
-        signal.addEventListener('abort', () => resolve(), { once: true });
+        abortListener = () => resolve();
+        signal.addEventListener('abort', abortListener, { once: true });
       }),
-    ]);
+    ]).finally(() => {
+      if (abortListener) signal.removeEventListener('abort', abortListener);
+    });
     permissionRequestTails.set(this.client, tail);
     return requestPermissionWithAbort(
       { requestPermission: () => transportRequest },

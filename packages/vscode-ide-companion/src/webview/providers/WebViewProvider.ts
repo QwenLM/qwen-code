@@ -556,6 +556,7 @@ export class WebViewProvider {
             if (message.type !== 'permissionResponse') {
               return;
             }
+            if (!this.pendingPermissionResolve) return;
 
             const optionId = message.data.optionId || '';
 

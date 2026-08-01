@@ -359,6 +359,8 @@ export class WorkflowRunRegistry {
     const seenSources = new Set<string>();
     const onWaiting = (event: AgentApprovalRequestEvent) => {
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
+      // Re-emission of an already-settled call: respond is idempotent via
+      // the runtime's responded set, so silently dropping it is safe.
       if (seenSources.has(sourceKey)) return;
       seenSources.add(sourceKey);
       const parked = this.parkPendingApproval(runId, event);

@@ -437,6 +437,15 @@ export class PermissionController extends BaseController {
       );
       return;
     }
+    const inputFormat = this.context.config.getInputFormat?.();
+    if (inputFormat !== InputFormat.STREAM_JSON) {
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      return;
+    }
     const signal = AbortSignal.any([this.context.abortSignal, approvalSignal]);
     try {
       const response = await this.sendControlRequest(
