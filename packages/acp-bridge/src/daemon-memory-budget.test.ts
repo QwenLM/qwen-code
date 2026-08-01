@@ -126,6 +126,15 @@ describe('resolveDaemonMemoryBudget', () => {
       TypeError,
     );
   });
+
+  it('reports the constrained source through the seam', () => {
+    const budget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 4_096,
+      availableMemorySource: 'constrained',
+    });
+    expect(budget.availableMemorySource).toBe('constrained');
+    expect(budget.availableMemoryMb).toBe(4_096);
+  });
 });
 
 describe('normalizeMemoryBudgetMb', () => {

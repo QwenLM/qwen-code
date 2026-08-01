@@ -6,9 +6,11 @@
 
 import os from 'node:os';
 
-// Mirrored from the inline constants in spawnChannel.ts:getAcpMemoryArgs().
-// If those change, update these to match (the import direction is blocked by
-// the fast-path bundle closure check; reversing it is tracked as follow-up).
+// Mirrored from the inline literals in spawnChannel.ts:getAcpMemoryArgs()
+// (only DEFAULT_MEMORY_BUDGET_FRACTION and MAX_CHILD_HEAP_MB have counterparts
+// there; the remaining constants are new to this module). If those change,
+// update these to match. The import direction is blocked by the fast-path
+// bundle closure check; reversing it is tracked as follow-up.
 export const DEFAULT_MEMORY_BUDGET_FRACTION = 0.5;
 export const MIN_MEMORY_BUDGET_MB = 1_024;
 export const MAX_MEMORY_BUDGET_MB = 1_048_576;
@@ -182,12 +184,17 @@ export function resolveDaemonMemoryBudget(
     budgetMb?: number;
     /** Test seam: bypasses detection so the arithmetic is pure. */
     availableMemoryMb?: number;
+    /** Paired with availableMemoryMb; defaults to 'host'. */
+    availableMemorySource?: AvailableMemorySource;
   } = {},
 ): DaemonMemoryBudget {
   const detected =
     input.availableMemoryMb === undefined
       ? detectAvailableMemoryMb()
-      : { memoryMb: input.availableMemoryMb, source: 'host' as const };
+      : {
+          memoryMb: input.availableMemoryMb,
+          source: input.availableMemorySource ?? ('host' as const),
+        };
   const availableMemoryMb = detected.memoryMb;
 
   const configuredBudgetMb =

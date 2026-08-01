@@ -640,6 +640,7 @@ export interface DaemonStatusReport {
         rootReserveMb: number;
         childPoolMb: number;
         minChildHeapMb: number;
+        maxChildHeapMb: number;
         legacyChildCeilingMb: number;
       };
     } | null;

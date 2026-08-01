@@ -18,6 +18,7 @@ import type {
   BridgeDaemonStatusSnapshot,
 } from './acp-session-bridge.js';
 import {
+  MAX_CHILD_HEAP_MB,
   MIN_CHILD_HEAP_MB,
   recommendedChildShareMb,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
@@ -207,6 +208,7 @@ interface DaemonStatusMemoryLimits {
     rootReserveMb: number;
     childPoolMb: number;
     minChildHeapMb: number;
+    maxChildHeapMb: number;
     /**
      * A conservative model of the ceiling an ACP child receives today, with no
      * budget involved. Re-derived rather than observed, so it can sit below
@@ -429,17 +431,16 @@ export async function buildDaemonStatusResponse(
   const aggregatedChannelLive = workspaceSnapshots.some(
     (item) => item.snapshot.channelLive,
   );
-  // Count what actually holds a process, not what is merely active-state. A
-  // workspace mid-drain, mid-replacement, or blocked still holds a live ACP
-  // child while `list()` (active-state only) drops it, which would under-report
-  // live children in exactly the window an admission policy must not treat as
-  // free capacity. `listManaged()` is the process-holding set; `listEntries()`
-  // is the registration count. Registered-but-dormant workspaces still have no
-  // live child, which is why the registered count remains unsafe to divide by.
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Resolved only when a budget is reported, since nothing else consumes them.
+    // Count what actually holds a process, not what is merely active-state. A
+    // workspace mid-drain, mid-replacement, or blocked still holds a live ACP
+    // child while `list()` (active-state only) drops it, which would under-report
+    // live children in exactly the window an admission policy must not treat as
+    // free capacity. `listManaged()` is the process-holding set; `listEntries()`
+    // is the registration count. Registered-but-dormant workspaces still have no
+    // live child, which is why the registered count remains unsafe to divide by.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
     const activeAcpChildCount = managedRuntimes
       ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())
@@ -623,6 +624,7 @@ export async function buildDaemonStatusResponse(
               rootReserveMb: memoryBudget.rootReserveMb,
               childPoolMb: memoryBudget.childPoolMb,
               minChildHeapMb: MIN_CHILD_HEAP_MB,
+              maxChildHeapMb: MAX_CHILD_HEAP_MB,
               legacyChildCeilingMb: memoryBudget.legacyChildCeilingMb,
             },
           }

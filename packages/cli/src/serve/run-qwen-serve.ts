@@ -2035,6 +2035,8 @@ async function runQwenServeImpl(
   );
   const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
   const rawWorkspace = rawWorkspaces[0]!;
+  // daemonMemoryBudget is assigned after construction, once the budget is
+  // resolved near the end of this function.
   const opts: ServeOptions = {
     ...optsIn,
     token,

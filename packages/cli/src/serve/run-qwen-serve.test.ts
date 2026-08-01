@@ -467,6 +467,17 @@ const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
 const mockChannelWorkerEnabledState = vi.hoisted(() => ({
   value: undefined as boolean | undefined,
 }));
+const mockTotalMemBytes = vi.hoisted(() => ({
+  value: undefined as number | undefined,
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    totalmem: () => mockTotalMemBytes.value ?? actual.totalmem(),
+  };
+});
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -1916,6 +1927,7 @@ describe('runQwenServe memory budget', () => {
               rootReserveMb: number;
               childPoolMb: number;
               minChildHeapMb: number;
+              maxChildHeapMb: number;
               legacyChildCeilingMb: number;
             };
           } | null;
@@ -2030,6 +2042,14 @@ describe('runQwenServe memory budget', () => {
   it('writes no stderr line for a derived budget on a sufficient host', async () => {
     // The gate must stay conditional: a derived budget on a host above the
     // minimum prints nothing. If the gate were unconditional this test fails.
+    // Pin host memory so the test is independent of the runner's cgroup.
+    mockTotalMemBytes.value = 32_768 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
     const dir = makeTmpDir();
     const stderrWrites: string[] = [];
     const spy = vi
@@ -2054,6 +2074,8 @@ describe('runQwenServe memory budget', () => {
       expect(stderrWrites.join('')).not.toContain('memory budget');
     } finally {
       spy.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
       await handle.close();
     }
   });
