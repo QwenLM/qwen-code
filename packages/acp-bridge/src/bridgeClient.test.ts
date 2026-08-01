@@ -2534,7 +2534,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:drain',
       activePromptId: 'prompt-drain',
-      midTurnMessageQueue: [{ text: 'first' }, { text: 'second' }],
+      midTurnMessageQueue: [
+        { messageId: 'mid-1', text: 'first' },
+        { messageId: 'mid-2', text: 'second' },
+      ],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -2554,7 +2557,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish.mock.calls[0][0]).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-drain',
-      data: { sessionId: 'sess:drain', messages: ['first', 'second'] },
+      data: {
+        sessionId: 'sess:drain',
+        messages: ['first', 'second'],
+        messageIds: ['mid-1', 'mid-2'],
+      },
     });
     // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
     // frame, so every consumer reconciles it.
@@ -2570,9 +2577,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:multi',
       activePromptId: 'prompt-multi',
       midTurnMessageQueue: [
-        { text: 'a', originatorClientId: 'client-1' },
-        { text: 'b', originatorClientId: 'client-2' },
-        { text: 'c', originatorClientId: 'client-1' },
+        { messageId: 'mid-a', text: 'a', originatorClientId: 'client-1' },
+        { messageId: 'mid-b', text: 'b', originatorClientId: 'client-2' },
+        { messageId: 'mid-c', text: 'c', originatorClientId: 'client-1' },
       ],
       events: { publish },
     };
@@ -2596,13 +2603,21 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(c1).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['a', 'c'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['a', 'c'],
+        messageIds: ['mid-a', 'mid-c'],
+      },
       originatorClientId: 'client-1',
     });
     expect(c2).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['b'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['b'],
+        messageIds: ['mid-b'],
+      },
       originatorClientId: 'client-2',
     });
   });
@@ -2619,7 +2634,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     try {
       const entry = {
         sessionId: 'sess:closed',
-        midTurnMessageQueue: [{ text: 'still-delivered' }],
+        midTurnMessageQueue: [
+          { messageId: 'mid-delivered', text: 'still-delivered' },
+        ],
         events: { publish },
       };
       const client = makeClientWithEntry('sess:closed', entry);

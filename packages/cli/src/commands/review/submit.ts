@@ -47,6 +47,7 @@ import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getCliVersion } from '../../utils/version.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -276,7 +277,10 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
  * handed over beside the comments, and a number beside a thing is a number that can
  * disagree with it.
  */
-function compose(payload: ReviewPayload): {
+function compose(
+  payload: ReviewPayload,
+  cliVersion: string,
+): {
   event: string;
   body: string;
   cappedBy: string[];
@@ -292,15 +296,28 @@ function compose(payload: ReviewPayload): {
   // a non-function value reaching `bilingualFromPlan` throws and drops the Chinese
   // fold through the fail-safe — the exact regression this PR closes. compose-review's
   // own CLI strips both for the same reason.
-  const { env: _dropped, prBodyFetcher: _droppedFetcher, ...rest } = state;
+  // `draftedComments` joins them: the ledger marker's contents are the comments
+  // this submission actually carries, taken from the payload below — not an
+  // assertion a caller's state JSON gets to make about what it reviewed.
+  const {
+    env: _dropped,
+    prBodyFetcher: _droppedFetcher,
+    draftedComments: _droppedDrafted,
+    ...rest
+  } = state;
   void _dropped;
   void _droppedFetcher;
+  void _droppedDrafted;
 
-  const r = composeReview({
-    ...rest,
-    criticalsInline,
-    suggestionsInline,
-  });
+  const r = composeReview(
+    {
+      ...rest,
+      criticalsInline,
+      suggestionsInline,
+      draftedComments: comments,
+    },
+    cliVersion,
+  );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
 
@@ -430,7 +447,7 @@ function isRepo(repo: string): boolean {
   );
 }
 
-export function runSubmit(args: SubmitArgs): void {
+export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
@@ -494,7 +511,7 @@ export function runSubmit(args: SubmitArgs): void {
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload));
+    ({ event, body, cappedBy } = compose(payload, cliVersion));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -637,7 +654,7 @@ export const submitCommand: CommandModule = {
         default: false,
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
-  handler: (argv) => {
-    runSubmit(argv as unknown as SubmitArgs);
+  handler: async (argv) => {
+    runSubmit(argv as unknown as SubmitArgs, await getCliVersion());
   },
 };
