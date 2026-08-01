@@ -136,6 +136,34 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
   })
 
+  it('normalizes a scheme-less DashScope exact model provider', async () => {
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { DASHSCOPE_API_KEY: 'settings-key' },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: 'dashscope.aliyuncs.com/compatible-mode',
+                    envKey: 'DASHSCOPE_API_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'settings-key',
+    })
+  })
+
   it('uses an exactly allowlisted private provider from qwen settings', async () => {
     const baseUrl = 'http://voice.region-a.internal.example/v1'
     const config = await resolveDesktopVoiceConfig({

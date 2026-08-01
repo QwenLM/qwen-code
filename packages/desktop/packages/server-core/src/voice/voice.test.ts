@@ -72,6 +72,7 @@ describe('net-guard host classification', () => {
     expect(isPrivateNetworkIp('::192.168.1.1')).toBe(true)
     expect(isPrivateNetworkIp('::a00:1')).toBe(true)
     expect(isPrivateNetworkIp('::a9fe:a9fe')).toBe(true)
+    expect(isPrivateNetworkIp('::5db8')).toBe(true)
     expect(isPrivateNetworkIp('8.8.8.8')).toBe(false)
     expect(isPrivateNetworkIp('::5db8:d822')).toBe(false)
     expect(isPrivateNetworkIp('127.0.0.1')).toBe(false) // loopback, not private
@@ -268,6 +269,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '100.100.100.200',
       '[::6464:64c8]',
       '[::]',
+      '[::5db8]',
       '[::ffff:127.0.0.1]',
       '[::ffff:7f00:1]',
       '[::a9fe:a9fe]',
