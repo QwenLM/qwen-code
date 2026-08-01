@@ -23,6 +23,8 @@ export interface ExecuteToolCallOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
+  /** Lets a larger provider batch commit presentation metadata atomically. */
+  deferDeferredToolPresentationCommit?: boolean;
 }
 
 /**
@@ -43,13 +45,17 @@ export async function executeToolCall(
           : config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
+        let accepted: boolean | void = undefined;
         if (options.onAllToolCallsComplete) {
-          await options.onAllToolCallsComplete(completedToolCalls);
+          accepted = await options.onAllToolCallsComplete(completedToolCalls);
         }
         resolve(completedToolCalls[0].response);
+        return accepted;
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,
+      deferDeferredToolPresentationCommit:
+        options.deferDeferredToolPresentationCommit,
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })

@@ -541,6 +541,9 @@ export class QwenLogger {
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          ...(event['tool.provider_name']
+            ? { 'tool.provider_name': event['tool.provider_name'] }
+            : {}),
           permission: event.decision,
           status: event.status,
           tool_type: event.tool_type,

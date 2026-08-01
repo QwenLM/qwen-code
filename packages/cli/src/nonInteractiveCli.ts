@@ -10,6 +10,7 @@ import type {
   Config,
   CronJob,
   CronScheduler,
+  DeferredToolPresentation,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
@@ -1228,6 +1229,7 @@ export async function runNonInteractive(
         const executedRequests = new Set<ToolCallRequestInfo>(
           respondedRequests,
         );
+        const deferredToolPresentations: DeferredToolPresentation[] = [];
 
         // Partition this batch by concurrency safety, then run each
         // partition. Tools that are safe to run concurrently (agent
@@ -1329,6 +1331,7 @@ export async function runNonInteractive(
                   statusByResponse.set(call.response, call.status);
                 }
               },
+              deferDeferredToolPresentationCommit: true,
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -1614,6 +1617,14 @@ export async function runNonInteractive(
         for (let index = 0; index < orderedResponses.length; index++) {
           const { request, response } = orderedResponses[index];
           const finalizedParts = finalized[index].responseParts;
+          const responseChanged =
+            finalizedParts.length !== response.responseParts.length ||
+            finalizedParts.some(
+              (part, partIndex) => part !== response.responseParts[partIndex],
+            );
+          const deliveredPresentations = responseChanged
+            ? undefined
+            : response.deferredToolPresentations;
           toolResponseParts.push(...finalizedParts);
           chatRecordingService?.recordToolResult?.(finalizedParts, {
             callId: request.callId,
@@ -1623,7 +1634,15 @@ export async function runNonInteractive(
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
+            deferredToolPresentations: deliveredPresentations,
           });
+          if (!response.error && deliveredPresentations) {
+            deferredToolPresentations.push(...deliveredPresentations);
+          }
+        }
+
+        for (const presentation of deferredToolPresentations) {
+          config.getToolRegistry().markProxySchemaPresented(presentation);
         }
 
         return {

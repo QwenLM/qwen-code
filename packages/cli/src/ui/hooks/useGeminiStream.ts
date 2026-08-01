@@ -29,6 +29,7 @@ import {
   type GeminiErrorEventValue,
   type ActiveGoal,
   type SteerInput,
+  type DeferredToolPresentation,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -590,10 +591,11 @@ export const useGeminiStream = (
           addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
-          await handleCompletedTools(
+          return handleCompletedTools(
             completedToolCallsFromScheduler as TrackedToolCall[],
           );
         }
+        return false;
       },
       config,
       getPreferredEditor,
@@ -2663,6 +2665,8 @@ export const useGeminiStream = (
       metadata?: {
         notificationDisplayText?: string;
         todoWorkChainId?: string;
+        /** Fires after the next model request accepts the prepared context. */
+        onContextAccepted?: () => void;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         steerInput?: SteerInput;
@@ -2893,6 +2897,14 @@ export const useGeminiStream = (
         }
 
         let cleanupReviewLease = false;
+        // Stream rejection may be observed both while iterating and during
+        // post-processing. Report it once and suppress a later onDelivered.
+        let deliveryFailed = false;
+        const reportDeliveryFailure = () => {
+          if (deliveryFailed) return;
+          deliveryFailed = true;
+          metadata?.onDeliveryFailed?.();
+        };
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2927,9 +2939,33 @@ export const useGeminiStream = (
             prompt_id!,
             sendOptions,
           );
+          const acknowledgedStream = (async function* () {
+            let accepted = false;
+            let sawEvent = false;
+            for await (const event of stream) {
+              sawEvent = true;
+              const rejected =
+                event.type === ServerGeminiEventType.Error ||
+                event.type === ServerGeminiEventType.UserCancelled;
+              // Error and cancellation events are not evidence that the model
+              // accepted the request context.
+              if (rejected) {
+                reportDeliveryFailure();
+              } else if (!accepted) {
+                accepted = true;
+                metadata?.onContextAccepted?.();
+              }
+              yield event;
+            }
+            // A cleanly closed empty iterable still provides no evidence that
+            // the model received schema-bearing context, so fail closed.
+            if (!accepted && !sawEvent) {
+              reportDeliveryFailure();
+            }
+          })();
 
           const processingStatus = await processGeminiStreamEvents(
-            stream,
+            acknowledgedStream,
             userMessageTimestamp,
             abortSignal,
           );
@@ -2938,7 +2974,7 @@ export const useGeminiStream = (
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
-            metadata?.onDeliveryFailed?.();
+            reportDeliveryFailure();
             return;
           }
 
@@ -3008,8 +3044,8 @@ export const useGeminiStream = (
           }
 
           if (lastPromptErroredRef.current) {
-            metadata?.onDeliveryFailed?.();
-          } else {
+            reportDeliveryFailure();
+          } else if (!deliveryFailed) {
             metadata?.onDelivered?.();
           }
 
@@ -3045,7 +3081,7 @@ export const useGeminiStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          reportDeliveryFailure();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -3303,7 +3339,7 @@ export const useGeminiStream = (
       }
 
       if (activeModelStreamsRef.current > 0) {
-        return;
+        return false;
       }
 
       // Finalize any client-initiated tools as soon as they are done.
@@ -3384,7 +3420,7 @@ export const useGeminiStream = (
       }
 
       if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
-        return;
+        return false;
       }
 
       type ReadyToolResponse = {
@@ -3442,17 +3478,37 @@ export const useGeminiStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      const deliveredDeferredToolPresentations: DeferredToolPresentation[] = [];
       orderedResponses.forEach(({ request, response, status }, index) => {
-        config
-          .getChatRecordingService?.()
-          ?.recordToolResult?.(finalizedResponses[index].responseParts, {
-            callId: request.callId,
-            status,
-            resultDisplay: response.resultDisplay,
-            error: response.error,
-            errorType: response.errorType,
-          });
+        const finalizedParts = finalizedResponses[index].responseParts;
+        const responseChanged =
+          finalizedParts.length !== response.responseParts.length ||
+          finalizedParts.some(
+            (part, partIndex) => part !== response.responseParts[partIndex],
+          );
+        const deferredToolPresentations =
+          status === 'success' && !responseChanged
+            ? response.deferredToolPresentations
+            : undefined;
+        config.getChatRecordingService?.()?.recordToolResult?.(finalizedParts, {
+          callId: request.callId,
+          status,
+          resultDisplay: response.resultDisplay,
+          error: response.error,
+          errorType: response.errorType,
+          deferredToolPresentations,
+        });
+        if (deferredToolPresentations) {
+          deliveredDeferredToolPresentations.push(...deferredToolPresentations);
+        }
       });
+
+      const commitDeferredToolPresentations = () => {
+        const toolRegistry = config.getToolRegistry();
+        for (const presentation of deliveredDeferredToolPresentations) {
+          toolRegistry.markProxySchemaPresented(presentation);
+        }
+      };
 
       if (
         turnCancelledRef.current ||
@@ -3461,7 +3517,7 @@ export const useGeminiStream = (
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
-        return;
+        return false;
       }
 
       // If all the tools were cancelled, don't submit a response to Gemini.
@@ -3486,7 +3542,7 @@ export const useGeminiStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
-        return;
+        return false;
       }
 
       const callIdsToMarkAsSubmitted = geminiTools.map(
@@ -3631,7 +3687,7 @@ export const useGeminiStream = (
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
-        return;
+        return false;
       }
 
       const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
@@ -3651,7 +3707,10 @@ export const useGeminiStream = (
           );
         });
       if (backgroundLaunchExhaustedCapacity) {
-        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        if (geminiClient) {
+          geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+          commitDeferredToolPresentations();
+        }
         return;
       }
 
@@ -3691,14 +3750,34 @@ export const useGeminiStream = (
         abortControllerRef.current?.signal.aborted
       ) {
         drainedSteer?.restore();
-        return;
+        return false;
       }
 
+      let settled = false;
+      let settleAcceptance: (accepted: boolean) => void = () => {};
+      const acceptance = new Promise<boolean>((resolve) => {
+        settleAcceptance = (accepted) => {
+          if (settled) return;
+          settled = true;
+          resolve(accepted);
+        };
+      });
       void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: drainedSteer,
-        onDelivered: drainedSteer?.accept,
-        onDeliveryFailed: drainedSteer?.restore,
-      });
+        onContextAccepted: () => {
+          drainedSteer?.accept();
+          commitDeferredToolPresentations();
+          settleAcceptance(true);
+        },
+        onDeliveryFailed: () => {
+          drainedSteer?.restore();
+          settleAcceptance(false);
+        },
+      }).then(
+        () => settleAcceptance(false),
+        () => settleAcceptance(false),
+      );
+      return acceptance;
     },
     [
       submitQuery,

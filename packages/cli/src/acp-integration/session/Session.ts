@@ -39,6 +39,7 @@ import type {
   ToolCallResponseInfo,
   LoopTickResult,
   ToolArtifact,
+  DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
@@ -55,6 +56,10 @@ import {
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
+  formatPermissionToolIdentity,
+  normalizeDeferredToolCallRequest,
+  providerToolName,
+  withPermissionToolIdentity,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -366,6 +371,7 @@ type RunToolResult = {
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  deferredToolPresentations?: DeferredToolPresentation[];
 };
 
 type MidTurnDrainResult = {
@@ -1277,6 +1283,10 @@ export class Session implements SessionContext {
   // background loops, so keep this with the session instead of a single
   // runToolCalls invocation.
   private readonly duplicateProviderToolCallResponseIds = new Set<string>();
+  private readonly pendingDeferredToolPresentationsByMessage = new WeakMap<
+    Content,
+    readonly DeferredToolPresentation[]
+  >();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -2074,7 +2084,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const geminiClient = this.config.getGeminiClient()!;
+    const chat = geminiClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -2088,7 +2099,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
@@ -2151,10 +2162,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getGeminiClient()!.setHistory(structuredClone(history));
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -3023,6 +3031,9 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
+                  this.commitDeferredToolPresentationsForDeliveredMessage(
+                    nextMessage,
+                  );
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(channelDeliveryCapture);
@@ -3981,6 +3992,7 @@ export class Session implements SessionContext {
         }
 
         const responseStream = sendResult.responseStream;
+        this.commitDeferredToolPresentationsForDeliveredMessage(nextMessage);
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.channelDeliveryCapture,
@@ -4500,7 +4512,7 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const responseStream = await this.#getCurrentChat().sendMessageStream(
+    const rawResponseStream = await this.#getCurrentChat().sendMessageStream(
       options.getModelOverride?.() ??
         options.modelOverride ??
         this.config.getModel(),
@@ -4512,6 +4524,15 @@ export class Session implements SessionContext {
       },
       promptId,
     );
+    const toolRegistry = this.config.getToolRegistry();
+    const responseStream = (async function* () {
+      for await (const event of rawResponseStream) {
+        if (event.type === StreamEventType.COMPRESSED) {
+          toolRegistry.clearProxySchemaPresentations();
+        }
+        yield event;
+      }
+    })();
     return { responseStream };
   }
 
@@ -4558,18 +4579,19 @@ export class Session implements SessionContext {
           { preserveFallbackOnAbort: true },
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
-    this.#preserveUnsentMessageHistory(
-      {
-        role: 'user',
-        parts: [
-          ...toolRun.parts,
-          ...(toolRun.loopDetected
-            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
-            : []),
-          ...midTurnParts,
-        ],
-      },
-      true,
+    const message: Content = {
+      role: 'user',
+      parts: [
+        ...toolRun.parts,
+        ...(toolRun.loopDetected
+          ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+          : []),
+        ...midTurnParts,
+      ],
+    };
+    this.#preserveUnsentMessageHistory(message, true);
+    this.commitDeferredToolPresentations(
+      toolRun.deferredToolPresentations ?? [],
     );
     await this.messageRewriter?.waitForPendingRewrites();
   }
@@ -4604,8 +4626,10 @@ export class Session implements SessionContext {
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
       ...drained.parts,
     ];
+    const message: Content = { role: 'user', parts };
+    this.trackDeferredToolPresentationsForMessage(message, toolRun);
     return {
-      message: { role: 'user', parts },
+      message,
       hadMidTurnUserInput,
     };
   }
@@ -5396,6 +5420,9 @@ export class Session implements SessionContext {
                   beginChannelDeliveryResponseBlock(channelDeliveryCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
+                this.commitDeferredToolPresentationsForDeliveredMessage(
+                  nextMessage,
+                );
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -5920,6 +5947,9 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            this.commitDeferredToolPresentationsForDeliveredMessage(
+              nextMessage,
+            );
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -6521,14 +6551,34 @@ export class Session implements SessionContext {
           persistedOutputFiles: record.persistedOutputFiles,
         })),
       );
+      const deliveredPresentations: DeferredToolPresentation[] = [];
       orderedRecords.forEach((record, index) => {
+        const finalizedParts = finalized[index].responseParts;
+        const responseChanged =
+          finalizedParts.length !== record.responseParts.length ||
+          finalizedParts.some(
+            (part, partIndex) => part !== record.responseParts[partIndex],
+          );
+        const recordPresentations = responseChanged
+          ? undefined
+          : record.metadata.deferredToolPresentations;
+        if (recordPresentations) {
+          deliveredPresentations.push(...recordPresentations);
+        }
         this.config
           .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+          ?.recordToolResult(finalizedParts, {
+            ...record.metadata,
+            deferredToolPresentations: recordPresentations,
+          });
       });
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
+        deferredToolPresentations:
+          deliveredPresentations.length > 0
+            ? deliveredPresentations
+            : undefined,
       };
     };
     let skippedToolCallCounter = 0;
@@ -6749,9 +6799,16 @@ export class Session implements SessionContext {
       }
     };
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const deferredToolPresentations: DeferredToolPresentation[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
         memoryWriteCandidates.push(...result.memoryWriteCandidates);
+      }
+    };
+    const collectToolResultMetadata = (result: RunToolResult): void => {
+      collectMemoryWriteCandidates(result);
+      if (result.deferredToolPresentations) {
+        deferredToolPresentations.push(...result.deferredToolPresentations);
       }
     };
     const refreshMemoryIfNeeded = async (): Promise<void> => {
@@ -6897,8 +6954,8 @@ export class Session implements SessionContext {
       return results;
     };
 
-    const parts: Part[] = [];
-    try {
+    const buildRunToolResult = async (): Promise<RunToolResult> => {
+      const parts: Part[] = [];
       for (const batch of batches) {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
@@ -6954,7 +7011,7 @@ export class Session implements SessionContext {
           let shouldStopForLoop = false;
           for (const r of results) {
             parts.push(...r.parts);
-            collectMemoryWriteCandidates(r);
+            collectToolResultMetadata(r);
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
@@ -6969,6 +7026,7 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: false,
               loopDetected: true,
               memoryWriteCandidates,
+              deferredToolPresentations,
             });
           }
           if (shouldStop) {
@@ -6981,6 +7039,7 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
+              deferredToolPresentations,
             });
           }
         } else {
@@ -6997,7 +7056,7 @@ export class Session implements SessionContext {
               onFullTurnModel,
             );
             parts.push(...r.parts);
-            collectMemoryWriteCandidates(r);
+            collectToolResultMetadata(r);
             if (r.loopDetected) {
               await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
               return await finalizeRunToolResult({
@@ -7005,6 +7064,7 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: false,
                 loopDetected: true,
                 memoryWriteCandidates,
+                deferredToolPresentations,
               });
             }
             if (r.stopAfterPermissionCancel) {
@@ -7014,6 +7074,7 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: true,
                 repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
+                deferredToolPresentations,
               });
             }
           }
@@ -7024,10 +7085,68 @@ export class Session implements SessionContext {
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
+        deferredToolPresentations,
       });
-    } finally {
+    };
+
+    let result: RunToolResult;
+    try {
+      result = await buildRunToolResult();
+    } catch (error) {
       await refreshMemoryIfNeeded();
+      throw error;
     }
+    await refreshMemoryIfNeeded();
+    return result;
+  }
+
+  private commitDeferredToolPresentations(
+    presentations: readonly DeferredToolPresentation[],
+  ): void {
+    const toolRegistry = this.config.getToolRegistry();
+    for (const presentation of presentations) {
+      toolRegistry.markProxySchemaPresented(presentation);
+    }
+  }
+
+  /**
+   * Stage proxy presentations on the exact user message that carries their
+   * function responses. A ToolSearch result only unlocks deferred_tool_call
+   * after that message is accepted into the active model history; keeping the
+   * metadata off the session-global registry until delivery prevents dropped
+   * or aborted responses from authorizing a schema the model never saw.
+   */
+  private trackDeferredToolPresentationsForMessage(
+    message: Content | null,
+    toolRun: RunToolResult,
+  ): void {
+    const presentations = toolRun.deferredToolPresentations;
+    if (!message || !presentations || presentations.length === 0) {
+      return;
+    }
+    this.pendingDeferredToolPresentationsByMessage.set(message, presentations);
+  }
+
+  /**
+   * Commit staged presentations after the associated message has crossed the
+   * active-history boundary. This preserves the same-batch rule: a batch that
+   * contains both tool_search and deferred_tool_call cannot self-authorize, but
+   * the next model turn can use the proxy once the ToolSearch response is part
+   * of history.
+   */
+  private commitDeferredToolPresentationsForDeliveredMessage(
+    message: Content | null,
+  ): void {
+    if (!message) {
+      return;
+    }
+    const presentations =
+      this.pendingDeferredToolPresentationsByMessage.get(message);
+    if (!presentations) {
+      return;
+    }
+    this.pendingDeferredToolPresentationsByMessage.delete(message);
+    this.commitDeferredToolPresentations(presentations);
   }
 
   /**
@@ -7082,6 +7201,9 @@ export class Session implements SessionContext {
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    let responseToolName = fc.name ?? 'unknown_tool';
+    let telemetryToolName = fc.name ?? '';
+    let telemetryProviderName: string | undefined;
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -7090,7 +7212,7 @@ export class Session implements SessionContext {
             : {
                 functionResponse: {
                   id: callId,
-                  name: fc.name ?? 'unknown_tool',
+                  name: responseToolName,
                   response: { error: LOOP_DETECTED_SKIP_MESSAGE },
                 },
               },
@@ -7107,6 +7229,7 @@ export class Session implements SessionContext {
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
+    let isMcpTool = false;
 
     const cleanupAgentToolResources = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
@@ -7115,30 +7238,31 @@ export class Session implements SessionContext {
       removeAgentToolAbortPropagation = undefined;
     };
 
-    const errorResponse = (error: Error) => {
+    const errorResponse = (error: Error, errorType?: ToolErrorType) => {
       const durationMs = Date.now() - startTime;
       logToolCall(this.config, {
         'event.name': 'tool_call',
         'event.timestamp': new Date().toISOString(),
         prompt_id: promptId,
-        function_name: fc.name ?? '',
+        function_name: telemetryToolName,
+        ...(telemetryProviderName
+          ? { 'tool.provider_name': telemetryProviderName }
+          : {}),
         function_args: args,
         duration_ms: durationMs,
         // An aborted signal means the call was cancelled, not a genuine error.
         status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
         success: false,
         error: error.message,
-        tool_type:
-          typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
-            ? 'mcp'
-            : 'native',
+        ...(errorType ? { error_type: errorType } : {}),
+        tool_type: isMcpTool ? 'mcp' : 'native',
       });
 
       return [
         {
           functionResponse: {
             id: callId,
-            name: fc.name ?? '',
+            name: responseToolName,
             response: { error: error.message },
           },
         },
@@ -7161,7 +7285,7 @@ export class Session implements SessionContext {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
 
-      const errorParts = errorResponse(error);
+      const errorParts = errorResponse(error, opts?.errorType);
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
@@ -7198,9 +7322,41 @@ export class Session implements SessionContext {
       });
     }
 
-    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(toolName);
+    const requestInfo: ToolCallRequestInfo = {
+      callId,
+      name: fc.name,
+      args,
+      isClientInitiated: false,
+      prompt_id: promptId,
+    };
+    const normalizedRequest = await normalizeDeferredToolCallRequest(
+      requestInfo,
+      toolRegistry,
+    );
+    if (!normalizedRequest.ok) {
+      // Failure still has three distinct identities: responses must use the
+      // provider-declared wrapper, while telemetry/retry isolation use the
+      // attempted target and recordings retain the structured error type.
+      responseToolName = normalizedRequest.providerName;
+      telemetryProviderName = normalizedRequest.providerName;
+      telemetryToolName =
+        normalizedRequest.targetName ?? normalizedRequest.providerName;
+      return earlyErrorResponse(normalizedRequest.error, telemetryToolName, {
+        recordInvalidToolParams: true,
+        errorType: normalizedRequest.errorType,
+      });
+    }
+
+    const effectiveRequest = normalizedRequest.request;
+    const toolName = effectiveRequest.name;
+    args = effectiveRequest.args;
+    responseToolName = providerToolName(effectiveRequest);
+    telemetryToolName = toolName;
+    telemetryProviderName = effectiveRequest.providerName;
+    const tool =
+      normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);
+    isMcpTool = tool instanceof DiscoveredMCPTool;
 
     if (!tool) {
       return earlyErrorResponse(
@@ -7220,6 +7376,9 @@ export class Session implements SessionContext {
       {
         'tool.call_id': callId,
         'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        ...(telemetryProviderName
+          ? { 'tool.provider_name': telemetryProviderName }
+          : {}),
         // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
         // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
         // matching daemon/ACP tool spans during the migration window.
@@ -7237,7 +7396,9 @@ export class Session implements SessionContext {
         const pm = this.config.getPermissionManager?.();
         if (pm && !(await pm.isToolEnabled(policyToolName))) {
           return earlyErrorResponse(
-            new Error(`Tool "${toolName}" is disabled.`),
+            new Error(
+              `Tool ${formatPermissionToolIdentity(effectiveRequest)} is disabled.`,
+            ),
             toolName,
           );
         }
@@ -7362,7 +7523,11 @@ export class Session implements SessionContext {
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
-              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              new Error(
+                denyMessage
+                  ? withPermissionToolIdentity(denyMessage, effectiveRequest)
+                  : `Tool ${formatPermissionToolIdentity(effectiveRequest)} is denied.`,
+              ),
               toolName,
             );
           }
@@ -7709,8 +7874,12 @@ export class Session implements SessionContext {
                 } else {
                   return earlyErrorResponse(
                     new Error(
-                      hookResult.denyMessage ||
-                        `Permission denied by hook for "${toolName}"`,
+                      hookResult.denyMessage
+                        ? withPermissionToolIdentity(
+                            hookResult.denyMessage,
+                            effectiveRequest,
+                          )
+                        : `Permission denied by hook for ${formatPermissionToolIdentity(effectiveRequest)}`,
                     ),
                     toolName,
                   );
@@ -8191,13 +8360,13 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           let responseParts = toolResult.error
             ? convertToFunctionErrorResponse(
-                toolName,
+                responseToolName,
                 callId,
                 toolResult.llmContent,
                 toolResult.error.message,
               )
             : convertToFunctionResponse(
-                toolName,
+                responseToolName,
                 callId,
                 toolResult.llmContent,
               );
@@ -8359,6 +8528,9 @@ export class Session implements SessionContext {
             'event.name': 'tool_call',
             'event.timestamp': new Date().toISOString(),
             function_name: toolName,
+            ...(telemetryProviderName
+              ? { 'tool.provider_name': telemetryProviderName }
+              : {}),
             function_args: args,
             duration_ms: durationMs,
             status,
@@ -8388,9 +8560,11 @@ export class Session implements SessionContext {
                 ? new Error(toolResult.error.message)
                 : undefined,
               errorType: toolResult.error?.type,
+              deferredToolPresentations: succeeded
+                ? toolResult.deferredToolPresentations
+                : undefined,
             },
           });
-
           spanSuccess = succeeded;
           if (succeeded && !nestedPermissionCancelled) {
             const result = responseParts.find(
@@ -8424,6 +8598,9 @@ export class Session implements SessionContext {
                     },
                   ]
                 : undefined,
+            deferredToolPresentations: succeeded
+              ? toolResult.deferredToolPresentations
+              : undefined,
           };
         } catch (e) {
           // Ensure cleanup on error

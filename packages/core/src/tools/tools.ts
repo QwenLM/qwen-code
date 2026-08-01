@@ -222,9 +222,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool, which returns the full schema in model
+     * context for a later deferred proxy call. Mirrors the `shouldDefer` field
+     * described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -485,6 +485,12 @@ export interface ToolArtifact {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+/** Binds a model-visible deferred tool name to the exact schema it displayed. */
+export interface DeferredToolPresentation {
+  name: string;
+  schemaFingerprint: string;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -525,6 +531,13 @@ export interface ToolResult {
    * underlying file, URL, or managed resource lifecycle.
    */
   artifacts?: ToolArtifact[];
+
+  /**
+   * Deferred tool schemas that this result has shown to the model and may be
+   * committed for deferred_tool_call routing after the result is accepted into
+   * the active conversation flow.
+   */
+  deferredToolPresentations?: DeferredToolPresentation[];
 
   /**
    * If this property is present, the tool call is considered a failure.

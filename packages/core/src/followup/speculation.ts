@@ -20,10 +20,10 @@ import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import {
-  canonicalToolName,
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../core/deferred-tool-call-normalization.js';
 import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
