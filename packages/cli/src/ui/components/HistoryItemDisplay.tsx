@@ -86,7 +86,7 @@ interface HistoryItemDisplayProps {
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * Full-detail mode (Ctrl+O). When true, collapse is lifted:
    * thinking blocks render expanded and tool groups force `forceExpandAll`
    * + `forceShowResult` (every tool with its full, untruncated result).
    * Default false (main view stays at the #5661 partition baseline).
@@ -213,6 +213,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'goal_state':
     case 'vision_notice':
       return 0;
     default:
@@ -508,6 +509,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           iterations={itemForDisplay.iterations}
           durationMs={itemForDisplay.durationMs}
           lastReason={itemForDisplay.lastReason}
+        />
+      )}
+      {itemForDisplay.type === 'goal_state' && (
+        <GoalStatusMessage
+          snapshot={itemForDisplay.snapshot}
+          cause={itemForDisplay.cause}
         />
       )}
     </Box>

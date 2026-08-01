@@ -84,12 +84,14 @@ const baseMetricDefinition = {
 
 const COUNTER_DEFINITIONS = {
   [TOOL_CALL_COUNT]: {
-    description: 'Counts tool calls, tagged by function name and success.',
+    description:
+      'Counts tool calls, tagged by function name and terminal status.',
     valueType: ValueType.INT,
     assign: (c: Counter) => (toolCallCounter = c),
     attributes: {} as {
       function_name: string;
       success: boolean;
+      status?: 'success' | 'error' | 'cancelled';
       decision?: 'accept' | 'reject' | 'modify' | 'auto_accept';
       tool_type?: 'native' | 'mcp';
     },
@@ -591,6 +593,7 @@ export function recordToolCallMetrics(
   const metricAttributes: Attributes = {
     ...baseMetricDefinition.getCommonAttributes(config),
     ...attributes,
+    status: attributes.status ?? (attributes.success ? 'success' : 'error'),
   };
   toolCallCounter.add(1, metricAttributes);
   toolCallLatencyHistogram.record(durationMs, {

@@ -4,6 +4,7 @@ import {
   getArtifactFormatIcon,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
+  isDownloadableReviewFilePath,
   isRenderedFilePath,
   type TurnOutputFileChange,
 } from './TurnOutputs';
@@ -93,6 +94,13 @@ describe('TurnOutputs helpers', () => {
     expect(isRenderedFilePath('screenshots/result.PNG')).toBe(true);
     expect(isRenderedFilePath('diagram.svg')).toBe(false);
     expect(isRenderedFilePath('source.ts')).toBe(false);
+  });
+
+  it('enables review downloads for HTML and Markdown files', () => {
+    expect(isDownloadableReviewFilePath('REPORT.HTML')).toBe(true);
+    expect(isDownloadableReviewFilePath('notes.markdown')).toBe(true);
+    expect(isDownloadableReviewFilePath('screenshots/result.PNG')).toBe(false);
+    expect(isDownloadableReviewFilePath('source.ts')).toBe(false);
   });
 
   it.each([

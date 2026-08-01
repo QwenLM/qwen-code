@@ -1,7 +1,9 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import {
+  DownloadIcon,
   FileAudioIcon,
   FileCode2Icon,
   FileIcon,
@@ -12,14 +14,17 @@ import {
   NotebookTabsIcon,
   type LucideIcon,
 } from 'lucide-react';
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   formatArtifactSize,
+  downloadWorkspaceFile,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
+  normalizePath,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -61,7 +66,7 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
-export type TurnOutputOpenRequest =
+export type TurnOutputOpenRequest = (
   | {
       id: 'review';
       kind: 'review';
@@ -99,7 +104,11 @@ export type TurnOutputOpenRequest =
       tool: ACPToolCall;
       sessionId: string;
       workspaceCwd?: string;
-    };
+    }
+) & {
+  /** Session whose transcript produced this output. */
+  sourceSessionId?: string;
+};
 
 interface TurnOutputsProps {
   turnId: string;
@@ -114,6 +123,7 @@ interface TurnOutputsProps {
   ) => void;
   onOpenArtifact: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask: (task: TurnOutputScheduledTask) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }
 
 function TurnOutputsComponent({
@@ -126,8 +136,10 @@ function TurnOutputsComponent({
   onReviewChanges,
   onOpenArtifact,
   onOpenScheduledTask,
+  onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
+  const workspaceActions = useWorkspaceActions();
   const [showAllChanges, setShowAllChanges] = useState(false);
   if (
     changes.length === 0 &&
@@ -309,6 +321,18 @@ function TurnOutputsComponent({
           key={artifact.id}
           artifact={artifact}
           onOpen={() => openArtifact(artifact)}
+          onError={onError}
+          onDownload={
+            canDownloadArtifact(artifact)
+              ? (isCancelled) =>
+                  downloadWorkspaceFile(
+                    workspaceActions,
+                    artifact.workspacePath,
+                    artifact.mimeType,
+                    isCancelled,
+                  )
+              : undefined
+          }
         />
       ))}
 
@@ -327,13 +351,47 @@ function TurnOutputsComponent({
 function ArtifactCard({
   artifact,
   onOpen,
+  onDownload,
+  onError,
 }: {
   artifact: DaemonSessionArtifact;
   onOpen: () => void;
+  onDownload?: (isCancelled: () => boolean) => Promise<void>;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
+  const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const downloadName =
+    (artifact.workspacePath &&
+      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
+    artifact.title;
+  const handleDownload = async () => {
+    if (!onDownload || downloading) return;
+    setDownloading(true);
+    try {
+      await onDownload(() => !mountedRef.current);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      const message = t('common.downloadFailed', {
+        message: extractErrorDetail(error),
+      });
+      if (onError) onError(new Error(message, { cause: error }), message);
+      else console.error(message, error);
+    } finally {
+      setDownloading(false);
+    }
+  };
   return (
     <div className={styles.card}>
       <div className={styles.summary}>
@@ -351,6 +409,18 @@ function ArtifactCard({
           </div>
         </div>
         <div className={styles.actions}>
+          {onDownload && (
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={() => void handleDownload()}
+              title={`${t('common.download')} ${downloadName}`}
+              disabled={downloading}
+            >
+              <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+              {t(downloading ? 'common.downloading' : 'common.download')}
+            </button>
+          )}
           <button
             type="button"
             className={styles.reviewButton}
@@ -547,6 +617,20 @@ export function isRenderedFilePath(value: string) {
     path.endsWith('.md') ||
     path.endsWith('.markdown') ||
     getImageMimeTypeFromPath(path) !== undefined
+  );
+}
+
+export function isDownloadableReviewFilePath(value: string) {
+  return /\.(?:html?|md|markdown)$/i.test(value);
+}
+
+function canDownloadArtifact(
+  artifact: DaemonSessionArtifact,
+): artifact is DaemonSessionArtifact & { workspacePath: string } {
+  return (
+    artifact.storage === 'workspace' &&
+    artifact.status === 'available' &&
+    Boolean(artifact.workspacePath)
   );
 }
 

@@ -22,7 +22,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "undici": "^7.28.0",
     "zod": "^3.25.0"
   },

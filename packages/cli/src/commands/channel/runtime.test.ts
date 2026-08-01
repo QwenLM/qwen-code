@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   channelLoopPath,
   daemonChannelLoopPath,
+  daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
@@ -38,33 +40,63 @@ vi.mock('./channel-registry.js', () => ({
 
 it('isolates daemon route stores by workspace hash', () => {
   expect(daemonSessionRoutesPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'routes.json',
+    ),
   );
   expect(daemonSessionRoutesPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/routes.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'routes.json'),
   );
   expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
 });
 
 it('isolates observed contact stores beside daemon routes', () => {
   expect(daemonObservedContactsPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'observed-contacts.json',
+    ),
   );
   expect(daemonObservedContactsPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/observed-contacts.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'other-hash',
+      'observed-contacts.json',
+    ),
   );
   expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
 });
 
 it('isolates daemon loop stores by workspace hash', () => {
   expect(daemonChannelLoopPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/cron.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'workspace-hash', 'cron.json'),
   );
   expect(daemonChannelLoopPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/cron.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'cron.json'),
   );
   expect(daemonChannelLoopPath('/workspace')).not.toBe(channelLoopPath());
   expect(daemonChannelLoopPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates daemon channel state by workspace and safe instance key', () => {
+  const stateDir = daemonChannelStateDir('/workspace', 'team/../bot');
+
+  expect(stateDir).toMatch(
+    /^\/tmp\/qwen\/channels\/daemon\/workspace-hash\/instances\/team_\.\._bot-[0-9a-f]{16}$/,
+  );
+  expect(stateDir).not.toContain('/../');
+  expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
+  expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
+  expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);
 });
 
 describe('parseConfiguredChannels', () => {
@@ -103,7 +135,7 @@ describe('parseConfiguredChannels', () => {
         config: expect.objectContaining({
           type: 'telegram',
           token: 'secret',
-          cwd: '/workspace',
+          cwd: path.resolve('/workspace'),
         }),
       }),
     ]);

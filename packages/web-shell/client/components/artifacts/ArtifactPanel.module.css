@@ -18,9 +18,12 @@
 .header {
   flex: 0 0 auto;
   display: flex;
+  min-height: 52px;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px 0 14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
 }
 
 .title {
@@ -47,8 +50,8 @@
   background: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--foreground);
   border-radius: 6px;
-  flex: 0 0 180px;
-  width: 180px;
+  flex: 0 0 150px;
+  width: 150px;
   display: inline-flex;
   align-items: center;
 }
@@ -146,6 +149,7 @@
 
 .iconButton {
   appearance: none;
+  margin-left: auto;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--foreground);
@@ -166,6 +170,39 @@
   background: var(--accent);
 }
 
+.headerActions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.headerActions .iconButton {
+  margin-left: 0;
+}
+
+.addButton {
+  border-color: transparent;
+}
+
+.panelToggleButton {
+  width: 30px;
+  height: 30px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: var(--accent);
+}
+
+.panelToggleButton:hover {
+  border-color: transparent;
+}
+
+.panelToggleIcon {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}
+
 .toolbarIcon {
   width: 16px;
   height: 16px;
@@ -179,10 +216,105 @@
   padding: 12px;
 }
 
+.bodySideTask {
+  overflow: hidden;
+  padding: 0;
+}
+
 .empty {
   color: var(--muted-foreground);
   font-size: 13px;
   padding: 16px 4px;
+}
+
+.emptyActions {
+  display: grid;
+  gap: 2px;
+}
+
+.emptyAction {
+  appearance: none;
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.emptyAction:hover:not(:disabled),
+.emptyAction:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.emptyAction:disabled {
+  color: var(--muted-foreground);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.emptyActionIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.emptyActionIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.emptyActionTitle {
+  flex: 0 0 auto;
+}
+
+.emptyActionHint {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyActionChevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.sideTaskListTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sideTaskListTime {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.sideTaskNewIcon {
+  width: 14px;
+  height: 14px;
 }
 
 .list {
@@ -460,6 +592,11 @@
 
 .reviewOpenButton:hover {
   background: var(--accent);
+}
+
+.reviewOpenButton:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .fileIcon {

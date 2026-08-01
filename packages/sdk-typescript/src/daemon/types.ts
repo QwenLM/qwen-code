@@ -838,6 +838,15 @@ export interface DaemonBranchedSession extends DaemonRestoredSession {
   forkedFrom: { sessionId: string; displayName: string };
 }
 
+export interface SideTaskSessionRequest {
+  name?: string;
+}
+
+export interface DaemonSideTaskSession extends DaemonRestoredSession {
+  displayName: string;
+  parentSessionId: string;
+}
+
 export interface ForkSessionRequest {
   directive: string;
 }
@@ -2737,6 +2746,11 @@ export interface DaemonSessionBtwResult {
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
+  messageId?: string;
+}
+
+export interface DaemonRemoveMidTurnMessageResult {
+  removed: boolean;
 }
 
 /**

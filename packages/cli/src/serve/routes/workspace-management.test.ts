@@ -163,6 +163,43 @@ describe('POST /workspaces', () => {
     vi.clearAllMocks();
   });
 
+  it('allows scratch creation but protects existing paths in loopback development', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const mutate = vi.fn(
+        (options?: { strict?: boolean }) =>
+          (_req: Request, res: Response, next: () => void) => {
+            if (options?.strict) {
+              res.status(401).json({ code: 'token_required' });
+              return;
+            }
+            next();
+          },
+      );
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+        mutate,
+      });
+
+      const scratch = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+      const existing = await request(app)
+        .post('/workspaces')
+        .send({ cwd: REAL_DIR });
+
+      expect(scratch.status).toBe(201);
+      expect(existing.status).toBe(401);
+      expect(mutate).toHaveBeenCalledWith();
+      expect(mutate).toHaveBeenCalledWith({ strict: true });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('returns 501 when createWorkspaceRuntime is not provided', async () => {
     const { app } = createApp({ createWorkspaceRuntime: undefined });
     const res = await request(app)

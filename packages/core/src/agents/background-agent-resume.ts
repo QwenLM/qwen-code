@@ -50,6 +50,9 @@ import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  buildForkExecutionAllowlist,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
 import {
@@ -904,6 +907,12 @@ export class BackgroundAgentResumeService {
       const activeRestoreParentPM = approvalOverride.cleanup;
       agentConfig = activeAgentConfig;
       restoreParentPM = activeRestoreParentPM;
+      if (target.isFork) {
+        registerForkDisplayImageForCache(
+          activeAgentConfig,
+          currentForkRuntime!.toolNames,
+        );
+      }
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces
       // confirmations to the parent UI instead of auto-denying, in
@@ -980,6 +989,7 @@ export class BackgroundAgentResumeService {
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
+          meta.executionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =
@@ -1659,6 +1669,7 @@ export class BackgroundAgentResumeService {
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
+    executionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1666,6 +1677,14 @@ export class BackgroundAgentResumeService {
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
+      // Combine the ask_user_question restriction (buildForkExecutionAllowlist)
+      // with the display_image restriction (resolveForkExecutionAllowedTools):
+      // a resumed fork keeps the parent's display_image declaration for cache
+      // parity but must not execute it.
+      executionAllowedTools: resolveForkExecutionAllowedTools(
+        runtime.toolNames,
+        buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
+      ),
     };
 
     return AgentHeadless.create(

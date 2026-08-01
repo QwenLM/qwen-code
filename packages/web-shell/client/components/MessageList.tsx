@@ -123,6 +123,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -2233,6 +2234,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onError,
       generateContent,
     },
     ref,
@@ -3654,6 +3656,7 @@ export const MessageList = memo(
                 onOpenScheduledTask={
                   onOpenScheduledTask ?? noopTurnOutputAction
                 }
+                onError={onError}
               />
             );
           }
@@ -3761,6 +3764,7 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onError,
       ],
     );
 

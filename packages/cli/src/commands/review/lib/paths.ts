@@ -48,6 +48,20 @@ export function probeWorktreePath(worktree: string): string {
   return `${resolve(worktree)}-probe`;
 }
 
+/**
+ * The merge-base tree an A/B probe compares against — a second sibling of the
+ * review worktree, holding the code as it stood *before* the PR.
+ *
+ * Absolute for the same reason as `probeWorktreePath`: `git worktree add` runs
+ * with the review worktree as cwd, so a relative path would land the base tree
+ * nested inside the tree it is meant to sit beside. Kept here beside its sibling
+ * so `base-tree` and `cleanup.ts`'s sweep cannot drift apart on the suffix —
+ * the failure mode that made the probe tree's helper shared in the first place.
+ */
+export function baseWorktreePath(worktree: string): string {
+  return `${resolve(worktree)}-base`;
+}
+
 /** Local branch ref name for a fetched PR head. */
 export function reviewBranch(prNumber: string | number): string {
   return `qwen-review/pr-${prNumber}`;
