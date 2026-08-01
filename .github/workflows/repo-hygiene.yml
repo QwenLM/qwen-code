@@ -629,8 +629,8 @@ jobs:
       # then poison the workspace .git/config and hijack the PAT-bearing push
       # that follows. Every code-touching check therefore runs inside the same
       # docker sandbox image the agent uses, with networking disabled, so
-      # untrusted code executes in an isolated, egress-less container (mirrors
-      # the CLI sandbox flags, plus --network none). Orchestration — the revert
+      # untrusted code executes in an isolated, egress-less container (the flags
+      # harden the CLI sandbox defaults and add --network none). Orchestration — the revert
       # loop, findings.json bookkeeping, outputs — stays on the host; the push
       # step additionally pushes from a clean clone so nothing this step touched
       # can redirect it.
