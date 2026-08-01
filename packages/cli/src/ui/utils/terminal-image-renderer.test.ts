@@ -288,6 +288,49 @@ describe('terminalImageRenderer', () => {
     },
   );
 
+  it('rejects cmd.exe metacharacters before invoking a shell shim', async () => {
+    const dangerousImagePath = path.join(tempDir, 'chart & whoami.png');
+    await fs.writeFile(dangerousImagePath, PNG_1X1);
+    const chafaPath = path.join(tempDir, 'chafa.CMD');
+    await fs.writeFile(chafaPath, '@echo off\r\n');
+    await fs.chmod(chafaPath, 0o755);
+
+    const platformDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'platform',
+    );
+    Object.defineProperty(process, 'platform', {
+      ...platformDescriptor,
+      value: 'win32',
+    });
+    try {
+      const result = renderTerminalImage({
+        display: {
+          type: 'terminal_image',
+          filePath: dangerousImagePath,
+          mimeType: 'image/png',
+        },
+        contentWidth: 20,
+        env: {
+          PATH: tempDir,
+          PATHEXT: '.CMD',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+        stdoutIsTTY: true,
+      });
+
+      expect(result).toEqual({
+        kind: 'unavailable',
+        reason:
+          'Image path contains characters that cannot be safely passed to the renderer on this platform.',
+      });
+    } finally {
+      if (platformDescriptor) {
+        Object.defineProperty(process, 'platform', platformDescriptor);
+      }
+    }
+  });
+
   it.runIf(process.platform !== 'win32')(
     'does not trust a project-local node_modules/.bin/chafa',
     async () => {
