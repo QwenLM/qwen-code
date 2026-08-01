@@ -7344,7 +7344,10 @@ class QwenAgent implements Agent {
         if (session.worktreeCwd && existsSync(session.worktreeCwd)) {
           return session.worktreeCwd;
         }
-        return configWt ?? process.cwd();
+        if (configWt && existsSync(configWt)) {
+          return configWt;
+        }
+        return process.cwd();
       }
     }
     for (const session of this.sessions.values()) {
@@ -7352,9 +7355,12 @@ class QwenAgent implements Agent {
         return session.worktreeCwd;
       }
       const wt = session.getConfig().getActiveWorktree?.();
-      if (wt) return wt;
+      if (wt && existsSync(wt)) return wt;
     }
-    return this.defaultSettingsCwd || process.cwd();
+    if (this.defaultSettingsCwd && existsSync(this.defaultSettingsCwd)) {
+      return this.defaultSettingsCwd;
+    }
+    return process.cwd();
   }
 
   private async extMethodInternal(

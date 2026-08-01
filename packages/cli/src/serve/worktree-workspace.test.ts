@@ -66,4 +66,12 @@ describe('findEffectiveWorkspace', () => {
     };
     expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
   });
+
+  it('skips a worktree whose path shares a sibling prefix with boundWorkspace', () => {
+    const sibling = '/repo/project-evil/worktrees/escape';
+    const bridge = {
+      listWorkspaceSessions: () => [{ worktree: { path: sibling } }],
+    };
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
+  });
 });
