@@ -38,6 +38,7 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
+import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -255,6 +256,8 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const todoId =
+    typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
@@ -265,6 +268,7 @@ function projectSubagentToolUpdate(
         ...(subagentType ? { subagent_type: subagentType } : {}),
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
+        ...(todoId ? { todo_id: todoId } : {}),
         ...(rawInput['run_in_background'] === true
           ? { run_in_background: true }
           : {}),
@@ -3237,16 +3241,4 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
-}
-
-function extractHttpStatus(error: unknown): number | undefined {
-  if (error instanceof DaemonHttpError) return error.status;
-  if (isRecord(error) && typeof error['status'] === 'number') {
-    return error['status'];
-  }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

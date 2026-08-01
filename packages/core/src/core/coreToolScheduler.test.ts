@@ -14,6 +14,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
   ToolInvocation,
+  ToolInvocationGuard,
   ToolResult,
   ToolResultDisplay,
   ToolRegistry,
@@ -328,6 +329,21 @@ vi.mock('../ide/ide-client.js', () => ({
     getInstance: vi.fn(),
   },
 }));
+
+const evaluateGuardSpy = vi.hoisted(() => vi.fn());
+vi.mock('./tool-invocation-guard.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./tool-invocation-guard.js')>();
+  return {
+    ...actual,
+    evaluateToolInvocationGuard: (
+      ...args: Parameters<typeof actual.evaluateToolInvocationGuard>
+    ) => {
+      evaluateGuardSpy(...args);
+      return actual.evaluateToolInvocationGuard(...args);
+    },
+  };
+});
 
 const mockIdeClient = {
   openDiff: vi.fn(),
@@ -2116,6 +2132,40 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls.map((call) => call.request.callId)).toEqual([
       'dup_id_0001',
     ]);
+  });
+
+  it('propagates a tool turn-termination boundary to the host', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'proposal recorded',
+      returnDisplay: 'proposal recorded',
+      terminateTurn: true,
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['update_goal', new MockTool({ name: 'update_goal', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'goal-complete-1',
+          name: 'update_goal',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.terminateTurn).toBe(true);
+    }
   });
 
   it('does not dedupe requests with empty callIds in one batch', async () => {
@@ -8671,6 +8721,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     disableHooks?: boolean;
     avoidPermissionPrompts?: boolean;
     targetDir?: () => string;
+    toolInvocationGuard?: ToolInvocationGuard;
   }) {
     const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
     const registry = {
@@ -8726,6 +8777,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       getShouldAvoidPermissionPrompts: () =>
         options.avoidPermissionPrompts ?? false,
       getOnPersistPermissionRule: () => undefined,
+      getToolInvocationGuard: () => options.toolInvocationGuard,
     } as unknown as Config;
 
     return {
@@ -8811,6 +8863,121 @@ describe('CoreToolScheduler Plan shell routing', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(getConfirmationDetails).not.toHaveBeenCalled();
+  });
+
+  it('runs the host guard with final params and denies before execution', async () => {
+    const execute = vi.fn();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, reason: 'host policy denied' });
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      toolInvocationGuard,
+      targetDir: () => '/workspace',
+    });
+
+    await scheduler.schedule(
+      [request('guard-denied', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(toolInvocationGuard).toHaveBeenCalledWith({
+      callId: 'guard-denied',
+      toolName: ToolNames.SHELL,
+      args: { command: 'git status', directory: '/workspace' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const deniedCall = completed[0];
+    expect(deniedCall.status).toBe('error');
+    expect(JSON.stringify(deniedCall)).toContain('host policy denied');
+    if (deniedCall.status !== 'error') {
+      throw new Error('Expected the guarded tool call to fail');
+    }
+    expect(deniedCall.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+  });
+
+  it('executes once when the host guard allows the final invocation', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const toolInvocationGuard = vi.fn().mockResolvedValue({ allowed: true });
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      toolInvocationGuard,
+      targetDir: () => '/workspace',
+    });
+
+    await scheduler.schedule(
+      [request('guard-allowed', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(toolInvocationGuard).toHaveBeenCalledWith({
+      callId: 'guard-allowed',
+      toolName: ToolNames.SHELL,
+      args: { command: 'git status', directory: '/workspace' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+  });
+
+  it('cancels without execution when aborted while awaiting the host guard', async () => {
+    const execute = vi.fn();
+    let resolveGuard!: (decision: { allowed: true }) => void;
+    const toolInvocationGuard = vi.fn(
+      () =>
+        new Promise<{ allowed: true }>((resolve) => {
+          resolveGuard = resolve;
+        }),
+    );
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      toolInvocationGuard,
+    });
+    const abortController = new AbortController();
+
+    const schedule = scheduler.schedule(
+      [request('guard-aborted', 'git status')],
+      abortController.signal,
+    );
+    await vi.waitFor(() => expect(toolInvocationGuard).toHaveBeenCalledOnce());
+    abortController.abort();
+    resolveGuard({ allowed: true });
+
+    await schedule;
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+  });
+
+  it('skips guard evaluation entirely when no guard is configured', async () => {
+    evaluateGuardSpy.mockClear();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+    });
+
+    await scheduler.schedule(
+      [request('no-guard', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(evaluateGuardSpy).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
   });
 
   it('limits PM-confirmed read-only shell calls to exact one-off approval', async () => {
@@ -14880,6 +15047,14 @@ describe('extractToolFilePaths', () => {
         y1: 0,
         x2: 500,
         y2: 500,
+      }),
+    ).toEqual(['/proj/chart.png']);
+  });
+
+  it('extracts file_path for display_image', () => {
+    expect(
+      extractToolFilePaths(ToolNames.DISPLAY_IMAGE, {
+        file_path: '/proj/chart.png',
       }),
     ).toEqual(['/proj/chart.png']);
   });

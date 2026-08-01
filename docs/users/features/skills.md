@@ -68,6 +68,20 @@ Use project Skills for:
 
 Project Skills can be checked into git and automatically become available to teammates.
 
+### Maintain auto-generated project Skills
+
+Qwen Code tracks successful uses of generated project Skills locally, including while new Auto Skill generation is disabled, so re-enabling maintenance cannot mistake a recently used skill for an inactive one. When **Auto Skill** is enabled, it periodically moves inactive generated Skills out of the active library. Only directories named `.qwen/skills/auto-skill-*` whose `SKILL.md` frontmatter contains `source: auto-skill` are managed; personal, extension, bundled, and hand-authored Skills are never selected.
+
+- After 30 days without a successful use or `SKILL.md` edit, an auto-skill is marked stale.
+- After 90 days, its complete directory is moved to `.qwen/archived-skills/`. Nothing is permanently deleted.
+- Automatic maintenance runs at most once every 7 days in trusted workspaces. Each newly observed auto-skill gets a full grace period before maintenance begins.
+- A pinned auto-skill is excluded from automatic stale and archive transitions until it is unpinned.
+- Archived directory names remain reserved, and an existing archive destination skips only that collision rather than stopping maintenance for other skills.
+
+Use `/curator` to see active, stale, archived, and pinned auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, `/curator pin <directory>` or `/curator unpin <directory>` to control per-skill maintenance, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
+
+Status and dry-run previews are available in safe mode and untrusted workspaces. Applying maintenance, changing pins, and restoring archived auto-skills require a trusted workspace outside safe mode.
+
 ## Write `SKILL.md`
 
 Create a `SKILL.md` file with YAML frontmatter and Markdown content:
