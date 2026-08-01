@@ -383,14 +383,31 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
     isCrossRepository: meta.isCrossRepository,
-    // `diffPath` (set only on a SUCCESSFUL capture) gates this: a capture that
-    // threw also leaves diffText empty, and recommending close-as-superseded
-    // off a failed capture would close a live PR on an infrastructure error.
-    ...(diffPath !== null && diffText.trim() === '' ? { emptyDiff: true } : {}),
+    // Two gates, because the SKILL acts on this by recommending the PR be
+    // closed as superseded — the one ruling here that is expensive to get
+    // wrong. `diffPath` (set only on a SUCCESSFUL capture): a capture that
+    // threw also leaves diffText empty, and closing off that would close a
+    // live PR on an infrastructure error. `baseFetchFailed`: the merge base is
+    // then "resolved from a possibly stale local ref" (the warning above says
+    // so), and a stale base ref that already contains the head commits diffs
+    // to empty — the same wrong recommendation, one cause further out.
+    ...(diffPath !== null && !baseFetchFailed && diffText.trim() === ''
+      ? { emptyDiff: true }
+      : {}),
     // Collapse detection compares recomputed reality against GitHub's
     // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
     // signature, not rounding. Both thresholds are deliberately coarse — this
     // is a disclosure, never a gate.
+    //
+    // The two sides are produced by different tools, so the ratio has floors
+    // under it for a reason. Rename detection is the divergence that matters:
+    // `--find-renames` is pinned here and GitHub applies its own, and a move
+    // whose similarity lands on opposite sides of the two thresholds shrinks
+    // one side and not the other. That is what the 4x buys — a threshold
+    // disagreement moves the ratio by the size of one file, a genuine
+    // upstream collapse moves it by the size of the PR. Kept as a disclosure
+    // precisely because the ratio is not a measurement of the same quantity
+    // twice.
     ...(diffText.trim() !== '' &&
     meta.additions + meta.deletions >= 200 &&
     countDiffChangedLines(diffText) * 4 <= meta.additions + meta.deletions
@@ -437,14 +454,30 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
 /** Changed (+/-) lines in a unified diff — headers excluded. */
 export function countDiffChangedLines(diffText: string): number {
+  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+  // every line starting `--`, and a DELETED line whose own content starts `--`
+  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+  // comments, a `--flag` in a script. Each one silently dropped a real changed
+  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+  // (the disclosure fires when the recomputed count comes in LOW).
+  //
+  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
+  // headers there — so track hunk state and count every `+`/`-` line in it.
   let n = 0;
+  let inHunk = false;
   for (const line of diffText.split('\n')) {
-    // `+++`/`---` are FILE headers only at exactly that prefix; a body line
-    // legitimately starts `--x` or `++x` (decrement/increment statements) and
-    // must count. Match one marker followed by NOT-the-same-marker.
-    if (/^\+(?!\+\+)/.test(line) || /^-(?!--)/.test(line)) {
-      n++;
+    if (line.startsWith('@@')) {
+      inHunk = true;
+      continue;
     }
+    // `diff --git` opens the next file's header block; `\ No newline at end of
+    // file` is a marker, not content, and git emits it inside the hunk.
+    if (line.startsWith('diff --git')) {
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk || line.startsWith('\\')) continue;
+    if (line.startsWith('+') || line.startsWith('-')) n++;
   }
   return n;
 }

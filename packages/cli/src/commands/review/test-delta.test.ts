@@ -103,11 +103,13 @@ describe('runTestDelta', () => {
   const runWith = (
     test: CommandResult[],
     baseOutput: string | ((command: string, cwd: string) => CommandResult),
+    now?: () => number,
   ): TestDeltaReport =>
     runTestDelta({
       report: writeReport(test),
       baseline,
       timeout: 60,
+      now,
       exec:
         typeof baseOutput === 'function'
           ? // Pass cwd through: swallowing it made the baseline-dir assertion
@@ -252,64 +254,90 @@ describe('runTestDelta', () => {
   it('stops at the whole-command budget and discloses what it skipped', () => {
     // --timeout is PER COMMAND: three failures at the 300s default is 900s
     // against a 600s tool ceiling, killed with NO report at all.
-    const real = Date.now;
+    // The injected clock is the command's own seam — reassigning the global
+    // `Date.now` leaks into every other test in the file if an assertion
+    // throws before the `finally`.
     let t = 0;
-    Date.now = () => (t += 300_000);
-    try {
-      const r = runWith(
-        [
-          cmd({
-            command: 'npm test --workspace="a"',
-            output: 'FAIL a/x.test.ts',
-          }),
-          cmd({
-            command: 'npm test --workspace="b"',
-            output: 'FAIL b/y.test.ts',
-          }),
-        ],
-        ' FAIL a/x.test.ts',
-      );
-      expect(r.entries).toHaveLength(1);
-      expect(r.note).toContain('budget was exhausted');
-      expect(r.note).toContain('npm test --workspace="b"');
-    } finally {
-      Date.now = real;
-    }
+    const r = runWith(
+      [
+        cmd({
+          command: 'npm test --workspace="a"',
+          output: 'FAIL a/x.test.ts',
+        }),
+        cmd({
+          command: 'npm test --workspace="b"',
+          output: 'FAIL b/y.test.ts',
+        }),
+      ],
+      ' FAIL a/x.test.ts',
+      () => (t += 300_000),
+    );
+    expect(r.entries).toHaveLength(1);
+    expect(r.note).toContain('budget was exhausted');
+    expect(r.note).toContain('npm test --workspace="b"');
+    // Structured, not prose-only: the skipped commands must be readable
+    // without substring-matching the note.
+    expect(r.skippedForBudget).toEqual(['npm test --workspace="b"']);
+  });
+
+  it('skips a command the remaining window cannot fit, rather than timing it out', () => {
+    // The floor is priced against the command's OWN measured duration, the way
+    // test-efficacy prices a mutant run. A flat 5s floor admitted this command
+    // with 40s left, handed it a 40s deadline, and the guaranteed timeout was
+    // then disclosed as "infrastructure, not evidence" — a budget exhaustion
+    // wearing the wrong label, and the two tell the reader different things.
+    // startedAt, the first command's check, then the second's: 500s of the
+    // 540s budget are gone by then, so 40s remain against a 60s slot.
+    const ticks = [0, 0, 500_000];
+    let i = 0;
+    const clock = () => ticks[Math.min(i++, ticks.length - 1)];
+    const r = runWith(
+      [
+        cmd({
+          command: 'npm test --workspace="a"',
+          output: 'FAIL a/x.test.ts',
+          seconds: 120,
+        }),
+        cmd({
+          command: 'npm test --workspace="b"',
+          output: 'FAIL b/y.test.ts',
+          seconds: 120,
+        }),
+      ],
+      ' FAIL a/x.test.ts',
+      clock,
+    );
+    expect(r.skippedForBudget).toEqual(['npm test --workspace="b"']);
+    expect(r.note).toContain('budget was exhausted');
+    expect(r.note).not.toContain('timed out');
   });
 
   it('says when a rerun died on a BUDGET-shortened deadline, not its own', () => {
     // Otherwise "timed out — infrastructure" sends the reader hunting a hang
     // that is really an exhausted budget, and a rerun with room to spare would
     // have measured it.
-    const real = Date.now;
     let t = 0;
-    // `runWith` passes timeout: 60, so `remaining` must fall below 60s while
-    // staying above the 5s hard skip. Each call advances 490s: startedAt lands
-    // at 490s, the first iteration sees remaining = 540 - 490 = 50s (clamped),
-    // and the second falls past the skip threshold.
-    Date.now = () => {
-      t += 490_000;
-      return t;
-    };
-    try {
-      const r = runWith(
-        [
-          cmd({
-            command: 'npm test --workspace="a"',
-            output: 'FAIL a/x.test.ts',
-          }),
-          cmd({
-            command: 'npm test --workspace="b"',
-            output: 'FAIL b/y.test.ts',
-          }),
-        ],
-        (command) =>
-          cmd({ command, timedOut: true, exitCode: null, output: '' }),
-      );
-      expect(r.note).toContain('the whole-command budget shortened');
-    } finally {
-      Date.now = real;
-    }
+    // `runWith` passes timeout: 60, so `remaining` must fall below the 60s
+    // per-command deadline while staying above the skip threshold (the
+    // command's own 10s duration, floored at 30s). Each call advances 490s:
+    // startedAt lands at 490s, the first iteration sees remaining = 540 − 490
+    // = 50s — enough to start, not enough to finish — and the second falls
+    // past the threshold entirely.
+    const r = runWith(
+      [
+        cmd({
+          command: 'npm test --workspace="a"',
+          output: 'FAIL a/x.test.ts',
+        }),
+        cmd({
+          command: 'npm test --workspace="b"',
+          output: 'FAIL b/y.test.ts',
+        }),
+      ],
+      (command) => cmd({ command, timedOut: true, exitCode: null, output: '' }),
+      () => (t += 490_000),
+    );
+    expect(r.note).toContain('the whole-command budget shortened');
   });
 
   it('refuses an unreadable report and a missing base tree without throwing', () => {

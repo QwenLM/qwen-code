@@ -670,15 +670,33 @@ describe('runTestPlan', () => {
       expect(r.claims).toEqual([]);
     });
 
-    it('a gitignored file that EXISTS still rules reproduces', () => {
+    it('a gitignored file that EXISTS still rules reproduces, and says which kind', () => {
       // build-test may have produced it earlier in this worktree; the ignore
-      // guard only ever downgrades a would-be contradiction.
+      // guard only ever downgrades a would-be contradiction. The NOTE is the
+      // part a reader acts on: an ignored file that is present is something
+      // this run produced, not state at the reviewed commit, and collapsing
+      // both cases onto one sentence retires that distinction silently.
       execFileSync('git', ['init', '-q'], { cwd: dir });
       writeFileSync(join(dir, '.gitignore'), 'artifacts/\n');
       mkdirSync(join(dir, 'artifacts'), { recursive: true });
       writeFileSync(join(dir, 'artifacts/report.json'), '{}');
       const r = run('## Test Plan\n\nWrote `artifacts/report.json`');
-      expect(verdictOf(r.claims, 'artifacts/report.json')).toBe('reproduces');
+      const claim = r.claims.find((c) => c.text === 'artifacts/report.json');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('gitignored');
+      expect(claim?.note).toContain('this run produced');
+    });
+
+    it('a TRACKED file that exists says it is state at the reviewed commit', () => {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src/kept.ts'), 'export {};\n');
+      const r = run('## Test Plan\n\nSee `src/kept.ts`');
+      const claim = r.claims.find((c) => c.text === 'src/kept.ts');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toBe(
+        'exists at the reviewed commit (the diff does not change it)',
+      );
     });
 
     it('sheds no claim at all for a well-known build directory', () => {

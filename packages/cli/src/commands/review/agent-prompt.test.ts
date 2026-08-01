@@ -1871,8 +1871,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // be fenced off from findings the same way the probes' inconclusive is.
     expect(p).toContain('`kind: "mutant-survived"`');
     expect(p).toContain('`mutants.skipped*`');
+    expect(p).toContain('`hunks.skipped*`');
     expect(p).toContain('hunk-survived');
     expect(p).toContain('harnessValidated');
+    // All THREE values, not two: `null` read as `false` would report "the
+    // harness could not be validated" for a run that simply never spent a
+    // control, and read as `true` would license the survivor claim outright.
+    expect(p).toContain('skippedForControl');
+    expect(p).toContain('neither validated nor refuted');
     expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the

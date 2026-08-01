@@ -1129,17 +1129,10 @@ export function safeRmWithin(worktree: string, relPath: string): void {
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
-export function probeCreateFailureDetail(
-  err: unknown,
-  sweepStderr: string,
-): string {
-  return worktreeCreateFailureDetail('probe', err, sweepStderr);
-}
-
 /**
  * The warning for a probe worktree that survived its discard.
  *
- * Pure, and for the same reason as its sibling above: the branch it lives on
+ * Pure, and for the same reason as `worktreeCreateFailureDetail`: the branch it lives on
  * fires only when the path outlives both `worktree remove` and `rmSync`, which
  * no portable test can force. The reason is what makes it useful — whoever has
  * to delete the tree by hand needs to know WHY it would not go, and a bare
@@ -1546,19 +1539,26 @@ export function runOneHunkProbe(
  * run that file, restore. Red = the harness demonstrably executes assertions
  * (true), green = it does not (false). Restore is by content in finally, the
  * same discipline as every other probe edit in this file.
+ *
+ * `null` is the THIRD outcome, and it is not the same as `false`: the control
+ * never ran, so nothing was demonstrated either way. Returning `false` there
+ * would state as fact that an injected test stayed green when none was ever
+ * injected — the fabricated verdict this file's budget path already refuses
+ * ("never a fabricated true or false"), and it would additionally discard the
+ * whole mutant/hunk window over an I/O error.
  */
 export function runControlMutant(
   probeTree: string,
   probeFile: string,
   deadlineAt?: number,
   now: () => number = Date.now,
-): boolean {
+): boolean | null {
   const abs = join(probeTree, probeFile);
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
   } catch {
-    return false; // cannot even read the probe file — nothing is validated
+    return null; // cannot even read the probe file — nothing was demonstrated
   }
   try {
     writeFileSync(
@@ -1742,6 +1742,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let hunksSkippedForBaseline = 0;
   /** Null until the positive control ran; false = dead runner, survivors lie. */
   let harnessValidated: boolean | null = null;
+  // Its OWN counter, not the budget's or the baseline's: a control that came
+  // back red stops the run with candidates still unprobed, and folding them
+  // into `skippedForBudget` would say the window ran out when it did not. The
+  // note explains why; these numbers are what a reader can count.
+  let mutantsSkippedForControl = 0;
+  let hunksSkippedForControl = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1947,8 +1953,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // reported off a runner whose collected suite never covered them.)
           // The control pays for its run like any other experiment: without
           // this check it silently ate one budgeted slot and skippedForBudget
-          // under-reported by one. No budget for the control means nothing
-          // was validated (null) — never a fabricated true or false.
+          // under-reported by one. No budget for the control — and equally, a
+          // control that could not be set up at all — means nothing was
+          // validated (null), never a fabricated true or false.
           if (!fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
             mutantsSkippedForBudget = candidates.length;
             hunksSkippedForBudget = hunkCandidates.length;
@@ -1959,12 +1966,22 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               mutantDeadline,
               now,
             );
+            if (harnessValidated === null) {
+              // The probe file could not be read, so no test was injected and
+              // no run happened. That is not a verdict about the runner —
+              // fall through and let the mutants spend the window as usual.
+              noteMutants(
+                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+              );
+            }
           }
           if (harnessValidated === false) {
             // Three causes share this shape — a runner that executes nothing,
             // a collector that skips the injected test, a reporter that drops
             // failures — and none of them can kill, so spending the rest of
             // the window would only manufacture survivors to re-class.
+            mutantsSkippedForControl = candidates.length;
+            hunksSkippedForControl = hunkCandidates.length;
             noteMutants(
               'positive control FAILED (the injected always-failing test did not turn the run red — a dead runner, a collector that skipped it, or a reporter that dropped the failure): nothing here can kill, every would-be survivor is reported inconclusive, and the remaining mutant/hunk window was not spent',
             );
@@ -2198,9 +2215,16 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: mutantsSkippedForBudget,
       skippedForCap: mutantsSkippedForCap,
       skippedForBaseline: mutantsSkippedForBaseline,
+      skippedForControl: mutantsSkippedForControl,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
-    /** Null: control never ran (no green baseline / no candidates). */
+    /**
+     * `true` — an injected always-failing test turned the runner red, so this
+     * harness can kill. `false` — it stayed green: nothing here can kill, and
+     * every survivor was re-classed. `null` — the control never ran (no green
+     * baseline, no candidates, no budget, or the probe file was unreadable):
+     * the run is neither validated nor refuted, and it is NOT a survivor claim.
+     */
     harnessValidated,
     hunks: {
       probed: hunkResults,
@@ -2211,6 +2235,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: hunksSkippedForBudget,
       skippedForCap: hunksSkippedForCap,
       skippedForBaseline: hunksSkippedForBaseline,
+      skippedForControl: hunksSkippedForControl,
     },
     findings,
     cleanupFailure,

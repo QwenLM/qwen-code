@@ -464,4 +464,45 @@ describe('countDiffChangedLines', () => {
     expect(countDiffChangedLines(d)).toBe(2);
     expect(countDiffChangedLines('')).toBe(0);
   });
+
+  it('counts body lines whose own content starts with -- or ++', () => {
+    // A DELETED markdown rule / YAML marker / SQL comment arrives as `--- …`,
+    // and an ADDED `++x` as `+++x`. A prefix-shape rule has to drop both, and
+    // every dropped line pushes the ratio toward a false collapse disclosure
+    // (the flag fires when the recomputed count comes in LOW).
+    const d = [
+      'diff --git a/x.md b/x.md',
+      '--- a/x.md',
+      '+++ b/x.md',
+      '@@ -1,4 +1,4 @@',
+      '----',
+      '--- a title underline',
+      '+++ replacement',
+      '++i;',
+      ' ctx',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
+  });
+
+  it('does not count the file headers of a SECOND file in the diff', () => {
+    // `diff --git` closes the previous hunk: without that, the next file's
+    // `---`/`+++` headers would be read as body lines of the hunk above.
+    const d = [
+      'diff --git a/a b/a',
+      '--- a/a',
+      '+++ b/a',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/b b/b',
+      'index 111..222 100644',
+      '--- a/b',
+      '+++ b/b',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
+  });
 });

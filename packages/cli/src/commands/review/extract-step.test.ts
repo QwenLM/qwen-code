@@ -517,6 +517,18 @@ describe('expressionsOf / invokedCommandsOf', () => {
     ]);
   });
 
+  it('still enumerates a real site below a MALFORMED one', () => {
+    // A non-greedy scan with no opener guard runs from the broken `${{` all
+    // the way to the next site's `}}` and swallows it — the injection site
+    // below silently stops being reported, which is the one direction this
+    // helper must not fail in.
+    expect(
+      expressionsOf(
+        'echo ${{ github.event.issue.title }\nrun: echo ${{ github.event.comment.body }}',
+      ),
+    ).toEqual(['${{ github.event.comment.body }}']);
+  });
+
   it('dedupes expression sites across script and env', () => {
     expect(expressionsOf('a ${{ x }} b ${{ x }}', '${{ y }}')).toEqual([
       '${{ x }}',

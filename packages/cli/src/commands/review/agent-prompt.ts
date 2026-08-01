@@ -884,14 +884,18 @@ export function buildRoleBrief(
           'test still green — that specific change ships with nothing gating it. Report each ' +
           'of the four as a ' +
           '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
-          'test in this diff that would catch its removal. If `harnessValidated` is `false`, ' +
-          'the positive control failed and every would-be survivor was re-classed — say the ' +
-          'harness could not be validated instead of implying clean coverage. ' +
+          'test in this diff that would catch its removal. `harnessValidated` has THREE ' +
+          'values and they are not two: `false` means the positive control failed and every ' +
+          'would-be survivor was re-classed — say the harness could not be validated instead ' +
+          'of implying clean coverage; `null` means the control never ran, so the run is ' +
+          'neither validated nor refuted and any survivor below is unconfirmed by a control; ' +
+          'only `true` licenses reading a survivor as a coverage gap. ' +
           '**`inconclusive` is not a finding** — for probes, mutants and hunks alike, ' +
           "reverting or mutating the source often breaks the test's own compile, and that is " +
           'not the test catching anything. Entries counted in `mutants.skipped*` or ' +
-          '`hunks.skippedForBudget` / `skippedForCap` / `skippedForBaseline` never ran — not ' +
-          'findings either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
+          '`hunks.skipped*` never ran — not findings either, and `skippedForControl` in ' +
+          'particular means the control stopped the run, NOT that the window ran out. ' +
+          '`mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }
