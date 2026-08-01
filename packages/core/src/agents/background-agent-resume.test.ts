@@ -108,8 +108,19 @@ describe('BackgroundAgentResumeService', () => {
     // mocks the override helper throws and every resume test fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue(
+          (
+            options.currentForkRuntime?.registeredTools ??
+            options.currentForkRuntime?.advertisedTools ??
+            []
+          )
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
       getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -2032,6 +2043,7 @@ describe('BackgroundAgentResumeService', () => {
       executionAllowedTools: ['Read', ToolNames.ASK_USER_QUESTION] as
         | string[]
         | undefined,
+      includeDisplayImage: false,
       deniedTool: 'Edit',
       expectedExecutionAllowedTools: ['Read'],
     },
@@ -2039,7 +2051,16 @@ describe('BackgroundAgentResumeService', () => {
       format: 'history-only bootstrap',
       legacyCapabilities: {},
       executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: false,
       deniedTool: ToolNames.ASK_USER_QUESTION,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
+    },
+    {
+      format: 'legacy fork without a persisted display policy',
+      legacyCapabilities: {},
+      executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: true,
+      deniedTool: ToolNames.DISPLAY_IMAGE,
       expectedExecutionAllowedTools: ['Read', 'Edit'],
     },
   ])(
@@ -2047,6 +2068,7 @@ describe('BackgroundAgentResumeService', () => {
     async ({
       legacyCapabilities,
       executionAllowedTools,
+      includeDisplayImage,
       deniedTool,
       expectedExecutionAllowedTools,
     }) => {
@@ -2151,6 +2173,9 @@ describe('BackgroundAgentResumeService', () => {
                 1,
                 [
                   { name: 'Read' },
+                  ...(includeDisplayImage
+                    ? [{ name: ToolNames.DISPLAY_IMAGE }]
+                    : []),
                   { name: 'Edit' },
                   { name: ToolNames.ASK_USER_QUESTION },
                 ],
@@ -2175,6 +2200,14 @@ describe('BackgroundAgentResumeService', () => {
           systemInstruction: currentSystemInstruction,
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'advertised display schema',
+                  },
+                ]
+              : []),
             { name: 'Edit', description: 'advertised edit schema' },
             {
               name: ToolNames.ASK_USER_QUESTION,
@@ -2184,6 +2217,14 @@ describe('BackgroundAgentResumeService', () => {
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'registered display schema',
+                  },
+                ]
+              : []),
             { name: 'Edit', description: 'registered edit schema' },
             {
               name: ToolNames.ASK_USER_QUESTION,
@@ -2217,7 +2258,12 @@ describe('BackgroundAgentResumeService', () => {
         max_turns: FORK_DEFAULT_MAX_TURNS,
       });
       expect(createArgs?.[5]).toEqual({
-        tools: ['Read', 'Edit', ToolNames.ASK_USER_QUESTION],
+        tools: [
+          'Read',
+          ...(includeDisplayImage ? [ToolNames.DISPLAY_IMAGE] : []),
+          'Edit',
+          ToolNames.ASK_USER_QUESTION,
+        ],
         executionAllowedTools: expectedExecutionAllowedTools,
       });
       expect(executeContext).toBeDefined();
@@ -2236,6 +2282,12 @@ describe('BackgroundAgentResumeService', () => {
       expect(deniedError).not.toContain('not found');
       expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
       expect(deniedBuild).not.toHaveBeenCalled();
+      if (includeDisplayImage) {
+        expect(stubToolRegistry.registerFactory).toHaveBeenCalledWith(
+          ToolNames.DISPLAY_IMAGE,
+          expect.any(Function),
+        );
+      }
       createSpy.mockRestore();
     },
   );
