@@ -139,7 +139,7 @@ Recorded and deferred with evidence: SSE and WebSocket write chains respect back
 
 ### Part 4 — Small aggregate quotas where multiplicity matters
 
-Bounding a container bounds one container. It does not bound _N_ of them, and the daemon's shape is many small bounded things: 20 sessions per workspace, 25 workspaces, an 8 MiB journal and a 4 MiB compacted replay each. Every one of those can sit inside its documented limit while the total reaches several gigabytes. Part 3 alone therefore does not produce an aggregate bound, and saying otherwise would repeat the mistake this document criticises #8093 for.
+Bounding a container bounds one container. It does not bound _N_ of them, and the daemon's shape is many small bounded things: 32 sessions per workspace, 25 workspaces, an 8 MiB journal and a 4 MiB compacted replay each. Every one of those can sit inside its documented limit while the total reaches several gigabytes. Part 3 alone therefore does not produce an aggregate bound, and saying otherwise would repeat the mistake this document criticises #8093 for.
 
 What is needed is narrow: per-workspace and process-wide counters over retained rings, queues, caches, and concurrent large operations, updated at the actual insertion and removal points. Two properties keep this from turning back into #8093's ledger — it counts the bytes a container **actually retains** rather than an estimated V8 object cost, and it is maintained where the data structure already mutates rather than at a separate reservation call every caller must remember. `EventBus`'s existing per-subscriber `maxQueuedBytes` is the shape to copy; it is already correct, just not aggregated.
 
@@ -173,7 +173,7 @@ No new refusals are introduced. The only new boot failure is the existing valida
 
 `maxSessions` and `maxTotalSessions` keep their current defaults and derivation, and this change gives them no new bound. An earlier draft claimed `maxTotalSessions` was transitively bounded because `workspaceCount` would be capped by the budget; that is false against this PR, where the workspace cap remains the fixed `MAX_REGISTERED_WORKSPACES = 25` and nothing derives a limit from the budget at all. Sessions still multiplex onto one child per workspace, so per-session memory sits inside a child heap that nothing currently bounds beyond V8's own ceiling. The documentation for `maxSessions` should be read as a fairness and file-descriptor lever, not a memory one.
 
-`limits.memory` on `GET /daemon/status` is additive and optional in the SDK mirror, so older daemons parse against newer clients.
+`limits.memory` and `runtime.memory` on `GET /daemon/status` are additive and optional in the SDK mirror, so older daemons parse against newer clients.
 
 Channel workers spawn `process.execPath` per workspace with no memory arguments (`channel-worker-supervisor.ts:823`). They are real consumers of the daemon tree's memory and are not covered by the per-child ceiling; the root reserve nominally covers them, and Part 2 measures them.
 
