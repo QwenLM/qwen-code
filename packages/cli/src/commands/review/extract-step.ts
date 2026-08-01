@@ -81,7 +81,11 @@ export interface ExtractedStep {
   env: Record<string, string>;
   /** Which level each effective `env:` key came from. */
   envSources: Record<string, EnvScope>;
-  /** Every distinct `${{ … }}` expression in the script and env — the stub list. */
+  /**
+   * Every distinct `${{ … }}` expression in anything this command carries —
+   * the script, the effective env, the working directory, the shell template.
+   * The stub list, and the caller reads it as complete.
+   */
   expressions: string[];
   /** Top-level commands the script invokes — a starting point for stubbing. */
   invokes: string[];
@@ -207,6 +211,18 @@ function maskExpressions(line: string): string {
 }
 
 /**
+ * KNOWN LIMIT, measured rather than assumed: the quote walk is FLAT, and shell
+ * quoting nests — a `"` inside `$( … )` inside a `"` string opens a fresh
+ * context the runner tracks and this does not. Over a long script the two
+ * drift, and past roughly 300 lines of this repo's own autofix workflow the
+ * drift starts reporting fragments of jq source as commands. Deliberately not
+ * papered over: inserting a separator where a blanked span was removes those
+ * fragments, but it also splits `a"X"b`, which is one word (`aXb`) to the
+ * shell, and no test short enough to be a test can pin the difference — the
+ * minimal reproducer is 296 lines. An over-report is the safe direction here
+ * and the script itself ships verbatim beside the list, so the junk costs a
+ * reviewer a glance; a scanner nobody can pin costs them the next bug.
+ *
  * Blank out quoted spans, carrying the quote across lines. Everything inside
  * quotes is DATA, and a line-based word split that runs through a quote reads
  * it as code: `EVIDENCE_SECTION=$'### Evidence images'` steps over the
@@ -217,12 +233,12 @@ function maskExpressions(line: string): string {
 function stripQuoted(
   line: string,
   open: '"' | "'" | null,
-): { live: string; open: '"' | "'" | null; heredocs: string[] } {
+): { live: string; open: '"' | "'" | null; heredocs: Heredoc[] } {
   let live = '';
   let quote = open;
   // `cat <<A <<B` opens two, and their bodies follow in order. Tracking only
   // the first leaves the second body — and its terminator — read as commands.
-  const heredocs: string[] = [];
+  const heredocs: Heredoc[] = [];
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote !== null) {
@@ -240,7 +256,10 @@ function stripQuoted(
     if (c === '<' && line[i + 1] === '<') {
       const m = HEREDOC_OPENER.exec(line.slice(i));
       if (m) {
-        heredocs.push((m[1] ?? m[2] ?? m[3]) as string);
+        heredocs.push({
+          word: (m[1] ?? m[2] ?? m[3]) as string,
+          dash: line[i + 2] === '-',
+        });
         i += m[0].length - 1;
         live += ' ';
         continue;
@@ -260,12 +279,71 @@ function stripQuoted(
   return { live, open: quote, heredocs };
 }
 
+/**
+ * A pending heredoc: the terminator word, and whether the opener was the
+ * indent-stripping `<<-` form.
+ *
+ * The form decides where the body ENDS, and getting that wrong leaks the body
+ * into the command list. Bash ends a plain `<<WORD` only on a line that is
+ * exactly WORD, so an indented `  EOF` inside the body is still body — matched
+ * loosely, an `rm -rf /` two lines further down got reported as an invoked
+ * command, which is a frightening entry for a reviewer to chase with nothing
+ * behind it. `<<-` is matched more loosely than bash on purpose (bash strips
+ * tabs, this strips any leading whitespace): looser can only end a body EARLY,
+ * which over-reports, and this file's stated priority is that an under-report
+ * is the worse direction — a missed command is a stub nobody writes.
+ */
+interface Heredoc {
+  word: string;
+  dash: boolean;
+}
+
 /** `<<WORD`, `<<-WORD`, `<<'WORD'` — the body that follows is data. */
 const HEREDOC_OPENER =
   /^<<-?\s*(?:'([A-Za-z_][\w-]*)'|"([A-Za-z_][\w-]*)"|([A-Za-z_][\w-]*))/;
 
 /** A line ending in an unescaped `\` continues into the next one. */
 const CONTINUES = /(?:^|[^\\])(?:\\\\)*\\$/;
+
+/**
+ * Every `$( … )` body in a line, OUTER ONES INCLUDED.
+ *
+ * A `[^()]*` pattern only ever matches the innermost pair, so
+ * `X=$(gh api $(build_url))` reported `build_url` and lost `gh` entirely — an
+ * under-report, and the direction this file treats as the dangerous one: a
+ * missed command is a stub the verifier never writes, so the extraction
+ * reaches the network. Depth-counted instead, and every nesting level is
+ * returned as its own body so each one's command word is found.
+ */
+function commandSubstitutionsOf(line: string): string[] {
+  const bodies: string[] = [];
+  for (let i = 0; i < line.length - 1; i++) {
+    if (line[i] !== '$' || line[i + 1] !== '(') continue;
+    // `$(( … ))` is ARITHMETIC, not a substitution, and nothing in it runs.
+    // Read as one, `N=$((N + 1))` reported `N` as a command to stub — measured
+    // across this repo's 434 run: steps, where it was the single largest
+    // source of all-caps junk in the list. Skipping past the whole construct
+    // costs the vanishingly rare `$( (a; b) )` subshell form, which is written
+    // with a space in practice.
+    if (line[i + 2] === '(') {
+      const close = line.indexOf('))', i + 3);
+      i = close === -1 ? line.length : close + 1;
+      continue;
+    }
+    let depth = 0;
+    for (let j = i + 1; j < line.length; j++) {
+      if (line[j] === '(') depth++;
+      else if (line[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          bodies.push(line.slice(i + 2, j));
+          break;
+        }
+      }
+    }
+  }
+  return bodies;
+}
 
 export function invokedCommandsOf(script: string): string[] {
   const seen = new Set<string>();
@@ -275,8 +353,18 @@ export function invokedCommandsOf(script: string): string[] {
       .replace(/^[\s(]+/, '')
       .split(/\s+/);
     for (const word of words) {
-      // Step over leading `name=value` assignment prefixes, any case.
-      if (/^[\w]+=/.test(word)) continue;
+      // Step over leading `name=value` assignment prefixes, any case — but
+      // only when the value is CLOSED. `X=$(gh api $(u))` splits into
+      // `X=$(gh`, `api`, …, and stepping over the first put `api` in command
+      // position, reporting a subcommand as a command to stub. An unbalanced
+      // `(` means the rest of this line is still inside the substitution, and
+      // `commandSubstitutionsOf` above already reported what runs in there.
+      if (/^[\w]+=/.test(word)) {
+        const opens = (word.match(/\(/g) ?? []).length;
+        const closes = (word.match(/\)/g) ?? []).length;
+        if (opens > closes) break;
+        continue;
+      }
       // ...and over a `case` pattern label, whose command follows it on the
       // same line: `blocked) gh api x ;;` invokes `gh`, and stopping at the
       // label loses it. An UNDER-report is the worse direction here — a
@@ -293,7 +381,7 @@ export function invokedCommandsOf(script: string): string[] {
     const masked = maskExpressions(rawLine);
     // Command substitutions first, on the unstripped text — `body="$(sanitize
     // < f)"` is an assignment whose real invocation lives inside the `$()`.
-    for (const m of masked.matchAll(/\$\(([^()]*)\)/g)) scanSegment(m[1]);
+    for (const body of commandSubstitutionsOf(masked)) scanSegment(body);
     const stripped = stripQuoted(masked, openQuote);
     const line = stripped.live.trim();
     if (line && !line.startsWith('#')) {
@@ -302,7 +390,9 @@ export function invokedCommandsOf(script: string): string[] {
     return stripped;
   };
 
-  const heredocQueue: string[] = [];
+  const heredocQueue: Heredoc[] = [];
+  const terminates = (rawLine: string, h: Heredoc): boolean =>
+    h.dash ? rawLine.trim() === h.word : rawLine === h.word;
   let openQuote: '"' | "'" | null = null;
   // A backslash-continued command is ONE command: scanning the continuation
   // as its own line puts the next argument in command position, which is how
@@ -311,7 +401,7 @@ export function invokedCommandsOf(script: string): string[] {
   for (const rawLine of script.split('\n')) {
     if (heredocQueue.length > 0) {
       // a heredoc body is input to a command, not a list of them
-      if (rawLine.trim() === heredocQueue[0]) heredocQueue.shift();
+      if (terminates(rawLine, heredocQueue[0])) heredocQueue.shift();
       continue;
     }
     // Annotated because the narrowing is loop-carried: `pending`'s type at
@@ -347,6 +437,14 @@ export function commentLines(firstPrefix: string, text: string): string[] {
 /** The nearest level that set a scalar — step, then job, then workflow. */
 function nearestString(...values: unknown[]): string | undefined {
   return values.find((v): v is string => typeof v === 'string');
+}
+
+/** The same, plus WHICH level won — the header labels it the way it labels env. */
+function nearestScoped(
+  ...values: Array<[EnvScope, unknown]>
+): { value: string; scope: EnvScope } | undefined {
+  const hit = values.find(([, v]) => typeof v === 'string');
+  return hit ? { value: hit[1] as string, scope: hit[0] } : undefined;
 }
 
 /** `defaults.run` of a workflow or job, tolerating any shape the YAML holds. */
@@ -448,9 +546,21 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
   const steps = Array.isArray(job.steps) ? job.steps : [];
   // Match by name, id, or 0-based index — exact, never substring: two steps
   // named "Post comment" and "Post comment (retry)" must not alias.
-  const index = /^\d+$/.test(args.step)
-    ? Number(args.step)
-    : steps.findIndex((s) => s?.name === args.step || s?.id === args.step);
+  const byName = steps.flatMap((s, i) =>
+    s?.name === args.step || s?.id === args.step ? [i] : [],
+  );
+  // A job may legally hold two steps with the SAME name, and taking the first
+  // is the failure this command's own header names: "picks the same-named step
+  // from the wrong job". A/B extraction runs this twice, once per tree, and a
+  // PR that adds or reorders a duplicate then has the two sides comparing
+  // different steps while reporting on one. Ambiguity is refused out loud —
+  // the index is always available and is never ambiguous.
+  if (byName.length > 1) {
+    throw new Error(
+      `extract-step: step \`${args.step}\` is ambiguous in job \`${args.job}\` — ${byName.length} steps share that name (indices ${byName.join(', ')}); pass the index instead`,
+    );
+  }
+  const index = /^\d+$/.test(args.step) ? Number(args.step) : (byName[0] ?? -1);
   const step = steps[index];
   if (!step) {
     const named = steps
@@ -502,11 +612,12 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
       : shellCommand === 'bash' || shellCommand === 'sh'
         ? 'set -e'
         : undefined;
-  const workingDirectory = nearestString(
-    step['working-directory'],
-    jobDefaults['working-directory'],
-    workflowDefaults['working-directory'],
+  const workingDir = nearestScoped(
+    ['step', step['working-directory']],
+    ['job', jobDefaults['working-directory']],
+    ['workflow', workflowDefaults['working-directory']],
   );
+  const workingDirectory = workingDir?.value;
 
   const script = step.run;
   const stepLabel = String(step.name ?? step.id ?? index);
@@ -527,6 +638,18 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
       ? []
       : commentLines('# shell (runner invokes it this way): ', shell)),
     ...(setLine ? [setLine] : []),
+    // A comment, not a `cd`, for the reason the env block is comments: the
+    // value may hold `${{ … }}`, and this command substitutes nothing. But it
+    // has to be HERE and not only in the metadata — this file's own argument
+    // for reading all three levels is that a step run "in the wrong directory,
+    // and nothing says so" is the transcription error it exists to remove, and
+    // a reader of the script alone was told nothing.
+    ...(workingDir
+      ? commentLines(
+          `# working-directory [${workingDir.scope}] (run FROM here): `,
+          workingDir.value,
+        )
+      : []),
     ...Object.entries(env).flatMap(([k, v]) =>
       commentLines(`# env [${envSources[k]}] ${k}=`, v),
     ),
@@ -544,7 +667,16 @@ export function runExtractStep(args: ExtractStepArgs): ExtractedStep {
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
     env,
     envSources,
-    expressions: expressionsOf(script, ...Object.values(env)),
+    // Every setting this command carries, not just the script and its env:
+    // a `working-directory: ${{ github.workspace }}/x` left off the list is a
+    // caller told there is nothing to stub, who then runs in a literal
+    // `${{ … }}` directory. The `shell:` template is on the same footing.
+    expressions: expressionsOf(
+      script,
+      ...Object.values(env),
+      workingDirectory ?? '',
+      shell,
+    ),
     invokes: invokedCommandsOf(script),
     scriptPath: outPath,
   };
@@ -574,15 +706,25 @@ export const extractStepCommand: CommandModule = {
         describe: 'Where to write the executable script',
       }),
   handler: (argv) => {
-    const meta = runExtractStep(argv as unknown as ExtractStepArgs);
-    writeStdoutLine(JSON.stringify(meta, null, 2));
-    const inherited = Object.values(meta.envSources).filter(
-      (scope) => scope !== 'step',
-    ).length;
-    writeStderrLine(
-      `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, ` +
-        `${Object.keys(meta.env).length} env var(s), ${inherited} inherited from job/workflow, ` +
-        `invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
-    );
+    // Caught, like `base-tree` and `test-plan` next door. Every throw above is
+    // a message written FOR the caller — read vs parse, no job vs no step vs
+    // no `run:` — and letting it propagate re-frames all of them as "an
+    // unexpected critical error" under a stack trace, which is the hunt those
+    // messages exist to prevent.
+    try {
+      const meta = runExtractStep(argv as unknown as ExtractStepArgs);
+      writeStdoutLine(JSON.stringify(meta, null, 2));
+      const inherited = Object.values(meta.envSources).filter(
+        (scope) => scope !== 'step',
+      ).length;
+      writeStderrLine(
+        `extract-step: wrote ${meta.scriptPath} (${meta.expressions.length} \${{ }} site(s) to stub, ` +
+          `${Object.keys(meta.env).length} env var(s), ${inherited} inherited from job/workflow, ` +
+          `invokes: ${meta.invokes.join(', ') || '(none detected)'})`,
+      );
+    } catch (err) {
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
+    }
   },
 };
