@@ -2824,6 +2824,30 @@ describe('modelCommand', () => {
       });
     });
 
+    it('should reject --default combined with --voice', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default --voice');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default only applies to the main model',
+        ),
+      });
+    });
+
+    it('should reject --default combined with --vision', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--default --vision');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default only applies to the main model',
+        ),
+      });
+    });
+
     it('should reject --default with an inline prompt even when the prompt mentions --vision', async () => {
       const setValue = vi.fn();
       const settings = {
