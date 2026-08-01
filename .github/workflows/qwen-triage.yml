@@ -3355,10 +3355,16 @@ jobs:
           #      & and > are left alone in prose (a decoded entity
           #      yields text, never markup, and an unescaped > cannot
           #      open a tag once < is escaped), which keeps &&, ->, and
-          #      blockquotes readable. Outside HTML blocks, inside code
-          #      spans/fences < & @ are left alone: <img> and @mentions
-          #      are inert under a code/pre ancestor, and escaping them
-          #      there only mangles the rendered text;
+          #      blockquotes readable. Code-span parity is a paragraph
+          #      property in CommonMark but a line property here, so a prose
+          #      line carrying an unmatched backtick run makes the rest of the
+          #      paragraph's code/prose split unknowable; the scanner fails
+          #      closed and prose-escapes every line until the next blank line
+          #      (over-escaping is the safe direction — a multi-line code span
+          #      shows its entities literally, inert not live). Outside HTML
+          #      blocks, inside code spans/fences < & @ are left alone: <img>
+          #      and @mentions are inert under a code/pre ancestor, and
+          #      escaping them there only mangles the rendered text;
           #   2. the comment-open token is broken EVERYWHERE, prose and code
           #      alike (<!-- becomes an escaped no-op, the autofix-proven
           #      neutralizer). The break must stay global: the upsert greps
@@ -3375,19 +3381,32 @@ jobs:
           #      counted — surplus closers are dropped (they would otherwise
           #      close the wrapping fold early) and unclosed opens are closed
           #      at the end, so a malformed report can neither swallow the
-          #      footer nor escape its wrapper. A fence still open at EOF is
-          #      a reliable signal the flat scanner diverged from GitHub's
-          #      container-aware parser (which closes a list-nested fence at
-          #      the container's end, not at EOF), so the sanitizer exits
-          #      non-zero and emit_report degrades to the escaped fallback
-          #      rather than guessing.
+          #      footer nor escape its wrapper. The flat scanner diverges
+          #      from GitHub's container-aware parser whenever a fence it
+          #      holds open cannot exist in GitHub's view, so two signals
+          #      exit non-zero (emit_report then degrades to the escaped
+          #      fallback rather than guessing): a fence still open at EOF
+          #      (GitHub closes a list-nested fence at the container's end,
+          #      not at EOF), and a non-blank line that dedents below the
+          #      fence opener's indent while it is open — the container
+          #      boundary moved, so GitHub already closed the fence and a
+          #      balancing closer later in the file would otherwise let the
+          #      scanner pass unescaped prose through escCode.
           # Accepted tradeoff (named, not accidental): rendering promotes the
           # report from inert text to parsed markdown, so [links](…) and
           # ![images](…) now render live where emit_block showed them literal.
           # report.md is agent output from a sandbox that ran PR code; images
           # are camo-proxied (mostly noise) and a phishing link under the bot
-          # identity is the residual surface. Defusing link targets is a
-          # deliberate follow-up, not done here.
+          # identity is the residual surface. That surface exists only while
+          # the four guarantees hold, so the fail-closed bails above are what
+          # keep deferring link defusing defensible; defusing link targets is
+          # a deliberate follow-up, not done here. Two safe-but-ugly display
+          # costs are named, not bugs: a code span that opens on one line and
+          # closes on the next is prose-escaped (the reader sees &lt;T&gt;
+          # inside it — the #8140 symptom relocated but inert), and escCode
+          # breaks <!-- to &lt;!\-\- which renders LITERALLY in a fence
+          # (entities do not decode there), so a fenced comment example shows
+          # as &lt;!\-\-.
           # An OVERSIZED report falls back to emit_block wholesale (cut
           # markdown dangles fences/folds), as does any sanitizer failure.
           emit_report() {
@@ -3447,7 +3466,7 @@ jobs:
                       k = m;
                     } else k += 1;
                   }
-                  if (cs === -1) { buf += line.slice(i, j); i = j; }
+                  if (cs === -1) { unmatched = true; buf += line.slice(i, j); i = j; }
                   else { flush(); out += escCode(line.slice(i, ce)); i = ce; }
                 }
                 flush();
@@ -3455,20 +3474,31 @@ jobs:
               }
               const lines = text.split("\n");
               const out = [];
-              let inFence = false, fc = "", fl = 0, inHtml = false;
+              let inFence = false, fc = "", fl = 0, fi = 0, inHtml = false;
+              let spanUnknown = false, unmatched = false;
               for (const line of lines) {
                 if (!inFence) {
-                  if (inHtml && /^\s*$/.test(line)) inHtml = false;
+                  const blank = /^\s*$/.test(line);
+                  if (inHtml && blank) inHtml = false;
+                  if (blank) spanUnknown = false;
                   const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
                   if (m && !(m[1][0] === "`" && m[2].indexOf("`") !== -1)) {
-                    inFence = true; fc = m[1][0]; fl = m[1].length;
+                    inFence = true; fc = m[1][0]; fl = m[1].length; fi = line.match(/^ */)[0].length;
                     out.push(escCode(line));
                     continue;
                   }
-                  const rendered = inHtml ? balance(escProse(line)) : proseLine(line);
+                  let rendered;
+                  if (inHtml || spanUnknown) {
+                    rendered = balance(escProse(line));
+                  } else {
+                    unmatched = false;
+                    rendered = proseLine(line);
+                    if (unmatched) { spanUnknown = true; rendered = balance(escProse(line)); }
+                  }
                   if (/^\s*<\/?(details|summary)\b/.test(rendered)) inHtml = true;
                   out.push(rendered);
                 } else {
+                  if (/\S/.test(line) && line.match(/^ */)[0].length < fi) process.exit(3);
                   const cm = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
                   if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
                   out.push(escCode(line));
@@ -3489,7 +3519,7 @@ jobs:
                 echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
               fi
               rm -f "$san_file"
-              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              emit_block 'Verification report (report.md, escaped fallback)' "$file" "$max"
               return 0
             fi
             # Wrap in a collapsed <details> (one-line footprint, markdown when

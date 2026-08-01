@@ -1824,7 +1824,7 @@ describe('qwen-triage verify hardening', () => {
       expect(fenceProc.status).toBe(0);
       expect(fenceProc.stdout).toContain('<pre><code>');
       expect(fenceProc.stdout).toContain(
-        'Verification report (report.md, truncated)',
+        'Verification report (report.md, escaped fallback)',
       );
       expect(fenceProc.stderr).toContain(
         '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
@@ -1853,9 +1853,67 @@ describe('qwen-triage verify hardening', () => {
       );
       const listOut = emit(listFence, 45000);
       expect(listOut).toContain('<pre><code>');
-      expect(listOut).toContain('Verification report (report.md, truncated)');
+      expect(listOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
       expect(listOut).not.toContain('<img');
       expect(listOut).not.toContain('<a href');
+
+      // Container-axis hole with a BALANCING closer (review hole #2 / the
+      // inline Critical): the list-nested fence opens indented, column-0
+      // prose follows, then a column-0 fence marker balances the flat
+      // scanner so it reaches EOF with inFence false — the old EOF guard
+      // never fired and the unescaped prose (mention, <img>, raw <a href>)
+      // shipped. The dedent guard now exits non-zero the moment a non-blank
+      // line dedents below the fence opener's indent. Asserted on the RAW
+      // output (parser-independent): the fallback is the escaped pre, so no
+      // live <img>/<a href> reaches the body and the @mention is inert under
+      // the pre/code ancestor.
+      const listFenceClosed = join(dir, 'list-fence-closed.md');
+      writeFileSync(
+        listFenceClosed,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+          '```',
+          'after',
+          '',
+        ].join('\n'),
+      );
+      const lfcOut = emit(listFenceClosed, 45000);
+      expect(lfcOut).toContain('<pre><code>');
+      expect(lfcOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(lfcOut).not.toContain('<img');
+      expect(lfcOut).not.toContain('<a href');
+
+      // Paragraph-spanning code span (review hole #1): CommonMark matches a
+      // code span across the lines of a paragraph, but proseLine matches per
+      // line. An unmatched backtick run on one line flips the parity for the
+      // rest of the paragraph, so the span the sanitizer classified as code
+      // was prose to GitHub — a live <img>/@everyone shipped before the fix.
+      // The scanner now fails closed: an unmatched run prose-escapes the rest
+      // of the paragraph. Asserted on the RAW output (parser-independent)
+      // rather than through stripCode, which mirrors the sanitizer's own
+      // line-scoped model and so cannot see this divergence.
+      const paraSpan = join(dir, 'para-span.md');
+      writeFileSync(
+        paraSpan,
+        ['A `hint about --flag', 'See `<img src=x> @everyone` here', ''].join(
+          '\n',
+        ),
+      );
+      const psOut = emit(paraSpan, 45000);
+      expect(psOut).toContain('&lt;img src=x>');
+      expect(psOut).not.toContain('<img');
+      expect(psOut).toContain('@&#8203;everyone');
+      expect(psOut).not.toContain('@everyone');
 
       // A NUL byte in the report is stripped (parity with emit_block's
       // tr -d '\000'); it must not reach the comment body.
@@ -1930,7 +1988,7 @@ describe('qwen-triage verify hardening', () => {
       expect(crashProc.status).toBe(0);
       expect(crashProc.stdout).toContain('<pre><code>');
       expect(crashProc.stdout).toContain(
-        'Verification report (report.md, truncated)',
+        'Verification report (report.md, escaped fallback)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
