@@ -66,7 +66,10 @@ export function failingFilesOf(output: string): string[] {
   const text = output.replace(ANSI_SGR_RE, '');
   const files = new Set<string>();
   const re =
-    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|[^|]+\|\s+)?([\w@./-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
+    // `\\` and `:` in the path class: a Windows runner prints
+    // `FAIL  C:\\repo\\src\\x.test.ts`, which the POSIX-only class missed —
+    // and a missed parse is an unattributed failure, not a loud error.
+    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|[^|]+\|\s+)?([\w@.:\\/-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     // The `❯` progress line lists every file; only a failing one counts.
@@ -172,8 +175,11 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     const prFailingFiles = failingFilesOf(t.output ?? '');
     const base = exec(t.command, baseline, args.timeout * 1000);
     const baseFailingFiles = base.timedOut ? [] : failingFilesOf(base.output);
-    const unparsed =
-      prFailingFiles.length === 0 && baseFailingFiles.length === 0;
+    // The PR side is what netNew/shared are derived from, so a PR side that
+    // parsed NOTHING attributes nothing — regardless of what the base rerun
+    // managed to parse. Requiring both sides to be empty silently dropped a
+    // failed command whose FAIL lines the trim had scattered.
+    const unparsed = prFailingFiles.length === 0;
     // A base run that never finished attributes NOTHING: with its failing set
     // unknowable, promoting the PR side's failures to net-new would
     // manufacture the strongest evidence this command produces out of an
