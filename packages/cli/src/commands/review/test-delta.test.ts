@@ -13,7 +13,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import yargs, { type Argv } from 'yargs';
 import {
+  testDeltaCommand,
+  type TestDeltaArgs,
   failingFilesOf,
   runTestDelta,
   type TestDeltaReport,
@@ -236,6 +239,34 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('nothing to attribute');
   });
 
+  it('stops at the whole-command budget and discloses what it skipped', () => {
+    // --timeout is PER COMMAND: three failures at the 300s default is 900s
+    // against a 600s tool ceiling, killed with NO report at all.
+    const real = Date.now;
+    let t = 0;
+    Date.now = () => (t += 300_000);
+    try {
+      const r = runWith(
+        [
+          cmd({
+            command: 'npm test --workspace="a"',
+            output: 'FAIL a/x.test.ts',
+          }),
+          cmd({
+            command: 'npm test --workspace="b"',
+            output: 'FAIL b/y.test.ts',
+          }),
+        ],
+        ' FAIL a/x.test.ts',
+      );
+      expect(r.entries).toHaveLength(1);
+      expect(r.note).toContain('budget was exhausted');
+      expect(r.note).toContain('npm test --workspace="b"');
+    } finally {
+      Date.now = real;
+    }
+  });
+
   it('refuses an unreadable report and a missing base tree without throwing', () => {
     expect(
       runTestDelta({ report: join(dir, 'nope.json'), baseline, timeout: 60 })
@@ -248,5 +279,71 @@ describe('runTestDelta', () => {
         timeout: 60,
       }).note,
     ).toMatch(/base-tree/);
+  });
+});
+
+describe('the CLI option contract', () => {
+  // Every test above builds its args by hand. That is how the flag-name bug
+  // got into `test-plan`: yargs camel-cases `--build-test` to `buildTest`, a
+  // field named for the flag read `undefined` on every real invocation, and
+  // the suite stayed green because nothing went through yargs.
+  //
+  // `--pr-worktree` has the worst failure mode of any flag here: arriving
+  // undefined, root stripping silently stops and EVERY pre-existing failure
+  // becomes a fabricated netNew. So this test does not assert the parsed
+  // shape and stop — it feeds the parsed object straight into runTestDelta
+  // and asserts on an attribution only reachable when the root was stripped.
+  let dir: string;
+  let baseDir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'qwen-test-delta-cli-'));
+    baseDir = join(dir, 'base');
+    mkdirSync(baseDir);
+    writeFileSync(
+      join(dir, 'bt.json'),
+      JSON.stringify({
+        test: [
+          {
+            command: 'npm test',
+            exitCode: 1,
+            seconds: 1,
+            timedOut: false,
+            // Absolute, under the PR worktree root.
+            output: ' FAIL  /wt/pr/src/flaky.test.ts > env',
+          },
+        ],
+      }),
+    );
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('parses --pr-worktree into the field runTestDelta actually reads', () => {
+    const parsed = (testDeltaCommand.builder as (y: Argv) => Argv)(
+      yargs([]),
+    ).parseSync([
+      '--report',
+      join(dir, 'bt.json'),
+      '--baseline',
+      baseDir,
+      '--pr-worktree',
+      '/wt/pr',
+    ]) as unknown as TestDeltaArgs;
+
+    const report = runTestDelta({
+      ...parsed,
+      // The base side prints the SAME failure under its own root.
+      exec: (command) => ({
+        command,
+        exitCode: 1,
+        seconds: 1,
+        timedOut: false,
+        output: ` FAIL  ${baseDir}/src/flaky.test.ts > env`,
+      }),
+    });
+
+    // Reachable ONLY if both roots were stripped: unstripped, the two absolute
+    // paths differ and the pre-existing failure is reported as the PR's own.
+    expect(report.netNew).toEqual([]);
+    expect(report.shared).toEqual(['src/flaky.test.ts']);
   });
 });

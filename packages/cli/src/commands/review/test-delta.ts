@@ -129,10 +129,12 @@ export interface TestDeltaArgs {
   report: string;
   baseline: string;
   out?: string;
-  /** The PR worktree the report's failures were produced in — its root is
-   *  stripped so both sides compare as repo-relative paths. */
-  /** yargs camel-cases `--pr-worktree`; naming the field for the flag would
-   *  read `undefined` on every real invocation. */
+  /**
+   * The PR worktree the report's failures were produced in — its root is
+   * stripped so both sides compare as repo-relative paths. Named for yargs'
+   * camel-cased `--pr-worktree`; a field named for the flag itself would read
+   * `undefined` on every real invocation.
+   */
   prWorktree?: string;
   timeout: number;
   /** Test seam — production spawns the real command. */
@@ -170,6 +172,18 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   };
 }
 
+/**
+ * Whole-command budget, mirroring test-efficacy's. `--timeout` is PER COMMAND,
+ * so three failed commands at the 300s default is 900s against the 600s tool
+ * ceiling — killed with NO report written, discarding the base-tree install and
+ * build just paid for. Commands the budget cannot fit are disclosed, never
+ * silently dropped.
+ */
+const TOTAL_BUDGET_MS = 540_000;
+
+/** The CLI default, reused when a programmatic caller omits `--timeout`. */
+const DEFAULT_TIMEOUT_S = 300;
+
 export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const exec = args.exec ?? run;
   const baseline = resolve(args.baseline);
@@ -204,16 +218,24 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     );
   }
 
-  const entries: DeltaEntry[] = failed.map((t) => {
+  // A programmatic caller may omit `timeout`; `NaN * 1000` reaches spawnSync as
+  // an invalid deadline. Fall back to the CLI's own default.
+  const perCommandMs =
+    (Number.isFinite(args.timeout) ? args.timeout : DEFAULT_TIMEOUT_S) * 1000;
+  const startedAt = Date.now();
+  const skippedForBudget: string[] = [];
+  const entries: DeltaEntry[] = [];
+  for (const t of failed) {
+    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining < 5_000) {
+      skippedForBudget.push(t.command);
+      continue;
+    }
     const prFailingFiles = failingFilesOf(
       t.output ?? '',
       args.prWorktree ?? '',
     );
-    // A programmatic caller may omit `timeout`; `NaN * 1000` reaches spawnSync
-    // as an invalid deadline. Fall back to the CLI's own default.
-    const perCommandMs =
-      (Number.isFinite(args.timeout) ? args.timeout : 300) * 1000;
-    const base = exec(t.command, baseline, perCommandMs);
+    const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
     const baseFailingFiles = base.timedOut
       ? []
       : failingFilesOf(base.output, baseline);
@@ -236,7 +258,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // manufactured from a base that never ran a test.
     const baseUnusable =
       base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
-    return {
+    entries.push({
       command: t.command,
       prFailingFiles,
       baseFailingFiles,
@@ -248,8 +270,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         : prFailingFiles.filter((f) => baseFailingFiles.includes(f)),
       base,
       unparsed,
-    };
-  });
+    });
+  }
 
   const netNew = [...new Set(entries.flatMap((e) => e.netNew))].sort();
   const shared = [...new Set(entries.flatMap((e) => e.shared))].sort();
@@ -293,6 +315,11 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (timedOut) {
     parts.push(
       `${timedOut} base-side rerun(s) timed out — infrastructure, not evidence`,
+    );
+  }
+  if (skippedForBudget.length) {
+    parts.push(
+      `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
   return {

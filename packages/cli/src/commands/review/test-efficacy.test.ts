@@ -1739,6 +1739,16 @@ describe('replacementMutantsOf', () => {
     });
   });
 
+  it('does not read a GENERIC call as a comparison', () => {
+    // `if (isRecord<string>(v))` is a type-guard predicate — the `if (ready)`
+    // shape whose survivors this gate calls noise. Telling `a<b` from
+    // `fn<T>(x)` needs a parser, so the gate stays silence-biased.
+    expect(same('if (isRecord<string>(v)) return;')).toBeNull();
+    expect(same('if (fn<Bar>(x)) go();')).toBeNull();
+    // A spaced comparison still qualifies.
+    expect(same('if (n <= 0) return 0;')?.operator).toBe('guard-true');
+  });
+
   it('does not read an arrow function as a comparison', () => {
     // `=>` ends in `>` followed by a space, so the old class matched it and
     // every predicate guard became a guard-true candidate — exactly the

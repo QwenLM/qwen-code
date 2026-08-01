@@ -667,13 +667,15 @@ export function replacementMutantsOf(
     // exists to exclude.
     if (
       condEnd > 0 &&
-      // `(?<![=!<>])[<>]=?(?!=)` so an arrow function's `=>` is not a
-      // comparison: it ends in `>` followed by a space, and the loose class
-      // made every predicate guard a candidate — the `if (ready)` noise this
-      // gate exists to exclude.
-      // The trailing `\s` was accidental asymmetry with `[!=]==`, which has
-      // none: `if (a<b)` is the same guard, just unformatted.
-      /[!=]==|(?<![=!<>])[<>]=?(?![=>])/.test(ifm[2].slice(0, condEnd))
+      // Two exclusions, both measured. `(?<![=!<>])…(?![=>])` keeps an arrow
+      // function's `=>` from reading as a comparison. And the trailing `\s` is
+      // REQUIRED, not an accidental asymmetry with `[!=]==`: without it a
+      // generic call — `if (isRecord<string>(v))` — matches at `<string`, and
+      // a type-guard predicate is exactly the `if (ready)` shape whose
+      // survivors this gate calls noise. Telling `a<b` from `fn<T>(x)` needs a
+      // parser; the gate is silence-biased by design, and Prettier makes the
+      // unformatted comparison near-nonexistent here.
+      /[!=]==|(?<![=!<>])[<>]=?(?![=>])\s/.test(ifm[2].slice(0, condEnd))
     ) {
       return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
     }
