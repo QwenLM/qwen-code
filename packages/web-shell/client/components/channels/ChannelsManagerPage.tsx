@@ -78,6 +78,8 @@ const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   wecom: 'W',
   feishu: 'F',
+  github: 'GH',
+  gitlab: 'GL',
 };
 
 function badgeVariant(
@@ -528,7 +530,7 @@ export function ChannelsManagerPage({
                 }
               >
                 <span className={styles.platformMark} aria-hidden="true">
-                  {PLATFORM_MARKS[platform.type]}
+                  {PLATFORM_MARKS[platform.type] ?? platform.displayName[0]}
                 </span>
                 <div className={styles.platformCopy}>
                   <p className={styles.platformName}>{platform.displayName}</p>

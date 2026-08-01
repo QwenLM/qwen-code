@@ -60,6 +60,8 @@ const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   wecom: 'W',
   feishu: 'F',
+  github: 'GH',
+  gitlab: 'GL',
 };
 
 const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
@@ -75,6 +77,14 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
+  },
+  github: {
+    token: 'channels.editor.field.github.token',
+    baseUrl: 'channels.editor.field.github.baseUrl',
+  },
+  gitlab: {
+    token: 'channels.editor.field.gitlab.token',
+    baseUrl: 'channels.editor.field.gitlab.baseUrl',
   },
 };
 
