@@ -33,6 +33,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+vi.mock('../../utils/version.js', () => ({
+  getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
+}));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
