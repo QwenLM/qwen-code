@@ -455,7 +455,7 @@ export function registerWorkspaceSettingsRoutes(
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
-          `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
+          `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${effectiveWorkspace}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );

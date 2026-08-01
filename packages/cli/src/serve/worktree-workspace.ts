@@ -5,6 +5,7 @@
  */
 
 import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 
 interface SessionLister {
   listWorkspaceSessions(
@@ -23,8 +24,12 @@ export function findEffectiveWorkspace(
   pathExists: (p: string) => boolean = existsSync,
 ): string {
   const sessions = bridge.listWorkspaceSessions(boundWorkspace);
+  const normalizedBound = path.normalize(boundWorkspace);
   const relocated = sessions.find(
-    (s) => s.worktree && pathExists(s.worktree.path),
+    (s) =>
+      s.worktree &&
+      path.normalize(s.worktree.path).startsWith(normalizedBound + path.sep) &&
+      pathExists(s.worktree.path),
   );
   return relocated?.worktree?.path ?? boundWorkspace;
 }

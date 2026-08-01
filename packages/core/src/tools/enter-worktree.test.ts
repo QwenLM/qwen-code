@@ -173,6 +173,51 @@ describe('EnterWorktreeTool.execute', () => {
     expect(result.error?.message).toMatch(/not a git repository/i);
     await fs.rm(cwd, { recursive: true, force: true });
   });
+
+  it('calls setActiveWorktree with the created worktree path', async () => {
+    const fs = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const os = await import('node:os');
+    const { execFileSync } = await import('node:child_process');
+    const repoRoot = await fs.mkdtemp(
+      pathMod.join(os.tmpdir(), 'qwen-enter-wt-'),
+    );
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+      execFileSync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: repoRoot,
+      });
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: repoRoot,
+      });
+      await fs.writeFile(pathMod.join(repoRoot, 'README.md'), 'hi\n');
+      execFileSync('git', ['add', '.'], { cwd: repoRoot });
+      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+        cwd: repoRoot,
+      });
+
+      const setActiveWorktree = vi.fn();
+      const cfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'test-session',
+        getWorktreeSymlinkDirectories: () => [],
+        setActiveWorktree,
+        getActiveWorktree: () => null,
+      } as unknown as Config;
+      const tool = new EnterWorktreeTool(cfg);
+      const result = await tool
+        .build({ name: 'spy-test' })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(setActiveWorktree).toHaveBeenCalledTimes(1);
+      const calledPath = setActiveWorktree.mock.calls[0][0] as string;
+      expect(calledPath).toContain('.qwen');
+      expect(calledPath).toContain('spy-test');
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('session marker round-trip', () => {

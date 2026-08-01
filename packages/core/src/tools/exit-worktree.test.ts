@@ -312,5 +312,61 @@ describe('ExitWorktreeTool', () => {
       );
       expect(re.trim()).toBe('rewritten-id');
     });
+
+    it('clears activeWorktree on keep when it matches the exited path', async () => {
+      const wtPath = await provisionWorktree('keep-active');
+      const setActiveWorktree = vi.fn();
+      const cfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'session-creator',
+        getActiveWorktree: () => wtPath,
+        setActiveWorktree,
+      } as unknown as Config;
+      const result = await new ExitWorktreeTool(cfg)
+        .build({ name: 'keep-active', action: 'keep' })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(setActiveWorktree).toHaveBeenCalledWith(null);
+    });
+
+    it('clears activeWorktree on remove when it matches the exited path', async () => {
+      const wtPath = await provisionWorktree('remove-active');
+      const setActiveWorktree = vi.fn();
+      const cfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'session-creator',
+        getActiveWorktree: () => wtPath,
+        setActiveWorktree,
+      } as unknown as Config;
+      const result = await new ExitWorktreeTool(cfg)
+        .build({
+          name: 'remove-active',
+          action: 'remove',
+          discard_changes: true,
+        })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(setActiveWorktree).toHaveBeenCalledWith(null);
+    });
+
+    it('does not clear activeWorktree when it points elsewhere', async () => {
+      await provisionWorktree('other-active');
+      const setActiveWorktree = vi.fn();
+      const cfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'session-creator',
+        getActiveWorktree: () => '/some/other/worktree',
+        setActiveWorktree,
+      } as unknown as Config;
+      const result = await new ExitWorktreeTool(cfg)
+        .build({
+          name: 'other-active',
+          action: 'remove',
+          discard_changes: true,
+        })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(setActiveWorktree).not.toHaveBeenCalled();
+    });
   });
 });

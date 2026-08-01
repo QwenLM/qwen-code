@@ -58,4 +58,12 @@ describe('findEffectiveWorkspace', () => {
     };
     expect(findEffectiveWorkspace(bridge, ws, always)).toBe(wt1);
   });
+
+  it('skips a worktree whose path is outside boundWorkspace', () => {
+    const outside = '/tmp/evil/worktrees/escape';
+    const bridge = {
+      listWorkspaceSessions: () => [{ worktree: { path: outside } }],
+    };
+    expect(findEffectiveWorkspace(bridge, ws, always)).toBe(ws);
+  });
 });

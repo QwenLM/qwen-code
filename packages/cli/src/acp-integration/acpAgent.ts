@@ -166,6 +166,7 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
@@ -7260,10 +7261,16 @@ class QwenAgent implements Agent {
       const session = this.sessions.get(sessionId);
       if (session) {
         const configWt = session.getConfig().getActiveWorktree?.();
-        return session.worktreeCwd ?? configWt ?? process.cwd();
+        if (session.worktreeCwd && existsSync(session.worktreeCwd)) {
+          return session.worktreeCwd;
+        }
+        return configWt ?? process.cwd();
       }
     }
     for (const session of this.sessions.values()) {
+      if (session.worktreeCwd && existsSync(session.worktreeCwd)) {
+        return session.worktreeCwd;
+      }
       const wt = session.getConfig().getActiveWorktree?.();
       if (wt) return wt;
     }
