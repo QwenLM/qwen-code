@@ -206,6 +206,7 @@ describe('useGeminiStream', () => {
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
   let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
+  let mockWorkflowRunRegistry: { setCompletionCallback: Mock };
   let mockMonitorRegistry: {
     setNotificationCallback: Mock;
     get: Mock;
@@ -241,6 +242,9 @@ describe('useGeminiStream', () => {
     };
     mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
+    };
+    mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
@@ -300,6 +304,7 @@ describe('useGeminiStream', () => {
       })),
       getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn(() => mockMonitorRegistry),
+      getWorkflowRunRegistry: vi.fn(() => mockWorkflowRunRegistry),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -451,6 +456,47 @@ describe('useGeminiStream', () => {
 
     act(() => {
       callback(displayText, modelText);
+    });
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: displayText },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        modelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Notification,
+          notificationDisplayText: displayText,
+        }),
+      );
+    });
+  });
+
+  it('queues background workflow completions for the model loop', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    const displayText = 'Background workflow "research" completed.';
+    const modelText =
+      '<task-notification>\n<kind>workflow</kind>\n<status>completed</status>\n</task-notification>';
+
+    await waitFor(() => {
+      expect(
+        mockWorkflowRunRegistry.setCompletionCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+    const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: { todoWorkChainId?: string },
+    ) => void;
+
+    act(() => {
+      callback(displayText, modelText, { todoWorkChainId: 'workflow-chain' });
     });
 
     await waitFor(() => {
