@@ -679,7 +679,15 @@ export function renderLedgerSection(ledger: Ledger): string {
   // neutralised before interpolation. The location cell is rendered inside a
   // code span, so it also has its backticks replaced: one would close the span
   // and let the rest of the path render as markdown.
-  const cell = (v: string) => v.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+  // Backslash FIRST: escaping `|` with `\\|` is only an escape if the backslash
+  // is itself literal. A title already holding `\\|` became `\\\\|`, which markdown
+  // reads as an escaped backslash followed by a LIVE separator — the forged
+  // row this escaping exists to prevent, produced by the escaping.
+  const cell = (v: string) =>
+    v
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/[\r\n]+/g, ' ');
   const code = (v: string) => cell(v).replace(/`/g, "'");
   const rows = ledger.findings.map(
     (f) =>
@@ -689,6 +697,14 @@ export function renderLedgerSection(ledger: Ledger): string {
     '## Previous /review round (machine ledger)',
     '',
     `Round ${ledger.round}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.`,
+    // A truncated ledger must not read like a complete one. `dropped` exists
+    // to draw that line, and this is the only place a reader sees the list.
+    ...(ledger.dropped
+      ? [
+          '',
+          `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
+        ]
+      : []),
     '',
     '| id | severity | location | title |',
     '| --- | --- | --- | --- |',
