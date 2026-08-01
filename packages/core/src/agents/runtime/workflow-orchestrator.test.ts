@@ -1071,6 +1071,32 @@ describe('WorkflowOrchestrator', () => {
     await expect(run).resolves.toMatchObject({ result: 'done' });
   });
 
+  it('preserves a dispatch error when cancellation aborts its pause gate', async () => {
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    scheduler.pause();
+    rejectDispatch?.(new Error('dispatch-boom'));
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).rejects.toThrow('dispatch-boom');
+  });
+
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.

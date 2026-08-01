@@ -1577,9 +1577,14 @@ export class WorkflowOrchestrator {
             // invoking its thunk. Settle the issued counter here as well;
             // emitCompletion's latch keeps dispatch/slot failures exactly-once.
             emitCompletion(error);
-            return scheduler.waitUntilRunning().then(() => {
-              throw error;
-            });
+            return scheduler.waitUntilRunning().then(
+              () => {
+                throw error;
+              },
+              () => {
+                throw error;
+              },
+            );
           },
         );
     };
