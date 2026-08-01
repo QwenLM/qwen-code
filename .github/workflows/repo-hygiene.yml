@@ -59,7 +59,17 @@ jobs:
             echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
           fi
 
-  # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
+  # ── Phase 1: Scan ───────────────────────────────────────────────────────
+  # "Read-only" here means no repository modifications, and that is enforced
+  # only by model compliance plus the AST read-only gate on shell commands —
+  # NOT by the coreTools list below, whose run_shell_command(<cmd>) specifiers
+  # match at the tool level (they enable the whole tool, not specific calls).
+  # With no `permissions` block, shell invocations fall back to the AST gate,
+  # which classifies by command name regardless of arguments, so a read-only
+  # command (e.g. `cat /proc/self/environ`) can still read this step's model
+  # API key. That secret is contained: it is not the write PAT, and it would
+  # only surface in an auditable PR comment. The scan also writes its own
+  # output files (findings.json, report-only.md) to WORKDIR.
   scan:
     name: 'Scan'
     if: '${{ needs.dedup.outputs.open_prs_present == ''false'' }}'
@@ -607,18 +617,61 @@ jobs:
           echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
           echo 'result=fixes' >> "${GITHUB_OUTPUT}"
 
-      # Verification with auto-revert
+      # Verification with auto-revert.
+      #
+      # SECURITY: the checks below compile and EXECUTE agent-written files —
+      # vitest runs the agent's test files, generate:settings-schema executes
+      # the writable settingsSchema.ts, and eslint/build/typecheck process the
+      # agent's source. Scanned repo content is untrusted, and fix.md mandates
+      # a regression test per fix, so a prompt-injected finding could smuggle in
+      # a "regression test" carrying top-level code. Running that on the bare
+      # runner would be arbitrary code execution as the runner user, which could
+      # then poison the workspace .git/config and hijack the PAT-bearing push
+      # that follows. Every code-touching check therefore runs inside the same
+      # docker sandbox image the agent uses, with networking disabled, so
+      # untrusted code executes in an isolated, egress-less container (mirrors
+      # the CLI sandbox flags, plus --network none). Orchestration — the revert
+      # loop, findings.json bookkeeping, outputs — stays on the host; the push
+      # step additionally pushes from a clean clone so nothing this step touched
+      # can redirect it.
       - name: 'Independent verification'
         if: '${{ steps.gate.outputs.result == ''fixes'' }}'
         id: 'verify'
         run: |-
+          # Each code-touching check below runs inside the network-less sandbox
+          # image using the docker args below, bound to the workspace so it sees
+          # the branch under verification. --user matches the runner uid so
+          # sandbox-created files stay runner-owned (the host's git reset --hard
+          # below must be able to overwrite them). RUNNER_TEMP is mounted
+          # read-only for the trusted staged gate scripts; HOME and the npm cache
+          # are redirected into WORKDIR so npm never needs a host HOME.
+          # GITHUB_OUTPUT is deliberately NOT passed: the gate scripts skip their
+          # outcome write when it is unset and signal failure by exit code, which
+          # docker propagates back to this step. The docker run is invoked as a
+          # top-level command (not wrapped in a function) so a check failure
+          # trips the ERR salvage trap below exactly as the bare command did.
+          SANDBOX_ARGS=(
+            --init --rm -i
+            --network none
+            --user "$(id -u):$(id -g)"
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --workdir "${GITHUB_WORKSPACE}"
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=${GITHUB_WORKSPACE}"
+            --mount "type=bind,src=${WORKDIR},dst=${WORKDIR}"
+            --mount "type=bind,src=${RUNNER_TEMP},dst=${RUNNER_TEMP},readonly"
+            -e "HOME=${WORKDIR}/sandbox-home"
+            -e "npm_config_cache=${WORKDIR}/npm-cache"
+          )
+          mkdir -p "${WORKDIR}/sandbox-home" "${WORKDIR}/npm-cache"
+
           # Typecheck only, by design: it catches most bad model-generated
           # commits cheaply. Lint/build breakage still fails the job below.
           REVERTED=0
           REVERTED_MSGS=''
           BREAKER_MSG=''
           while true; do
-            if npm run typecheck; then break; fi
+            if docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run typecheck'; then break; fi
             COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
             if [[ "${COMMITS_LEFT}" -le 0 ]]; then
               echo '❌ All commits reverted; baseline still fails typecheck.'
@@ -701,11 +754,11 @@ jobs:
           }
           trap move_surviving_to_report_only ERR
 
-          npm run build
-          npm run lint
-          bash "${RUNNER_TEMP}/check-settings-schema.sh"
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run build'
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run lint'
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-settings-schema.sh'"
           git diff --name-only origin/main...HEAD \
-            | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
+            | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-autofix-contracts.sh'"
 
           CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
             | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
@@ -717,7 +770,7 @@ jobs:
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then continue; fi
               echo "🧪 Testing ${p}..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+              docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "npm run test --workspace '${p}' --if-present -- --changed origin/main --passWithNoTests"
             done
           fi
 
@@ -730,8 +783,23 @@ jobs:
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
           BRANCH="${{ steps.branch.outputs.name }}"
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git push origin "${BRANCH}"
+
+          # SECURITY: the verification step executed agent-written files (now
+          # sandboxed and network-less) but still shared this workspace, so
+          # treat the workspace git config as untrusted: a poisoned .git/config
+          # (http.proxy / url.*.insteadOf) or a pre-push hook could reroute the
+          # PAT-bearing push below. Push from a fresh clone whose config git
+          # created clean, with global/system config neutralized and hooks
+          # bypassed, so nothing the verification touched can redirect the
+          # authenticated URL. The PAT is passed only on the push command line,
+          # never written to any config file.
+          PUSH_DIR="$(mktemp -d)"
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_SYSTEM=/dev/null
+          git clone --no-checkout "file://${GITHUB_WORKSPACE}" "${PUSH_DIR}"
+          git -C "${PUSH_DIR}" push --no-verify \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" \
+            "${BRANCH}:${BRANCH}"
 
           if [[ -s "${WORKDIR}/pr-body.md" ]]; then
             {
