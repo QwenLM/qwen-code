@@ -16,18 +16,17 @@ import { parseArgs } from 'node:util';
 const skillDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 70 * 60 * 1000;
 const specs = {
-  'scan': {
+  scan: {
     inputs: [],
     outputs: ['findings.json'],
     required: [],
     invocation: (o) => `Scan phase. --workdir ${o.workdir}`,
   },
-  'fix': {
+  fix: {
     inputs: ['findings.json'],
     outputs: ['findings.json'],
     required: ['branch'],
-    invocation: (o) =>
-      `Fix phase. --workdir ${o.workdir} --branch ${o.branch}`,
+    invocation: (o) => `Fix phase. --workdir ${o.workdir} --branch ${o.branch}`,
   },
 };
 
@@ -84,10 +83,14 @@ function runQwen(options, prompt) {
   let killTimer;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--approval-mode', 'auto-edit', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      ['--approval-mode', 'auto-edit', '--prompt', prompt],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
 
     // A cancelled workflow SIGTERMs this script only; without forwarding,
     // the detached child would keep running (with API credentials) until
