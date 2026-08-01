@@ -27,7 +27,7 @@ const mockRunForkedAgent = vi.hoisted(() => vi.fn());
 const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   vi.fn().mockReturnValue({
     generationConfig: {},
-    history: [],
+    history: [{ role: 'user', parts: [{ text: 'hello' }] }],
     model: 'test-model',
     version: 0,
   }),
@@ -54,7 +54,7 @@ describe('advisorCommand', () => {
     vi.clearAllMocks();
     mockBuildBtwCacheSafeParams.mockReturnValue({
       generationConfig: {},
-      history: [],
+      history: [{ role: 'user', parts: [{ text: 'hello' }] }],
       model: 'test-model',
       version: 0,
     });
@@ -93,6 +93,23 @@ describe('advisorCommand', () => {
       messageType: 'error',
       content: 'Config not loaded.',
     });
+  });
+
+  it('should return error when no model is configured', async () => {
+    const noModelContext = createMockCommandContext({
+      services: {
+        config: createConfig({ getModel: () => null }),
+      },
+    });
+
+    const result = await advisorCommand.action!(noModelContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'No model configured.',
+    });
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
   });
 
   describe('interactive mode', () => {
@@ -139,9 +156,28 @@ describe('advisorCommand', () => {
 
       await advisorCommand.action!(mockContext, '');
 
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.not.objectContaining({ model: expect.anything() }),
-      );
+      const callArgs = mockRunForkedAgent.mock.calls[0][0];
+      expect(callArgs).not.toHaveProperty('model');
+    });
+
+    it('should not pass model override when advisorModel is whitespace-only', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+      const contextWithBlankModel = createMockCommandContext({
+        services: {
+          config: createConfig(),
+          settings: {
+            merged: { advisorModel: '   ' },
+          },
+        },
+      });
+
+      await advisorCommand.action!(contextWithBlankModel, '');
+
+      const callArgs = mockRunForkedAgent.mock.calls[0][0];
+      expect(callArgs).not.toHaveProperty('model');
     });
 
     it('should pass advisorModel setting as model override', async () => {
@@ -165,8 +201,47 @@ describe('advisorCommand', () => {
       );
     });
 
+    it('should forward abortSignal to runForkedAgent', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+      const abortController = new AbortController();
+      const contextWithSignal = createMockCommandContext({
+        services: { config: createConfig() },
+        abortSignal: abortController.signal,
+      });
+
+      await advisorCommand.action!(contextWithSignal, '');
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ abortSignal: abortController.signal }),
+      );
+    });
+
     it('should error when no conversation context is available', async () => {
       mockBuildBtwCacheSafeParams.mockReturnValue(null);
+
+      await advisorCommand.action!(mockContext, '');
+
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('No conversation context'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+    });
+
+    it('should error when conversation history is empty', async () => {
+      mockBuildBtwCacheSafeParams.mockReturnValue({
+        generationConfig: {},
+        history: [],
+        model: 'test-model',
+        version: 0,
+      });
 
       await advisorCommand.action!(mockContext, '');
 
@@ -295,6 +370,20 @@ describe('advisorCommand', () => {
       const prompt = buildAdvisorPrompt('is the fix correct?');
       expect(prompt).toContain('is the fix correct?');
       expect(prompt).not.toContain('Review the conversation above.');
+    });
+
+    it('should contain all four required section headings', () => {
+      const prompt = buildAdvisorPrompt('');
+      expect(prompt).toContain('## Verdict');
+      expect(prompt).toContain('## Risks');
+      expect(prompt).toContain('## Missing evidence');
+      expect(prompt).toContain('## Recommendation');
+    });
+
+    it('should acknowledge the transcript may be truncated', () => {
+      const prompt = buildAdvisorPrompt('');
+      expect(prompt).toContain('may be truncated');
+      expect(prompt).not.toContain('complete evidence');
     });
   });
 });

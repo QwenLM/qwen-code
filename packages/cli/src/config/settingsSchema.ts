@@ -1310,7 +1310,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended.',
+      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
     showInDialog: true,
   },
 

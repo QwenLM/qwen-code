@@ -2223,6 +2223,13 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
+  'Consulting advisor...': '正在咨询审查模型...',
+  'Advisor review failed: {{error}}': '审查失败：{{error}}',
+  'No conversation context available for /advisor':
+    '没有可供 /advisor 使用的对话上下文',
+  'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一个操作正在进行中，请等待其完成后再运行 /advisor',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',

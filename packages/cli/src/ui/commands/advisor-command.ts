@@ -18,10 +18,12 @@ import {
   runForkedAgent,
 } from '@qwen-code/qwen-code-core';
 
+const ADVISOR_MAX_FOCUS_LENGTH = BTW_MAX_INPUT_LENGTH;
+
 export function buildAdvisorPrompt(focus: string): string {
   return [
     '<system-reminder>',
-    'You are acting as an ADVISOR — an independent senior reviewer giving a second opinion on the conversation so far. The transcript above is the complete evidence available to you.',
+    'You are acting as an ADVISOR — an independent senior reviewer giving a second opinion on the conversation so far. The transcript above may be truncated to the most recent turns; treat what is shown as the evidence available to you.',
     '',
     'CRITICAL CONSTRAINTS:',
     '- You have NO tools. Base every claim strictly on evidence present in the transcript; never claim to have verified something you could not observe.',
@@ -32,7 +34,7 @@ export function buildAdvisorPrompt(focus: string): string {
     'Respond in markdown with exactly these sections:',
     '## Verdict — one short paragraph: is the current approach or conclusion sound?',
     '## Risks — concrete risks or flawed assumptions, each citing transcript evidence. Write "None found" if none.',
-    '## Missing evidence — claims asserted but not verified in the transcript.',
+    '## Missing evidence — claims asserted but not verified in the visible transcript (earlier verification may exist outside the shown window).',
     '## Recommendation — the single most valuable next action.',
     '</system-reminder>',
     '',
@@ -56,11 +58,12 @@ async function askAdvisor(
   if (!config) throw new Error('Config not loaded');
 
   const cacheSafeParams = buildBtwCacheSafeParams(config);
-  if (!cacheSafeParams) {
+  if (!cacheSafeParams || cacheSafeParams.history.length === 0) {
     throw new Error(t('No conversation context available for /advisor'));
   }
 
-  const advisorModel = context.services.settings.merged.advisorModel;
+  const advisorModel =
+    context.services.settings.merged.advisorModel?.trim() || undefined;
 
   const result = await runForkedAgent({
     config,
@@ -88,12 +91,12 @@ export const advisorCommand: SlashCommand = {
   ): Promise<void | SlashCommandActionReturn> => {
     const focus = args.trim();
 
-    if (focus.length > BTW_MAX_INPUT_LENGTH) {
+    if (focus.length > ADVISOR_MAX_FOCUS_LENGTH) {
       return {
         type: 'message',
         messageType: 'error',
         content: t('Focus too long (max {{max}} chars)', {
-          max: String(BTW_MAX_INPUT_LENGTH),
+          max: String(ADVISOR_MAX_FOCUS_LENGTH),
         }),
       };
     }
@@ -106,6 +109,14 @@ export const advisorCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Config not loaded.'),
+      };
+    }
+
+    if (!config.getModel()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('No model configured.'),
       };
     }
 
