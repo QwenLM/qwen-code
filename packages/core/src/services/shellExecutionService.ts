@@ -117,17 +117,8 @@ export function getShellAbortReasonKind(
  */
 const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
 
-function applyUtf8Prefix(
-  command: string,
-  shell: ShellType,
-  isPipeMode = false,
-): string {
+function applyUtf8Prefix(command: string, shell: ShellType): string {
   if (os.platform() !== 'win32') return command;
-  // In pipe mode, chcp/Console.OutputEncoding have no effect on native
-  // Windows tools — they write OEM bytes directly to the pipe handle,
-  // bypassing the console subsystem. Skip the prefix to avoid ~50ms
-  // overhead per command. Encoding detection is handled at decode time.
-  if (isPipeMode && shell === 'cmd') return command;
   switch (shell) {
     case 'powershell':
       return (
@@ -766,7 +757,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyUtf8Prefix(commandToExecute, shell, true);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.

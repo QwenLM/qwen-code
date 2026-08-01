@@ -3257,35 +3257,6 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should skip chcp 65001 prefix for cmd.exe in pipe mode on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
-      await simulateExecution('dir "foo bar"', (cp) =>
-        cp.emit('exit', 0, null),
-      );
-
-      // cmd.exe commands in pipe mode skip chcp 65001 — pipe output
-      // bypasses the console subsystem, so chcp has no effect.
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        'cmd.exe',
-        ['/d', '/s', '/c', 'dir "foo bar"'],
-        expect.objectContaining({
-          detached: false,
-          windowsHide: true,
-          windowsVerbatimArguments: true,
-        }),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-    });
-
     it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({

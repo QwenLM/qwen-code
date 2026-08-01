@@ -9,7 +9,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { decodeProcessOutput } from '@qwen-code/qwen-code-core';
 
 export type TerminalImageProtocol = 'kitty' | 'iterm2';
 
@@ -1268,11 +1267,13 @@ function runCommand(
     }, options.timeout);
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout = appendBoundedRendererOutput(stdout, decodeProcessOutput(chunk));
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      stdout = appendBoundedRendererOutput(stdout, chunk);
     });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr = appendBoundedRendererOutput(stderr, decodeProcessOutput(chunk));
+    child.stderr?.on('data', (chunk: string) => {
+      stderr = appendBoundedRendererOutput(stderr, chunk);
     });
     child.on('error', (error) => {
       finish({

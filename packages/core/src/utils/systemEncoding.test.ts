@@ -537,5 +537,15 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(() => decodeProcessOutput(buffer)).not.toThrow();
       expect(typeof decodeProcessOutput(buffer)).toBe('string');
     });
+
+    it('decodes valid UTF-8 buffer to exact expected string', () => {
+      const text = '你好世界 Hello мир';
+      const buf = Buffer.from(text, 'utf-8');
+      expect(decodeProcessOutput(buf)).toBe(text);
+    });
+
+    it('returns string input unchanged (setEncoding guard)', () => {
+      expect(decodeProcessOutput('already a string')).toBe('already a string');
+    });
   });
 });

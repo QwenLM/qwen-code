@@ -60,7 +60,8 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
   return 'utf-8';
 }
 
-export function decodeProcessOutput(buffer: Buffer): string {
+export function decodeProcessOutput(buffer: Buffer | string): string {
+  if (!Buffer.isBuffer(buffer)) return String(buffer);
   if (buffer.length === 0) return '';
   const encoding = getCachedEncodingForBuffer(buffer);
   try {
