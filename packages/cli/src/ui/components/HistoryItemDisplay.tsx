@@ -87,7 +87,7 @@ interface HistoryItemDisplayProps {
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * Full-detail mode (Ctrl+O). When true, collapse is lifted:
    * thinking blocks render expanded and tool groups force `forceExpandAll`
    * + `forceShowResult` (every tool with its full, untruncated result).
    * Default false (main view stays at the #5661 partition baseline).

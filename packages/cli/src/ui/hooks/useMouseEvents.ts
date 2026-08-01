@@ -150,7 +150,7 @@ export function useMouseEvents(
   // with. On the non-VP main screen, holding mouse tracking just hijacks the
   // wheel (Terminal.app diverts it away from scrollback), so by DEFAULT mouse
   // tracking is denied outside VP. Surfaces that legitimately consume the wheel
-  // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
+  // pass `bypassVpGate` to opt in. This keeps the non-VP main screen scrollable
   // no matter how many click/hover subscribers are added later.
   const settings = useContext(SettingsContext);
   const isVpMode = useVirtualViewport(settings?.merged.ui?.useTerminalBuffer);
@@ -167,9 +167,9 @@ export function useMouseEvents(
   // Never write SGR mouse-mode escapes (?1002h ?1006h) unless stdout is a TTY.
   // `isRawModeSupported` only reflects stdin; with stdout piped/redirected
   // (`qwen | tee log`) an active, raw-mode-capable surface — e.g. the non-TTY
-  // transcript's focused ScrollableList (`bypassVpGate`) — would otherwise emit
-  // raw control bytes into the captured output. Mirrors AlternateScreen's
-  // `process.stdout.isTTY` guard so the non-TTY fallback stays byte-clean.
+  // focused ScrollableList (`bypassVpGate`) — would otherwise emit
+  // raw control bytes into the captured output. Mirrors the repo-wide
+  // `process.stdout.isTTY` convention so the non-TTY fallback stays byte-clean.
   const enabled =
     isActive &&
     isRawModeSupported &&

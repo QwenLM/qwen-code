@@ -2038,6 +2038,23 @@ const SETTINGS_SCHEMA = {
       'the model.',
     showInDialog: false,
     properties: {
+      disabledLevels: {
+        type: 'array',
+        label: 'Disabled Skill Levels',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill discovery levels to skip entirely. Supported levels are ' +
+          'project, user, extension, and bundled. UNION-merged across settings ' +
+          'scopes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+        items: {
+          type: 'string',
+          enum: ['project', 'user', 'extension', 'bundled'],
+        },
+      },
       disabled: {
         type: 'array',
         label: 'Disabled Skills',

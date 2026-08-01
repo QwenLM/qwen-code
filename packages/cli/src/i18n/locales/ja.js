@@ -208,9 +208,6 @@ export default {
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
   Transcript: 'トランスクリプト',
-  'to close': '閉じる',
-  'to scroll': 'スクロール',
-  'Failed to render transcript.': 'トランスクリプトの描画に失敗しました。',
   'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
   'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
   'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',
@@ -1449,7 +1446,7 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to view transcript': 'トランスクリプトを表示',
+  'to expand details': '詳細を展開',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
