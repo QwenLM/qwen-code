@@ -50,7 +50,9 @@ describe('truncateAndSaveToFile', () => {
       500,
     );
 
-    expect(result.outputFile).toBe('/tmp/separate-preview.output');
+    expect(result.outputFile).toBe(
+      path.join('/tmp', 'separate-preview.output'),
+    );
     expect(result.content.length).toBeLessThan(2000);
   });
 
@@ -495,7 +497,10 @@ describe('persistAndTruncateToolResult', () => {
       config,
     );
 
-    expect(result.outputFile).toMatch(/^\/fallback\/shell_[a-f0-9]+\.output$/);
+    expect(path.dirname(result.outputFile!)).toBe(path.normalize('/fallback'));
+    expect(path.basename(result.outputFile!)).toMatch(
+      /^shell_[a-f0-9]+\.output$/,
+    );
     expect(result.bytesWritten).toBe(Buffer.byteLength(content));
     expect(trackToolResultBytes).toHaveBeenCalledTimes(1);
     expect(trackToolResultBytes).toHaveBeenCalledWith(

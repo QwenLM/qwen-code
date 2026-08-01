@@ -12,6 +12,7 @@ import type {
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
+  WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
 import type { CLIUserMessage } from './nonInteractive/types.js';
 import {
@@ -49,6 +50,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
@@ -505,6 +507,78 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('registers and clears the stream-json workflow approval channel', async () => {
+    setupMetricsMock();
+    const setApprovalRequestCallback = vi.fn();
+    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
+      setApprovalRequestCallback,
+    });
+    const handleWorkflowApproval = vi.fn().mockResolvedValue(undefined);
+    const controlService = {
+      permission: { handleWorkflowApproval },
+    } as unknown as ControlService;
+    const approvalSignal = new AbortController().signal;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        const callback = setApprovalRequestCallback.mock.calls[0]?.[0] as
+          | WorkflowApprovalRequestCallback
+          | undefined;
+        expect(callback).toBeTypeOf('function');
+        await callback?.(
+          { runId: 'wf_stream' } as never,
+          {
+            approvalId: 'wfap_stream',
+            name: 'run_shell_command',
+          } as never,
+          { command: 'echo safe' },
+          approvalSignal,
+        );
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-workflow', {
+      controlService,
+    });
+
+    expect(handleWorkflowApproval).toHaveBeenCalledWith(
+      'wf_stream',
+      expect.objectContaining({ approvalId: 'wfap_stream' }),
+      { command: 'echo safe' },
+      approvalSignal,
+    );
+    expect(setApprovalRequestCallback).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('does not register a workflow approval channel in plain headless mode', async () => {
+    setupMetricsMock();
+    const setApprovalRequestCallback = vi.fn();
+    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
+      setApprovalRequestCallback,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-headless');
+
+    expect(setApprovalRequestCallback).not.toHaveBeenCalled();
   });
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
