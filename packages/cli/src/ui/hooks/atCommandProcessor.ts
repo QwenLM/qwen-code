@@ -317,8 +317,8 @@ export async function resolveAtCommandQuery({
     // Session reference (`@session:<id|title>`): detected BEFORE MCP and
     // filesystem resolution so the ':' in the token isn't mistaken for a path
     // or intercepted by an MCP server literally named "session". Resolution
-    // (load + slim) happens after the loop; here we only collect and keep the
-    // token verbatim in the prompt text.
+    // (load + slim) happens after the loop; here we only collect and normalize
+    // escaped title delimiters in the prompt text.
     const sessionRef = parseSessionRef(pathName);
     if (sessionRef) {
       if (
@@ -329,7 +329,10 @@ export async function resolveAtCommandQuery({
       ) {
         sessionMentions.push({ originalAtPath, ref: sessionRef });
       }
-      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      atPathToResolvedSpecMap.set(
+        originalAtPath,
+        buildSessionRef(sessionRef.id ?? sessionRef.title!),
+      );
       continue;
     }
 

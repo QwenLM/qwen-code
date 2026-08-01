@@ -2134,6 +2134,40 @@ describe('CoreToolScheduler', () => {
     ]);
   });
 
+  it('propagates a tool turn-termination boundary to the host', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'proposal recorded',
+      returnDisplay: 'proposal recorded',
+      terminateTurn: true,
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['update_goal', new MockTool({ name: 'update_goal', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'goal-complete-1',
+          name: 'update_goal',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.terminateTurn).toBe(true);
+    }
+  });
+
   it('does not dedupe requests with empty callIds in one batch', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'result',

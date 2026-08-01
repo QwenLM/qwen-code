@@ -1,5 +1,9 @@
 import type { DaemonTranscriptBlock } from '@qwen-code/webui/daemon-react-sdk';
-import type { PermissionRequest, PermissionOptionKind } from './types';
+import type {
+  ContentBlock,
+  PermissionRequest,
+  PermissionOptionKind,
+} from './types';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
@@ -36,12 +40,7 @@ export function extractPendingPermission(
       title: perm.title,
       toolKind,
       toolName,
-      content: [
-        {
-          type: 'text',
-          text: perm.title || 'Tool permission',
-        },
-      ],
+      content: getPermissionContent(toolCallRecord, perm.title),
       options: perm.options.map((opt) => ({
         id: opt.optionId,
         label: opt.label,
@@ -51,6 +50,28 @@ export function extractPendingPermission(
     };
   }
   return null;
+}
+
+function getPermissionContent(
+  toolCall: Record<string, unknown> | undefined,
+  fallback?: string,
+): ContentBlock[] {
+  const rawContent = toolCall?.['content'];
+  if (Array.isArray(rawContent)) {
+    const content = rawContent.flatMap((value): ContentBlock[] => {
+      const block = getRecord(value);
+      const nested = getRecord(block?.['content']);
+      const text =
+        block?.['type'] === 'text' && typeof block['text'] === 'string'
+          ? block['text']
+          : nested?.['type'] === 'text' && typeof nested['text'] === 'string'
+            ? nested['text']
+            : undefined;
+      return text ? [{ type: 'text', text }] : [];
+    });
+    if (content.length > 0) return content;
+  }
+  return [{ type: 'text', text: fallback || 'Tool permission' }];
 }
 
 function isPermissionBlock(
