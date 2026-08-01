@@ -399,6 +399,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       .join('\n\n');
     super(name, config, bridge, options);
   }
+
   protected createInitialCursor(): GithubCursor {
     return { lastProcessedAt: new Date().toISOString() };
   }

@@ -2703,6 +2703,33 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('transitions a delivery-phase lifecycle failure to reply_pending', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const privateChannel = channel as unknown as {
+        activeInboundTaskIdsByMessage: Map<string, string>;
+      };
+      privateChannel.activeInboundTaskIdsByMessage.set(
+        'owner/repo|1001',
+        'inbound-task-1',
+      );
+
+      channel.triggerTaskLifecycleForTest({
+        type: 'failed',
+        phase: 'delivery',
+        chatId: 'owner/repo',
+        messageId: '1001',
+        error: 'delivery failed',
+      });
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'reply_pending',
+          error: 'delivery failed',
+        }),
+      ]);
+    });
+
     it('recovers an accepted task before polling and removes it after success', async () => {
       writeInboundTasks([makeInboundTaskRecord()]);
       channel.handleInboundHook = async () => {
@@ -2882,6 +2909,36 @@ describe('GithubChannel', () => {
       expect(readInboundTasks()).toEqual([
         expect.objectContaining({ state: 'running' }),
       ]);
+    });
+
+    it('removes a recovered task whose reply already has a posted audit record', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(join(auditPath, '..'), { recursive: true });
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({
+          outcome: 'posted',
+          repository: 'owner/repo',
+          threadId: 'issue:42',
+          sourceMessageId: '1001',
+        })}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      await privateChannel.pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('removes a reply-pending task when a posted pending delivery is reconciled', async () => {
