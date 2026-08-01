@@ -92,7 +92,10 @@ vi.mock('../../../utils/stdioHelpers.js', () => ({
 }));
 
 const { createDaemonWorkspaceService } = await import('../index.js');
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  WorkspaceInitPathEscapeError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   BridgeChannelClosedError,
   type ServeWorkspaceSkillsStatus,
@@ -2955,7 +2958,7 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
-        /resolves outside/,
+        WorkspaceInitPathEscapeError,
       );
     });
   });

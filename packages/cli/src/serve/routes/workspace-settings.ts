@@ -274,6 +274,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  resolveEffectiveWorkspace?: () => string;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -287,6 +288,7 @@ export function registerWorkspaceSettingsRoutes(
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId,
+    resolveEffectiveWorkspace,
   } = deps;
 
   const allowedKeys = getAllowedKeys();
@@ -410,10 +412,12 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
       let publicValue: unknown = value;
+      const effectiveWorkspace =
+        resolveEffectiveWorkspace?.() ?? boundWorkspace;
       try {
         const persist = async () => {
           const prepared = prepareSettingWrite(
-            boundWorkspace,
+            effectiveWorkspace,
             settingScope,
             key,
             value,
@@ -423,7 +427,7 @@ export function registerWorkspaceSettingsRoutes(
           publicValue = prepared.publicValue;
           if (deps.captureGenerationAssertion) {
             await persistSetting(
-              boundWorkspace,
+              effectiveWorkspace,
               settingScope,
               key,
               prepared.persistedValue,
@@ -431,7 +435,7 @@ export function registerWorkspaceSettingsRoutes(
             );
           } else {
             await persistSetting(
-              boundWorkspace,
+              effectiveWorkspace,
               settingScope,
               key,
               prepared.persistedValue,
@@ -440,7 +444,7 @@ export function registerWorkspaceSettingsRoutes(
         };
         if (mcpServerMutation) {
           await withMcpServerMutationLock(
-            boundWorkspace,
+            effectiveWorkspace,
             settingScope,
             persist,
           );
