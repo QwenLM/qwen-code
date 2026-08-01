@@ -1180,6 +1180,15 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenLastCalledWith("'=1+1");
   });
 
+  it('keeps an accessible name on the custom columns trigger', () => {
+    const container = renderTable();
+
+    const trigger = button(container, 'Custom columns');
+
+    expect(trigger.getAttribute('aria-label')).toBe('Custom columns');
+    expect(trigger.textContent).toContain('Custom columns');
+  });
+
   it('hides columns and restores them from custom columns', () => {
     const container = renderTable();
 

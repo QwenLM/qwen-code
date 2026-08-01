@@ -749,6 +749,6 @@ function truncateUtf8(
   };
 }
 
-function detectLineEndingFromContent(content: string): 'crlf' | 'lf' {
+export function detectLineEndingFromContent(content: string): 'crlf' | 'lf' {
   return content.includes('\r\n') ? 'crlf' : 'lf';
 }

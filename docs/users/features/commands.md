@@ -83,6 +83,7 @@ Commands for managing AI tools and models.
 | `/import-config`  | Import MCP servers from Claude configs                                                | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
 | `/tools`          | Display currently available tool list                                                 | `/tools`, `/tools desc`                                                                                   |
 | `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills                    | `/skills`, `/<skill-name>`                                                                                |
+| `/curator`        | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
 | `/plan`           | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`  | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
 | → `plan`          | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |

@@ -202,6 +202,11 @@ describe('review run (handler)', () => {
   }
 
   beforeEach(() => {
+    // Pin POSIX semantics for the whole suite (restored in afterEach): these
+    // tests assert the process-group kill and POSIX paths, so pinning the
+    // platform keeps them green on a Windows runner without pretending to cover
+    // win32 — that path has its own test in killProcessGroup above.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     dir = mkdtempSync(join(tmpdir(), 'run-handler-'));
     cwd = process.cwd();
     process.chdir(dir);

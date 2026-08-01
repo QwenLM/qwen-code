@@ -30,6 +30,7 @@ import {
   type BackgroundApproval,
   type MonitorTask,
   type ToolCallConfirmationDetails,
+  type WorkflowApproval,
   type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
@@ -215,7 +216,10 @@ function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
         entry.agentsDispatched > 0
           ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
           : '';
-      return `[workflow] ${label}${phase}${counts}`;
+      const approval = entry.pendingApprovals.length
+        ? ` ⚠ ${t('needs approval')}`
+        : '';
+      return `[workflow] ${label}${phase}${counts}${approval}`;
     }
     case 'dream':
       return formatDreamRowLabel(entry);
@@ -1413,35 +1417,59 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // registry's approval-change callback), so `pendingApprovals` is current.
   // When present in detail mode, the dialog renders the shared
   // ToolConfirmationMessage and yields keyboard focus to it.
-  const selectedApproval: BackgroundApproval | undefined =
-    selectedEntry?.kind === 'agent'
-      ? selectedEntry.pendingApprovals?.[0]
-      : undefined;
+  const selectedApproval:
+    | { kind: 'agent'; approval: BackgroundApproval; ownerId: string }
+    | { kind: 'workflow'; approval: WorkflowApproval; ownerId: string }
+    | undefined =
+    selectedEntry?.kind === 'agent' && selectedEntry.pendingApprovals?.[0]
+      ? {
+          kind: 'agent',
+          approval: selectedEntry.pendingApprovals[0],
+          ownerId: selectedEntry.agentId,
+        }
+      : selectedEntry?.kind === 'workflow' && selectedEntry.pendingApprovals[0]
+        ? {
+            kind: 'workflow',
+            approval: selectedEntry.pendingApprovals[0],
+            ownerId: selectedEntry.runId,
+          }
+        : undefined;
   const approvalActive = isDetailMode && Boolean(selectedApproval);
   const approvalUsesQuestionDialog =
-    selectedApproval?.confirmationDetails.type === 'ask_user_question';
+    selectedApproval?.approval.confirmationDetails.type === 'ask_user_question';
 
   // Reconstruct the full confirmation details (the parked approval omits
   // the runtime-owned `onConfirm`) and route the user's outcome back
   // through the registry, which invokes the parked call's `respond` to
-  // resume the agent's tool call.
+  // resume the parked tool call.
   const approvalConfirmationDetails: ToolCallConfirmationDetails | undefined =
-    selectedApproval && selectedAgentIdForActivity
+    selectedApproval
       ? // The spread restores every field except `onConfirm`; the cast is
         // needed because TS can't prove the discriminated-union shape across
         // an object spread.
         ({
-          ...selectedApproval.confirmationDetails,
+          ...selectedApproval.approval.confirmationDetails,
           hideAlwaysAllow: true,
           onConfirm: async (
-            outcome: Parameters<BackgroundApproval['respond']>[0],
-            payload?: Parameters<BackgroundApproval['respond']>[1],
+            outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
+            payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
           ) => {
+            if (selectedApproval.kind === 'agent') {
+              await config
+                .getBackgroundTaskRegistry()
+                .resolvePendingApproval(
+                  selectedApproval.ownerId,
+                  selectedApproval.approval.callId,
+                  outcome,
+                  payload,
+                );
+              return;
+            }
             await config
-              .getBackgroundTaskRegistry()
+              .getWorkflowRunRegistry()
               .resolvePendingApproval(
-                selectedAgentIdForActivity,
-                selectedApproval.callId,
+                selectedApproval.ownerId,
+                selectedApproval.approval.approvalId,
                 outcome,
                 payload,
               );
@@ -1783,7 +1811,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         {approvalActive && approvalConfirmationDetails && (
           <Box flexDirection="column" marginTop={1} paddingX={1}>
             <Text bold color={theme.status.warning}>
-              {t('Background agent needs approval')}
+              {selectedApproval?.kind === 'workflow'
+                ? `[workflow] ${t('needs approval')}`
+                : t('Background agent needs approval')}
             </Text>
             <ToolConfirmationMessage
               confirmationDetails={approvalConfirmationDetails}

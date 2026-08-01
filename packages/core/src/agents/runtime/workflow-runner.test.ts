@@ -5,11 +5,18 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import type { Config } from '../../config/config.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
-const { logWorkflowRunMock, writeWorkflowSnapshotMock } = vi.hoisted(() => ({
+const {
+  createProductionDispatchMock,
+  logWorkflowRunMock,
+  writeWorkflowSnapshotMock,
+} = vi.hoisted(() => ({
+  createProductionDispatchMock: vi.fn(),
   logWorkflowRunMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
@@ -21,6 +28,15 @@ vi.mock('../../telemetry/loggers.js', () => ({
 vi.mock('../workflow-snapshot.js', () => ({
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./workflow-orchestrator.js')>();
+  return {
+    ...actual,
+    createProductionDispatch: createProductionDispatchMock,
+  };
+});
 
 function configWithRegistry(): {
   config: Config;
@@ -58,8 +74,58 @@ function observeSettlement(registry: WorkflowRunRegistry): {
 
 describe('WorkflowRunner', () => {
   beforeEach(() => {
+    createProductionDispatchMock.mockReset();
     logWorkflowRunMock.mockClear();
     writeWorkflowSnapshotMock.mockClear();
+  });
+
+  it('passes the registry approval bridge only to production dispatch', async () => {
+    const production = configWithRegistry();
+    const productionBridge = vi.spyOn(
+      production.registry,
+      'bridgeApprovalEvents',
+    );
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+
+    const productionHandle = await WorkflowRunner.start({
+      config: production.config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+    });
+    await expect(productionHandle.completion).resolves.toMatchObject({
+      ok: true,
+    });
+
+    const bridgeApprovalEvents = createProductionDispatchMock.mock
+      .calls[0]?.[3] as
+      | ((emitter: AgentEventEmitter) => () => void)
+      | undefined;
+    expect(bridgeApprovalEvents).toEqual(expect.any(Function));
+    const emitter = new AgentEventEmitter();
+    const cleanup = vi.fn();
+    productionBridge.mockReturnValue(cleanup);
+    expect(bridgeApprovalEvents?.(emitter)).toBe(cleanup);
+    expect(productionBridge).toHaveBeenCalledWith(
+      productionHandle.runId,
+      emitter,
+    );
+
+    const injected = configWithRegistry();
+    const injectedBridge = vi.spyOn(injected.registry, 'bridgeApprovalEvents');
+    const injectedHandle = await WorkflowRunner.start({
+      config: injected.config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: async () => 'injected',
+    });
+    await expect(injectedHandle.completion).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(createProductionDispatchMock).toHaveBeenCalledOnce();
+    expect(injectedBridge).not.toHaveBeenCalled();
   });
 
   it('keeps one registry-owned handle through exactly-once completion', async () => {
@@ -149,6 +215,103 @@ describe('WorkflowRunner', () => {
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps background runs alive after the caller turn ends', async () => {
+    const { config, registry } = configWithRegistry();
+    const observed = observeSettlement(registry);
+    const caller = new AbortController();
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: caller.signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+
+    caller.abort();
+    expect(observed.abortCount()).toBe(0);
+    expect(registry.get(handle.runId)?.status).toBe('running');
+
+    resolveDispatch?.('done');
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+    expect(observed.terminalStatuses).toEqual(['completed']);
+    expect(observed.abortCount()).toBe(1);
+  });
+
+  it('rejects a concurrent resume while the original run is active', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const original = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("original")',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const replacementCaller = new AbortController();
+    const replacementDispatch = vi.fn(async () => 'replacement');
+
+    try {
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: replacementCaller.signal,
+          script: 'return await agent("replacement")',
+          args: undefined,
+          resumeFromRunId: runId,
+          dispatch: replacementDispatch,
+        }),
+      ).rejects.toThrow(/already active/);
+      expect(registry.getHandle(runId)).toBe(original);
+      expect(replacementDispatch).not.toHaveBeenCalled();
+      expect(getEventListeners(replacementCaller.signal, 'abort')).toHaveLength(
+        0,
+      );
+    } finally {
+      resolveDispatch?.('original');
+      await original.completion;
+    }
+
+    expect(registry.get(runId)?.result).toBe('original');
+  });
+
+  it('classifies a background failure after caller abort as failed', async () => {
+    const { config, registry } = configWithRegistry();
+    const caller = new AbortController();
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: caller.signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    caller.abort();
+    rejectDispatch?.(new Error('background boom'));
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: false });
+    expect(registry.get(handle.runId)?.status).toBe('failed');
+  });
+
   it('routes registry cancellation through each live handle', async () => {
     const cancelCases: Array<{
       cancel: (registry: WorkflowRunRegistry, runId: string) => void;
@@ -170,6 +333,7 @@ describe('WorkflowRunner', () => {
         signal: new AbortController().signal,
         script: 'return await agent("work")',
         args: undefined,
+        runInBackground: true,
         dispatch: () =>
           new Promise<string>((_resolve, reject) => {
             rejectDispatch = reject;
@@ -208,6 +372,7 @@ describe('WorkflowRunner', () => {
         signal: new AbortController().signal,
         script: 'await new Promise(() => {})',
         args: undefined,
+        runInBackground: true,
         dispatch: async () => 'unused',
       });
 

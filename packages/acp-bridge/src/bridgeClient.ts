@@ -1111,17 +1111,22 @@ export class BridgeClient implements Client {
       // clients to filter on — a peer that didn't queue the message must not
       // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
       // clients pushing in the same window) is rare but still routed correctly.
-      const byOriginator = new Map<string | undefined, string[]>();
+      const byOriginator = new Map<string | undefined, MidTurnQueueEntry[]>();
       for (const item of drained) {
         const group = byOriginator.get(item.originatorClientId);
-        if (group) group.push(item.text);
-        else byOriginator.set(item.originatorClientId, [item.text]);
+        if (group) group.push(item);
+        else byOriginator.set(item.originatorClientId, [item]);
       }
-      for (const [originatorClientId, texts] of byOriginator) {
+      for (const [originatorClientId, items] of byOriginator) {
+        const texts = items.map((item) => item.text);
         const published = entry.events.publish({
           type: MID_TURN_MESSAGE_INJECTED_EVENT,
           ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-          data: { sessionId: entry.sessionId, messages: texts },
+          data: {
+            sessionId: entry.sessionId,
+            messages: texts,
+            messageIds: items.map((item) => item.messageId),
+          },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
         writeStderrLine(

@@ -14,14 +14,21 @@ interface Item {
   id: number;
   text: string;
   images?: unknown[];
+  midTurnState?: 'submitting' | 'queued';
+  midTurnMessageId?: string;
 }
 
 let nextId = 1;
-const q = (text: string, images?: unknown[]): Item => ({
-  id: nextId++,
-  text,
-  ...(images ? { images } : {}),
-});
+const q = (text: string, images?: unknown[]): Item => {
+  const id = nextId++;
+  return {
+    id,
+    text,
+    midTurnState: 'queued',
+    midTurnMessageId: `mid-${id}`,
+    ...(images ? { images } : {}),
+  };
+};
 const batch = (
   sessionId: string,
   ...messages: string[]
@@ -34,6 +41,12 @@ const batchFrom = (
   originatorClientId: string,
   ...messages: string[]
 ): MidTurnInjectedBatch => ({ sessionId, originatorClientId, messages });
+
+const batchWithIds = (
+  sessionId: string,
+  messages: string[],
+  messageIds: string[],
+): MidTurnInjectedBatch => ({ sessionId, messages, messageIds });
 
 describe('removeInjectedFromQueue', () => {
   it('removes the matching text-only entry for a single batch', () => {
@@ -86,6 +99,62 @@ describe('removeInjectedFromQueue', () => {
     expect(next).not.toBeNull();
     expect(next).toHaveLength(1);
     expect(next?.[0].images).toEqual([{ data: 'x' }]);
+  });
+
+  it('does not remove an ordinary queued prompt with the same text', () => {
+    const ordinary = { ...q('same'), midTurnState: undefined };
+    const inserted = q('same');
+    const next = removeInjectedFromQueue(
+      [ordinary, inserted],
+      [batch('s', 'same')],
+      's',
+    );
+    expect(next).toEqual([ordinary]);
+  });
+
+  it('uses message ids instead of text when the daemon provides them', () => {
+    const first = q('same');
+    const second = q('same');
+    const next = removeInjectedFromQueue(
+      [first, second],
+      [batchWithIds('s', ['same'], [second.midTurnMessageId!])],
+      's',
+    );
+    expect(next).toEqual([first]);
+  });
+
+  it('matches a submitting prompt before its admission response provides the id', () => {
+    const submitting = {
+      ...q('early injection'),
+      midTurnState: 'submitting' as const,
+      midTurnMessageId: undefined,
+    };
+    const next = removeInjectedFromQueue(
+      [submitting],
+      [batchWithIds('s', ['early injection'], ['mid-early'])],
+      's',
+    );
+    expect(next).toEqual([]);
+  });
+
+  it('removes the id-matched row, not an earlier same-text row still submitting', () => {
+    // Two same-text sends: the first is still awaiting its admission id, the
+    // second was admitted and queued with an id. The injection frame names the
+    // second's id, so it must be removed — an array-position text match on the
+    // earlier row would silently drop it and leave the queued one to be resent
+    // at idle (double delivery).
+    const submitting = {
+      ...q('x'),
+      midTurnState: 'submitting' as const,
+      midTurnMessageId: undefined,
+    };
+    const queued = q('x');
+    const next = removeInjectedFromQueue(
+      [submitting, queued],
+      [batchWithIds('s', ['x'], [queued.midTurnMessageId!])],
+      's',
+    );
+    expect(next).toEqual([submitting]);
   });
 
   it('skips batches for a different session', () => {

@@ -572,6 +572,11 @@
       "type": "string",
       "default": ""
     },
+    "compactionModel": {
+      "description": "Model used for chat compression (auto-compaction). Set with /model --compaction. Leave empty to fall back to the main model. A smaller/faster model reduces compression latency and cost.",
+      "type": "string",
+      "default": ""
+    },
     "imageModel": {
       "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
       "type": "string",
@@ -940,6 +945,19 @@
       "description": "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
       "type": "object",
       "properties": {
+        "disabledLevels": {
+          "description": "Skill discovery levels to skip entirely. Supported levels are project, user, extension, and bundled. UNION-merged across settings scopes.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user",
+              "extension",
+              "bundled"
+            ]
+          }
+        },
         "disabled": {
           "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
           "type": "array",
