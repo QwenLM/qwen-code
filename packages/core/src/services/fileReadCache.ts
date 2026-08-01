@@ -29,7 +29,9 @@ import { resolve as resolvePath } from 'node:path';
  * SMB-style filesystems), inode identity is unverifiable. The cache
  * deliberately does not store those reads/writes, so later mutation
  * checks fail closed instead of treating unrelated files as the same
- * `dev:0` entry.
+ * `dev:0` entry. On Windows, non-zero `ino` values from `nFileIndex`
+ * can also collide across volumes and on ReFS; a path-based key
+ * fallback for that case is not yet implemented.
  *
  * Lifecycle: one instance is created per `Config` via the field
  * initializer, so any code that constructs its own Config — notably
@@ -257,18 +259,9 @@ export class FileReadCache {
     stats: Stats,
     opts: { cacheable?: boolean } = {},
   ): FileReadEntry {
-    if (!FileReadCache.hasVerifiableIdentity(stats)) {
-      const entry = FileReadCache.createEntry(absPath, stats);
-      const now = Date.now();
-      entry.lastWriteAt = now;
-      entry.lastReadAt = now;
-      entry.lastReadWasFull = true;
-      entry.lastReadCacheable = opts.cacheable ?? true;
-      entry.readResidentInHistory = true;
-      return entry;
-    }
-
-    const entry = this.upsert(absPath, stats);
+    const entry = FileReadCache.hasVerifiableIdentity(stats)
+      ? this.upsert(absPath, stats)
+      : FileReadCache.createEntry(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
