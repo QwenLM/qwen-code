@@ -7370,7 +7370,11 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const settingsCwd = requestedCwd || this.resolveSettingsCwd(params);
+    const resolvedWt = this.resolveSettingsCwd(params);
+    const settingsCwd =
+      (resolvedWt !== process.cwd() ? resolvedWt : undefined) ||
+      requestedCwd ||
+      process.cwd();
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
@@ -9154,9 +9158,13 @@ class QwenAgent implements Agent {
             );
           }
 
-          session.worktreeCwd = canonicalPath;
-          this.defaultSettingsCwd =
-            canonicalPath === process.cwd() ? null : canonicalPath;
+          if (canonicalPath !== process.cwd()) {
+            session.worktreeCwd = canonicalPath;
+            this.defaultSettingsCwd = canonicalPath;
+          } else {
+            session.worktreeCwd = null;
+            this.defaultSettingsCwd = null;
+          }
 
           try {
             await config
