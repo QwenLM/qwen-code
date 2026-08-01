@@ -2121,7 +2121,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   }
   if (mutantsSkippedForCap > 0) {
     writeStdoutLine(
-      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the cap of ${MAX_MUTANTS}`,
+      // BOTH caps, because this count carries drops from either: with 2
+      // deletions and 6 replacements the total is exactly MAX_MUTANTS and the
+      // main cap never fires, yet the sub-cap drops 3. Naming only the main cap
+      // then sends the reader looking for a pool of 11 candidates that does not
+      // exist — the number is right, the reason was not.
+      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the selection caps (${MAX_MUTANTS} total, ${REPLACEMENT_SUB_CAP} of them replacements)`,
     );
   }
   if (mutantsSkippedForBaseline > 0) {

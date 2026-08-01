@@ -989,8 +989,10 @@ process.stdout.write(JSON.stringify({
     expect(out.mutants.skippedForCap).toBe(1);
     expect(out.mutants.skippedForBaseline).toBe(0);
     expect(out.mutants.probed.length + out.mutants.skippedForCap).toBe(9);
+    // Names BOTH caps: this count carries sub-cap drops too, and a message
+    // naming only the total sends the reader after candidates that never were.
     expect(stdoutChunks.join('')).toContain(
-      '1 mutant(s) skipped: more candidates than the cap of 8',
+      '1 mutant(s) skipped: more candidates than the selection caps (8 total, 3 of them replacements)',
     );
   });
 
