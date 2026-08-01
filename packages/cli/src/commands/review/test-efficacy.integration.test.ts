@@ -855,6 +855,187 @@ process.stdout.write(JSON.stringify({
     ]);
   });
 
+  it('re-classes every survivor and spends nothing when the positive control fails', async () => {
+    // The control's WHOLE point, and the half no other case reaches. This is
+    // the same tree as the survivor test above — one uncovered `state.clear()`
+    // and an inert probe file — run against a DEAD runner: one that reports
+    // `passed` for every file it is handed, including the injected
+    // always-failing control. Against that runner the survivor above is not a
+    // coverage gap, it is the runner not executing assertions, and reporting
+    // it would be the false gap-report this command exists to prevent.
+    // Two separated change blocks, so the diff carries a mutant candidate AND
+    // a hunk candidate: the filler keeps them more than two context windows
+    // apart, and `selectHunkProbes` drops the hunk that already contains a
+    // mutant line. Without the second block every hunk counter reads zero and
+    // the hunk half of the re-class is asserted against nothing.
+    const filler = Array.from(
+      { length: 8 },
+      (_, i) => `const a${i} = ${i};\n`,
+    ).join('');
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        filler +
+        'export const KEEP = a0 + a7;\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n' +
+        filler +
+        'export const KEEP = a0 + a7;\n' +
+        'export function extra() {\n' +
+        '  return a1 + a2;\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // A runner that reports green unconditionally — it never reads the file,
+    // so the injected control is green too. Three real defects share this
+    // shape (a runner that executes nothing, a collector that skips the
+    // injected test, a reporter that drops failures) and none can kill.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(false);
+    // Nothing was spent after the control came back green: a mutant run
+    // against a runner that cannot kill only manufactures survivors.
+    expect(out.mutants.probed).toEqual([]);
+    expect(out.hunks.probed).toEqual([]);
+    // …and the candidates it declined are counted under their OWN reason.
+    // Folding them into `skippedForBudget` would blame a window that never
+    // ran out; a bare zero would read as "there was nothing to probe".
+    expect(out.mutants.skippedForControl).toBe(1);
+    expect(out.mutants.skippedForBudget).toBe(0);
+    expect(out.hunks.skippedForControl).toBeGreaterThan(0);
+    expect(out.mutants.note).toContain('positive control FAILED');
+    // The file-level revert probe's `inert` is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too — so it
+    // is re-classed with the rest.
+    expect(out.probed.map((p: { verdict: string }) => p.verdict)).toEqual([
+      'inconclusive',
+    ]);
+    expect(out.probed[0].detail).toContain('positive control failed');
+    // The re-class happens UPSTREAM of findings: nothing a reader acts on may
+    // carry a survivor claim this run cannot support.
+    expect(out.findings).toEqual([]);
+  });
+
+  it('a control that could not be SET UP leaves the window spendable', async () => {
+    // `null` is not `false`, and this is where the difference is observable.
+    // A control that never ran demonstrated nothing about the runner, so the
+    // mutants must still spend their window — reporting `false` here would
+    // discard the whole phase over an I/O error and stamp every survivor with
+    // "an injected always-failing test stayed green" about a run that never
+    // happened.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // Green, then it deletes the probe file it just reported on — a stand-in
+    // for the concurrent sweep / permissions failure that makes the control's
+    // own `readFileSync` throw. The runner itself stays honest, so nothing
+    // here is a claim about whether it can kill.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+for (const f of files) { try { fs.unlinkSync(f); } catch {} }
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBeNull();
+    expect(out.mutants.note).toContain('could not be set up');
+    expect(out.mutants.note).toContain('NOT validated');
+    // The window was NOT discarded — this is the whole difference from `false`.
+    expect(out.mutants.probed.length).toBeGreaterThan(0);
+    expect(out.mutants.skippedForControl).toBe(0);
+  });
+
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
     // Three safety-verb candidates, but the budget expires after one: the
     // counter, the `skippedForBudget` report field, and the stdout line are

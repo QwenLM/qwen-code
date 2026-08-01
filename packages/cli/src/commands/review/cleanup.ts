@@ -421,15 +421,6 @@ export function runCleanup(target: string): void {
     // its only removal — not just a crash sweep. Same shared path helper, same
     // reason: the suffix must not drift between creator and sweeper.
     report('base worktree', baseWorktreePath(wt));
-    // A crashed base-tree build leaves its mkdir lock behind, and the lock is
-    // what tells every later shard "busy" — unswept, it wedges the A/B for
-    // this PR permanently. rmSync, not report(): a lock dir is not a worktree.
-    try {
-      rmSync(`${baseWorktreePath(wt)}.lock`, { recursive: true, force: true });
-    } catch {
-      // Best-effort: the next base-tree run surfaces a survivor as busy.
-    }
-
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
     // not a git worktree, so `releaseWorktree` above does not touch it. A builder
     // killed mid-build leaves it behind (its `finally` rmSync never runs), and every

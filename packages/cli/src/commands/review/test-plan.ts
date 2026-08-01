@@ -412,6 +412,38 @@ function normalizeClaimPath(text: string): string {
   return normalize(text.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, ''));
 }
 
+/**
+ * Is `path` gitignored in `worktree`? One `git` spawn per distinct path, memoed
+ * for the process — a Test Plan naming the same artifact in its Evidence and
+ * its Environment sections should not pay twice.
+ *
+ * `--` before the path is belt-and-braces, and measured as such: `PATH_RE`'s
+ * class admits a leading `-`, but no `-`-leading text survives extraction today
+ * (`extractClaims('`-packages/old/gone.ts`')` returns nothing), so nothing
+ * reaches `check-ignore` in OPTION position. It is one token against a future
+ * extraction change, not a live hole. A non-zero exit means either "not
+ * ignored" or "no git here"; both fall through to the ordinary ruling, which is
+ * why this returns a plain boolean.
+ */
+function isGitIgnored(worktree: string, path: string): boolean {
+  const key = `${worktree}\0${path}`;
+  const memo = ignoreCache.get(key);
+  if (memo !== undefined) return memo;
+  let ignored: boolean;
+  try {
+    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', path], {
+      stdio: 'ignore',
+    });
+    ignored = true;
+  } catch {
+    ignored = false;
+  }
+  ignoreCache.set(key, ignored);
+  return ignored;
+}
+
+const ignoreCache = new Map<string, boolean>();
+
 function rulePath(
   text: string,
   worktree: string,
@@ -439,42 +471,32 @@ function rulePath(
       note: 'not a repo-relative path',
     };
   }
-  // Existence FIRST: a gitignored file that is nonetheless present (build-test
-  // ran earlier in this worktree and produced it) is a live `reproduces`, and
-  // the ignore guard below must only ever downgrade a would-be contradiction —
-  // reviewed live when it also swallowed that reproduces.
+  // ONE existence check, and the ignore status only ever picks the WORDING or
+  // downgrades a would-be contradiction — never swallows a `reproduces`. Two
+  // existence checks with the ignore probe between them made the second one
+  // unreachable and silently retired its note, which is the distinction a
+  // reader needs: a tracked file that is present is state at the reviewed
+  // commit, an ignored file that is present is something this run produced.
+  const ignored = isGitIgnored(worktree, path);
   if (existsSync(join(worktree, path))) {
     return {
       kind: 'path',
       text,
       verdict: 'reproduces',
-      note: 'exists in the review worktree',
+      note: ignored
+        ? 'exists in the review worktree — gitignored, so it is a build output this run produced, not state at the reviewed commit'
+        : 'exists at the reviewed commit (the diff does not change it)',
     };
   }
   // A gitignored path (a build output the Environment section names — the
   // template's own example is a dist/ entry point) is absent at the reviewed
   // commit BY CONSTRUCTION, the same reasoning that excludes `.qwen/` paths.
-  // check-ignore failing (not a repo, old git) falls through to the normal
-  // ruling.
-  try {
-    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', path], {
-      stdio: 'ignore',
-    });
+  if (ignored) {
     return {
       kind: 'path',
       text,
       verdict: 'unchecked',
       note: 'gitignored — a build output, absent at the reviewed commit by construction',
-    };
-  } catch {
-    // Not ignored (exit 1) or no git here: proceed.
-  }
-  if (existsSync(join(worktree, path))) {
-    return {
-      kind: 'path',
-      text,
-      verdict: 'reproduces',
-      note: 'exists at the reviewed commit (the diff does not change it)',
     };
   }
   return {
