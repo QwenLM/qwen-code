@@ -64,12 +64,14 @@ async function askAdvisor(
 
   const advisorModel =
     context.services.settings.merged.advisorModel?.trim() || undefined;
+  const model = advisorModel ?? cacheSafeParams.model;
 
   const result = await runForkedAgent({
     config,
     userMessage: buildAdvisorPrompt(focus),
     cacheSafeParams,
     ...(advisorModel ? { model: advisorModel } : {}),
+    preserveTools: model === cacheSafeParams.model,
     abortSignal,
   });
 
@@ -168,7 +170,7 @@ export const advisorCommand: SlashCommand = {
         Date.now(),
       );
     } finally {
-      ui.setPendingItem(null);
+      if (!abortSignal.aborted) ui.setPendingItem(null);
     }
   },
 };

@@ -201,6 +201,40 @@ describe('advisorCommand', () => {
       );
     });
 
+    it('should preserve tools for cache sharing when advisorModel is unset', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+
+      await advisorCommand.action!(mockContext, '');
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ preserveTools: true }),
+      );
+    });
+
+    it('should not preserve tools when advisorModel differs from the cache-safe model', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+      const contextWithModel = createMockCommandContext({
+        services: {
+          config: createConfig(),
+          settings: {
+            merged: { advisorModel: 'stronger-model' },
+          },
+        },
+      });
+
+      await advisorCommand.action!(contextWithModel, '');
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ preserveTools: false }),
+      );
+    });
+
     it('should forward abortSignal to runForkedAgent', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'review',
@@ -303,7 +337,28 @@ describe('advisorCommand', () => {
       await advisorCommand.action!(abortableContext, '');
 
       expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
-      expect(abortableContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+      expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
+        null,
+      );
+    });
+
+    it('should not add items when the forked agent rejects on abort', async () => {
+      const abortController = new AbortController();
+      mockRunForkedAgent.mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      });
+      const abortableContext = createMockCommandContext({
+        services: { config: createConfig() },
+        abortSignal: abortController.signal,
+      });
+
+      await advisorCommand.action!(abortableContext, '');
+
+      expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
+      expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
+        null,
+      );
     });
 
     it('should show fallback text when result text is empty', async () => {
