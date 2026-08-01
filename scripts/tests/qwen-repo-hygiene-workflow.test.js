@@ -180,7 +180,7 @@ describe('repo-hygiene workflow structure', () => {
     expect(fixJob).toBeTruthy();
     // The fix phase only runs on a successful scan, and reads the scan's
     // findings artifact rather than re-scanning.
-    expect(fixJob).toContain("needs.scan.result == ''success''");
+    expect(fixJob).toContain("needs.scan.result == 'success'");
     expect(fixJob).toContain("needs: 'scan'");
     expect(fixJob).toContain('Download scan findings');
 
@@ -197,10 +197,10 @@ describe('repo-hygiene workflow structure', () => {
     expect(dedupJob).toContain('open_prs_present=true');
     // Both downstream jobs gate on the dedup output.
     expect(job('scan')).toContain(
-      "needs.dedup.outputs.open_prs_present == ''false''",
+      "needs.dedup.outputs.open_prs_present == 'false'",
     );
     expect(workflow).toContain(
-      "steps.dedup.outputs.open_prs_present == ''false''",
+      "steps.dedup.outputs.open_prs_present == 'false'",
     );
   });
 
