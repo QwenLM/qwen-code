@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type {
   SettingDefinition,
@@ -255,16 +255,39 @@ function generateJsonSchema(
   return jsonSchema;
 }
 
-const schema = getSettingsSchema();
-const jsonSchema = generateJsonSchema(schema as unknown as SettingsSchema);
+export function resolveOutputPath(args: string[]): string {
+  const outputArgIndex = args.indexOf('--output');
+  const explicitOutput =
+    outputArgIndex === -1 ? undefined : args[outputArgIndex + 1];
+  if (
+    outputArgIndex !== -1 &&
+    (!explicitOutput || explicitOutput.startsWith('--'))
+  ) {
+    throw new Error('--output requires a path');
+  }
+  return explicitOutput
+    ? path.resolve(explicitOutput)
+    : path.resolve(
+        __dirname,
+        '../packages/vscode-ide-companion/schemas/settings.schema.json',
+      );
+}
 
-const outputDir = path.resolve(
-  __dirname,
-  '../packages/vscode-ide-companion/schemas',
-);
-const outputPath = path.join(outputDir, 'settings.schema.json');
+function main(): void {
+  const schema = getSettingsSchema();
+  const jsonSchema = generateJsonSchema(schema as unknown as SettingsSchema);
+  const outputPath = resolveOutputPath(process.argv.slice(2));
+  const outputDir = path.dirname(outputPath);
 
-fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(outputPath, JSON.stringify(jsonSchema, null, 2) + '\n');
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputPath, JSON.stringify(jsonSchema, null, 2) + '\n');
 
-console.log(`Generated settings JSON Schema at: ${outputPath}`);
+  console.log(`Generated settings JSON Schema at: ${outputPath}`);
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main();
+}

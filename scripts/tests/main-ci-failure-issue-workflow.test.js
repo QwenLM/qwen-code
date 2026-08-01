@@ -42,12 +42,135 @@ describe('main CI failure issue workflow', () => {
       "READY_FOR_AGENT_LABEL: 'status/ready-for-agent'",
     );
     expect(workflow).toContain("AUTOFIX_APPROVED_LABEL: 'autofix/approved'");
-    expect(workflow).toContain('gh issue edit "$1"');
     expect(workflow).toContain(
-      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+      "AUTOFIX_ELIGIBLE: '${{ needs.analyze.outputs.autofix_eligible }}'",
     );
-    expect(workflow).toContain('--add-assignee "${AUTOFIX_BOT}"');
-    expect(workflow).toContain('apply_autofix_route "${issue_url}"');
+    expect(workflow).toContain('if [[ "${AUTOFIX_ELIGIBLE}" == \'true\' ]]');
+    expect(workflow).toContain('--label "${BUG_LABEL}"');
+    expect(workflow).toContain('--label "${READY_FOR_AGENT_LABEL}"');
+    expect(workflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(workflow).toContain('--assignee "${AUTOFIX_BOT}"');
+  });
+
+  it('does not drop workflow_run events through concurrency coalescing', () => {
+    expect(yml.concurrency).toBeUndefined();
+    for (const job of Object.values(jobs)) {
+      expect(job.concurrency).toBeUndefined();
+    }
+  });
+
+  it('publishes issue-bound E2E metadata before applying the required label', () => {
+    expect(jobs.file_issue.permissions).toEqual({
+      actions: 'write',
+      issues: 'write',
+    });
+    expect(workflow).toContain(
+      "E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'",
+    );
+    expect(workflow).toContain(
+      "name: 'autofix-e2e-failure-${{ steps.issue.outputs.number }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}'",
+    );
+    expect(workflow).toContain("if-no-files-found: 'error'");
+    expect(workflow).not.toContain('overwrite: true');
+    expect(workflow).toContain(
+      "steps.issue.outputs.route_allowed == 'true' && needs.analyze.outputs.autofix_eligible == 'true' && needs.analyze.outputs.targeted_e2e != 'null'",
+    );
+    expect(workflow).toContain('.issue = $issue');
+    expect(workflow).toContain("AUTOFIX_ROUTING_LABEL: 'autofix/routing'");
+    expect(workflow).toContain('--add-label "${AUTOFIX_ROUTING_LABEL}"');
+    expect(workflow).toContain('--label "${AUTOFIX_ROUTING_LABEL}"');
+    expect(workflow).toContain('--assignee "${AUTOFIX_BOT}"');
+    expect(workflow).not.toContain('labels_to_remove=');
+    expect(workflow).not.toContain(
+      '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain('--remove-label "${AUTOFIX_ROUTING_LABEL}"');
+    expect(
+      workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
+    ).toBeLessThan(workflow.indexOf('--body-file "${body_file}"'));
+    expect(
+      workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
+    ).toBeLessThan(workflow.indexOf("- name: 'Upload targeted E2E metadata'"));
+    expect(
+      workflow.indexOf("- name: 'Upload targeted E2E metadata'"),
+    ).toBeLessThan(workflow.indexOf("- name: 'Route issue to Autofix'"));
+    expect(workflow).toContain('--add-label "${E2E_REQUIRED_LABEL}"');
+    expect(workflow).toContain(
+      'autofix-approved-prose-sha256:${approval_digest}',
+    );
+    const requiredLabelIndex = workflow.indexOf(
+      '--add-label "${E2E_REQUIRED_LABEL}"',
+    );
+    const approvalMarkerIndex = workflow.indexOf(
+      'autofix-approved-prose-sha256:${approval_digest}',
+    );
+    const routingUnlockIndex = workflow.indexOf(
+      '--remove-label "${AUTOFIX_ROUTING_LABEL}"',
+    );
+    expect(requiredLabelIndex).toBeLessThan(approvalMarkerIndex);
+    expect(approvalMarkerIndex).toBeLessThan(routingUnlockIndex);
+    expect(workflow).not.toContain(
+      '--add-label "${E2E_REQUIRED_LABEL}" \\\n            --remove-label "${AUTOFIX_ROUTING_LABEL}"',
+    );
+  });
+
+  it('preserves live human cancellation when recording a recurrence', () => {
+    expect(workflow).toContain(
+      '--json state,labels,assignees,closedByPullRequestsReferences',
+    );
+    expect(workflow).toContain('index("autofix/in-progress") == null');
+    expect(workflow).toContain('index("autofix/skip") == null');
+    expect(workflow).toContain('index("status/need-information") == null');
+    expect(workflow).toContain('index("status/need-retesting") == null');
+    expect(workflow).toContain(
+      '((.assignees // []) | length > 0 and all(.login == $bot))',
+    );
+    expect(workflow).toContain(
+      '((.closedByPullRequestsReferences // []) | length == 0)',
+    );
+    expect(workflow).toContain('echo "route_allowed=${route_allowed}"');
+    expect(workflow).toContain('if [[ "${route_allowed}" != \'true\' ]]; then');
+    expect(workflow).toContain(
+      'leaving it and its trusted metadata unchanged.',
+    );
+    const preserveIndex = workflow.indexOf(
+      'if [[ "${route_allowed}" != \'true\' ]]; then',
+    );
+    expect(preserveIndex).toBeGreaterThan(-1);
+    expect(
+      workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
+    ).toBeGreaterThan(preserveIndex);
+    expect(workflow.indexOf('--body-file "${body_file}"')).toBeGreaterThan(
+      preserveIndex,
+    );
+    expect(workflow).toContain('if [[ "${ROUTE_ALLOWED}" != \'true\' ]]; then');
+    expect(workflow).toContain('recurrence recorded without re-routing');
+    expect(workflow).toContain(
+      "EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'",
+    );
+    expect(workflow).toContain('--arg ready "${READY_FOR_AGENT_LABEL}"');
+    expect(workflow).toContain('--arg approved "${AUTOFIX_APPROVED_LABEL}"');
+    expect(workflow).toContain('--arg routing "${AUTOFIX_ROUTING_LABEL}"');
+    expect(workflow).toContain('index($ready) != null');
+    expect(workflow).toContain('index($approved) != null');
+    expect(workflow).toContain('index($routing) != null');
+    expect(workflow).toContain(
+      '((.assignees // []) | length > 0 and all(.login == $bot))',
+    );
+    expect(workflow).toContain('live_state="$(gh issue view "${ISSUE}"');
+    expect(workflow).toContain(
+      'Issue #${ISSUE} changed during publication; leaving its current routing unchanged.',
+    );
+    expect(
+      workflow.indexOf('live_state="$(gh issue view "${ISSUE}"'),
+    ).toBeGreaterThan(
+      workflow.indexOf("- name: 'Upload targeted E2E metadata'"),
+    );
+    expect(
+      workflow.indexOf('live_state="$(gh issue view "${ISSUE}"'),
+    ).toBeLessThan(
+      workflow.indexOf('--remove-label "${AUTOFIX_ROUTING_LABEL}"'),
+    );
   });
 
   it('deduplicates by failing test and includes run context', () => {
@@ -57,11 +180,43 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('searchMarkers');
     // The failing tests are read from the triggering run's failed-job logs, so
     // the dedupe key is recovered even when the run reported no test result.
-    expect(workflow).toContain('actions/runs/${WORKFLOW_RUN_ID}/jobs');
+    expect(workflow).toContain(
+      'actions/runs/${WORKFLOW_RUN_ID}/attempts/${WORKFLOW_RUN_ATTEMPT}/jobs',
+    );
+    expect(workflow).toContain('--run-attempt "${WORKFLOW_RUN_ATTEMPT}"');
     expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
+    expect(workflow).toContain('--state all');
+    expect(workflow).toContain('--json number,state');
+    expect(workflow).toContain(
+      '(map(select(.state == "OPEN"))[0] // map(select(.state == "CLOSED"))[0]).number // ""',
+    );
+    expect(workflow).not.toContain(
+      '(map(select(.state == "CLOSED"))[0] // .[0]).number // ""',
+    );
+    expect(workflow).toContain('--author "${AUTOFIX_BOT}"');
+    expect(workflow).toContain(
+      'search_markers=$(jq -c \'.searchMarkers\' "${plan}")',
+    );
+    expect(workflow).toContain(
+      "SEARCH_MARKERS: '${{ needs.analyze.outputs.search_markers }}'",
+    );
+    expect(workflow).toContain(
+      'was created by a concurrent run; reusing it without overwriting its body.',
+    );
+    expect(workflow).toContain('EXISTING_ISSUE="${concurrent_issue}"');
+    expect(workflow).toContain("concurrent_reuse='true'");
+    expect(workflow).toContain(
+      'if [[ "${concurrent_reuse}" != \'true\' ]]; then',
+    );
+    expect(workflow).not.toContain(
+      'was created by a concurrent run; skipping duplicate publication.',
+    );
+    expect(workflow).toContain(
+      'done < <(jq -r \'.[]\' <<< "${SEARCH_MARKERS}")',
+    );
     expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
+    expect(workflow).toContain('issue_number="${EXISTING_ISSUE}"');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
   });
@@ -92,8 +247,25 @@ describe('main CI failure issue workflow', () => {
       const rendered = JSON.stringify(job);
       expect(rendered, name).not.toContain('actions/checkout');
       expect(rendered, name).not.toContain('main-failure-signature.mjs');
-      expect(job.permissions, name).toEqual({ issues: 'write' });
+      expect(job.permissions, name).toEqual({
+        actions: 'write',
+        issues: 'write',
+      });
     }
+  });
+
+  it('verifies the bot PAT identity before any GitHub write', () => {
+    const writeStep = jobs.file_issue.steps.find(
+      (step) => step.name === 'File or update the autofix issue',
+    );
+    expect(writeStep).toBeDefined();
+    expect(writeStep.run).toContain("gh api user --jq '.login'");
+    expect(writeStep.run).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}.',
+    );
+    expect(writeStep.run.indexOf('gh api user')).toBeLessThan(
+      writeStep.run.indexOf('gh issue'),
+    );
   });
 
   it('pins the analyze checkout and drops persist-credentials', () => {

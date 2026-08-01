@@ -23,18 +23,26 @@ fail() {
   exit 1
 }
 
-# Guard the generator itself: if it CRASHES (e.g. a type error the agent
-# introduced in the schema source), a caller running under set -eo pipefail
-# would abort before outcome=failed is written, leaving OUTCOME unset. Handle
-# it here so the failure is explicit, not inferred from job.status.
-if ! npm run generate:settings-schema; then
-  echo "❌ Settings schema generator failed to run."
-  fail
-fi
-
-if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-  echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-  git --no-pager diff -- "${SCHEMA_FILE}" || true
-  git checkout -- "${SCHEMA_FILE}" || true
-  fail
+# Autofix rejects changes to the committed schema and every source that can
+# affect it before this gate runs. Executing the candidate's schema module graph
+# here would let module initialization short-circuit the trusted comparison.
+if [[ -n "${AUTOFIX_VERIFY_COMMAND:-}" ]]; then
+  exit 0
+else
+  # Guard the generator itself: if it CRASHES (e.g. a type error introduced in
+  # the schema source), report an explicit gate failure.
+  if ! npm run generate:settings-schema; then
+    echo "❌ Settings schema generator failed to run."
+    fail
+  fi
+  if ! schema_status="$(git status --porcelain "${SCHEMA_FILE}")"; then
+    echo "❌ Failed to inspect ${SCHEMA_FILE} after generation."
+    fail
+  fi
+  if [[ -n "${schema_status}" ]]; then
+    echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
+    git --no-pager diff -- "${SCHEMA_FILE}" || true
+    git checkout -- "${SCHEMA_FILE}" || true
+    fail
+  fi
 fi

@@ -2,8 +2,8 @@
 # Owning-workspace resolver, shared by the qwen-autofix verify steps
 # (.github/workflows/qwen-autofix.yml) so the two gates cannot drift apart.
 #
-# Reads changed file paths on stdin (one per line, e.g. the output of
-# `git diff --name-only`) and emits, sorted and unique on stdout, the OWNING
+# Reads NUL-delimited changed file paths on stdin (e.g. the output of
+# `git diff --name-only -z`) and emits, sorted and unique on stdout, the OWNING
 # npm workspace of each: the workspace whose location is the LONGEST matching
 # path prefix of the file.
 #
@@ -57,8 +57,7 @@ if [[ -z "${workspaces}" ]]; then
   exit 1
 fi
 
-while IFS= read -r f || [[ -n "${f}" ]]; do
-  [[ -n "${f}" ]] || continue
+while IFS= read -r -d '' f; do
   best=''
   while IFS= read -r w; do
     [[ -n "${w}" ]] || continue
@@ -68,6 +67,6 @@ while IFS= read -r f || [[ -n "${f}" ]]; do
   done <<< "${workspaces}"
   # `if`, not `[[ ]] && printf`: an unmatched file (best empty) must leave the
   # loop body's exit status 0, or under `set -o pipefail` a no-match on the LAST
-  # line makes `while … | sort` fail and (with `set -e`) aborts the script.
+  # path makes `while … | sort` fail and (with `set -e`) aborts the script.
   if [[ -n "${best}" ]]; then printf '%s\n' "${best}"; fi
 done | sort -u

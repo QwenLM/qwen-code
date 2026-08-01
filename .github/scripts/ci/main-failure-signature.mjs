@@ -31,6 +31,11 @@ export const MAX_SEARCH_MARKERS = 5;
  * provider key, model outage) can fail every test at once; the body must stay
  * under GitHub's 65,536-character limit or `gh issue create` hard-fails. */
 export const MAX_BODY_TESTS = 20;
+export const MAX_TARGETED_E2E_CASES = 5;
+export const TARGETED_E2E_SCHEMA_VERSION = 1;
+export const TRUSTED_EXTERNAL_PROCESS_E2E_TESTS = new Set([
+  'cli/qwen-serve-client-mcp.test.ts',
+]);
 
 // Vitest and pytest colourise their output and Actions stores the escapes
 // verbatim, so failure lines arrive wrapped in SGR sequences.
@@ -84,6 +89,148 @@ export function testKey(testId) {
     .slice(0, 12);
 }
 
+export function parseE2eJobName(jobName) {
+  const linux =
+    /^E2E Test \(Linux\) - sandbox:(none|docker) - shard (\d+\/\d+)$/.exec(
+      String(jobName ?? ''),
+    );
+  if (linux) {
+    return {
+      os: 'linux',
+      sandbox: linux[1],
+      shard: linux[2],
+    };
+  }
+
+  const macos = /^E2E Test - macOS - shard (\d+\/\d+)$/.exec(
+    String(jobName ?? ''),
+  );
+  if (macos) {
+    return {
+      os: 'macos',
+      sandbox: 'none',
+      shard: macos[1],
+    };
+  }
+
+  return null;
+}
+
+export function parseVitestTestId(testId) {
+  const segments = String(testId ?? '')
+    .split(' > ')
+    .map((segment) => segment.trim());
+  if (segments.length < 2 || !/\.test\.[cm]?[jt]sx?$/.test(segments[0])) {
+    return null;
+  }
+  const name = segments.slice(1).join(' > ');
+  if (!name) return null;
+  return { file: segments[0], name };
+}
+
+export function buildTargetedE2eAnalysis(workflowName, jobs) {
+  if (workflowName !== 'E2E Tests') return null;
+
+  const cases = [];
+  const reasons = [];
+  for (const job of jobs) {
+    const environment = parseE2eJobName(job.name);
+    if (!environment) {
+      reasons.push(`unsupported failed job: ${job.name || '(unnamed)'}`);
+      continue;
+    }
+    if (typeof job.log !== 'string') {
+      reasons.push(`missing log for failed job: ${job.name}`);
+      continue;
+    }
+    const failedTests = extractFailingTests(job.log);
+    if (!failedTests.length) {
+      reasons.push(`no exact Vitest failure found in job: ${job.name}`);
+      continue;
+    }
+    for (const id of failedTests) {
+      const parsed = parseVitestTestId(id);
+      if (!parsed) {
+        reasons.push(`unsupported E2E test identifier: ${id}`);
+        continue;
+      }
+      if (!TRUSTED_EXTERNAL_PROCESS_E2E_TESTS.has(parsed.file)) {
+        reasons.push(
+          `E2E test does not use the trusted external-process harness: ${parsed.file}`,
+        );
+      }
+      cases.push({
+        id,
+        ...parsed,
+        job: job.name,
+        ...environment,
+      });
+    }
+  }
+
+  const totalCases = cases.length;
+  if (totalCases > MAX_TARGETED_E2E_CASES) {
+    reasons.push(
+      `too many environment-specific failures: ${totalCases} > ${MAX_TARGETED_E2E_CASES}`,
+    );
+  }
+  if (cases.some((testCase) => testCase.os !== 'linux')) {
+    reasons.push('macOS E2E failures are unsupported by the Linux verifier');
+  }
+  if (cases.some((testCase) => testCase.sandbox !== 'none')) {
+    reasons.push(
+      'Docker E2E failures are unsupported by credential-free read-only verification',
+    );
+  }
+
+  return {
+    schemaVersion: TARGETED_E2E_SCHEMA_VERSION,
+    eligible:
+      jobs.length > 0 &&
+      totalCases > 0 &&
+      totalCases <= MAX_TARGETED_E2E_CASES &&
+      reasons.length === 0,
+    complete: reasons.length === 0,
+    reasons: [...new Set(reasons)],
+    totalCases,
+    cases: cases.slice(0, MAX_TARGETED_E2E_CASES),
+  };
+}
+
+export function isAutofixEligible(analysis) {
+  return (
+    analysis.workflow === 'E2E Tests' &&
+    analysis.targetedE2e?.eligible === true &&
+    analysis.targetedE2e.complete === true
+  );
+}
+
+export function buildTargetedE2eMetadata({
+  analysis,
+  repository,
+  issue = null,
+  occurrence,
+}) {
+  if (!analysis.targetedE2e) return null;
+  return {
+    schemaVersion: TARGETED_E2E_SCHEMA_VERSION,
+    kind: 'main-e2e-failure',
+    repository,
+    issue,
+    workflow: analysis.workflow,
+    source: {
+      runId: Number(occurrence.runId),
+      runAttempt: Number(occurrence.runAttempt),
+      runUrl: occurrence.runUrl,
+      headSha: occurrence.sha,
+      headBranch: 'main',
+      event: 'push',
+      conclusion: 'failure',
+    },
+    verification: analysis.targetedE2e,
+  };
+}
+
 /**
  * A signature over the whole failure set, recorded in the body for humans
  * comparing two issues. Matching is done with the per-test markers, which
@@ -113,7 +260,7 @@ export function shortenForTitle(testId, limit = 110) {
     : `${collapsed.slice(0, limit - 1)}…`;
 }
 
-export function analyzeLogs(workflowName, logTexts) {
+export function analyzeLogs(workflowName, logTexts, jobs = []) {
   const tests = [];
   for (const logText of logTexts) {
     for (const id of extractFailingTests(logText)) {
@@ -126,6 +273,7 @@ export function analyzeLogs(workflowName, logTexts) {
   return {
     workflow: workflowName,
     tests,
+    targetedE2e: buildTargetedE2eAnalysis(workflowName, jobs),
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -184,6 +332,12 @@ function splitOccurrenceBlock(body) {
  * break — has nothing to dedupe on, so it keeps the original per-commit marker
  * and title.
  */
+function autofixDisposition(analysis) {
+  return isAutofixEligible(analysis)
+    ? 'This issue is eligible for Autofix to create a verified repair PR.'
+    : 'This failure is not eligible for Autofix and requires human investigation.';
+}
+
 function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
@@ -196,7 +350,7 @@ function renderPerCommitBody({ analysis, occurrence }) {
     `- Run ID: ${occurrence.runId}`,
     `- Commit: ${occurrence.sha}`,
     '',
-    'This issue is labeled for autofix so the existing agent can create a repair PR.',
+    autofixDisposition(analysis),
     '',
   ].join('\n');
 }
@@ -253,7 +407,7 @@ export function renderIssueBody({
       '',
       ...testLines,
       '',
-      'This issue is labeled for autofix so the existing agent can create a repair PR.',
+      autofixDisposition(analysis),
       'It is deduped by failing test, so every later commit that hits the same',
       'failure is appended below instead of opening another issue.',
     ].join('\n');
@@ -316,6 +470,32 @@ export function renderIssueBody({
   ].join('\n');
 }
 
+function publicIssueAnalysis(analysis) {
+  if (!isAutofixEligible(analysis)) return analysis;
+  const tests = analysis.tests.map((test) => ({
+    ...test,
+    id: `case ${test.key}`,
+  }));
+  const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
+  return {
+    ...analysis,
+    tests,
+    title: `Main CI failed: ${analysis.workflow} — ${tests[0].id}${extra}`,
+  };
+}
+
+function publicMachineMarkers(body) {
+  const pattern = new RegExp(
+    `<!-- ${TEST_MARKER_PREFIX}([0-9a-f]{12}) -->`,
+    'g',
+  );
+  return [
+    ...new Set(
+      [...String(body ?? '').matchAll(pattern)].map((match) => match[0]),
+    ),
+  ].join('\n');
+}
+
 function parseArgs(argv) {
   const options = {};
   const positional = [];
@@ -337,8 +517,14 @@ export function runCli(argv) {
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));
+    const jobs = options.jobs
+      ? JSON.parse(readFileSync(options.jobs, 'utf8')).map((job) => ({
+          ...job,
+          log: job.logPath ? readFileSync(job.logPath, 'utf8') : null,
+        }))
+      : [];
     process.stdout.write(
-      `${JSON.stringify(analyzeLogs(options.workflow ?? '', logTexts))}\n`,
+      `${JSON.stringify(analyzeLogs(options.workflow ?? '', logTexts, jobs))}\n`,
     );
     return;
   }
@@ -354,15 +540,30 @@ export function runCli(argv) {
       sha: options.sha,
       runUrl: options['run-url'],
       runId: options['run-id'],
+      runAttempt: options['run-attempt'],
       at: options.at,
     };
+    const issueAnalysis = publicIssueAnalysis(analysis);
+    const publicExistingBody = isAutofixEligible(analysis)
+      ? publicMachineMarkers(existingBody)
+      : existingBody;
     process.stdout.write(
       `${JSON.stringify({
-        title: renderIssueTitle({ analysis, occurrence }),
-        body: renderIssueBody({ analysis, existingBody, occurrence }),
+        title: renderIssueTitle({ analysis: issueAnalysis, occurrence }),
+        body: renderIssueBody({
+          analysis: issueAnalysis,
+          existingBody: publicExistingBody,
+          occurrence,
+        }),
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers
           : [`${LEGACY_MARKER_PREFIX}${occurrence.sha}`],
+        autofixEligible: isAutofixEligible(analysis),
+        targetedE2e: buildTargetedE2eMetadata({
+          analysis,
+          repository: options.repository ?? '',
+          occurrence,
+        }),
       })}\n`,
     );
     return;

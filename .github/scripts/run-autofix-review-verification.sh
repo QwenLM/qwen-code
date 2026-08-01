@@ -125,7 +125,7 @@ run_check 'lint failed on the agent-committed fix' npm run lint
 # workspace's tests). No '|| true': a resolver error (missing node, an
 # unreadable manifest) must fail the gate loudly rather than silently
 # skip package tests; legitimate no-match input already exits 0 empty.
-CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
+CHANGED_PKGS="$(git diff --name-only -z "origin/main...${BRANCH}" \
   | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
 if [[ -z "${CHANGED_PKGS}" ]]; then
   echo 'No package changes detected; skipping package tests.'
