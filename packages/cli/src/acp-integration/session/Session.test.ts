@@ -938,7 +938,7 @@ describe('Session', () => {
     secondSession.dispose();
   });
 
-  it('waits for an aborted ACP transport request to settle before advancing the queue', async () => {
+  it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
     let settleFirstTransport:
       | ((response: RequestPermissionResponse) => void)
       | undefined;
@@ -992,13 +992,14 @@ describe('Session', () => {
 
     firstAbort.abort();
     await first;
-    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
-
-    settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
+    // The queue advances on abort — the second request is sent without
+    // waiting for the orphaned first RPC to settle.
     await vi.waitFor(() => {
       expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     });
     await second;
+    // Settle the orphaned RPC so no dangling promises remain.
+    settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
   });
 
   it('fails a workflow approval closed when the ACP request times out', async () => {

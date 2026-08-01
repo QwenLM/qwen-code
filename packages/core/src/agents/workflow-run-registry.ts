@@ -463,6 +463,9 @@ export class WorkflowRunRegistry {
       entry.status !== 'running' ||
       (!this.approvalChangeCallback && !this.approvalRequestCallback)
     ) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not running, or no host channel`,
+      );
       return 'rejected';
     }
     if (
@@ -475,6 +478,9 @@ export class WorkflowRunRegistry {
       return 'duplicate';
     }
     if (entry.pendingApprovals.length >= MAX_PENDING_WORKFLOW_APPROVALS) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: pending limit (${MAX_PENDING_WORKFLOW_APPROVALS}) reached`,
+      );
       return 'rejected';
     }
     const confirmationDetails = restrictWorkflowConfirmationDetails(
@@ -487,6 +493,9 @@ export class WorkflowRunRegistry {
         JSON.stringify(confirmationDetails).length >
         MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS
     ) {
+      debugLogger.warn(
+        `Workflow approval rejected for ${runId}/${event.callId}: unsupported type (${event.confirmationDetails.type}) or payload exceeds ${MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS} chars`,
+      );
       return 'rejected';
     }
     const approvalId = `wfap_${this.nextApprovalId++}`;

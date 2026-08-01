@@ -429,6 +429,14 @@ export class PermissionController extends BaseController {
     approvalSignal: AbortSignal,
   ): Promise<void> {
     const registry = this.context.config.getWorkflowRunRegistry();
+    if (approvalSignal.aborted) {
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      return;
+    }
     const signal = AbortSignal.any([this.context.abortSignal, approvalSignal]);
     try {
       const response = await this.sendControlRequest(

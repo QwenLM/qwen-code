@@ -1418,6 +1418,8 @@ export class Session implements SessionContext {
               : []),
           ]
         : buildPermissionRequestContent(confirmationDetails);
+    // Resolves against the parent session's registry; per-agent MCP tools
+    // fall back to the bare tool name (the mcp details still carry serverName).
     const { title, locations, kind } = this.toolCallEmitter.resolveToolMetadata(
       approval.name,
       rawArgs,
@@ -1489,6 +1491,7 @@ export class Session implements SessionContext {
         _meta: {
           toolName: approval.name,
           workflowApproval: true,
+          approvalOutcome: success ? 'approved' : 'denied',
         },
       });
     } catch (error) {
@@ -6385,10 +6388,18 @@ export class Session implements SessionContext {
         ? requestPermissionWithAbort(this.client, params, signal)
         : this.client.requestPermission(params),
     );
-    const tail = transportRequest.then(
-      () => undefined,
-      () => undefined,
-    );
+    // Advance the queue when the transport settles OR when the caller's
+    // signal aborts — an orphaned RPC must not wedge later requests.
+    const tail = Promise.race([
+      transportRequest.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<void>((resolve) => {
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      }),
+    ]);
     permissionRequestTails.set(this.client, tail);
     return requestPermissionWithAbort(
       { requestPermission: () => transportRequest },
