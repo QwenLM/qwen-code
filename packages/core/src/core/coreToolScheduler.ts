@@ -5442,7 +5442,7 @@ export class CoreToolScheduler {
         let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
-          executionErrorType,
+          executionErrorType ?? ToolErrorType.UNKNOWN,
           executionStatus,
           failureHookArtifacts,
           typeof toolResult.returnDisplay === 'string'
