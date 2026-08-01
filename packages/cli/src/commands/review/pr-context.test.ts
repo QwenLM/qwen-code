@@ -1015,6 +1015,21 @@ describe('latestOwnLedger', () => {
     expect(ledger?.round).toBe(3);
   });
 
+  it('breaks a submitted_at tie on the review id, not on array order', () => {
+    // Two rounds posted in the same second (or with the timestamp missing) are
+    // ordered only by id. Keeping the earlier one hands the next round the
+    // older work list — the one failure the whole recovery exists to prevent.
+    const at = '2026-01-01T00:00:00Z';
+    const ledger = latestOwnLedger(
+      [
+        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
+        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
+      ],
+      'bot',
+    );
+    expect(ledger?.round).toBe(4);
+  });
+
   it('yields nothing with no login, no marker, or a malformed one', () => {
     expect(
       latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
@@ -1090,5 +1105,17 @@ describe('renderLedgerSection escaping', () => {
     const rows = md.split('\n').filter((l) => l.startsWith('| R1-1'));
     expect(rows).toHaveLength(1); // one row, not three
     expect(rows[0]).toContain('\\|');
+  });
+
+  it('keeps a backtick in the location inside its code span', () => {
+    // The location is rendered as `path` — a backtick in the path closes the
+    // span and lets the rest render as markdown instead of as a path.
+    const md = renderLedgerSection({
+      v: 1,
+      round: 1,
+      findings: [{ id: 'R1-1', sev: 'S', file: 'a`.ts** bold **', title: 't' }],
+    });
+    const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
+    expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
   });
 });

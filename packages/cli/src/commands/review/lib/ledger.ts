@@ -23,7 +23,14 @@
 
 /** One finding the review stands behind, carried to the next round. */
 export interface LedgerFinding {
-  /** Round-scoped id, `R<round>-<n>`. Stable across re-reports. */
+  /**
+   * The finding's id. A **new** finding gets `R<round>-<n>`; a finding carried
+   * forward from an earlier round keeps the id it already has — Step 6 re-reports
+   * a still-standing entry under its original id, and `buildLedger` reads that id
+   * back off the comment body, so `R1-2` names the same claim in every round.
+   * Renumbering it by position would hand the next round a work list keyed by
+   * ids the report it accompanies never used.
+   */
   id: string;
   /** `C` (Critical) or `S` (Suggestion). Compact on purpose — body bytes. */
   sev: 'C' | 'S';
@@ -40,26 +47,39 @@ export interface Ledger {
 }
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
- *  65,536 chars and the marker rides inside it. */
+ *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
+ *  the serializer so the write side is bounded, the parser so a hand-edited
+ *  marker cannot exceed what the serializer would have written. */
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
+export const LEDGER_MAX_FILE = 200;
 
 const OPEN = '<!-- qwen-review-ledger ';
 const CLOSE = ' -->';
 
-/** Serialize for embedding. `--` never survives into the JSON (it would close
- *  the HTML comment early); JSON.stringify escapes nothing else that could. */
+/**
+ * Serialize for embedding, capped and comment-safe.
+ *
+ * `--` would close the HTML comment early and spill the tail onto the PR page
+ * as visible text, so none may survive into the payload. The escape is applied
+ * at the JSON layer rather than by rewriting the data: the second dash becomes
+ * a `\u002d` escape, which parses back to a literal `-`, so a title quoting
+ * `--comment` reaches the next round verbatim — where the earlier rewrite to an
+ * em dash delivered `—comment`, on a work list whose whole job is to re-locate
+ * the claim it names. Escaping the serialized text also means a field added to
+ * `Ledger` later cannot reintroduce the hazard by being forgotten below.
+ */
 export function serializeLedger(ledger: Ledger): string {
   const capped: Ledger = {
     v: 1,
     round: ledger.round,
     findings: ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
       ...f,
-      title: f.title.slice(0, LEDGER_MAX_TITLE).replace(/--/g, '—'),
-      file: f.file.replace(/--/g, '—'),
+      title: f.title.slice(0, LEDGER_MAX_TITLE),
+      file: f.file.slice(0, LEDGER_MAX_FILE),
     })),
   };
-  return `${OPEN}${JSON.stringify(capped)}${CLOSE}`;
+  return `${OPEN}${JSON.stringify(capped).replace(/--/g, '-\\u002d')}${CLOSE}`;
 }
 
 /**
@@ -97,7 +117,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       .map((f) => ({
         ...f,
         title: f.title.slice(0, LEDGER_MAX_TITLE),
-        file: f.file.slice(0, 200),
+        file: f.file.slice(0, LEDGER_MAX_FILE),
       }));
     return { v: 1, round: raw.round, findings };
   } catch {
@@ -105,12 +125,27 @@ export function parseLedger(body: string | undefined): Ledger | null {
   }
 }
 
-/** Strip the marker from a body about to be rendered for a model — the JSON
- *  blob is noise there; the parsed copy travels separately. */
+/**
+ * Strip the marker from a body about to be rendered for a model — the JSON
+ * blob is noise there; the parsed copy travels separately.
+ *
+ * EVERY marker, not the first. `parseLedger` deliberately reads the LAST one
+ * because an edited or quote-carrying body can hold more than one, so a
+ * stripper that removed only the first left exactly the marker the parser
+ * trusts sitting in the model-facing prose — and left a canonical LGTM
+ * unmatched by its `^…$`-anchored filter, which is the no-op-round noise the
+ * filter exists to remove.
+ */
 export function stripLedgerMarker(body: string): string {
-  const start = body.indexOf(OPEN);
-  if (start < 0) return body;
-  const end = body.indexOf(CLOSE, start);
-  if (end < 0) return body;
-  return (body.slice(0, start) + body.slice(end + CLOSE.length)).trim();
+  let out = body;
+  for (;;) {
+    const start = out.indexOf(OPEN);
+    if (start < 0) break;
+    const end = out.indexOf(CLOSE, start);
+    // An unterminated marker is not a marker: leave the tail alone rather than
+    // truncating a body at a stray `<!-- qwen-review-ledger`.
+    if (end < 0) break;
+    out = out.slice(0, start) + out.slice(end + CLOSE.length);
+  }
+  return out === body ? body : out.trim();
 }

@@ -648,19 +648,26 @@ function blockerSection(
  * claim. Another user's marker — pasted, forged, or their own tooling's — is
  * data about THEIR review, not ours, and is ignored rather than trusted.
  * Latest by submitted_at wins: each posted round embeds a fresh full copy.
+ * Ties — same second, or both timestamps missing — break on the review id,
+ * which is monotonic: keeping the earlier review on a tie would hand the next
+ * round the older work list, the one failure this whole recovery exists to
+ * prevent.
  */
 export function latestOwnLedger(
   reviews: RawReview[],
   login: string | null,
 ): Ledger | null {
   if (!login) return null;
-  let best: { at: string; ledger: Ledger } | null = null;
+  let best: { at: string; id: number; ledger: Ledger } | null = null;
   for (const r of reviews) {
     if (r.user?.login !== login) continue;
     const ledger = parseLedger(r.body);
     if (!ledger) continue;
     const at = r.submitted_at ?? '';
-    if (!best || at > best.at) best = { at, ledger };
+    const id = typeof r.id === 'number' ? r.id : 0;
+    if (!best || at > best.at || (at === best.at && id > best.id)) {
+      best = { at, id, ledger };
+    }
   }
   return best?.ledger ?? null;
 }
@@ -669,11 +676,14 @@ export function latestOwnLedger(
 export function renderLedgerSection(ledger: Ledger): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
-  // neutralised before interpolation.
+  // neutralised before interpolation. The location cell is rendered inside a
+  // code span, so it also has its backticks replaced: one would close the span
+  // and let the rest of the path render as markdown.
   const cell = (v: string) => v.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+  const code = (v: string) => cell(v).replace(/`/g, "'");
   const rows = ledger.findings.map(
     (f) =>
-      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${cell(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
+      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
   );
   return [
     '## Previous /review round (machine ledger)',
@@ -937,7 +947,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
   let prevLedger: Ledger | null = null;
   try {
-    prevLedger = latestOwnLedger(reviews, currentUser());
+    // `currentUser()` is a network round-trip; with no reviews on the PR there
+    // is nothing for its answer to match against, so it is not made.
+    prevLedger = reviews.length
+      ? latestOwnLedger(reviews, currentUser())
+      : null;
   } catch {
     prevLedger = null;
   }
@@ -955,6 +969,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       // No side file: compose-review starts the round count over, nothing else.
     }
   }
+  // No `else` clearing a stale side file, deliberately. A recovery that failed
+  // transiently — auth, network, a review page not fetched — would otherwise
+  // reset the round counter to 1 and re-issue ids the PR already carries.
+  // Keeping the stale copy only ever advances the count, which is the safe
+  // direction for an id space.
 
   const md = buildMarkdown(
     prNumber,

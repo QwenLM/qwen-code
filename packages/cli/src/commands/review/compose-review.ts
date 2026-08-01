@@ -49,6 +49,7 @@ import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
   countInlineFindings,
+  severityOf,
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
@@ -1750,6 +1751,16 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
+ * A carried-forward finding names its ORIGINAL id right after the severity
+ * marker — `**[Critical]** R1-2: the same claim, re-reported`. Step 6 already
+ * mandates re-reporting a still-standing entry under the id it has; reading
+ * that id back here is what makes the machine ledger agree with the report it
+ * rides in, instead of renumbering the entry to a fresh `R<round>-<n>` the
+ * report never used.
+ */
+const CARRIED_ID_RE = /^(R\d+-\d+)[:.)\]]?(?=\s|$)\s*/;
+
+/**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
  * never reach either input (they are terminal-only), so the ledger holds only
@@ -1761,32 +1772,60 @@ export function buildLedger(
   bodyCriticals: string[],
 ): Ledger {
   const findings: LedgerFinding[] = [];
+  const taken = new Set<string>();
+  let next = 0;
+  /** A carried id if it is free, else the next unused id of THIS round. */
+  const idFor = (carried: string | undefined): string => {
+    if (carried && !taken.has(carried)) {
+      taken.add(carried);
+      return carried;
+    }
+    let id: string;
+    do {
+      id = `R${round}-${++next}`;
+    } while (taken.has(id));
+    taken.add(id);
+    return id;
+  };
+  /** The first line of what follows the severity marker, minus any carried id. */
+  const titleOf = (rest: string): { id?: string; title: string } => {
+    const line = rest.split('\n')[0].trim();
+    const carried = CARRIED_ID_RE.exec(line);
+    return {
+      id: carried?.[1],
+      title: (carried ? line.slice(carried[0].length) : line).trim(),
+    };
+  };
+
   for (const c of drafted) {
-    const body = typeof c.body === 'string' ? c.body : '';
-    const sev = body.startsWith('**[Critical]**')
-      ? ('C' as const)
-      : body.startsWith('**[Suggestion]**')
-        ? ('S' as const)
-        : null;
+    // ONE severity predicate for the whole package. `severityOf` trims leading
+    // whitespace before matching, and it is what `countInlineFindings` — the
+    // count the verdict is computed from — and the unmarked-comment gate both
+    // use. A second `startsWith` here disagreed on exactly that whitespace: a
+    // Critical whose body opened with a newline was counted, was posted, and
+    // was silently absent from the ledger, shifting every id after it.
+    const sev = severityOf(c);
     if (!sev) continue;
-    const title = body
-      .replace(/^\*\*\[(Critical|Suggestion)\]\*\*:?\s*/, '')
-      .split('\n')[0]
-      .trim();
+    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+    const body = (typeof c.body === 'string' ? c.body : '').trimStart();
+    const { id: carried, title } = titleOf(
+      body.slice(marker.length).replace(/^:?\s*/, ''),
+    );
     findings.push({
-      id: `R${round}-${findings.length + 1}`,
-      sev,
+      id: idFor(carried),
+      sev: sev === 'critical' ? 'C' : 'S',
       file: typeof c.path === 'string' ? c.path : '(unknown)',
       ...(typeof c.line === 'number' ? { line: c.line } : {}),
       title,
     });
   }
   for (const b of bodyCriticals) {
+    const { id: carried, title } = titleOf(b);
     findings.push({
-      id: `R${round}-${findings.length + 1}`,
+      id: idFor(carried),
       sev: 'C',
       file: '(body)',
-      title: b.split('\n')[0].trim(),
+      title,
     });
   }
   return { v: 1, round, findings };

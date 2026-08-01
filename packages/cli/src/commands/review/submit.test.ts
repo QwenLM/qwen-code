@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { parseLedger } from './lib/ledger.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
@@ -666,6 +667,73 @@ describe('the verdict is computed, not carried', () => {
 
     expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
+// The ledger's whole premise is that the marker rides the body GITHUB receives.
+// It was once appended one layer above this path and reached only a file on
+// disk, so the assertions that matter are the ones made on the posted payload —
+// compose-review.test.ts owns the composition, this owns the wire.
+describe('the ledger marker on the body that reaches GitHub', () => {
+  const authorized = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  it('carries the findings of this round, numbered off the recovered one', () => {
+    const planPath = file('plan.json', { prNumber: 6771 });
+    file('qwen-review-pr-6771-prev-ledger.json', {
+      v: 1,
+      round: 2,
+      findings: [],
+    });
+    const review = file('ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+      ],
+      state: { modelId: 'm', planPath },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.round).toBe(3);
+    expect(ledger?.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+    ]);
+  });
+
+  it('takes its contents from the comments posted, not from `state`', () => {
+    // `draftedComments` is stripped off `state` here for the same reason `env`
+    // and `prBodyFetcher` are: what the review carries is not a claim the
+    // caller's JSON gets to make about what it reviewed.
+    const planPath = file('plan2.json', { prNumber: 6771 });
+    const review = file('forged-ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'real.ts', line: 1, body: '**[Suggestion]** the real one' },
+      ],
+      state: {
+        modelId: 'm',
+        planPath,
+        draftedComments: [
+          { path: 'forged.ts', line: 9, body: '**[Critical]** never drafted' },
+        ],
+      },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.findings).toEqual([
+      { id: 'R1-1', sev: 'S', file: 'real.ts', line: 1, title: 'the real one' },
+    ]);
   });
 });
 
