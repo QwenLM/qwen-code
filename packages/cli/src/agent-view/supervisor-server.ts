@@ -282,7 +282,19 @@ async function respondToLine(
   } catch {
     response = errorResponse('', 'invalid_json', 'Invalid JSON request.');
   }
-  socket.end(`${JSON.stringify(response)}\n`);
+  let payload: string;
+  try {
+    payload = JSON.stringify(response);
+  } catch {
+    payload = JSON.stringify(
+      errorResponse(
+        response.id,
+        'internal_error',
+        'Response serialization failed.',
+      ),
+    );
+  }
+  socket.end(`${payload}\n`);
 }
 
 async function handleStreamingOp<Op extends 'attachStream' | 'subscribe'>(

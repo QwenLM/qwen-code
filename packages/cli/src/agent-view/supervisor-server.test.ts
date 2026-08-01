@@ -236,6 +236,36 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('returns internal_error when a handler result is not serializable', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const server = createAgentViewSupervisorServer(
+      {
+        status: () => circular,
+        list: () => [],
+        shutdown: () => ({}),
+      },
+      { socketPath },
+    );
+
+    await server.listen();
+    try {
+      await expect(
+        requestAgentViewSupervisor(socketPath, {
+          id: 'status-request',
+          op: 'status',
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'internal_error' },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   it('returns internal_error when a streaming handler throws', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);
