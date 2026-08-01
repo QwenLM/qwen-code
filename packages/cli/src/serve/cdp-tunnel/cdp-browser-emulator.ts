@@ -72,6 +72,7 @@ export class CdpBrowserEmulator {
   readonly pageSessionId = PAGE_SESSION_ID;
   private readonly attachedPageSessions = new Set<string>();
   private nextPageSessionId = 1;
+  private autoAttachActive = false;
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
@@ -229,6 +230,7 @@ export class CdpBrowserEmulator {
     // ── tab session: recursive auto-attach mints the page session ──
     if (sessionId === TAB_SESSION_ID) {
       if (method === 'Target.setAutoAttach') {
+        this.autoAttachActive = true;
         this.cb.reply({
           method: 'Target.attachedToTarget',
           sessionId: TAB_SESSION_ID,
@@ -285,17 +287,20 @@ export class CdpBrowserEmulator {
    * plus each session created by an explicit `Target.attachToTarget`.
    *
    * This mirrors Chrome's per-session delivery — each attachment is an
-   * independent subscription that gets its own copy of the page's events. A
-   * client attaches through exactly one of those paths and listens only on the
-   * session it was handed, ignoring events tagged with any other session, so it
-   * still receives each event once. Only a client that deliberately attached
-   * twice would see an event twice, exactly as it would against a real browser.
+   * independent subscription that gets its own copy of the page's events. The
+   * auto-attach session only receives events after the `Target.setAutoAttach`
+   * handshake on the tab session, so a client that uses only explicit
+   * `Target.attachToTarget` does not pay for a duplicate stream it never
+   * listens to. A client that deliberately attached twice would see an event
+   * twice, exactly as it would against a real browser.
    */
   emitTabEvent(
     method: string,
     params: Record<string, unknown> | undefined,
   ): void {
-    this.cb.reply({ method, params, sessionId: PAGE_SESSION_ID });
+    if (this.autoAttachActive) {
+      this.cb.reply({ method, params, sessionId: PAGE_SESSION_ID });
+    }
     for (const sessionId of this.attachedPageSessions) {
       this.cb.reply({ method, params, sessionId });
     }

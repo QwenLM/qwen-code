@@ -85,7 +85,9 @@ const waitUntil = async (read, predicate, timeoutMs = 5_000) => {
     throw new Error(`waitUntil: read never succeeded: ${lastError?.message}`);
   }
   if (!predicate(value)) {
-    throw new Error(`waitUntil: timed out after ${timeoutMs}ms without matching predicate`);
+    throw new Error(
+      `waitUntil: timed out after ${timeoutMs}ms without matching predicate`,
+    );
   }
   return value;
 };

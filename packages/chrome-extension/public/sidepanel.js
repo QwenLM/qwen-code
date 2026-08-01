@@ -95,7 +95,11 @@ let cachedMcpSnapshot;
 async function probeState(baseUrl, token) {
   const { deriveCapabilityStatus } = QwenCapabilityStatus;
   const health = await probeJson(`${baseUrl}/health`, token);
-  if (!health) return deriveCapabilityStatus(false, []);
+  if (!health) {
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+    return deriveCapabilityStatus(false, []);
+  }
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
   let mcpSnapshot;

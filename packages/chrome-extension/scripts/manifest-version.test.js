@@ -4,31 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { toChromeManifestVersion } from './manifest-version.js';
+import {
+  resolveNightlyBuildNumber,
+  toChromeManifestVersion,
+} from './manifest-version.js';
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
-const repoRoot = path.resolve(packageRoot, '../..');
-
-function resolveNightlyBuildNumber(packageVersion) {
-  if (!packageVersion.includes('-nightly.')) return undefined;
-  const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
-  if (configured) return Number(configured);
-  return Number(
-    execFileSync('git', ['rev-list', '--count', 'HEAD'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-    }).trim(),
-  );
-}
 
 describe('toChromeManifestVersion', () => {
   it('preserves a stable semantic version', () => {

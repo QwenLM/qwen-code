@@ -4,7 +4,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import semver from 'semver';
+
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../..',
+);
+
+export function resolveNightlyBuildNumber(packageVersion) {
+  if (!packageVersion.includes('-nightly.')) return undefined;
+  const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
+  if (configured) return Number(configured);
+  const shallow = execFileSync(
+    'git',
+    ['rev-parse', '--is-shallow-repository'],
+    { cwd: repoRoot, encoding: 'utf8' },
+  ).trim();
+  if (shallow === 'true') {
+    throw new Error(
+      'Cannot derive a monotonic nightly build number from a shallow clone. ' +
+        'Set QWEN_CHROME_EXTENSION_BUILD_NUMBER to an explicit build number.',
+    );
+  }
+  try {
+    return Number(
+      execFileSync('git', ['rev-list', '--count', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
+    );
+  } catch {
+    throw new Error(
+      'Unable to derive the nightly extension build number from git history. ' +
+        'Set QWEN_CHROME_EXTENSION_BUILD_NUMBER to an explicit build number.',
+    );
+  }
+}
 
 const CHROME_COMPONENT_MAX = 65535;
 const STABLE_BUILD = CHROME_COMPONENT_MAX;

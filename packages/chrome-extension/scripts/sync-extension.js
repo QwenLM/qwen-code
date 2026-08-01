@@ -7,17 +7,18 @@
  * 支持 --watch 监听变更（不清空输出，便于与 esbuild --watch 共存）。
  */
 
-import { execFileSync } from 'node:child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { watch } from 'fs';
-import { toChromeManifestVersion } from './manifest-version.js';
+import {
+  resolveNightlyBuildNumber,
+  toChromeManifestVersion,
+} from './manifest-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
-const repoRoot = path.resolve(projectRoot, '../..');
 
 const args = process.argv.slice(2);
 const isWatch = args.includes('--watch');
@@ -28,25 +29,6 @@ const targetDir = path.resolve(
     ? targetArg.split('=')[1]
     : process.env.EXTENSION_OUT_DIR || 'dist/extension',
 );
-
-function resolveNightlyBuildNumber(packageVersion) {
-  if (!packageVersion.includes('-nightly.')) return undefined;
-  const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
-  if (configured) return Number(configured);
-  try {
-    return Number(
-      execFileSync('git', ['rev-list', '--count', 'HEAD'], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-      }).trim(),
-    );
-  } catch {
-    throw new Error(
-      'Unable to derive the nightly extension build number from git history. ' +
-        'Set QWEN_CHROME_EXTENSION_BUILD_NUMBER to an explicit build number.',
-    );
-  }
-}
 
 const staticSrcDir = path.join(projectRoot, 'public');
 async function syncManifestVersion() {

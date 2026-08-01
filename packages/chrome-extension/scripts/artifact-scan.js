@@ -156,18 +156,16 @@ async function main() {
   );
   const repoRoot = path.resolve(packageRoot, '../..');
   const roots = process.argv.slice(2);
+  let optionalRoots;
   let requiredMetafilePaths;
   let optionalMetafilePaths;
   let zipPath;
   if (roots.length === 0) {
-    roots.push(
-      path.join(packageRoot, 'dist/extension'),
-      path.join(repoRoot, 'dist'),
-    );
-    // The extension background build always writes its own metafile, so that
-    // one is required. The root CLI bundle metafile only exists after
-    // `cross-env DEV=true npm run bundle`, so a package-level run (which never
-    // builds the root bundle) skips it with a warning instead of failing.
+    roots.push(path.join(packageRoot, 'dist/extension'));
+    // The root CLI bundle and its metafile only exist after `npm run bundle`
+    // (and `cross-env DEV=true npm run bundle` for the metafile), so a
+    // package-level run skips them with a warning instead of failing.
+    optionalRoots = [path.join(repoRoot, 'dist')];
     requiredMetafilePaths = [path.join(packageRoot, 'dist/esbuild.json')];
     optionalMetafilePaths = [path.join(repoRoot, 'dist/esbuild.json')];
     zipPath = path.join(packageRoot, 'chrome-extension.zip');
@@ -180,6 +178,19 @@ async function main() {
     await access(root).catch(() => {
       throw new Error(`Artifact directory does not exist: ${root}`);
     });
+  }
+  for (const root of optionalRoots ?? []) {
+    const present = await access(root).then(
+      () => true,
+      () => false,
+    );
+    if (!present) {
+      console.warn(
+        `artifact-scan: skipping ${root} (run "npm run bundle" at the repo root to scan the CLI bundle)`,
+      );
+      continue;
+    }
+    roots.push(root);
   }
   const findings = await scanArtifactRoots(roots);
   for (const metafilePath of requiredMetafilePaths ?? []) {

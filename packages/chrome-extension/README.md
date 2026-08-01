@@ -109,8 +109,8 @@ QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
 ```
 
 The command exits successfully only after printing `DEGRADED-MODE: PASS`,
-`RUNTIME-MCP-COLD-RESTART: PASS`, `FULL-CDP-SMOKE: PASS`, and
-`REAL-CHROME-E2E: PASS`. It does not read or modify the user's Qwen settings.
+`RUNTIME-MCP: PASS`, `RUNTIME-MCP-COLD-RESTART: PASS`, `FULL-CDP-SMOKE: PASS`,
+and `REAL-CHROME-E2E: PASS`. It does not read or modify the user's Qwen settings.
 
 ## Packaging for the Chrome Web Store
 

@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -15,6 +15,12 @@ import { stopChild, waitForJson } from './acceptance-helpers.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../../../..');
 const cli = resolve(repoRoot, 'packages/cli/dist/index.js');
+await access(cli).catch(() => {
+  console.error(
+    `CLI bundle not found: ${cli}\nRun "npm run build && npm run bundle" first.`,
+  );
+  process.exit(2);
+});
 const fixture = resolve(here, 'fixture-server.mjs');
 const fullSmoke = resolve(here, 'full-tools-smoke.mjs');
 const reconnectSmoke = resolve(here, 'cdp-mcp-smoke.mjs');

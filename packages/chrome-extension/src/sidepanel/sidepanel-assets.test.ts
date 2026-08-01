@@ -49,7 +49,13 @@ describe('side panel capability status assets', () => {
       readFileSync(path.join(packageRoot, 'public/manifest.json'), 'utf8'),
     ) as { permissions?: string[] };
 
-    expect(manifest.permissions).not.toContain('activeTab');
+    expect(manifest.permissions).toEqual([
+      'tabs',
+      'storage',
+      'debugger',
+      'alarms',
+      'sidePanel',
+    ]);
   });
 
   it('transitions between welcome, shell, and warning states', async () => {
