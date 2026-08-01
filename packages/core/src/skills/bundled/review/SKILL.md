@@ -1022,7 +1022,7 @@ If reviewing a PR **at high effort**, update the review cache for incremental re
    }
    ```
 
-   The `findings` ledger is what lets the **next** high-effort run open with "R1-2 is fixed" instead of a from-scratch list (see Step 6's previous-round section). Write every **confirmed high-confidence** finding of this round under a fresh `R<round>-<n>` id, and carry forward a previous entry only while it still stands — a finding ruled `fixed` this round leaves the ledger (the report said so; the cache is for what the next round must check, not history). Low-confidence and terminal-only findings stay out: the ledger holds claims this review stands behind, because next round re-asserts each one by id.
+   The `findings` ledger is what lets the **next** high-effort run open with "R1-2 is fixed" instead of a from-scratch list (see Step 6's previous-round section). Write every **newly confirmed high-confidence** finding under a fresh `R<round>-<n>` id, and carry a still-standing previous entry forward **under the id it already has** — the whole payoff is that `R1-2` names the same claim in every round, so a finding that survives is re-reported, never renumbered — a finding ruled `fixed` this round leaves the ledger (the report said so; the cache is for what the next round must check, not history). Low-confidence and terminal-only findings stay out: the ledger holds claims this review stands behind, because next round re-asserts each one by id.
 
 3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.
 
