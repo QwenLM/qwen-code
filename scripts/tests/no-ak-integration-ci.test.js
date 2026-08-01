@@ -104,7 +104,7 @@ describe('no-AK integration CI wiring', () => {
       'XAI_API_KEY',
       'ZAI_API_KEY',
     ]) {
-      expect(gateStep).toContain(`${key}: ''`);
+      expect(gateStep).toContain(`\n          ${key}: ''`);
     }
     expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
