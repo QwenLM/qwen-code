@@ -47,6 +47,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { getLatestActiveTodos } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
@@ -333,11 +334,6 @@ export function ChatPane({
   );
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const notifySuccess = useCallback(
-    (message: string) => store.dispatch([{ type: 'status', text: message }]),
-    [store],
-  );
-
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -347,6 +343,13 @@ export function ChatPane({
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
+  const isExitPlanApproval =
+    pendingToolApproval?.toolKind === 'switch_mode' &&
+    pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
+  const planTodos = useMemo(
+    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
+    [isExitPlanApproval, messages],
+  );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
   // the approval current when setApprovalMode *resolves*, not a stale one
   // captured at click time — mirrors App's pendingApprovalRef.
@@ -407,12 +410,15 @@ export function ChatPane({
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -420,12 +426,12 @@ export function ChatPane({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions: actions,
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -825,6 +831,7 @@ export function ChatPane({
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
+              planTodos={planTodos}
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval
@@ -850,8 +857,8 @@ export function ChatPane({
         <QueuedPromptDisplay
           prompts={queuedPrompts}
           t={t}
+          canMutateMidTurn={canMutateMidTurn}
           onDelete={removeQueuedPrompt}
-          onInsert={insertQueuedPrompt}
           onEdit={editQueuedPrompt}
         />
         <ChatEditor

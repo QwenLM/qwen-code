@@ -771,6 +771,50 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores compaction model selector without switching models', async () => {
+    const switchModel = vi.fn();
+    const setCompactionModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isCompactionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'compaction-model',
+            label: 'compaction-model',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'gpt-4',
+            label: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+        isCurrentPrimaryModel: (m: { id: string; authType?: string }) =>
+          m.id === 'gpt-4' && m.authType === AuthType.USE_OPENAI,
+        setCompactionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::compaction-model`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'compactionModel',
+      'openai:compaction-model',
+    );
+    expect(setCompactionModel).toHaveBeenCalledWith('openai:compaction-model');
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('shows only image-generation models and stores the exact provider route', async () => {
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
