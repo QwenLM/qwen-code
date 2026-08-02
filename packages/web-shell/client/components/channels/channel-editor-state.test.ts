@@ -337,7 +337,7 @@ describe('Descriptor-driven senderPolicy', () => {
     invalid.name = 'example';
     invalid.values.reasons = 'mention, typo';
     expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
-      reasons: 'invalid',
+      reasons: 'invalidOption',
     });
   });
 });

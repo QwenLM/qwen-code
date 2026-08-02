@@ -225,6 +225,8 @@ export function ChannelEditorDialog({
   ) => {
     if (code === 'duplicate') return t('channels.editor.validation.duplicate');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
+    if (code === 'invalidOption')
+      return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {

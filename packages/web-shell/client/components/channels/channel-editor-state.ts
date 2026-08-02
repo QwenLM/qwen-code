@@ -30,6 +30,7 @@ export type ChannelEditorValidationCode =
   | 'required'
   | 'duplicate'
   | 'invalid'
+  | 'invalidOption'
   | 'number'
   | 'policy';
 
@@ -169,7 +170,7 @@ export function validateChannelEditorDraft(
           .filter((token) => token.length > 0)
           .some((token) => !allowed.has(token));
         if (invalid) {
-          errors[field.key] = 'invalid';
+          errors[field.key] = 'invalidOption';
         }
       }
     }

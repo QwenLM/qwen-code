@@ -2560,6 +2560,8 @@ const EN: Messages = {
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidOption':
+    "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
@@ -5069,6 +5071,7 @@ const ZH: Messages = {
     `${v?.label ?? '此字段'}为必填项。`,
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
