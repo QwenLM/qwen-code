@@ -154,11 +154,25 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     // product flag with a ≥ boundary, megamorphic stated as unconditional) and a
     // review measured them against a live JVM. Pin the corrected forms.
     const out = pathRulesFor(['src/Main.java']);
-    expect(out).toContain('2500 on JDK 17+');
-    expect(out).toContain('2000 on JDK 8–11');
+    expect(out).toContain('2500 on JDK 11+');
+    expect(out).toContain('2000 on JDK 8');
     expect(out).toContain('DontCompileHugeMethods');
     expect(out).toMatch(/> 8000/);
     expect(out).toContain('TypeProfileMajorReceiverPercent');
+  });
+
+  it('describes the inline table as size caps, not inlining outcomes', () => {
+    // A review reproduced C2 declining a 10-byte callee for `low call site
+    // frequency`: size is one gate among several, so the table reads as size
+    // caps and a "can no longer be inlined" claim needs the dynamic tier — a
+    // javap size diff alone proves only a threshold crossing, not an inlining
+    // change. The outcome words that contradicted that behaviour are gone.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('size caps');
+    expect(out).toMatch(/necessary but not sufficient/);
+    expect(out).toContain('low call site frequency');
+    expect(out).toContain('needs the **dynamic** tier');
+    expect(out).not.toContain('even when cold');
   });
 
   it('refuses to estimate bytecode from source', () => {
@@ -276,28 +290,51 @@ describe('pathRulesFor — the Java/JVM rule', () => {
   });
 
   it('deprioritizes generated, info-only, and non-Maven test sources too', () => {
-    // The checklist scopes out more than src/test: generated sources,
-    // package-info/module-info, and non-Maven test roots (integTest,
-    // androidTest, testFixtures) must not fill the named slots either.
+    // The checklist scopes out more than src/test: generated sources under the
+    // build output dirs, package-info/module-info, and non-Maven test roots
+    // (integrationTest, integTest, androidTest, testFixtures) must not fill the
+    // named slots either. A source package merely NAMED `generated` is production.
     const noise = [
       'target/generated-sources/com/x/Stub.java',
       'build/generated/com/x/R.java',
-      'src/main/java/com/x/generated/Proto.java',
       'src/main/java/com/x/package-info.java',
       'src/main/java/module-info.java',
-      'src/integTest/java/com/x/IT.java',
+      'src/integrationTest/java/com/x/IT.java',
+      'src/integTest/java/com/x/IT2.java',
       'src/androidTest/java/com/x/AT.java',
       'src/testFixtures/java/com/x/Fix.java',
     ];
-    const prod = ['src/main/java/com/x/Hot.java'];
+    const prod = [
+      'src/main/java/com/x/Hot.java',
+      'src/main/java/com/x/generated/Proto.java',
+    ];
     const out = pathRulesFor([...noise, ...prod]);
     const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
-    // The single production path must be named first.
+    // Both production paths — including the one in a `generated` package — must
+    // be named before any out-of-scope path.
+    const stubIdx = heading.indexOf('Stub.java');
+    expect(stubIdx).toBeGreaterThanOrEqual(0);
+    expect(heading.indexOf('Hot.java')).toBeGreaterThanOrEqual(0);
+    expect(heading.indexOf('Proto.java')).toBeGreaterThanOrEqual(0);
+    expect(heading.indexOf('Hot.java')).toBeLessThan(stubIdx);
+    expect(heading.indexOf('Proto.java')).toBeLessThan(stubIdx);
+  });
+
+  it('treats Gradle src/integrationTest as out of scope even past the cap', () => {
+    // Gradle's conventional directory for an `integrationTest` suite is
+    // src/integrationTest/java. With more than ten such paths plus one
+    // production path, the production path must still be named first — not
+    // truncated away by a heading full of test files.
+    const tests = Array.from(
+      { length: 12 },
+      (_, i) => `src/integrationTest/java/com/x/T${i}.java`,
+    );
+    const out = pathRulesFor([...tests, 'src/main/java/com/x/Hot.java']);
+    const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
+    expect(heading).toContain('…and 3 more');
     expect(heading.indexOf('Hot.java')).toBeGreaterThanOrEqual(0);
     expect(heading.indexOf('Hot.java')).toBeLessThan(
-      heading.indexOf('Stub.java') === -1
-        ? Infinity
-        : heading.indexOf('Stub.java'),
+      heading.indexOf('T0.java'),
     );
   });
 

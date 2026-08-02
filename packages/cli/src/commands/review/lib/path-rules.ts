@@ -97,24 +97,26 @@ const JAVA: PathRule = {
 
 **JIT inlining — the regression no dimension can see, and you cannot prove from source:**
 
-HotSpot inlines by the **bytecode size of the callee**, against these product defaults (a project's own \`-XX:\` flags, or a different JVM, change them — check before citing):
+HotSpot's C2 compiler gates inlining on the **bytecode size of the callee** among other criteria. These are the size caps in its normal policy (a project's own \`-XX:\` flags, or a different JVM, change them — check before citing):
 
-| callee bytecode size | inlinable |
+| callee bytecode size | C2 normal-policy size cap |
 | --- | --- |
-| ≤ 6 (\`MaxTrivialSize\`) | always |
-| ≤ 35 (\`MaxInlineSize\`) | even when cold |
-| ≤ 325 (\`FreqInlineSize\`) | only at a hot call site |
-| > 325 | never |
-| > 8000 (\`HugeMethodLimit\`, a develop flag gated by the product \`DontCompileHugeMethods\`) | never even JIT-compiled |
+| ≤ 6 (\`MaxTrivialSize\`) | under the trivial cap — size alone does not block it |
+| ≤ 35 (\`MaxInlineSize\`) | under the normal cap — size alone does not block it |
+| ≤ 325 (\`FreqInlineSize\`) | under the hot cap — size blocks it unless the call site is hot |
+| > 325 | over the hot cap — size blocks it at every call site |
+| > 8000 (\`HugeMethodLimit\`, a develop flag gated by the product \`DontCompileHugeMethods\`) | over the huge-method limit — size blocks even JIT compilation |
 
-Two more ways a diff can flip it: an already-compiled callee whose **native** size passes \`InlineSmallCode\` (x86_64 default: 2500 on JDK 17+, 2000 on JDK 8–11; 1000 only with \`-XX:-TieredCompilation\`) stops being inlined to protect the code cache, and a call site that gains a **third** receiver implementation goes megamorphic — vtable dispatch, and no inlining **unless one receiver still dominates the profile** (\`TypeProfileMajorReceiverPercent\`, 90% by default), in which case C2 inlines that receiver behind a guard with an uncommon trap for the rest. So the diff-shapes that matter: a small method on a hot path the change **grows** (added validation, logging, a branch), a new layer in a hot call chain, a new implementation registered for an interface invoked in a hot loop. A cold method over 325 bytes is **not** a finding — inlining only matters where the call is hot.
+A size cap is a gate, not an outcome: passing one is necessary but not sufficient. Independent of size, C2 also declines a call site that was **never executed**, has **low call site frequency**, exceeds the inlining **depth or recursion limits**, or hits the **node-count** cutoff — so a method under a cap can still be left un-inlined, and a static size measurement proves only that a threshold was crossed, not that the method *was* inlined before and *is not* now.
+
+Two more ways a diff can flip it: an already-compiled callee whose **native** size passes \`InlineSmallCode\` (x86_64 default: 2500 on JDK 11+, 2000 on JDK 8; 1000 only with \`-XX:-TieredCompilation\`) stops being inlined to protect the code cache, and a call site that gains a **third** receiver implementation goes megamorphic — vtable dispatch, and no inlining **unless one receiver still dominates the profile** (\`TypeProfileMajorReceiverPercent\`, 90% by default), in which case C2 inlines that receiver behind a guard with an uncommon trap for the rest. So the diff-shapes that matter: a small method on a hot path the change **grows** (added validation, logging, a branch), a new layer in a hot call chain, a new implementation registered for an interface invoked in a hot loop. A cold method over 325 bytes is **not** a finding — inlining only matters where the call is hot.
 
 **Measure it; do not estimate bytecode from source.** Two tiers, in order of cost:
 
 1. **Static — available when the class compiles, which for a leaf class is always and for a connected one needs its dependencies.** Allocate a private scratch dir first — \`SCRATCH=$(mktemp -d)\`, never a fixed path like \`/tmp/scratch\`: other agents are compiling concurrently, and two of them writing different revisions of the same class into one directory read each other's \`.class\` files and measure the wrong bytecode (on Windows, \`mkdir %TEMP%\\review-%RANDOM%\` gives the same uniqueness). Then \`javac -proc:none -nowarn -d "$SCRATCH" X.java\` — \`-proc:none\` is not optional: annotation processors on the classpath (Lombok, Dagger, one the PR itself added) run at compile time with your privileges, so a \`javac\` without it is itself an untrusted-code execution. It is also a fidelity flag: on a project whose processor contributes code to the measured class (Lombok's generated members, Dagger's injected fields), the compiled class is missing those members and \`javap\` reports a size that is simply wrong — if the project runs a processor that touches this class, the static tier is **void**; go to \`Confidence: low\` with the mechanism. Give the compiler what it needs to resolve imports: \`-sourcepath\` at the module source root, plus \`-cp\` against an already-built \`target/classes\` / \`build/classes\` if one exists. Pass \`--release <N>\` at the project's target level (read it from \`maven.compiler.release\`, \`<release>\`, or Gradle's \`release\`/\`targetCompatibility\`): the same source compiles to different bytecode at different levels — a five-\`+\` concatenation is 37 bytes at release 8 and 14 at 9+ — and measuring the wrong level produces a threshold verdict on bytecode the shipped artifact does not contain; if the target level cannot be determined, say so in the finding. Then \`javap -c -p\` the class and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — get the base side **without touching the tree**: \`git show <merge-base>:<path> > "$SCRATCH/X.java"\`, compile that too, and measure both; a method already over on the base side is pre-existing, not a finding. A file the PR **adds** has no base side — \`git show\` fails, and there is no crossing to claim; report the size without a before/after. The base side compiles against the same \`target/classes\` the head side used; on a PR that changes more than the measured file the conditions are not perfectly equivalent — note that caveat when it applies. If the class will not compile (no pre-built classpath, no source path that resolves its imports), go straight to the mechanism-at-\`Confidence: low\` form below — **never \`git checkout\`, \`git stash\`, build in place, or run \`mvn\`/\`gradle\` to force a compile.** In a PR review the worktree is shared with agents running concurrently and the branch's build logic is contributor-controlled — the attack surface, not a cost; in a local review it is the user's own checkout. Mutating either corrupts work you cannot see.
 2. **Dynamic — when the code is runnable.** Run the workload with \`-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining\` and grep for the method: \`callee is too large\` / \`hot method too big\` is the JVM itself declining to inline. JMH gives the before/after throughput; JITWatch visualizes the same decision logs.
 
-A finding that a method "can no longer be inlined" without one of these two tiers is a guess stated as fact. Report the **mechanism** instead, at \`Confidence: low\`: the threshold at risk, what the diff added to the method, and the measurement still to run. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
+A finding that a method "can no longer be inlined" needs the **dynamic** tier — only \`PrintInlining\` or equivalent runtime evidence shows the JVM actually declined to inline. The static tier proves a **size-gate crossing**, which is the mechanism: report it at \`Confidence: low\` — the threshold crossed, what the diff added to the method, and the runtime measurement still to run. A "can no longer be inlined" claim with neither tier is a guess stated as fact. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
 
 **When the finding IS a grown hot method, the fix to suggest is hot/cold splitting — not reverting the change, and not a JVM tuning flag** (\`-XX:FreqInlineSize\`, \`-XX:CompileCommand=inline\`): those are runtime knobs the PR's author cannot ship in a code change, and raising an inline threshold to fit one method pays for it at every other call site. (The JDK-internal \`@ForceInline\` is not available to application code at all.) Move the cold paths — error handling, rare branches, defensive validation, the \`switch\` arms that almost never fire — into a small private helper, leaving the common path under the threshold; the helper, now called from one site, is itself inlinable. Name the bytecode range to extract and the size it leaves behind, the way the measurement names them: "extract bytecodes 212–311 (~100 bytes) into \`applyRounding\`, leaving \`parseAmount\` at ~238 bytes" is a finding an author can act on; "consider splitting the method" is not.
 
@@ -124,6 +126,16 @@ A finding that a method "can no longer be inlined" without one of these two tier
 /** Every rule, in the order their checklists are appended. */
 export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
 
+function isOutOfScope(p: string): boolean {
+  return (
+    /src\/(test|integrationTest|integTest|androidTest|testFixtures)\//i.test(
+      p,
+    ) ||
+    /(?:^|\/)(?:package-info|module-info)\.java$/i.test(p) ||
+    /(?:^|\/)(?:target|build)\/(?:generated-sources|generated)\//i.test(p)
+  );
+}
+
 /**
  * The triggering paths named in a rule's heading — capped. A workflow rule
  * matches one or two files; a Java rule matches every source file in a large
@@ -132,14 +144,6 @@ export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
  * few and a count; the checklist, not the path list, is what the heading is
  * for.
  */
-function isOutOfScope(p: string): boolean {
-  return (
-    /src\/(test|integTest|androidTest|testFixtures)\//i.test(p) ||
-    /(?:^|\/)(?:package-info|module-info)\.java$/i.test(p) ||
-    /(?:^|\/)generated(?:-sources)?\//i.test(p)
-  );
-}
-
 function describePaths(which: readonly string[]): string {
   const CAP = 10;
   // Production paths before out-of-scope paths: the hot-path items this heading
