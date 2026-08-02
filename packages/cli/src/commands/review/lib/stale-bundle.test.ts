@@ -26,15 +26,16 @@ describe('bundleStaleness', () => {
   let bundle: string;
   let sources: string;
 
+  // A fixed instant, so each case is about the gap and not about how long the
+  // suite took to run.
+  const BUILT_AT = Date.parse('2026-08-02T00:57:00Z');
+
   /** Write `file` and stamp it `secondsFromBuild` after the bundle. */
   const at = (file: string, secondsFromBuild: number) => {
     writeFileSync(file, 'x');
     const t = new Date(BUILT_AT + secondsFromBuild * 1000);
     utimesSync(file, t, t);
   };
-  // A fixed instant, so the test is about the gap and not about how long it
-  // took to run.
-  const BUILT_AT = Date.parse('2026-08-02T00:57:00Z');
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'stale-bundle-'));
@@ -54,6 +55,17 @@ describe('bundleStaleness', () => {
     expect(s.stale).toBe(true);
     expect(s.newest?.file).toContain('drive.ts');
     expect(s.newest?.aheadMs).toBe(10 * 3_600_000);
+  });
+
+  it('accepts a single file as a root, not only a directory', () => {
+    // `review.ts` registers every subcommand and lives beside the directory,
+    // not in it — a new command or a changed dispatch is a change there and
+    // nowhere else.
+    const lone = join(root, 'review.ts');
+    at(lone, 3600);
+    const s = bundleStaleness(bundle, [lone]);
+    expect(s.stale).toBe(true);
+    expect(s.newest?.file).toBe(lone);
   });
 
   it('finds a source nested below the root', () => {
@@ -140,6 +152,9 @@ describe('reviewSourceRoots', () => {
   it('resolves both trees a review command can live in', () => {
     expect(reviewSourceRoots('/w/dist/cli.js')).toEqual([
       '/w/packages/cli/src/commands/review',
+      // The registration file sits beside the directory, so a subcommand added
+      // without a rebuild is a change this check can see.
+      '/w/packages/cli/src/commands/review.ts',
       '/w/packages/core/src/skills/bundled/review',
     ]);
   });

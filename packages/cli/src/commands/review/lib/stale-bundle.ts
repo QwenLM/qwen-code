@@ -8,7 +8,11 @@
 // was built from?
 //
 // Every `/review` subcommand runs as `"${QWEN_CODE_CLI}" review <name>`, which
-// resolves to the built bundle — not to the working tree. So editing a review
+// resolves to the built bundle — not to the working tree. `QWEN_CODE_CLI`
+// already stops the review talking to a DIFFERENT program (a bare `qwen` on
+// PATH once resolved to a v0.19.10 whose `agent-prompt` predated `--role`, and
+// the review died on a missing argument). This is the other half: the right
+// program, built before the change you are trying to exercise. So editing a review
 // command, or switching to a branch that contains one, changes nothing about
 // the run until someone rebuilds. The failure is silent and total: the run
 // behaves like the last build, and every conclusion drawn from it is a
@@ -101,15 +105,20 @@ export function bundleStaleness(
 }
 
 /**
- * Every file under `root`, recursively. Symlinked directories are not followed:
- * a link out of the tree is not this tree's source, and a cycle would hang the
- * one check that must never cost the run anything.
+ * Every file at or under `root`, recursively — `root` may be a directory or a
+ * single file. Symlinks of any kind are skipped, because `isFile()` and
+ * `isDirectory()` are both false for one: a link out of the tree is not this
+ * tree's source, and a directory cycle would hang the one check that must
+ * never cost the run anything.
  */
 function* sourceFilesUnder(root: string): Generator<string> {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // A file, not a directory: `readdir` reports ENOTDIR and the path itself
+    // is the source. Anything else — absent, unreadable — is nothing to walk.
+    if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') yield root;
     return;
   }
   for (const e of entries) {
@@ -130,8 +139,13 @@ function* sourceFilesUnder(root: string): Generator<string> {
  */
 export function reviewSourceRoots(bundlePath: string): string[] {
   const repoRoot = join(bundlePath, '..', '..');
+  const cli = join(repoRoot, 'packages', 'cli', 'src', 'commands');
   return [
-    join(repoRoot, 'packages', 'cli', 'src', 'commands', 'review'),
+    join(cli, 'review'),
+    // The parent file, which is where every subcommand is registered — a new
+    // command, or a changed dispatch, lives here and nowhere under `review/`.
+    // A root may be a single file for exactly this reason.
+    join(cli, 'review.ts'),
     join(repoRoot, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
   ];
 }
