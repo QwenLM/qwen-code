@@ -27,6 +27,16 @@
 // never has to get `data:` framing, chunk indices, `finish_reason` or the
 // terminator right again.
 //
+// WHAT IT IS NOT. It fakes one protocol: the OpenAI-compatible chat API. That
+// is a public shape and nothing here is qwen-specific — any project whose
+// product calls such an endpoint can drive against this — but it is also the
+// limit. Of the 94 mocks measured, 73% spoke this protocol and the rest did
+// not: 23% stood up the project's own HTTP service, and single cases faked
+// MCP/JSON-RPC, OAuth, and the Anthropic API. For those, the thing to reach
+// for is `drive`, which owns readiness, completion and cleanup for ANY process
+// the reviewer starts. The division is the usual one: a protocol shared by 73
+// files is a fixture, and a service that differs in all 22 is a judgement.
+//
 // Two things it fixes that the corpus did by hand:
 //
 //   - **The port.** 67 of 94 read it from an env var, i.e. the caller picks a
@@ -378,7 +388,7 @@ export async function startMockProvider(
 export const mockProviderCommand: CommandModule = {
   command: 'mock-provider',
   describe:
-    'Serve an OpenAI-compatible endpoint the review can drive the real product against, recording every request as JSONL — the protocol is provided, the answers are yours',
+    'Serve an OPENAI-COMPATIBLE endpoint (that protocol only) for the review to drive the real product against, recording every request as JSONL — the protocol is provided, the answers are yours; for any other kind of upstream, start it yourself and use `drive`',
   builder: (yargs) =>
     yargs
       .option('responder', {
