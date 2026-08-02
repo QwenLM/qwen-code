@@ -106,6 +106,19 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // And a miss nobody can observe is part of the finding, not a separate nit.
     expect(out).toContain('$GITHUB_STEP_SUMMARY');
   });
+
+  it('caps the path list for workflow files too', () => {
+    // The cap is rule-agnostic: a diff touching 15 workflows gets the same
+    // truncation as a large Java PR.
+    const many = Array.from(
+      { length: 15 },
+      (_, i) => `.github/workflows/ci${i}.yml`,
+    );
+    const out = pathRulesFor(many);
+    expect(out).toContain('…and 5 more');
+    expect(out).toContain('.github/workflows/ci9.yml');
+    expect(out).not.toContain('.github/workflows/ci10.yml');
+  });
 });
 
 describe('pathRulesFor — the Java/JVM rule', () => {
@@ -182,21 +195,22 @@ describe('pathRulesFor — the Java/JVM rule', () => {
 
   it('prescribes a measurement that cannot mutate the tree or run contributor code', () => {
     // The roster runs nine agents in ONE worktree concurrently, and a local
-    // review stands in the user's own checkout. Three distinct hazards the
+    // review stands in the user's own checkout. Four distinct hazards the
     // procedure must close, each found by review:
     //  - a fixed scratch path (/tmp/scratch) collides between concurrent agents
     //    compiling different revisions of the same class → mktemp -d;
     //  - plain javac runs classpath annotation processors with the agent's
     //    privileges → -proc:none, and mvn/gradle (the branch's build logic) is a
     //    prohibition, not a discouraged preference;
+    //  - -proc:none is also a fidelity hazard: on a Lombok/Dagger project the
+    //    compiled class is missing generated members, so the static tier is void;
     //  - "extract and javac" fails on any class with imports, so the tier names
-    //    a classpath path (-sourcepath / target/classes / dependency:build-classpath,
-    //    which resolves without building) and a graceful fall-back to the
-    //    mechanism tier instead of escalating to a project build.
+    //    a classpath path (-sourcepath / target/classes) and a graceful fall-back
+    //    to the mechanism tier instead of escalating to a project build.
     const out = pathRulesFor(['src/Main.java']);
     expect(out).toContain('mktemp -d');
     expect(out).toContain('-proc:none');
-    expect(out).toContain('dependency:build-classpath');
+    expect(out).toContain('static tier is **void**');
     expect(out).toContain('git show');
     expect(out).toMatch(
       /never `git checkout`, `git stash`, build in place, or run `mvn`\/`gradle`/,
@@ -253,7 +267,11 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(out).toContain('src/main/java/com/x/B.java');
     // The first named slot is production, not a test file.
     const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
-    expect(heading.indexOf('A.java')).toBeLessThan(heading.indexOf('T0Test'));
+    const prodIdx = heading.indexOf('A.java');
+    const testIdx = heading.indexOf('T0Test');
+    expect(prodIdx).toBeGreaterThanOrEqual(0);
+    expect(testIdx).toBeGreaterThanOrEqual(0);
+    expect(prodIdx).toBeLessThan(testIdx);
   });
 
   it('keeps the DoS escape hatch the workflow rule already needed', () => {
@@ -291,5 +309,16 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     const outFew = pathRulesFor(few);
     expect(outFew).not.toContain('…and');
     expect(outFew).toContain('src/main/java/com/x/F9.java');
+  });
+
+  it('names --release and the new-file clause in the static tier', () => {
+    // The same source compiles to different bytecode at different --release
+    // levels (61 vs 16 bytes for a five-+ concatenation), so measuring without
+    // the project's target level produces a verdict on bytecode the artifact
+    // does not contain. And a file the PR adds has no base side to compare.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('--release');
+    expect(out).toContain('maven.compiler.release');
+    expect(out).toContain('no base side');
   });
 });
