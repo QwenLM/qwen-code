@@ -286,4 +286,58 @@ describe('Descriptor-driven senderPolicy', () => {
     const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
     expect(request.config).not.toHaveProperty('allowedUsers');
   });
+
+  it('uses an explicit enum default over the first option for new channels', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'policy',
+          label: 'Policy',
+          kind: 'enum',
+          required: true,
+          default: 'disabled',
+          options: [
+            { value: 'open', label: 'Open' },
+            { value: 'disabled', label: 'Disabled' },
+          ],
+        },
+      ],
+    };
+    const draft = createChannelEditorDraft(descriptor);
+    expect(draft.values.policy).toBe('disabled');
+  });
+
+  it('flags string-list values outside the declared options', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reasons',
+          label: 'Reasons',
+          kind: 'string-list',
+          options: [
+            { value: 'mention', label: 'mention' },
+            { value: 'assign', label: 'assign' },
+          ],
+        },
+      ],
+    };
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.reasons = 'Mention, assign';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+
+    const invalid = createChannelEditorDraft(descriptor);
+    invalid.name = 'example';
+    invalid.values.reasons = 'mention, typo';
+    expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
+      reasons: 'invalid',
+    });
+  });
 });

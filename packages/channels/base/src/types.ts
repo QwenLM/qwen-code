@@ -395,6 +395,7 @@ export interface ChannelConfigFieldDescriptor {
   required?: boolean;
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 

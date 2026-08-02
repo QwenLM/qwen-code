@@ -523,7 +523,9 @@ export function ChannelsManagerPage({
                 }
               >
                 <span className={styles.platformMark} aria-hidden="true">
-                  {PLATFORM_MARKS[platform.type] ?? platform.displayName[0]}
+                  {PLATFORM_MARKS[platform.type] ??
+                    platform.displayName[0]?.toUpperCase() ??
+                    '?'}
                 </span>
                 <div className={styles.platformCopy}>
                   <p className={styles.platformName}>{platform.displayName}</p>

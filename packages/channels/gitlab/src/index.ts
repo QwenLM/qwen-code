@@ -33,6 +33,7 @@ export const plugin: ChannelPlugin = {
         kind: 'enum',
         required: true,
         description: 'Must be "Open" or "Allowlist" for todos to be processed',
+        default: 'open',
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },

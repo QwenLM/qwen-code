@@ -126,6 +126,10 @@ function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
     : [];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function FieldShell({
   id,
   label,
@@ -438,7 +442,10 @@ export function ChannelEditorDialog({
       let record: Record<string, string> = {};
       if (typeof value === 'string' && value) {
         try {
-          record = JSON.parse(value) as Record<string, string>;
+          const parsed: unknown = JSON.parse(value);
+          if (isRecord(parsed)) {
+            record = parsed as Record<string, string>;
+          }
         } catch {
           /* malformed — render empty */
         }
@@ -516,7 +523,9 @@ export function ChannelEditorDialog({
         <DialogHeader>
           <div className={styles.platformHeader}>
             <span className={styles.platformMark} aria-hidden="true">
-              {PLATFORM_MARKS[descriptor.type] ?? descriptor.displayName[0]}
+              {PLATFORM_MARKS[descriptor.type] ??
+                descriptor.displayName[0]?.toUpperCase() ??
+                '?'}
             </span>
             <div>
               <DialogTitle>

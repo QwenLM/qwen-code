@@ -44,6 +44,10 @@ export function hasDescriptorSenderPolicy(
   return descriptor.fields.some((f) => f.key === 'senderPolicy');
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function initialFieldValue(
   field: DaemonChannelConfigFieldDescriptor,
   instance?: DaemonChannelInstanceSnapshot,
@@ -59,14 +63,14 @@ function initialFieldValue(
     return Array.isArray(value) ? value.join(', ') : '';
   }
   if (field.kind === 'record') {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (isRecord(value)) {
       return JSON.stringify(value);
     }
     return '';
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
-    return instance ? '' : (field.options?.[0]?.value ?? '');
+    return instance ? '' : (field.default ?? field.options?.[0]?.value ?? '');
   }
   return typeof value === 'string' ? value : '';
 }
@@ -116,7 +120,8 @@ function isMissingField(
   if (field.kind === 'record') {
     if (typeof value !== 'string' || !value.trim()) return true;
     try {
-      const parsed = JSON.parse(value) as Record<string, string>;
+      const parsed: unknown = JSON.parse(value);
+      if (!isRecord(parsed)) return true;
       return Object.values(parsed).every(
         (v) => typeof v !== 'string' || !v.trim(),
       );
@@ -154,6 +159,19 @@ export function validateChannelEditorDraft(
       !Number.isFinite(Number(draft.values[field.key]))
     ) {
       errors[field.key] = 'number';
+    } else if (field.kind === 'string-list' && field.options) {
+      const rawValue = draft.values[field.key];
+      if (typeof rawValue === 'string') {
+        const allowed = new Set(field.options.map((option) => option.value));
+        const invalid = rawValue
+          .split(',')
+          .map((token) => token.trim().toLowerCase())
+          .filter((token) => token.length > 0)
+          .some((token) => !allowed.has(token));
+        if (invalid) {
+          errors[field.key] = 'invalid';
+        }
+      }
     }
   }
   if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
@@ -185,7 +203,11 @@ function assignField(
       .filter(Boolean);
   } else if (field.kind === 'record') {
     try {
-      const parsed = JSON.parse(value) as Record<string, string>;
+      const parsed: unknown = JSON.parse(value);
+      if (!isRecord(parsed)) {
+        delete config[field.key];
+        return;
+      }
       const filtered = Object.fromEntries(
         Object.entries(parsed).filter(
           ([, v]) => typeof v === 'string' && v.trim(),

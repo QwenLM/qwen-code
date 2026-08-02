@@ -33,6 +33,7 @@ export const plugin: ChannelPlugin = {
         kind: 'enum',
         required: true,
         description: 'Must be "Open" for notifications to flow',
+        default: 'open',
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },
@@ -63,11 +64,30 @@ export const plugin: ChannelPlugin = {
         kind: 'string-list',
         description:
           'Optional. Comma-separated notification reasons to process. ' +
-          'Valid values: mention, review_requested, assign, author, comment, ' +
-          'ci_activity, manual, state_change, subscribed, team_mention, ' +
-          'security_alert, approval_requested, invitation, ' +
-          'member_feature_requested, security_advisory_credit. ' +
           'Leave empty to process all.',
+        options: [
+          { value: 'mention', label: 'mention' },
+          { value: 'review_requested', label: 'review_requested' },
+          { value: 'assign', label: 'assign' },
+          { value: 'author', label: 'author' },
+          { value: 'comment', label: 'comment' },
+          { value: 'ci_activity', label: 'ci_activity' },
+          { value: 'manual', label: 'manual' },
+          { value: 'state_change', label: 'state_change' },
+          { value: 'subscribed', label: 'subscribed' },
+          { value: 'team_mention', label: 'team_mention' },
+          { value: 'security_alert', label: 'security_alert' },
+          { value: 'approval_requested', label: 'approval_requested' },
+          { value: 'invitation', label: 'invitation' },
+          {
+            value: 'member_feature_requested',
+            label: 'member_feature_requested',
+          },
+          {
+            value: 'security_advisory_credit',
+            label: 'security_advisory_credit',
+          },
+        ],
       },
     ],
   },
