@@ -60,7 +60,7 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
-    return field.options?.[0]?.value ?? '';
+    return instance ? '' : (field.options?.[0]?.value ?? '');
   }
   return typeof value === 'string' ? value : '';
 }
@@ -113,7 +113,9 @@ function isMissingField(
     if (typeof value !== 'string' || !value.trim()) return true;
     try {
       const parsed = JSON.parse(value) as Record<string, string>;
-      return Object.values(parsed).every((v) => !v.trim());
+      return Object.values(parsed).every(
+        (v) => typeof v !== 'string' || !v.trim(),
+      );
     } catch {
       return true;
     }

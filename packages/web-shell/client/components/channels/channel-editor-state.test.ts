@@ -240,6 +240,19 @@ describe('Descriptor-driven senderPolicy', () => {
     expect(draft.values.allowedUsers).toBe('alice, bob');
   });
 
+  it('leaves enum fields empty when editing an instance that lacks them', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'legacy-bot',
+      config: { type: 'github' },
+      secrets: { token: { present: true, source: 'stored' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(draft.values.groupPolicy).toBe('');
+    expect(draft.values.senderPolicy).toBe('');
+  });
+
   it('writes senderPolicy via descriptor fields, not the hardcoded path', () => {
     const draft = createChannelEditorDraft(GITHUB);
     draft.name = 'my-bot';
