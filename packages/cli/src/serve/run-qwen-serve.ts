@@ -42,6 +42,10 @@ import {
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
+  formatMemoryBudgetStderr,
+  resolveDaemonMemoryBudget,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
@@ -127,6 +131,7 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
@@ -1552,6 +1557,7 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -2029,6 +2035,8 @@ async function runQwenServeImpl(
   );
   const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
   const rawWorkspace = rawWorkspaces[0]!;
+  // daemonMemoryBudget is assigned after construction, once the budget is
+  // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
     token,
@@ -2347,6 +2355,20 @@ async function runQwenServeImpl(
     throw new Error(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
+  }
+  // Resolve the daemon's memory figures once, for reporting only. Nothing
+  // downstream consumes them to size a child: dividing a pool by a workspace
+  // count is unsound while registration does not spawn a child, and bounding
+  // the aggregate needs admission at spawn time keyed on live children. This
+  // establishes the denominator that work will be designed against.
+  opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+    budgetMb: opts.memoryBudgetMb,
+  });
+  if (
+    opts.daemonMemoryBudget.budgetSource === 'flag' ||
+    opts.daemonMemoryBudget.insufficientMemory
+  ) {
+    writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (

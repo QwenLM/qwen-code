@@ -51,6 +51,8 @@ describe('reviewCommand', () => {
       'build-test',
       'base-tree',
       'test-delta',
+      'drive',
+      'mock-provider',
       'extract-step',
       'script-lint',
       'resolve-anchors',
