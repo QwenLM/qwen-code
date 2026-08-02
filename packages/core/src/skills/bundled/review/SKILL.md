@@ -731,6 +731,29 @@ Run it on a same-repo **PR** review only. A **local** or **file** review has no 
 
 **None of it blocks, and none of it caps.** A Test Plan defect is not a code defect — the diff is unaffected — and the verdict is about the code. The notes are disclosed in the body on every event including Approve, the same disclosed-but-not-capping treatment a deferred checker gets, and for the same reason: an author cannot fix "you wrote a sentence I could not check", so it must never become a permanent cap.
 
+### The findings, as data
+
+**Write the findings artifact before you do anything else with them.** Everything that matters in this pipeline is a computed artifact — the diff plan, the coverage report, the resolved anchors, the verdict — and the findings were the one exception: prose in a terminal, re-typed into the Step 8 report, re-typed again into the Step 7 review JSON. Three transcriptions of the same list, and this skill's history is a catalogue of what transcription costs (a Critical that changed severity between two sections of one review; an aggregate that arrived at `resolve-anchors` with its per-location anchors dropped and took the whole batch down).
+
+Write every confirmed finding — high and low confidence alike — as a JSON array, then:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review findings \
+  --input .qwen/tmp/qwen-review-{target}-findings-in.json \
+  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
+  --out .qwen/tmp/qwen-review-{target}-findings.json
+```
+
+**Pass `--test-delta` on both invocations of this command — the block above and the `--outcomes` one in Step 6B, which already carry it.** `test-delta` runs only when a test command failed and a base tree was available, so on an ordinary green review the artifact is not there, and the command treats a file that is absent as no measurement taken and says nothing. It speaks up only for a file that exists and will not parse, which is a different fact. It holds back to Suggestion any Critical that names a test file `test-delta` measured as failing on the merge base too, and says on stderr which finding and which file. A Critical asserting "this PR breaks test X" against a test that was already red is the misattribution `test-delta` exists to prevent — and the round ledger is the other door into it: measured on #8368, exactly such a Critical was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice. The finding is not deleted, because a test can be red for two reasons at once; it keeps its evidence, gains the measurement that demoted it, and stays in front of a human who can restore it by naming which test fails for a new reason and quoting both sides.
+
+**One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
+
+Each entry carries `id` (unique — outcomes and resolved anchors both join on it), `severity`, `confidence`, `source`, `summary`, `failureScenario`, and either `file`/`line`/`anchor` or, for a pattern aggregate, a `locations[]` array with **one entry per location** (`suggestedFix`, `category` and `shortSummary` are optional; `shortSummary` is derived from `summary` when absent). The command validates the shape, refuses a duplicate id, refuses a finding with no failure scenario, sorts by severity → confidence → file → line → id, and writes counts nobody then recomputes by hand. Read the artifact for the numbers you quote in the Summary. This is a **canonicalization**, not a gate: it does not decide the verdict — `compose-review` does that, from the same findings — and it does not run at low effort, where the pass is unverified and emits no verdict.
+
+**The severities in this artifact are the canonical ones — draft the inline markers and the compose state FROM it, not from the list you typed by hand.** Ordering alone does not close the loop: `compose-review` reads `comments.json` and `compose.json`, both hand-written, so a hold that lowered a severity here still ships as `**[Critical]**` in the payload if the marker was copied from the draft instead of the artifact. Read `severity` out of `findings.json` for every marker and for the body Criticals.
+
+**This section sits before `### Verdict` on purpose.** `--test-delta` can lower a severity, and a Critical held back after `compose-review` has run reaches only the Step 8 report: the verdict line, the drafted `**[Critical]**` marker and the payload Step 7 recounts were all fixed before the measurement was consulted. Measured on #8368, that is the exact path the misattribution took into a composed review. If a hold does land after composing — a later round, a re-verified finding — treat it as a comment-set change: redraft the marker, update the comments file, and run `compose-review` again.
+
 ### Verdict
 
 **You do not decide the verdict, and you do not write it. Ask for it:**
@@ -760,22 +783,6 @@ The rules it applies — so you can read the line it gives you, not so you can a
 
 **The `FIX:` lines on stderr are that repair, spelled out.** For every repairable gap it capped on, `compose-review` prints one `FIX:` line naming the command — with this run's plan path already substituted. The parts that vary per agent stay as selectors: take `<id>`, `<r>` and `<path>` from the labels in the same report (never paste a literal `<...>` into a shell — it parses as a redirection), and add the `--rules` file whenever Step 2 loaded one. Execute them — **one repair round, then `compose-review` again**. If the same gap survives the round, stop: the cap stands, post with it, and disclose the gap. Do not loop repairs hoping for a different verdict, and do not skip the round and post a capped verdict the FIX lines could have lifted — both are the same failure, choosing the verdict over the evidence, in opposite directions.
 
-### The findings, as data
-
-**Write the findings artifact before you do anything else with them.** Everything that matters in this pipeline is a computed artifact — the diff plan, the coverage report, the resolved anchors, the verdict — and the findings were the one exception: prose in a terminal, re-typed into the Step 8 report, re-typed again into the Step 7 review JSON. Three transcriptions of the same list, and this skill's history is a catalogue of what transcription costs (a Critical that changed severity between two sections of one review; an aggregate that arrived at `resolve-anchors` with its per-location anchors dropped and took the whole batch down).
-
-Write every confirmed finding — high and low confidence alike — as a JSON array, then:
-
-```bash
-"${QWEN_CODE_CLI:-qwen}" review findings \
-  --input .qwen/tmp/qwen-review-{target}-findings-in.json \
-  --out .qwen/tmp/qwen-review-{target}-findings.json
-```
-
-**One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
-
-Each entry carries `id` (unique — outcomes and resolved anchors both join on it), `severity`, `confidence`, `source`, `summary`, `failureScenario`, and either `file`/`line`/`anchor` or, for a pattern aggregate, a `locations[]` array with **one entry per location** (`suggestedFix`, `category` and `shortSummary` are optional; `shortSummary` is derived from `summary` when absent). The command validates the shape, refuses a duplicate id, refuses a finding with no failure scenario, sorts by severity → confidence → file → line → id, and writes counts nobody then recomputes by hand. Read the artifact for the numbers you quote in the Summary. This is a **canonicalization**, not a gate: it does not decide the verdict — `compose-review` does that, from the same findings — and it does not run at low effort, where the pass is unverified and emits no verdict.
-
 ### Step 6B: Apply the findings (`--fix`)
 
 **Run this only when the Step 1 verdict says `fix.effective` is true.** A requested-but-ineffective `--fix` (a PR target) has already produced its warning in Step 1; say nothing further and move on.
@@ -792,9 +799,12 @@ Then record what happened to **every** finding — one of `fixed`, `skipped`, or
 "${QWEN_CODE_CLI:-qwen}" review findings \
   --input .qwen/tmp/qwen-review-{target}-findings-in.json \
   --outcomes .qwen/tmp/qwen-review-{target}-outcomes.json \
+  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
   --out .qwen/tmp/qwen-review-{target}-findings.json \
   --print
 ```
+
+`--test-delta` belongs on this invocation for the same reason it belongs on the first: this run rebuilds the artifact from the same input, so leaving it off here restores every Critical the earlier run held back.
 
 **The command refuses a ledger that does not account for every finding**, and that refusal is the whole reason it exists. A fixer that applies six of nine findings and reports six has not lied about any one of them — it has silently shortened the list, and the reader has no way to see the three that fell off. It also refuses an outcome for an id this review never produced, which is what a ledger built against the wrong list looks like. If it exits non-zero, the ledger is wrong, not the check: complete it and run it again.
 
@@ -963,6 +973,35 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
 ⚠️ **Suggestion text must never appear in the review `body`.** `.github/workflows/qwen-autofix.yml` keeps Suggestions out of the autofix loop by filtering the inline-comment channel on the `**[Suggestion]**` prefix. It does not filter review bodies, so a Suggestion smuggled into `body` would be handed to the autofix bot as actionable work.
 
 **Bilingual comments when the author writes Chinese.** If the Step 1 fetch report says `prDescriptionHasHan: true` — or, when no fetch report exists (a `plan-diff` or improvised pipeline), the PR description itself is written in Chinese — write every inline comment bilingually: the English finding first — marker, description, failure scenario, ` ```suggestion ` block — then the complete Chinese translation collapsed in a `<details><summary>中文说明</summary>…</details>` block, before the model footer. The severity marker and any ` ```suggestion ` block stay in the English half only (the marker is what tooling filters on; a duplicated suggestion block would render twice). The review `body` needs nothing from you: `submit` composes it from `state`, and its bilingual rendering reads the same plan flag on its own.
+
+### Evidence images (`publish-assets`) — only for an authorised, posting run
+
+**When a finding's evidence is an image** — a TUI screenshot, a rendered-output comparison, a browser capture produced during verification — a comment that embeds it is worth more than one that describes it. GitHub's API cannot attach images to review comments (the web UI's drag-and-drop upload has no API equivalent), so image evidence is hosted in a **user-designated assets repository** and referenced by URL. The designation is the `QWEN_REVIEW_ASSETS_REPO` environment variable (`owner/repo` the user can push to — the repo under review for maintainers, a fork or scratch repo otherwise). It is deliberately a **different** variable from `QWEN_REVIEW_SCRATCH_REPO`: the scratch repo's contract forbids PR-derived content, and an evidence screenshot is exactly that.
+
+Findings carry their evidence as local paths in the artifact's `assetFiles` field (Step 6's `qwen review findings` accepts it per finding). Publish them in one call, which weaves the resulting URLs back into the artifact as `assets`:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review publish-assets --pr <n> \
+  --findings .qwen/tmp/qwen-review-{target}-findings.json \
+  --findings-out .qwen/tmp/qwen-review-{target}-findings.json \
+  --out .qwen/tmp/qwen-review-{target}-assets-manifest.json
+# GitHub Enterprise: add --host <host>, same as the other subcommands.
+# URL-target reviews: also pass --reviewed-repo <owner>/<repo> (the repo the PR
+# lives in) — it strengthens the authorisation binding from PR-number-only to
+# the full target the user named.
+```
+
+Then reference each finding's `assets` URLs in its inline comment body as `![evidence](<url>)`, after the failure scenario and before the model footer (in a bilingual comment, the image goes in the English half only — one embed, not two).
+
+**What the command enforces, so you do not have to remember it:**
+
+- **No designation, no publish** — unset or malformed `QWEN_REVIEW_ASSETS_REPO` is exit 3 and `{"published": false}`, not a fallback to some repo it picked. A refusal is a complete outcome: the findings keep their local `assetFiles` paths, which the terminal report and the saved report can still name.
+- **Unauthorised run, no publish** — it reads the same verbatim args record `submit` reads, through the same shared gate (`lib/authorization.ts`), and refuses unless this run was authorised to post the review itself (an effective `--comment` naming this PR, or `--user-authorized` under Step 7's rules). A terminal-only review must not push the PR's behaviour to a public branch. Since an effective `--comment` forces high effort, low and medium runs can never publish — no separate rule needed.
+- **Images only, capped** — an extension allowlist (png/jpg/jpeg/gif/webp — SVG is a script container and is refused), per-file and per-batch size caps, and all-or-nothing validation: one refused file refuses the batch before anything is pushed.
+- **Immutable references** — files land on `pr-assets/<pr>-review` of the assets repo (the manual `pr-assets/<PR>-verify` convention, suffixed so the two flows never collide), and every URL is pinned to the **commit**, not the branch, so a posted comment's evidence cannot be changed from under it. Content-hashed remote names make a re-run idempotent rather than accumulative.
+- **Auditable** — the manifest names every file pushed and the commit they landed on, next to the other review artifacts, where Step 9's sweep and a curious human can find it.
+
+**What you must still judge: the image's content.** The command can check extensions and sizes; it cannot see that a terminal screenshot has an env dump in the scrollback. Publish only evidence the review itself produced — a capture of a rendering the verification ran, a before/after the A/B produced — and never a capture of the user's own terminal or editor. When in doubt, keep the finding's evidence as prose and local paths.
 
 **Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. It carries three things and **no verdict** — `submit` computes the event and body itself, from the `state` you hand it and the comments you attach, and **refuses a payload that carries `event` or `body`** (a run that skipped the computation and typed its own Approve is exactly what that refusal stops). Every high-confidence Critical or Suggestion finding that maps to a diff line is an entry in `comments`:
 

@@ -1049,6 +1049,12 @@ process.stdout.write(JSON.stringify({
       expect(m.verdict).toBe('inconclusive');
       expect(m.detail).toContain('f.test.ts');
       expect(m.detail).toContain('did not run green');
+      // The clause that actually regressed. The old flat wording satisfied
+      // both assertions above, so only this one pins the chain the bug
+      // shipped on: baseline classification -> reason tag -> sentence.
+      // `f.test.ts` fails an assertion here, so `gated` is the measured state.
+      expect(m.detail).toContain('was RED there');
+      expect(m.detail).not.toContain('compile or import error');
     }
     // ...and nothing a reader acts on carries a survivor claim for that file.
     expect(

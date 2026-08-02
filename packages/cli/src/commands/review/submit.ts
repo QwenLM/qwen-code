@@ -51,33 +51,14 @@ import { getCliVersion } from '../../utils/version.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
-import {
-  skillArgsPath,
-  currentSessionId,
-} from '../../services/skill-args-file.js';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
-
-/**
- * Where the CLI records a skill's invocation arguments, verbatim, before the
- * skill's prompt reaches the model.
- *
- * Derived, not duplicated. A literal here would say "kept in step with
- * `skill-args-file.ts`" and nothing would keep it: rename the file there and the
- * gate silently stops finding the authorisation and refuses every post.
- */
-// Derived from the session id at call time, not a constant: the args file is
-// named for the session that wrote it, and `submit` (a subprocess of that
-// session) reads the same name from the same inherited `QWEN_CODE_SESSION_ID`.
-function defaultSkillArgsPath(): string {
-  return skillArgsPath('review');
-}
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -150,114 +131,27 @@ interface ReviewPayload {
 /**
  * Was this run authorised to write to the pull request?
  *
- * Exactly two things authorise it, and both are facts rather than impressions:
- * `--comment` in the arguments the user typed (which `parse-args` resolved into
- * `comment.effective`), or `--user-authorized`, which the skill may pass only
- * after the user asked for this review to be published in a message they typed
- * this session.
+ * The gate itself lives in `lib/authorization.ts`, shared verbatim with
+ * `publish-assets` — the only other sanctioned public write. See that file for
+ * why authorisation is re-parsed from the CLI's verbatim record of what the
+ * user typed, and why it binds to a target rather than acting as a bearer
+ * token.
  */
 function authorization(args: SubmitArgs): { ok: boolean; why: string } {
-  if (args.userAuthorized) {
-    return { ok: true, why: 'the user asked for this review to be published' };
-  }
-
-  // Read what the **user typed**, and parse it here.
-  //
-  // The obvious design — take the parser's JSON verdict and read
-  // `comment.effective` out of it — hands the gate a document the caller wrote.
-  // A model that wants to post can write `{"comment":{"effective":true}}` to any
-  // file and point at it, and the gate opens. It is not a hypothetical: this
-  // exact weakness was raised by a review of this very change, and confirmed
-  // against the built CLI in one line.
-  //
-  // The argument string is different in kind. The CLI writes it, verbatim,
-  // before the skill's prompt ever reaches the model — nothing between the user's
-  // keystrokes and this file has an opinion. So the gate reads *that*, and runs
-  // the same tested parser on it. Forging authorisation now means forging the
-  // user's own input, which is not something a careless run does by accident.
-  // The session-scoped path is derived here, from the environment, on both the
-  // write and read sides — the model never names it. `--skill-args` is a test
-  // seam only (there is no session id under vitest); honouring a caller-supplied
-  // path in a real run would hand the gate back the model-writable file the whole
-  // design removed, so it is ignored whenever a session id is present.
-  const sessionScoped = defaultSkillArgsPath();
-  const path =
-    currentSessionId() === '' && args.skillArgs
-      ? args.skillArgs
-      : sessionScoped;
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    // No args file means no arguments — which means no `--comment`. Fail closed:
-    // a missing authorisation record is not an absent objection.
-    return {
-      ok: false,
-      why:
-        `no review arguments were recorded at ${path}, so this run cannot ` +
-        'show that `--comment` was requested',
-    };
-  }
-
-  const verdict = parseReviewArgs(raw);
-  if (!verdict.comment.effective) {
-    return {
-      ok: false,
-      why:
-        '`--comment` was not in the review arguments ' +
-        `(${JSON.stringify(raw.trim())})`,
-    };
-  }
-
-  // Authorisation is for a *target*, not a mood. `/review 6771 --comment`
-  // authorises a write to pull request 6771 — and to nothing else. Without this
-  // check the flag is a bearer token: a dry run confirmed that arguments naming
-  // 6771 happily authorised a submission to `--pr 9999 --repo other/repo`, so a
-  // stale args file, or a target swapped anywhere between Step 1 and Step 7,
-  // could put a review on a pull request the user never named.
-  const t = verdict.target;
-  const authorisedPr =
-    t.type === 'pr-number' || t.type === 'pr-url' ? t.number : undefined;
-  if (authorisedPr === undefined) {
-    return {
-      ok: false,
-      why:
-        `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
-        'pull request, so they cannot authorise posting to one',
-    };
-  }
-  if (authorisedPr !== args.pr) {
-    return {
-      ok: false,
-      why:
-        `the review arguments authorise pull request #${authorisedPr}, but ` +
-        `this submission targets #${args.pr}`,
-    };
-  }
-  if (t.type === 'pr-url') {
-    const authorisedRepo = `${t.owner}/${t.repo}`;
-    if (authorisedRepo.toLowerCase() !== args.repo.toLowerCase()) {
-      return {
-        ok: false,
-        why:
-          `the review arguments authorise ${authorisedRepo}, but this ` +
-          `submission targets ${args.repo}`,
-      };
-    }
-    if (args.host && t.host.toLowerCase() !== args.host.toLowerCase()) {
-      return {
-        ok: false,
-        why:
-          `the review arguments authorise ${t.host}, but this submission ` +
-          `targets ${args.host}`,
-      };
-    }
-  }
-
-  return {
-    ok: true,
-    why: `\`--comment\` was in the review arguments for #${authorisedPr}`,
-  };
+  return reviewWriteAuthorization({
+    userAuthorized: args.userAuthorized,
+    skillArgs: args.skillArgs,
+    pr: args.pr,
+    repo: args.repo,
+    // The EFFECTIVE host, not merely the flag: with --host absent the gh
+    // child inherits an operator-exported GH_HOST, so that is where this
+    // write would route — and what the gate must bind. Same resolution as
+    // publish-assets.
+    // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
+    // `??`, being non-nullish) must read as "no host", not as a host named
+    // "" that fails every comparison.
+    host: args.host ?? (process.env['GH_HOST']?.trim() || undefined),
+  });
 }
 
 /**
