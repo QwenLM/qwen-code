@@ -27,5 +27,8 @@ describe('ECS runner qwen update workflow', () => {
     expect(workflow).toContain(
       'echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"',
     );
+    expect(workflow).toContain('for attempt in 1 2 3; do');
+    expect(workflow).toContain('if [[ "${attempt}" -lt 3 ]]; then');
+    expect(workflow).toContain('sudo rm -rf "${PKG_DIR}"/.qwen-code-*');
   });
 });
