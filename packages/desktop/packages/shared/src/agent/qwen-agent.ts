@@ -592,10 +592,10 @@ function buildQwenAcpSpawnCommand(
 }
 
 function qwenSettingsCwd(hostRuntime: BackendHostRuntimeContext): string {
-  // TODO(#8138): populate worktreeRootPath in buildBackendHostRuntimeContext
-  // so desktop worktree sessions resolve settings against the worktree.
+  // TODO(#8138): add worktreeRootPath to BackendHostRuntimeContext and
+  // populate it in buildBackendHostRuntimeContext so desktop worktree
+  // sessions resolve settings against the worktree.
   return (
-    hostRuntime.worktreeRootPath ||
     hostRuntime.appRootPath ||
     homedir() ||
     process.cwd()

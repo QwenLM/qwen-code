@@ -42,15 +42,8 @@
     { "path": "packages/channels/telegram" },
     { "path": "packages/channels/wecom" },
     { "path": "packages/channels/weixin" },
-    { "path": "packages/chrome-extension" },
     { "path": "packages/cli" },
     { "path": "packages/core" },
-    { "path": "packages/desktop" },
-    { "path": "packages/mobile-mcp" },
-    { "path": "packages/sdk-typescript" },
-    { "path": "packages/vscode-ide-companion" },
-    { "path": "packages/web-shell" },
-    { "path": "packages/web-templates" },
-    { "path": "packages/webui" }
+    { "path": "packages/web-templates" }
   ]
 }

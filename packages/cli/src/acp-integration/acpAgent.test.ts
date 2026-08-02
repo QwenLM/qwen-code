@@ -4040,6 +4040,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('session/cd sets worktreeCwd and getCore resolves against the worktree path', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-cd-worktree-settings-'),
+    );
+    const canonicalTargetDir = await fs.realpath(targetDir);
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory,
+    });
+    Object.assign(innerConfig.getGeminiClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).resolves.toMatchObject({
+        previousCwd: '/tmp',
+        newCwd: canonicalTargetDir,
+      });
+
+      expect(
+        (lastSessionMock as Record<string, unknown>)?.['worktreeCwd'],
+      ).toBe(canonicalTargetDir);
+
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', {});
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(canonicalTargetDir);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('sessionArtifactsPersist rejects a missing session id', async () => {
     const { agent, agentPromise } = await bootAcpAgent();
 
