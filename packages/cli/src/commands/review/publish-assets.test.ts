@@ -21,9 +21,14 @@ const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 const ghWithInputMock = vi.hoisted(() =>
   vi.fn((_input: string, ..._rest: string[]) => ''),
 );
+const ghWithInputPlainMock = vi.hoisted(() =>
+  vi.fn((_input: string, ..._rest: string[]) => ''),
+);
 vi.mock('./lib/gh.js', () => ({
   gh: ghMock,
-  ghWithInput: ghWithInputMock,
+  // Two DISTINCT mocks: aliasing them hid which function a write actually
+  // used, and the retry-vs-not split is the point of having two.
+  ghWithInput: ghWithInputPlainMock,
   ghWithInputRetried: ghWithInputMock,
   setGhHost: setGhHostMock,
 }));
@@ -174,6 +179,9 @@ describe('publish-assets', () => {
     expect(stdoutSpy).toHaveBeenCalledWith(
       JSON.stringify({ published: true, count: 1 }),
     );
+    // Every write in this command is idempotent and must ride the RETRIED
+    // variant; the non-retrying ghWithInput is submit's, not ours.
+    expect(ghWithInputPlainMock).not.toHaveBeenCalled();
   });
 
   it('creates the branch when missing, from the default branch head', () => {

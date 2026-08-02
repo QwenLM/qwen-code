@@ -147,7 +147,10 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
     // child inherits an operator-exported GH_HOST, so that is where this
     // write would route — and what the gate must bind. Same resolution as
     // publish-assets.
-    host: args.host ?? process.env['GH_HOST']?.trim() ?? undefined,
+    // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
+    // `??`, being non-nullish) must read as "no host", not as a host named
+    // "" that fails every comparison.
+    host: args.host ?? (process.env['GH_HOST']?.trim() || undefined),
   });
 }
 

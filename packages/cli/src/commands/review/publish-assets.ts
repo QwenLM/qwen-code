@@ -236,8 +236,10 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // GH_HOST, else github.com — not merely the flag. Binding args.host while
   // routing at effectiveHost let a GH_HOST-driven Enterprise write pass a
   // github.com authorisation; caught by this skill's own review.
+  // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
+  // `??`, being non-nullish) must read as "no host".
   const effectiveHost =
-    args.host ?? process.env['GH_HOST']?.trim() ?? undefined;
+    args.host ?? (process.env['GH_HOST']?.trim() || undefined);
 
   // ── Gate 2: an authorised run — the same gate as `submit` ─────────────────
   // The PR identity used for authorisation binding is the PR the evidence is
@@ -337,7 +339,6 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // content hash).
   interface Prepared {
     file: string;
-    name: string;
     bytes: number;
     sha256: string;
     remotePath: string;
@@ -390,7 +391,6 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     const sha256 = createHash('sha256').update(content).digest('hex');
     prepared.push({
       file: st.file,
-      name: st.basename,
       bytes: st.bytes,
       sha256,
       remotePath: remoteAssetPath(args.pr, st.basename, sha256),
