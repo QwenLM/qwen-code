@@ -577,14 +577,61 @@ jobs:
       - name: 'Ensure qwen CLI'
         id: 'ensure_qwen'
         run: |-
-          set -euo pipefail
+          set -uo pipefail
+          # Resolve latest and upgrade when stale — the previous shape
+          # short-circuited on any pre-installed qwen, so a stale image kept
+          # its version forever and pinned the action's reinstall to it (the
+          # same bug the review runner fixed in c9f0d0657). The install runs
+          # from RUNNER_TEMP because the persistent workspace still holds the
+          # previous run's checked-out tree, and npm reads a cwd .npmrc into a
+          # global install — same hazard the verify lane documents. Retries
+          # cover the transient npm crashes the shared runners produce (a
+          # triage run died on exit 217 mid-install); the fallback covers the
+          # registry being the thing that is broken.
+          want="$(npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version 2>/dev/null | tail -n 1 || true)"
+          have=''
           if command -v qwen >/dev/null 2>&1; then
-            echo "qwen already installed:"
-          else
-            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+            have="$(qwen --version 2>/dev/null || true)"
           fi
-          qwen --version
-          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+          if [ -n "$have" ] && [ "$have" = "$want" ]; then
+            echo "qwen $have (latest)"
+            echo "version=$have" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ -z "$want" ]; then
+            if [ -n "$have" ]; then
+              echo "::warning::npm registry unreachable; triaging with installed qwen $have"
+              echo "version=$have" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo '::error::qwen is not installed and the npm registry is unreachable'
+            exit 1
+          fi
+          installed=''
+          for attempt in 1 2 3; do
+            if (cd "${RUNNER_TEMP:?}" && npm install -g --loglevel=error --no-audit --registry=https://registry.npmjs.org "@qwen-code/qwen-code@$want"); then
+              installed=1
+              break
+            fi
+            echo "::warning::qwen install attempt $attempt failed (wanted $want)"
+            sleep $((attempt * 10))
+          done
+          if [ -z "$installed" ]; then
+            if [ -n "$have" ]; then
+              echo "::warning::upgrade to qwen $want failed after 3 attempts; triaging with installed qwen $have"
+              echo "version=$have" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "::error::qwen is not installed and installing $want failed after 3 attempts"
+            exit 1
+          fi
+          hash -r
+          actual="$(qwen --version)"
+          echo "qwen $actual"
+          if [ "$actual" != "$want" ]; then
+            echo "::warning::wanted qwen $want but PATH resolves $actual — a system-wide install shadows the per-run upgrade"
+          fi
+          echo "version=$actual" >> "${GITHUB_OUTPUT}"
 
       - name: 'Run Qwen Triage'
         id: 'triage'
@@ -1114,7 +1161,19 @@ jobs:
           # reads a cwd .npmrc — whose settings (script-shell, hooks) a
           # --registry flag does not override — into a root-privileged
           # install. Same fix as the verify lane.
-          (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
+          # Retried: the shared runners produce transient npm crashes (a
+          # triage install died on exit 217), and one flake must not kill the
+          # whole job when the next attempt succeeds.
+          installed=''
+          for attempt in 1 2 3; do
+            if (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'); then
+              installed=1
+              break
+            fi
+            echo "::warning::qwen install attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          [ -n "$installed" ] || { echo '::error::installing @qwen-code/qwen-code@latest failed after 3 attempts'; exit 1; }
           qwen --version
           tmux -V
 
@@ -2386,7 +2445,19 @@ jobs:
           # npm reads a cwd .npmrc — whose settings (script-shell, hooks) a
           # --registry flag does not override — into a root-privileged
           # install.
-          (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
+          # Retried: the shared runners produce transient npm crashes (a
+          # triage install died on exit 217), and one flake must not kill the
+          # whole job when the next attempt succeeds.
+          installed=''
+          for attempt in 1 2 3; do
+            if (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'); then
+              installed=1
+              break
+            fi
+            echo "::warning::qwen install attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          [ -n "$installed" ] || { echo '::error::installing @qwen-code/qwen-code@latest failed after 3 attempts'; exit 1; }
           qwen --version
 
           # Chromium system dependencies (apt packages) for evidence
