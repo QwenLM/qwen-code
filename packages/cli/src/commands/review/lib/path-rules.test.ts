@@ -154,7 +154,8 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     // product flag with a ≥ boundary, megamorphic stated as unconditional) and a
     // review measured them against a live JVM. Pin the corrected forms.
     const out = pathRulesFor(['src/Main.java']);
-    expect(out).toContain('2500 on JDK 11+');
+    expect(out).toContain('2500 on JDK 17+');
+    expect(out).toContain('2000 on JDK 8–11');
     expect(out).toContain('DontCompileHugeMethods');
     expect(out).toMatch(/> 8000/);
     expect(out).toContain('TypeProfileMajorReceiverPercent');
@@ -274,6 +275,32 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(prodIdx).toBeLessThan(testIdx);
   });
 
+  it('deprioritizes generated, info-only, and non-Maven test sources too', () => {
+    // The checklist scopes out more than src/test: generated sources,
+    // package-info/module-info, and non-Maven test roots (integTest,
+    // androidTest, testFixtures) must not fill the named slots either.
+    const noise = [
+      'target/generated-sources/com/x/Stub.java',
+      'build/generated/com/x/R.java',
+      'src/main/java/com/x/generated/Proto.java',
+      'src/main/java/com/x/package-info.java',
+      'src/main/java/module-info.java',
+      'src/integTest/java/com/x/IT.java',
+      'src/androidTest/java/com/x/AT.java',
+      'src/testFixtures/java/com/x/Fix.java',
+    ];
+    const prod = ['src/main/java/com/x/Hot.java'];
+    const out = pathRulesFor([...noise, ...prod]);
+    const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
+    // The single production path must be named first.
+    expect(heading.indexOf('Hot.java')).toBeGreaterThanOrEqual(0);
+    expect(heading.indexOf('Hot.java')).toBeLessThan(
+      heading.indexOf('Stub.java') === -1
+        ? Infinity
+        : heading.indexOf('Stub.java'),
+    );
+  });
+
   it('keeps the DoS escape hatch the workflow rule already needed', () => {
     // The flat "perf is a Suggestion" rule misfires on unbounded cost reachable
     // by an attacker — that is a security hole, not a nit. GITHUB_ACTIONS walked
@@ -313,7 +340,7 @@ describe('pathRulesFor — the Java/JVM rule', () => {
 
   it('names --release and the new-file clause in the static tier', () => {
     // The same source compiles to different bytecode at different --release
-    // levels (61 vs 16 bytes for a five-+ concatenation), so measuring without
+    // levels (37 vs 14 bytes for a five-+ concatenation), so measuring without
     // the project's target level produces a verdict on bytecode the artifact
     // does not contain. And a file the PR adds has no base side to compare.
     const out = pathRulesFor(['src/Main.java']);
