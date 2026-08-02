@@ -13,7 +13,7 @@
 # Curate the reviewer set manually if fewer are desired.
 
 # --- CODEOWNERS file itself ---
-/.github/CODEOWNERS    @pomelo-nwu
+/.github/CODEOWNERS    @pomelo-nwu @wenshao
 
 # --- Core package ---
 /packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC
