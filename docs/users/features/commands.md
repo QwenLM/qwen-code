@@ -21,7 +21,7 @@ These commands help you save, restore, and summarize work progress.
 | Command          | Description                                                              | Usage Examples                                                |
 | ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
 | `/init`          | Analyze current directory and create initial context file                | `/init`                                                       |
-| `/summary`       | Generate project summary based on conversation history                   | `/summary`                                                    |
+| `/summary`       | Generate project summary based on conversation history                   | `/summary` or `/summary docs/my-summary.md`                   |
 | `/compress`      | Replace chat history with summary to save Tokens                         | `/compress` or `/summarize`                                   |
 | `/compress-fast` | Fast compression without AI — strips old tool outputs and thinking parts | `/compress-fast`                                              |
 | `/resume`        | Resume a previous conversation session                                   | `/resume` or `/continue`                                      |
@@ -37,6 +37,10 @@ These commands help you save, restore, and summarize work progress.
 > [!note]
 >
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
+
+> [!note]
+>
+> `/summary` accepts an optional `[path]` argument to save the summary to a custom location within the project root. Without an argument, it saves to `.qwen/PROJECT_SUMMARY.md`. Custom-path summaries are not detected by the welcome-back flow (`ui.enableWelcomeBack`), which only reads the default `.qwen/PROJECT_SUMMARY.md` location.
 
 ### 1.2 Interface and Workspace Control
 
@@ -83,6 +87,7 @@ Commands for managing AI tools and models.
 | `/import-config`  | Import MCP servers from Claude configs                                                | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
 | `/tools`          | Display currently available tool list                                                 | `/tools`, `/tools desc`                                                                                   |
 | `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills                    | `/skills`, `/<skill-name>`                                                                                |
+| `/learn`          | Create a reusable project skill from a file, directory, URL, video, or text           | `/learn https://docs.example.com/api`, `/learn ./tutorial.mp4 focus on deployment`                        |
 | `/curator`        | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
 | `/plan`           | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`  | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |

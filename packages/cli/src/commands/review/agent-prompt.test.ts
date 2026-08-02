@@ -982,7 +982,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
         '6a',
@@ -992,7 +994,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('9 agents required');
+      expect(printed).toContain('11 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1000,7 +1002,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 9 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1027,13 +1029,15 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
       ]);
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('6 agents required');
+      expect(printed).toContain('8 agents required');
       expect(printed).not.toMatch(/Agent 6[abc]:/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1770,7 +1774,9 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '1b',
     '1c',
     '2',
-    '3',
+    '3a',
+    '3b',
+    '3c',
     '4',
     '5',
     '6a',
@@ -1870,9 +1876,15 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // it was never told how to file — and the skipped/inconclusive mutants must
     // be fenced off from findings the same way the probes' inconclusive is.
     expect(p).toContain('`kind: "mutant-survived"`');
-    expect(p).toContain('mutants.skippedForBudget');
-    expect(p).toContain('mutants.skippedForCap');
-    expect(p).toContain('mutants.skippedForBaseline');
+    expect(p).toContain('`mutants.skipped*`');
+    expect(p).toContain('`hunks.skipped*`');
+    expect(p).toContain('hunk-survived');
+    expect(p).toContain('harnessValidated');
+    // All THREE values, not two: `null` read as `false` would report "the
+    // harness could not be validated" for a run that simply never spent a
+    // control, and read as `true` would license the survivor claim outright.
+    expect(p).toContain('skippedForControl');
+    expect(p).toContain('neither validated nor refuted');
     expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the
@@ -2190,12 +2202,21 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
     );
   });
 
-  it.each(['1a', '1b', '2', '3', '4', '5', '6a', '6b', '6c'] as const)(
-    'reaches the code-reviewing dimension %s',
-    (role) => {
-      expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
-    },
-  );
+  it.each([
+    '1a',
+    '1b',
+    '2',
+    '3a',
+    '3b',
+    '3c',
+    '4',
+    '5',
+    '6a',
+    '6b',
+    '6c',
+  ] as const)('reaches the code-reviewing dimension %s', (role) => {
+    expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
+  });
 
   it.each(['0', '7', 'test-matrix'] as const)(
     'does not reach %s — it is not sitting that exam',
@@ -2350,6 +2371,11 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toMatch(/documentation does not make a harm safe/);
     // Agent 0 findings are not disproved by a green test.
     expect(p).toMatch(/do not reject an issue-fidelity/i);
+    // The falsify-not-verify asymmetry: "could not verify" and "its evidence is
+    // somewhere I did not look" are not rejection grounds — the rule a future edit
+    // could silently drop.
+    expect(p).toContain('falsify, not to fail-to-verify');
+    expect(p).toContain('go read the claimed source first');
   });
 
   it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
