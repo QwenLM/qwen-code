@@ -782,6 +782,10 @@ Each entry carries `id` (unique — outcomes and resolved anchors both join on i
 
 Apply each finding to the working tree with the `edit` tool — Criticals and the reuse/simplification/consistency findings alike. **Skip** any finding whose fix would change intended behaviour, would require changes well outside the reviewed diff, or that you judge on a second look to be a false positive. Note the skip; do not argue with it in prose.
 
+**A test you add with a fix earns its place by failing without the fix — so remove the fix and watch it fail.** Not a formality: measured on this pipeline's own PRs, four assertions written to pin a real defect all survived the mutation they were written for. `expect(body).toContain('"index":0')` passed with the tool-call index deleted, because `"index":0` also appears on every `choices` entry. `expect(body).toContain('input_json_delta')` passed with the arguments handed over as a finished object, because the mutation kept the type and changed the field. `expect(wrapScript(s)).toMatch(/set \+e/)` asserted the mechanism rather than the behaviour, and `set +e` has no bearing on the `exit` that broke it. A pure function tested alone passed while the request path called a different one entirely.
+
+The shapes that survive are all the same shape: an assertion that a **string is present** rather than that the **behaviour holds**. Parse and assert structurally, drive the real path rather than its helper, and confirm the removal actually reddens the test you just wrote. A test that cannot fail is a fix nobody can keep.
+
 Then record what happened to **every** finding — one of `fixed`, `skipped`, or `no_change_needed` — as a JSON array of `{id, outcome, note?}`, and merge it back:
 
 ```bash

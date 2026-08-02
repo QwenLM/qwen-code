@@ -18,6 +18,12 @@ describe('ECS runner qwen update workflow', () => {
     expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
   });
 
+  it('runs only when this workflow changes on main', () => {
+    expect(workflow).toContain(
+      "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
+    );
+  });
+
   it('annotates a retry and a terminal failure distinctly', () => {
     // The final attempt must not log a "retrying" warning that never
     // retries; a sustained failure ends with an explicit exhausted error.
