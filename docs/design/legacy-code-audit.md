@@ -110,11 +110,15 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   roughly 5–8k lines); above it, tiles files into ~400-line chunks and
   fans out per-chunk agents with folded-in dimension briefs, mirroring
   Step 3B — with whole-module agents retained for the walks that are
-  meaningless per-chunk (1c cross-file, 3a reuse, 5 test-coverage);
+  meaningless per-chunk (1c cross-file, 3a reuse, 5 test-coverage, and
+  any personas the tier includes — these are whole-module by
+  construction);
 - marks heavy files (large, mostly-rewritten equivalents: big stateful
   classes) for the invariant-checklist triple — untested in the
   experiments; expected to transfer by analogy from the diff-based
-  checklist, flagged as extrapolation.
+  checklist, flagged as extrapolation;
+- detects event/lifecycle modules by emit/dispatch/subscribe call
+  patterns and flags them for the 1c event-coverage brief.
 
 No worktree, no base resolution, no merge base — the tree under audit is
 the user's own checkout, read-only.
@@ -238,7 +242,8 @@ brief must name both cases.
   `/review` low; unverified findings, capped. For "is this module worth a
   real audit".
 - **medium** (default) — the replicated 8-dimension core plus the 6a
-  blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a** + verification.
+  blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a**, plus invariant
+  a/b/c on files `plan-files` marks as heavy + verification.
   Rounds 1-2 measured the 8-dimension core; 6a rests on the near-miss
   argument above, not on experiment.
 - **high** — medium + the other two personas (6b/6c) + iterative reverse
