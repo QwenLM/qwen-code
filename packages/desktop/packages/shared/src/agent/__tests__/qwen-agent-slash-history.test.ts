@@ -261,6 +261,15 @@ describe('QwenAgent slash command history', () => {
         systemPayload: { displayText: 'Background agent completed' },
       }),
     ).toBe('notification model text');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'user prompt' }, { text: hookContext }],
+        },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toContain('trusted context');
   });
 
   it('sends slash commands as raw ACP prompts', () => {

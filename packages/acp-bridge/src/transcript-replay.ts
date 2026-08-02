@@ -10,6 +10,8 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
+// Use the Node-free transcriptRecords subpath so the browser replay bundle
+// does not pull in the full core package barrel.
 import {
   projectUserTranscriptForDisplay,
   type TranscriptProjectionDiagnostic,

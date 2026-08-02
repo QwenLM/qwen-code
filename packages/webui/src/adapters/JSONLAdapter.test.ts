@@ -94,6 +94,26 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('user promptlegacy bare hook context');
   });
 
+  it('keeps tag-like parts when another system payload is present', () => {
+    const [message] = adaptJSONLMessages([
+      userMessage(
+        [
+          { text: 'user prompt' },
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'user-authored text',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        { displayText: 'Background agent completed' },
+      ),
+    ]);
+
+    expect(message?.content).toContain('user-authored text');
+  });
+
   it('leaves non-Qwen user records to the existing format parser', () => {
     const [message] = adaptJSONLMessages([
       {

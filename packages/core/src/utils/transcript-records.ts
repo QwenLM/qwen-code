@@ -137,16 +137,25 @@ export function wrapUserPromptSubmitContext(context: string): string {
   return `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n${context}\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
 }
 
-function isUserPromptSubmitContextPart(part: unknown): boolean {
-  if (!isObjectRecord(part) || typeof part['text'] !== 'string') return false;
-  const text = part['text'];
+export function isUserPromptSubmitContextPartText(text: string): boolean {
+  const trimmed = text.trim();
   const prefix = `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n`;
   const suffix = `\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
-  if (!text.startsWith(prefix) || !text.endsWith(suffix)) return false;
-  const body = text.slice(prefix.length, -suffix.length);
+  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(suffix)) {
+    return false;
+  }
+  const body = trimmed.slice(prefix.length, -suffix.length);
   return (
     !body.includes(USER_PROMPT_SUBMIT_CONTEXT_OPEN) &&
     !body.includes(USER_PROMPT_SUBMIT_CONTEXT_CLOSE)
+  );
+}
+
+function isUserPromptSubmitContextPart(part: unknown): boolean {
+  return (
+    isObjectRecord(part) &&
+    typeof part['text'] === 'string' &&
+    isUserPromptSubmitContextPartText(part['text'])
   );
 }
 
@@ -154,9 +163,9 @@ function isUserPromptSubmitContextPart(part: unknown): boolean {
  * Selects the user-visible projection of a transcript record.
  *
  * New user-prompt records pair authoritative `systemPayload.displayText` with
- * `hookContext` provenance. For tag-only third-party records, only a complete
- * final hook-context part is removed. Legacy records without either shape
- * retain their model-facing parts.
+ * `hookContext` provenance. For tag-only third-party records with no metadata,
+ * only a complete final hook-context part is removed. Legacy records without
+ * either shape retain their model-facing parts.
  */
 export function projectUserTranscriptForDisplay<TPart>(record: {
   readonly message?: {
@@ -182,6 +191,7 @@ export function projectUserTranscriptForDisplay<TPart>(record: {
 
   const parts = record.message?.parts ?? [];
   if (
+    record.systemPayload === undefined &&
     parts.length > 1 &&
     isUserPromptSubmitContextPart(parts[parts.length - 1])
   ) {

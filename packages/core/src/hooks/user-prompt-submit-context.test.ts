@@ -80,6 +80,16 @@ describe('isUserPromptSubmitContextPartText', () => {
     ).toBe(false);
   });
 
+  it('rejects nested reserved tags in the body', () => {
+    expect(
+      isUserPromptSubmitContextPartText(
+        wrapUserPromptSubmitContext(
+          `inner ${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG} tag`,
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('rejects an unterminated open tag', () => {
     expect(
       isUserPromptSubmitContextPartText(

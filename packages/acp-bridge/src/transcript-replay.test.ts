@@ -460,8 +460,12 @@ describe('createTranscriptReplayMachine', () => {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'legacy bare hook context' },
         },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: tagged },
+        },
       ]);
-      expect(projected).toHaveLength(3);
+      expect(projected).toHaveLength(4);
     });
 
     it('treats paired empty displayText as authoritative', () => {

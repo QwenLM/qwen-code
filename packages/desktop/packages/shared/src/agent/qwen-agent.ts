@@ -969,12 +969,13 @@ const QWEN_USER_PROMPT_CONTEXT_CLOSE = '</qwen:user-prompt-submit-context>';
 
 function isQwenUserPromptContextPart(part: unknown): boolean {
   if (!isRecord(part) || typeof part.text !== 'string') return false;
+  const text = part.text.trim();
   const prefix = `${QWEN_USER_PROMPT_CONTEXT_OPEN}\n`;
   const suffix = `\n${QWEN_USER_PROMPT_CONTEXT_CLOSE}`;
-  if (!part.text.startsWith(prefix) || !part.text.endsWith(suffix)) {
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) {
     return false;
   }
-  const body = part.text.slice(prefix.length, -suffix.length);
+  const body = text.slice(prefix.length, -suffix.length);
   return (
     !body.includes(QWEN_USER_PROMPT_CONTEXT_OPEN) &&
     !body.includes(QWEN_USER_PROMPT_CONTEXT_CLOSE)
@@ -996,7 +997,9 @@ function projectQwenUserRecordText(record: JsonRecord): string {
     ? message.parts.filter(isRecord)
     : [];
   const visibleParts =
-    parts.length > 1 && isQwenUserPromptContextPart(parts[parts.length - 1])
+    record.systemPayload === undefined &&
+    parts.length > 1 &&
+    isQwenUserPromptContextPart(parts[parts.length - 1])
       ? parts.slice(0, -1)
       : parts;
   return visibleParts

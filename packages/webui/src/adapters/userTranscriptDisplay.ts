@@ -22,12 +22,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isHookContextPart(part: unknown): boolean {
   if (!isRecord(part) || typeof part.text !== 'string') return false;
+  const text = part.text.trim();
   const prefix = `${USER_PROMPT_CONTEXT_OPEN}\n`;
   const suffix = `\n${USER_PROMPT_CONTEXT_CLOSE}`;
-  if (!part.text.startsWith(prefix) || !part.text.endsWith(suffix)) {
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) {
     return false;
   }
-  const body = part.text.slice(prefix.length, -suffix.length);
+  const body = text.slice(prefix.length, -suffix.length);
   return (
     !body.includes(USER_PROMPT_CONTEXT_OPEN) &&
     !body.includes(USER_PROMPT_CONTEXT_CLOSE)
@@ -59,7 +60,9 @@ export function getUserTranscriptDisplayText(
     : [];
   if (parts.length === 0) return undefined;
   const visibleParts =
-    parts.length > 1 && isHookContextPart(parts[parts.length - 1])
+    record.systemPayload === undefined &&
+    parts.length > 1 &&
+    isHookContextPart(parts[parts.length - 1])
       ? parts.slice(0, -1)
       : parts;
   return visibleParts

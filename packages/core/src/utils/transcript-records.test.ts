@@ -266,4 +266,19 @@ describe('projectUserTranscriptForDisplay', () => {
       }),
     ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
   });
+
+  it('does not strip a tag-like part when system metadata is present', () => {
+    const taggedPart = {
+      text: wrapUserPromptSubmitContext('user-authored text'),
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [{ text: 'user text' }, taggedPart] },
+        systemPayload: { displayText: 'notification label' },
+      }),
+    ).toEqual({
+      displayText: undefined,
+      parts: [{ text: 'user text' }, taggedPart],
+    });
+  });
 });
