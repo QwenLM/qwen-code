@@ -102,6 +102,11 @@ function testResolveLogRoot() {
     'utf8',
   );
   assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
+  assert.match(
+    smoke,
+    /const logRoot = resolveLogRoot\(process\.platform, process\.env, \{/,
+    'smoke must resolve log root via resolveLogRoot',
+  );
   assert.ok(
     smoke.includes(`const appId = '${tauriConfig.identifier}'`),
     'smoke appId must match tauri.conf.json identifier',
@@ -116,7 +121,11 @@ function testResolveLogRoot() {
     previousLogIndex < spawnIndex,
     'previousLog must be captured before the child is spawned',
   );
-  assert.match(smoke, /const contents = readNewLog\(\)/);
+  const readNewLogCalls = smoke.match(/const contents = readNewLog\(\)/g);
+  assert.ok(
+    readNewLogCalls && readNewLogCalls.length >= 2,
+    'readNewLog() must be called in both the polling loop and the timeout path',
+  );
   assert.match(smoke, /sliceNewLog\(contents, previousLog\)/);
   assert.match(smoke, /log was truncated, resetting baseline/);
 }
