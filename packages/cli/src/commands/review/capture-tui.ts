@@ -55,8 +55,15 @@ interface CaptureTuiArgs {
   timeoutMs: number;
 }
 
-function which(bin: string): boolean {
-  const r = spawnSync('which', [bin], { encoding: 'utf8' });
+/** Probe the binary itself (`tmux -V` / `freeze --version`), not `which`:
+ * a host without `which` would otherwise misdiagnose an installed tmux as
+ * missing, and the binary answering is the only fact that matters. */
+function available(bin: string, versionFlag: string): boolean {
+  const r = spawnSync(bin, [versionFlag], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   return r.status === 0;
 }
 
@@ -85,7 +92,7 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     process.exitCode = 3;
   };
 
-  if (!which('tmux')) {
+  if (!available('tmux', '-V')) {
     refuse(
       'tmux is not installed. Rendering claims stay argued from the code on ' +
         'this host; say so in the finding rather than describing an imagined ' +
@@ -235,7 +242,7 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (!which('freeze')) {
+  } else if (!available('freeze', '--version')) {
     degradations.push(
       'freeze is not installed — .ans text captured, no image rendered',
     );

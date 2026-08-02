@@ -11,8 +11,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runCaptureTui } from './capture-tui.js';
 
-const hasTmux = spawnSync('which', ['tmux']).status === 0;
-const hasFreeze = spawnSync('which', ['freeze']).status === 0;
+const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+const hasFreeze = spawnSync('freeze', ['--version']).status === 0;
 
 // The command boundary drives REAL tmux — a private-server capture the mocks
 // cannot vouch for (the isolation property IS the exec shape). Skipped where
