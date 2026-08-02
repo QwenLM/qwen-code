@@ -53,6 +53,7 @@ import { validateFindings, buildReport, type Finding } from './findings.js';
 
 interface PublishAssetsArgs {
   pr: number;
+  reviewedRepo: string | undefined;
   files: string[] | undefined;
   findings: string | undefined;
   findingsOut: string | undefined;
@@ -69,7 +70,7 @@ function putContent(
   remotePath: string,
   contentBase64: string,
   pr: number,
-): string {
+): void {
   const api = `repos/${repo}/contents/${remotePath}`;
   const message = `review evidence for PR #${pr}`;
   const payload = (sha?: string) =>
@@ -80,27 +81,24 @@ function putContent(
       ...(sha ? { sha } : {}),
     });
   try {
-    const created = ghWithInput(
-      payload(),
-      'api',
-      '-X',
-      'PUT',
-      api,
-      '--input',
-      '-',
-    );
-    return JSON.parse(created).commit.sha as string;
-  } catch {
-    // The path already exists on the branch (identical content hashes to the
-    // same remote path, so this is the idempotent re-run case). Updating needs
-    // the blob's current sha.
+    ghWithInput(payload(), 'api', '-X', 'PUT', api, '--input', '-');
+  } catch (err) {
+    // Retry ONLY the already-exists shape (a 422 asking for the blob sha —
+    // the idempotent re-run case, since identical content hashes to the same
+    // remote path). Anything else — auth, network, a 404 on the repo — is
+    // rethrown as itself: a catch-all retry here would answer a 401 with a
+    // second failure from the sha lookup, burying the error the user needs.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/422|"sha"|sha wasn't supplied|already exists/i.test(msg)) {
+      throw err;
+    }
     const existing = gh(
       'api',
       `${api}?ref=${encodeURIComponent(branch)}`,
       '--jq',
       '.sha',
     );
-    const updated = ghWithInput(
+    ghWithInput(
       payload(existing.trim()),
       'api',
       '-X',
@@ -109,14 +107,20 @@ function putContent(
       '--input',
       '-',
     );
-    return JSON.parse(updated).commit.sha as string;
   }
 }
 
 /** Ensure the assets branch exists; create it from the default branch if not. */
 function ensureBranch(repo: string, branch: string): void {
+  // Ref paths keep their slashes LITERAL — that is the form GitHub's own docs
+  // use for slash-named refs, and %2F-encoding them routes inconsistently
+  // across endpoints (a 404 here would read as "branch missing" and send the
+  // create call into a 422 on every re-run). The branch name is built from a
+  // validated integer and fixed strings, so literal interpolation is safe; the
+  // contents `?ref=` QUERY VALUE below is a different position and keeps its
+  // encoding.
   try {
-    gh('api', `repos/${repo}/git/ref/${encodeURIComponent(`heads/${branch}`)}`);
+    gh('api', `repos/${repo}/git/ref/heads/${branch}`);
     return;
   } catch {
     // Missing — create from the default branch head.
@@ -124,7 +128,7 @@ function ensureBranch(repo: string, branch: string): void {
   const defaultBranch = gh('api', `repos/${repo}`, '--jq', '.default_branch');
   const baseSha = gh(
     'api',
-    `repos/${repo}/git/ref/${encodeURIComponent(`heads/${defaultBranch.trim()}`)}`,
+    `repos/${repo}/git/ref/heads/${defaultBranch.trim()}`,
     '--jq',
     '.object.sha',
   );
@@ -157,14 +161,12 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     userAuthorized: args.userAuthorized,
     skillArgs: args.skillArgs,
     pr: args.pr,
-    // Target binding for url-shaped authorisations compares against the repo
-    // being written; for assets that is the designated repo only when it IS
-    // the reviewed repo. A `--comment` on a bare PR number authorises by
-    // number alone, which is the common case. URL-shaped args bind to the
-    // reviewed repo, so pass that binding through unchanged via the assets
-    // repo when they match, and let a mismatch surface as a refusal the user
-    // can read rather than a silent publish.
-    repo,
+    // Bind the REVIEWED repo when the caller names it, never the assets repo:
+    // the designation itself is the consent for the destination, and binding a
+    // URL-shaped authorisation against a fork-hosted assets repo refused
+    // legitimately authorised runs. Without --reviewed-repo the gate binds the
+    // PR number (and host) alone.
+    repo: args.reviewedRepo,
     host: args.host,
   });
   if (!auth.ok) {
@@ -257,10 +259,20 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // ── Publish ───────────────────────────────────────────────────────────────
   const branch = assetsBranch(args.pr);
   ensureBranch(repo, branch);
-  let headSha = '';
   for (const p of prepared) {
-    headSha = putContent(repo, branch, p.remotePath, p.contentBase64, args.pr);
+    putContent(repo, branch, p.remotePath, p.contentBase64, args.pr);
   }
+  // Pin URLs to the branch head read AFTER the uploads — never to a PUT
+  // response's `commit` field, whose shape on an identical-content update is
+  // GitHub's to decide, not ours to assume. One extra call buys independence
+  // from that assumption, and every uploaded file exists at this head because
+  // the uploads are sequential commits on one branch.
+  const headSha = gh(
+    'api',
+    `repos/${repo}/git/ref/heads/${branch}`,
+    '--jq',
+    '.object.sha',
+  ).trim();
 
   const published: PublishedAsset[] = prepared.map((p) => ({
     file: p.file,
@@ -287,6 +299,12 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   writeFileSync(outPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
   // ── Pipeline mode: write the URLs back into the findings artifact ─────────
+  if (findings && !args.findingsOut) {
+    writeStderrLine(
+      'publish-assets: --findings given without --findings-out — the URLs are ' +
+        'in the manifest only; the artifact keeps local paths.',
+    );
+  }
   if (findings && args.findingsOut) {
     const urlByFile = new Map(published.map((p) => [p.file, p.url]));
     const updated = findings.map((f) => {
@@ -319,6 +337,11 @@ export const publishAssetsCommand: CommandModule = {
         demandOption: true,
         describe: 'The pull request this evidence belongs to',
       })
+      .option('reviewed-repo', {
+        type: 'string',
+        describe:
+          'The owner/repo the reviewed PR lives in — strengthens the authorisation binding for URL-shaped review arguments; omit to bind by PR number alone',
+      })
       .option('files', {
         type: 'string',
         array: true,
@@ -331,6 +354,7 @@ export const publishAssetsCommand: CommandModule = {
       })
       .option('findings-out', {
         type: 'string',
+        implies: 'findings',
         describe:
           'Where to write the findings artifact with published URLs woven into each finding (requires --findings)',
       })
@@ -357,6 +381,7 @@ export const publishAssetsCommand: CommandModule = {
   handler: (argv) => {
     runPublishAssets({
       pr: argv['pr'] as number,
+      reviewedRepo: argv['reviewed-repo'] as string | undefined,
       files: argv['files'] as string[] | undefined,
       findings: argv['findings'] as string | undefined,
       findingsOut: argv['findings-out'] as string | undefined,

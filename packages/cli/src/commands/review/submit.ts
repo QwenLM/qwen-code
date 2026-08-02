@@ -51,7 +51,6 @@ import { getCliVersion } from '../../utils/version.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import {

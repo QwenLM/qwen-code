@@ -73,16 +73,17 @@ describe('publish-assets', () => {
   }
 
   function happyGh(): void {
-    // Branch exists; every PUT succeeds and lands commit `headsha`.
-    ghMock.mockImplementation((..._args: string[]) => '{}');
-    ghWithInputMock.mockImplementation(
-      () => '{"commit":{"sha":"headsha1234567890"}}',
+    // Branch exists; PUTs succeed; the post-upload head read answers the sha.
+    ghMock.mockImplementation((...args: string[]) =>
+      args.includes('.object.sha') ? 'headsha1234567890' : '{}',
     );
+    ghWithInputMock.mockImplementation(() => '{}');
   }
 
   function run(overrides: Record<string, unknown> = {}): void {
     runPublishAssets({
       pr: 8346,
+      reviewedRepo: undefined,
       files: undefined,
       findings: undefined,
       findingsOut: undefined,
@@ -153,16 +154,15 @@ describe('publish-assets', () => {
 
   it('creates the branch when missing, from the default branch head', () => {
     // First ref lookup throws (missing branch); the creation path then asks
-    // for the default branch and its head.
+    // for the default branch and its head; the post-upload head read follows.
     ghMock
       .mockImplementationOnce(() => {
         throw new Error('HTTP 404');
       })
       .mockImplementationOnce(() => 'main')
-      .mockImplementationOnce(() => 'basesha');
-    ghWithInputMock.mockImplementation(
-      () => '{"commit":{"sha":"headsha1234567890"}}',
-    );
+      .mockImplementationOnce(() => 'basesha')
+      .mockImplementationOnce(() => 'headsha1234567890');
+    ghWithInputMock.mockImplementation(() => '{}');
     run({ files: [pngFile('a.png')] });
     expect(process.exitCode).toBeUndefined();
     const createCall = (ghWithInputMock as Mock).mock.calls[0];
@@ -170,25 +170,72 @@ describe('publish-assets', () => {
       ref: 'refs/heads/pr-assets/8346-review',
       sha: 'basesha',
     });
+    // Ref paths keep their slashes literal — GitHub's documented form; %2F
+    // routes inconsistently and a 404 here would 422 the create on re-runs.
+    const refCall = (ghMock as Mock).mock.calls[0];
+    expect(refCall[1]).toBe(
+      'repos/owner/assets/git/ref/heads/pr-assets/8346-review',
+    );
+    expect(String(refCall[1])).not.toContain('%2F');
   });
 
   it('retries an existing path with its blob sha — idempotent re-run', () => {
     ghMock.mockImplementation((...args: string[]) => {
       // branch ref exists; content sha lookup answers the retry
       if (String(args[1] ?? '').includes('/contents/')) return 'blobsha';
+      if (args.includes('.object.sha')) return 'headsha1234567890';
       return '{}';
     });
     ghWithInputMock
       .mockImplementationOnce(() => {
         throw new Error('HTTP 422: sha required');
       })
-      .mockImplementationOnce(() => '{"commit":{"sha":"headsha1234567890"}}');
+      .mockImplementationOnce(() => '{}');
     run({ files: [pngFile('a.png')] });
     expect(process.exitCode).toBeUndefined();
     const retry = JSON.parse(
       (ghWithInputMock as Mock).mock.calls[1][0] as string,
     );
     expect(retry.sha).toBe('blobsha');
+  });
+
+  it('rethrows a non-exists PUT failure instead of burying it in a sha lookup', () => {
+    // A 401 answered by a catch-all retry would surface as a confusing
+    // secondary error from the contents GET; the original must be the error.
+    ghMock.mockImplementation((...args: string[]) =>
+      args.includes('.object.sha') ? 'headsha1234567890' : '{}',
+    );
+    ghWithInputMock.mockImplementation(() => {
+      throw new Error('HTTP 401: Bad credentials');
+    });
+    expect(() => run({ files: [pngFile('a.png')] })).toThrow(/401/);
+    // Exactly one PUT attempt — no retry, no contents lookup.
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('authorises a URL-shaped --comment without binding it to the assets repo', () => {
+    // The reviewed repo (from the URL) differs from the fork-hosted assets
+    // repo; the designation itself is the consent for the destination, so the
+    // gate binds the PR number, not the assets repo.
+    writeFileSync(
+      argsFile,
+      'https://github.com/reviewed/upstream/pull/8346 --comment\n',
+    );
+    happyGh();
+    run({ files: [pngFile('a.png')] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('binds --reviewed-repo against a URL-shaped authorisation when given', () => {
+    writeFileSync(
+      argsFile,
+      'https://github.com/reviewed/upstream/pull/8346 --comment\n',
+    );
+    happyGh();
+    run({ files: [pngFile('a.png')], reviewedRepo: 'someone/else' });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
   it('refuses the whole batch when one file fails validation', () => {

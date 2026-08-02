@@ -33,7 +33,7 @@ import { parseReviewArgs } from '../parse-args.js';
  * review subcommand (a subprocess of that session) reads the same name from the
  * same inherited `QWEN_CODE_SESSION_ID`.
  */
-export function defaultSkillArgsPath(): string {
+function defaultSkillArgsPath(): string {
   return skillArgsPath('review');
 }
 
@@ -51,8 +51,20 @@ export interface WriteAuthorizationRequest {
   skillArgs?: string;
   /** The pull request this write targets. */
   pr: number;
-  /** The `owner/repo` this write targets. */
-  repo: string;
+  /**
+   * The `owner/repo` the PR under review lives in, when the caller knows it.
+   *
+   * Optional because the two callers know different things. `submit` writes TO
+   * the pull request, so it always knows (and must bind) the repo it is
+   * posting to. `publish-assets` writes to the user-designated assets repo on
+   * BEHALF of a PR — the destination is consented to by the designation
+   * itself, and the reviewed repo is not among its inputs. Binding the
+   * URL-shaped authorisation against the assets repo was the bug this field's
+   * optionality fixes: a fork-hosted assets repo plus a URL target refused a
+   * legitimately authorised run. When absent, the gate binds the PR number
+   * (and host) alone.
+   */
+  repo?: string;
   /** GitHub Enterprise host, when not github.com. */
   host?: string;
 }
@@ -118,7 +130,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
         `this submission targets #${req.pr}`,
     };
   }
-  if (t.type === 'pr-url') {
+  if (t.type === 'pr-url' && req.repo !== undefined) {
     const authorisedRepo = `${t.owner}/${t.repo}`;
     if (authorisedRepo.toLowerCase() !== req.repo.toLowerCase()) {
       return {
