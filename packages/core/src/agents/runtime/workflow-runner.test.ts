@@ -273,7 +273,10 @@ describe('WorkflowRunner', () => {
     void handle.completion.then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
 
     expect(registry.resume(handle.runId)).toBe(true);
@@ -306,7 +309,10 @@ describe('WorkflowRunner', () => {
     void handle.completion.then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
 
     registry.resume(handle.runId);
@@ -326,7 +332,13 @@ describe('WorkflowRunner', () => {
         config,
         signal: new AbortController().signal,
         script: `return await parallel([
-          () => agent("first"),
+          async () => {
+            await agent("first");
+            // Chain a follow-up dispatch off the first result: if the pause
+            // gate ever delivered that result early, the chained agent is
+            // issued during the pause and bumps the dispatched counter below.
+            return await agent("first-follow-up");
+          },
           () => agent("second"),
         ])`,
         args: undefined,
@@ -353,12 +365,19 @@ describe('WorkflowRunner', () => {
       void handle.completion.then(() => {
         settled = true;
       });
-      await Promise.resolve();
+      // Flush all microtasks + a timer tick so the negative check
+      // distinguishes the pause gate from a gate-less resolve
+      // (which settles in a few microtasks without one).
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(settled).toBe(false);
 
       expect(registry.resume(handle.runId)).toBe(true);
       await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
       finishes.get('second')?.('second done');
+      await vi.waitFor(() =>
+        expect(started).toEqual(['first', 'second', 'first-follow-up']),
+      );
+      finishes.get('first-follow-up')?.('follow-up done');
       await expect(handle.completion).resolves.toMatchObject({ ok: true });
     } finally {
       if (originalConcurrency === undefined) {

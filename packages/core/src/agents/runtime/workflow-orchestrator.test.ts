@@ -832,7 +832,10 @@ describe('WorkflowOrchestrator', () => {
     void run.then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
 
     scheduler.resume();
@@ -1064,7 +1067,10 @@ describe('WorkflowOrchestrator', () => {
     void run.then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
 
     scheduler.resume();
