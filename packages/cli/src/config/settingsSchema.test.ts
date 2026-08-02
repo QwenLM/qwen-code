@@ -20,6 +20,7 @@ import {
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
@@ -493,6 +494,12 @@ describe('SettingsSchema', () => {
       );
       expect(serve.maxConcurrentSubSessionsTotal.default).toBe(
         MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+      );
+      // The runtime clamps the total cap to the tracked-id set size; the
+      // schema maximum must match so editors reject values that the daemon
+      // would otherwise silently clamp.
+      expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
+        MAX_TRACKED_SPAWNED_SESSIONS,
       );
     });
 

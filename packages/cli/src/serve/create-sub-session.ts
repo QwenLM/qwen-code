@@ -265,8 +265,11 @@ export function createSubSessionLauncher(
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
   const maxConcurrentPerCaller =
     opts.maxConcurrentPerCaller ?? MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER;
-  // Clamped to the tracked-id set size so the depth-1 gate's FIFO eviction
-  // never discards a still-alive sub-session id.
+  // Clamped to the tracked-id set size so the in-flight population can never
+  // exceed it. This bounds concurrency, not the depth-1 gate: ids leave
+  // `spawnedSessionIds` only by FIFO eviction past that cap (finished ids are
+  // never removed), so once cumulative spawns pass it a still-alive id can
+  // still be evicted and the gate degrades to best-effort.
   const maxConcurrentTotal = Math.min(
     opts.maxConcurrentTotal ?? MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
     MAX_TRACKED_SPAWNED_SESSIONS,

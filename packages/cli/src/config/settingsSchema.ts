@@ -344,6 +344,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: 24,
         minimum: 1,
+        maximum: 1024,
         description:
           'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
         showInDialog: false,

@@ -797,27 +797,60 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
   it('rejects values outside positive integers', () => {
     // Hand-edited settings.json could land any of these; coercing (e.g.
     // accepting 0 or "10") would silently disable or misread a resource cap.
+    const onWarning = vi.fn();
     expect(
-      subSessionConcurrencyCapsFromSettings({
-        maxConcurrentSubSessionsPerCaller: 0,
-        maxConcurrentSubSessionsTotal: -1,
-      }),
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 0,
+          maxConcurrentSubSessionsTotal: -1,
+        },
+        onWarning,
+      ),
     ).toEqual({});
     expect(
-      subSessionConcurrencyCapsFromSettings({
-        maxConcurrentSubSessionsPerCaller: 2.5,
-        maxConcurrentSubSessionsTotal: '10',
-      }),
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 2.5,
+          maxConcurrentSubSessionsTotal: '10',
+        },
+        onWarning,
+      ),
     ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(4);
   });
 
   it('keeps a valid cap when the sibling key is invalid', () => {
     expect(
-      subSessionConcurrencyCapsFromSettings({
-        maxConcurrentSubSessionsPerCaller: 8,
-        maxConcurrentSubSessionsTotal: Number.NaN,
-      }),
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 8,
+          maxConcurrentSubSessionsTotal: Number.NaN,
+        },
+        () => {},
+      ),
     ).toEqual({ maxConcurrentPerCaller: 8 });
+  });
+
+  it('warns naming a present-but-invalid cap', () => {
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        { maxConcurrentSubSessionsTotal: '50' },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0][0]).toContain(
+      'maxConcurrentSubSessionsTotal',
+    );
+    // JSON.stringify keeps the quotes, revealing the value is a string.
+    expect(onWarning.mock.calls[0][0]).toContain('"50"');
+  });
+
+  it('does not warn when the keys are absent', () => {
+    const onWarning = vi.fn();
+    subSessionConcurrencyCapsFromSettings({}, onWarning);
+    expect(onWarning).not.toHaveBeenCalled();
   });
 });
 

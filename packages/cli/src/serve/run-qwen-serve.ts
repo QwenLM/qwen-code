@@ -685,23 +685,42 @@ function sessionArtifactsPersistenceAvailableFromSettings(
 /**
  * Reads the optional `serve.maxConcurrentSubSessions*` overrides. Only
  * positive integers are honored; anything else falls back to the launcher's
- * built-in defaults. Caps are a daemon-resource control, so an untrusted
+ * built-in defaults. A present-but-invalid value is reported through
+ * `onWarning` (matching the other settings-load fallback sites in this file)
+ * so an operator who mistypes a cap sees the fallback instead of silently
+ * running on the default. Caps are a daemon-resource control, so an untrusted
  * workspace's settings (skipped at load time) must not raise them — the
  * caller passes the already trust-filtered merged settings.
  */
-export function subSessionConcurrencyCapsFromSettings(serve: {
-  maxConcurrentSubSessionsPerCaller?: unknown;
-  maxConcurrentSubSessionsTotal?: unknown;
-}): {
+export function subSessionConcurrencyCapsFromSettings(
+  serve: {
+    maxConcurrentSubSessionsPerCaller?: unknown;
+    maxConcurrentSubSessionsTotal?: unknown;
+  },
+  onWarning: (message: string) => void = writeStderrLine,
+): {
   maxConcurrentPerCaller?: number;
   maxConcurrentTotal?: number;
 } {
-  const asCap = (value: unknown): number | undefined =>
-    typeof value === 'number' && Number.isInteger(value) && value >= 1
-      ? value
-      : undefined;
-  const maxConcurrentPerCaller = asCap(serve.maxConcurrentSubSessionsPerCaller);
-  const maxConcurrentTotal = asCap(serve.maxConcurrentSubSessionsTotal);
+  const asCap = (key: string, value: unknown): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
+      return value;
+    }
+    onWarning(
+      `qwen serve: ignoring invalid ${key} (${JSON.stringify(value)}); ` +
+        `expected a positive integer, falling back to the built-in default.`,
+    );
+    return undefined;
+  };
+  const maxConcurrentPerCaller = asCap(
+    'maxConcurrentSubSessionsPerCaller',
+    serve.maxConcurrentSubSessionsPerCaller,
+  );
+  const maxConcurrentTotal = asCap(
+    'maxConcurrentSubSessionsTotal',
+    serve.maxConcurrentSubSessionsTotal,
+  );
   return {
     ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
     ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
