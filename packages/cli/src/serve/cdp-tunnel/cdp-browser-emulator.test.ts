@@ -382,6 +382,83 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     ).toHaveLength(0);
   });
 
+  it('rejects commands on the page session after detach', async () => {
+    const { emu, replies, forwardToTab } = setup();
+    await emu.handleFromClient({
+      id: 40,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    await emu.handleFromClient({
+      id: 41,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session' },
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 42,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1' },
+      sessionId: 'qwen-cdp-page-session',
+    });
+    expect(forwardToTab).not.toHaveBeenCalled();
+    expect(replies[0]).toMatchObject({
+      id: 42,
+      sessionId: 'qwen-cdp-page-session',
+      error: {
+        code: -32000,
+        message: 'Unknown CDP session: qwen-cdp-page-session',
+      },
+    });
+  });
+
+  it('restores page-session forwarding after re-attach', async () => {
+    const { emu, replies, forwardToTab } = setup(async () => ({ value: 42 }));
+    await emu.handleFromClient({
+      id: 50,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    await emu.handleFromClient({
+      id: 51,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session' },
+    });
+    // Re-attach via a new setAutoAttach handshake.
+    await emu.handleFromClient({
+      id: 52,
+      method: 'Target.setAutoAttach',
+      params: { flatten: true },
+      sessionId: 'qwen-cdp-tab-session',
+    });
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 53,
+      method: 'Runtime.evaluate',
+      params: { expression: '6*7' },
+      sessionId: 'qwen-cdp-page-session',
+    });
+    expect(forwardToTab).toHaveBeenCalledWith('Runtime.evaluate', {
+      expression: '6*7',
+    });
+    expect(replies[0]).toMatchObject({
+      id: 53,
+      sessionId: 'qwen-cdp-page-session',
+      result: { value: 42 },
+    });
+  });
+
+  it('logs once when a tab event has no active listener', async () => {
+    const { emu, log } = setup();
+    emu.emitTabEvent('Console.messageAdded', { message: 'm1' });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][0]).toContain('dropped');
+    emu.emitTabEvent('Console.messageAdded', { message: 'm2' });
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
   it('does not emit detachedFromTarget for a never-attached session', async () => {
     const { emu, replies, log } = setup();
     await emu.handleFromClient({

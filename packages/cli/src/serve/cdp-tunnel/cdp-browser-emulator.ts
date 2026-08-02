@@ -72,6 +72,8 @@ export class CdpBrowserEmulator {
   private readonly attachedPageSessions = new Set<string>();
   private nextPageSessionId = 1;
   private autoAttachActive = false;
+  private pageSessionDetached = false;
+  private warnedNoListener = false;
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
@@ -207,6 +209,7 @@ export class CdpBrowserEmulator {
             // does not keep receiving events on a session it believes is gone.
             if (this.autoAttachActive) {
               this.autoAttachActive = false;
+              this.pageSessionDetached = true;
               this.cb.reply({
                 method: 'Target.detachedFromTarget',
                 params: {
@@ -246,6 +249,7 @@ export class CdpBrowserEmulator {
       if (method === 'Target.setAutoAttach') {
         this.autoAttachActive = params?.['autoAttach'] !== false;
         if (this.autoAttachActive) {
+          this.pageSessionDetached = false;
           this.cb.reply({
             method: 'Target.attachedToTarget',
             sessionId: TAB_SESSION_ID,
@@ -263,11 +267,20 @@ export class CdpBrowserEmulator {
     }
 
     // ── page session: forward to the real tab via the extension ──
-    // Forwarding is unconditional for PAGE_SESSION_ID even before the
-    // auto-attach handshake, because the lazy-attach path (cdp-reverse-link.ts)
-    // sends page commands without a prior Target.setAutoAttach. The lazy-attach
-    // path is therefore command-only: event delivery in emitTabEvent IS gated
-    // on autoAttachActive — the asymmetry is deliberate.
+    // PAGE_SESSION_ID forwarding works without a prior setAutoAttach handshake
+    // because the lazy-attach path (cdp-reverse-link.ts) sends page commands
+    // directly. After an explicit detachFromTarget the session is rejected,
+    // matching Chrome's "Unknown session" behavior.
+    if (sessionId === PAGE_SESSION_ID && this.pageSessionDetached) {
+      return this.cb.reply({
+        id,
+        sessionId,
+        error: {
+          code: SERVER_ERROR,
+          message: `Unknown CDP session: ${sessionId}`,
+        },
+      });
+    }
     if (
       sessionId === PAGE_SESSION_ID ||
       this.attachedPageSessions.has(sessionId)
@@ -324,6 +337,16 @@ export class CdpBrowserEmulator {
     }
     for (const sessionId of this.attachedPageSessions) {
       this.cb.reply({ method, params, sessionId });
+    }
+    if (
+      !this.autoAttachActive &&
+      this.attachedPageSessions.size === 0 &&
+      !this.warnedNoListener
+    ) {
+      this.warnedNoListener = true;
+      this.cb.log?.(
+        `qwen serve: /cdp tab event "${method}" dropped — no active page session (lazy-attach clients are command-only until Target.setAutoAttach)`,
+      );
     }
   }
 }
