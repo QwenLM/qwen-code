@@ -9,7 +9,8 @@ audit (pre-refactor assessment, taking over unfamiliar code, security review
 of a sensitive subsystem).
 
 Before designing, we measured whether the machinery actually transfers. An
-A/B experiment (`.qwen/investigations/legacy-review-ab/`) audited
+A/B experiment (working record at `.qwen/investigations/legacy-review-ab/`,
+untracked; key results below) audited
 `packages/core/src/permissions/` (12 files, 7,638 production lines) two ways:
 
 - **Naive baseline** — one agent, module context only, no methodology.
@@ -55,10 +56,11 @@ document: the
 cross-file tracer's event-coverage walk ("does every firing path fire?")
 produced two Criticals unique in the field — both adjacent-class siblings
 of a historical fix; and the security agent, briefed threat-model-first,
-produced four single-source Criticals at the trust boundary (frontmatter
-hooks bypassing folder trust, a workspace-writable HTTP-hook whitelist,
-env-resolution paths defeating a prior secrets-stripping fix). Full
-record: `.qwen/investigations/legacy-review-ab-2/REPORT.md`.
+produced four single-source Criticals at the trust boundary (including
+frontmatter hooks bypassing folder trust, a workspace-writable HTTP-hook
+whitelist, env-resolution paths defeating a prior secrets-stripping fix).
+Full record: `.qwen/investigations/legacy-review-ab-2/REPORT.md` (untracked
+working file; key results summarized above).
 
 ## Scope and non-goals
 
@@ -110,8 +112,9 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   Step 3B — with whole-module agents retained for the walks that are
   meaningless per-chunk (1c cross-file, 3a reuse, 5 test-coverage);
 - marks heavy files (large, mostly-rewritten equivalents: big stateful
-  classes) for the invariant-checklist triple, which the experiment
-  confirmed transfers unchanged.
+  classes) for the invariant-checklist triple — untested in the
+  experiments; expected to transfer by analogy from the diff-based
+  checklist, flagged as extrapolation.
 
 No worktree, no base resolution, no merge base — the tree under audit is
 the user's own checkout, read-only.
@@ -131,7 +134,7 @@ diff adds" becomes "for every non-trivial block in the module".
 | 3a/3b/3c quality     | module vs codebase                      | 3a's "does this exist already" found the two-splitter root cause   |
 | 4 performance        | trace the hot path first                | require a named hot path + cost shape                              |
 | 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                      |
-| 6a attacker persona  | undirected                              | one undirected seat at every tier ≥ medium — see below             |
+| 6a attacker persona  | undirected                              | untested; one undirected seat at every tier ≥ medium — see below   |
 | 6b/6c personas       | high effort only                        | untested in the experiments                                        |
 | invariant a/b/c      | heavy files only                        | unchanged                                                          |
 
@@ -164,7 +167,7 @@ question, not v1).
 ### The pre-existing inversion and legacy severity heuristics
 
 `/review` rejects findings about pre-existing code; in a legacy audit
-_everything_ is pre-existing, and the exclusion inverts. Two replacement
+_everything_ is pre-existing, and the exclusion inverts. Three replacement
 disciplines keep precision without an author to consult:
 
 1. **The failure scenario is the bar.** Intent is unknowable for merged
@@ -208,17 +211,20 @@ from the experiments: the verifier's strongest tool for legacy claims is
 a **runnable probe** (the decisive evidence in Round 1 was
 `PermissionManager.evaluate()` returning `allow`), including the
 discipline that a probe must be shown to flip under the implied fix; and
-**inter-agent disagreements are settled by execution, never by
+**factual inter-agent disagreements are settled by execution, never by
 adjudicator judgment** — Round 2 had two (a whitelist-bypass claim one
 agent filed and another explicitly cleared; a severity split) and only a
-probe resolved the first. The verify brief must name this case.
+probe resolved the first. Severity splits are settled by the
+authority-on-the-failure-path heuristic (discipline 2 above). The verify
+brief must name both cases.
 
 ### Output
 
 - **The artifact:** a markdown report at `.qwen/audit/<path-slug>-<ts>.md`,
   findings clustered by theme/root cause, each with severity, locations,
-  failure scenario, and the evidence tier (end-to-end probe / unit probe /
-  code read).
+  failure scenario, evidence tier (end-to-end probe / unit probe /
+  code read), and independent-discovery count ("found independently by N
+  agents").
 - **The terminal:** a short summary — counts by severity and theme, plus
   the top clusters — not the full list. The report is for acting on; the
   terminal is for deciding whether to.
@@ -231,9 +237,10 @@ probe resolved the first. The verify brief must name this case.
 - **low** — inline read by the orchestrator itself, angle rotation as in
   `/review` low; unverified findings, capped. For "is this module worth a
   real audit".
-- **medium** (default) — the replicated roster: 1a, 1c, 2, 3a/3b/3c, 4,
-  5, **6a** + verification. Rounds 1-2 measured the 8-dimension core;
-  6a is the single-agent blind-spot hedge justified above.
+- **medium** (default) — the replicated 8-dimension core plus the 6a
+  blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a** + verification.
+  Rounds 1-2 measured the 8-dimension core; 6a rests on the near-miss
+  argument above, not on experiment.
 - **high** — medium + the other two personas (6b/6c) + iterative reverse
   audit with the two-consecutive-dry-rounds stop rule. Unmeasured;
   flagged as extrapolation in the report header until replicated.
@@ -252,8 +259,8 @@ an inferior audit under the same command name.
   case.
 - **Auto-filing issues from findings.** Every posted artifact is public
   and permanent; the experiment's findings needed maintainer adjudication
-  on severity more than once (the naive arm's two grading inversions).
-  Humans file; the audit informs.
+  on severity (the naive arm's grading inversion — its most severe
+  finding filed as a Suggestion). Humans file; the audit informs.
 - **Cutting the expensive agents for the default tier.** 1c/3a/5 are 60%
   of the cost and produced the unique, most-severe findings. The tiers cut
   elsewhere.
