@@ -9,10 +9,48 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runCaptureTui } from './capture-tui.js';
+import { probes, runCaptureTui } from './capture-tui.js';
 
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 const hasFreeze = spawnSync('freeze', ['--version']).status === 0;
+
+// The no-tmux refusal fires exactly where the real-tmux block below is
+// skipped, so it gets its own suite that runs EVERYWHERE, driving the probe
+// seam instead of the real binary: a refactor that inverts the probe must
+// fail here, not surface as a raw ENOENT on some tmux-less host.
+describe('capture-tui without tmux (probe seam)', () => {
+  const realTmux = probes.tmux;
+  beforeEach(() => {
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    probes.tmux = realTmux;
+    process.exitCode = undefined;
+  });
+
+  it('refuses with the contract — exit 3, no artifacts, no throw', () => {
+    probes.tmux = () => false;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-notmux-'));
+    try {
+      runCaptureTui({
+        command: 'printf hi',
+        cwd: dir,
+        cols: 80,
+        rows: 24,
+        settleMs: 0,
+        until: undefined,
+        keys: undefined,
+        out: join(dir, 'cap'),
+        timeoutMs: 1000,
+      } as never);
+      expect(process.exitCode).toBe(3);
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 // The command boundary drives REAL tmux — a private-server capture the mocks
 // cannot vouch for (the isolation property IS the exec shape). Skipped where
@@ -171,6 +209,23 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     run({ until: undefined, settleMs: 600 });
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('fixed-delay');
+  });
+
+  it('degrades to ans-only when freeze is unavailable, and says why', () => {
+    // Through the probe seam, so the freeze-less rung is pinned even on
+    // hosts that have freeze installed.
+    const realFreeze = probes.freeze;
+    probes.freeze = () => false;
+    try {
+      run();
+    } finally {
+      probes.freeze = realFreeze;
+    }
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain('freeze is not installed');
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
   });
 
   it('sends dash-leading keys as keys, not as send-keys flags', () => {

@@ -67,6 +67,15 @@ function available(bin: string, versionFlag: string): boolean {
   return r.status === 0;
 }
 
+/** The availability probes, exported as a seam: the no-tmux refusal fires
+ * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
+ * without this seam that path is untestable in the one environment where it
+ * matters. Tests override a probe and restore it; production never does. */
+export const probes = {
+  tmux: () => available('tmux', '-V'),
+  freeze: () => available('freeze', '--version'),
+};
+
 function tmux(argv: string[]): string {
   return execFileSync('tmux', argv, {
     encoding: 'utf8',
@@ -92,7 +101,7 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     process.exitCode = 3;
   };
 
-  if (!available('tmux', '-V')) {
+  if (!probes.tmux()) {
     refuse(
       'tmux is not installed. Rendering claims stay argued from the code on ' +
         'this host; say so in the finding rather than describing an imagined ' +
@@ -242,7 +251,7 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (!available('freeze', '--version')) {
+  } else if (!probes.freeze()) {
     degradations.push(
       'freeze is not installed — .ans text captured, no image rendered',
     );
