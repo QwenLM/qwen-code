@@ -203,8 +203,13 @@ function parseLocations(
       const lo = l as Record<string, unknown>;
       const file = asString(lo, 'file');
       if (!file) fail(index, `location ${j} is missing a non-empty "file".`);
-      if (lo['line'] !== undefined && typeof lo['line'] !== 'number') {
-        fail(index, `location ${j} has a non-numeric "line".`);
+      if (
+        lo['line'] !== undefined &&
+        (typeof lo['line'] !== 'number' ||
+          !Number.isSafeInteger(lo['line']) ||
+          lo['line'] <= 0)
+      ) {
+        fail(index, `location ${j} has an invalid "line".`);
       }
       return {
         file,
@@ -221,8 +226,13 @@ function parseLocations(
       'needs a non-empty "file" (or a "locations" array for a pattern aggregate).',
     );
   }
-  if (o['line'] !== undefined && typeof o['line'] !== 'number') {
-    fail(index, 'has a non-numeric "line".');
+  if (
+    o['line'] !== undefined &&
+    (typeof o['line'] !== 'number' ||
+      !Number.isSafeInteger(o['line']) ||
+      o['line'] <= 0)
+  ) {
+    fail(index, 'has an invalid "line".');
   }
   return [
     {

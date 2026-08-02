@@ -10,6 +10,7 @@ allowedTools:
   - write_file
   - edit
   - glob
+  - record_artifact
 ---
 
 # Code Review
@@ -1108,6 +1109,36 @@ Report content should include:
 **The report's verdict is not yours to type.** `compose-review` printed the exact `Verdict:` line in Step 6 and persisted the same line as `verdictLine` inside `.qwen/tmp/qwen-review-{target}-composed.json` — copy either, verbatim. Do not reconstruct it from `event` + `cappedBy`: a presubmit downgrade also depends on fields that pair does not carry, and a rebuilt line can differ from the computed one. (And not `$(jq …)`: a `jq` binary is not guaranteed on the host, and a substitution that fails leaves the archived verdict blank or literal — worse than absent, because it looks written.)
 
 A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later. The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
+
+After the Markdown report exists, and before cleanup, create and register the structured review artifact for **medium and high** effort (low has no canonical composed verdict and must not invent one). Use the same filename stem as the Markdown report with a `.json` extension:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review save-artifact \
+  --findings .qwen/tmp/qwen-review-<target>-findings.json \
+  --composed .qwen/tmp/qwen-review-<target>-composed.json \
+  --report .qwen/reviews/<report>.md \
+  --target <target> \
+  --effort <effort> \
+  --out .qwen/reviews/<report>.json
+```
+
+For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. Then call `record_artifact` in the current session with exactly this registration shape (using the actual JSON path relative to the main project directory):
+
+```json
+{
+  "title": "Code review result",
+  "kind": "other",
+  "storage": "workspace",
+  "workspacePath": ".qwen/reviews/<report>.json",
+  "mimeType": "application/vnd.qwen.code-review+json",
+  "metadata": {
+    "artifactType": "code_review",
+    "schemaVersion": 1
+  }
+}
+```
+
+The JSON helper is fail-closed because it carries the authoritative review result: if it fails, do not synthesize a replacement or register a partial artifact. A `record_artifact` failure is a UI-delivery failure, not a review-verdict input: disclose the failure to the user, keep the Markdown report, and do **not** change, soften, or recompute the existing composed verdict.
 
 ### Incremental review cache
 

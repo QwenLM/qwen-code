@@ -2294,6 +2294,7 @@ export function App({
             const nextArtifact = paneArtifacts[index];
             return (
               nextArtifact?.id === artifact.id &&
+              nextArtifact.status === artifact.status &&
               nextArtifact.updatedAt === artifact.updatedAt &&
               nextArtifact.sizeBytes === artifact.sizeBytes
             );

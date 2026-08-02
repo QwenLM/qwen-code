@@ -933,6 +933,10 @@ vi.doMock('./components/SplitView', async () => {
         updatedAt: '2026-07-10T00:01:00Z',
         sizeBytes: 20,
       };
+      const changedArtifact = {
+        ...updatedArtifact,
+        status: 'changed',
+      };
       return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
@@ -986,6 +990,20 @@ vi.doMock('./components/SplitView', async () => {
               ),
           },
           'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-changed-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [changedArtifact],
+                paneActions,
+              ),
+          },
+          'changed artifact',
         ),
         React.createElement(
           'button',
@@ -4491,7 +4509,7 @@ describe('App session callbacks', () => {
       emptyActions?.querySelectorAll<HTMLButtonElement>('button') ?? [],
     );
     expect(actions).toHaveLength(1);
-    expect(actions[0]?.textContent).toContain('Review');
+    expect(actions[0]?.textContent).toContain('Changes');
     expect(actions[0]?.disabled).toBe(true);
     expect(
       container.querySelector('button[aria-label="Add panel"]'),
@@ -4568,16 +4586,16 @@ describe('App session callbacks', () => {
         )
         ?.click();
     });
-    const review = Array.from(
+    const changes = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.startsWith('Review'));
-    expect(review?.disabled).toBe(false);
+    ).find((button) => button.textContent?.startsWith('Changes'));
+    expect(changes?.disabled).toBe(false);
 
-    act(() => review?.click());
+    act(() => changes?.click());
 
-    expect(container.querySelector('button[title="Review"]')).not.toBeNull();
+    expect(container.querySelector('button[title="Changes"]')).not.toBeNull();
     expect(container.textContent).toContain('latest.ts');
     expect(container.textContent).not.toContain('first.ts');
   });
@@ -9898,6 +9916,17 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-changed-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('changed');
 
     await act(async () => {
       container

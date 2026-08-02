@@ -131,10 +131,25 @@ describe('validateFindings', () => {
     ).toThrow(/non-empty array/);
   });
 
-  it('rejects a non-numeric line', () => {
-    expect(() => validateFindings([{ ...base, line: '42' }])).toThrow(
-      /non-numeric "line"/,
-    );
+  it.each(['42', -1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects an invalid line value %s',
+    (line) => {
+      expect(() => validateFindings([{ ...base, line }])).toThrow(
+        /invalid "line"/,
+      );
+    },
+  );
+
+  it('rejects invalid aggregate location lines', () => {
+    expect(() =>
+      validateFindings([
+        {
+          ...base,
+          file: undefined,
+          locations: [{ file: 'a.ts', line: 0 }],
+        },
+      ]),
+    ).toThrow(/location 0 has an invalid "line"/);
   });
 
   it('rejects a top-level input that is not an array', () => {
