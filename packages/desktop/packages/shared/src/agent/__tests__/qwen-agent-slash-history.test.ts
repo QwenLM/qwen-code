@@ -270,6 +270,15 @@ describe('QwenAgent slash command history', () => {
         systemPayload: { displayText: 'raw @file prompt' },
       }),
     ).toBe('raw @file prompt');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'user prompt' }, { text: hookContext }],
+        },
+        systemPayload: null,
+      }),
+    ).toBe('user prompt');
   });
 
   it('sends slash commands as raw ACP prompts', () => {

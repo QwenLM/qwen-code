@@ -267,6 +267,20 @@ describe('projectUserTranscriptForDisplay', () => {
     ).toEqual({ displayText: undefined, parts: [userPart] });
   });
 
+  it('treats non-object system payloads as absent metadata', () => {
+    const userPart = { text: 'user text' };
+    const taggedPart = {
+      text: wrapUserPromptSubmitContext('hook context'),
+    };
+
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userPart, taggedPart] },
+        systemPayload: null,
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
   it('preserves legacy bare context and user-authored tag-like text', () => {
     const legacyParts = [{ text: 'user text' }, { text: 'bare hook context' }];
     expect(

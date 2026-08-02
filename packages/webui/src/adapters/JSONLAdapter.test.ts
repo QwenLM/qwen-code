@@ -83,6 +83,26 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('user prompt');
   });
 
+  it('strips a final tag-only context part with invalid metadata', () => {
+    const [message] = adaptJSONLMessages([
+      userMessage(
+        [
+          { text: 'user prompt' },
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        null,
+      ),
+    ]);
+
+    expect(message?.content).toBe('user prompt');
+  });
+
   it('preserves legacy bare-part concatenation without a reliable boundary', () => {
     const [message] = adaptJSONLMessages([
       userMessage([

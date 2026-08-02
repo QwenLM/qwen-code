@@ -1001,7 +1001,7 @@ function projectQwenUserRecordText(record: JsonRecord): string {
   if (displayText !== undefined) return displayText;
 
   const visibleParts =
-    record.systemPayload === undefined && hasFinalHookContextPart
+    payload === undefined && hasFinalHookContextPart
       ? parts.slice(0, -1)
       : parts;
   return visibleParts

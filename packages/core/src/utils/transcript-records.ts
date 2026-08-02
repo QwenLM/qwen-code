@@ -194,7 +194,7 @@ export function projectUserTranscriptForDisplay<TPart>(record: {
     return { displayText, parts: visibleParts };
   }
 
-  if (record.systemPayload === undefined && hasFinalHookContextPart) {
+  if (payload === undefined && hasFinalHookContextPart) {
     return { displayText: undefined, parts: parts.slice(0, -1) };
   }
   return { displayText: undefined, parts };
