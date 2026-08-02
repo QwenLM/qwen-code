@@ -257,9 +257,24 @@ const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
  * ASCII-only class does not recognise it. Not recognising a host is what leaks a
  * credential, so `münchen.de` had to be a host here for the same reason
  * `example.com` does.
+ *
+ * `HOST_CHAR` admits the characters a *valid* host cannot start with — `_`, `-`
+ * and `.` — for that same reason, which is the one place this grammar must not
+ * be a validator. Rejecting `@_host` did not make the URL invalid, it made the
+ * authority unrecognised: no credential prefix matched, `findUrlEnd` cut at the
+ * first space *inside* the password instead, and `sanitizeProviderBaseUrl` was
+ * handed an `@`-less slice it returned verbatim, so the whole credential landed
+ * in the `/status` payload. `_` is legal in practice besides — container and k8s
+ * service names use it, and this grammar exists to cover exactly those bare
+ * intranet labels.
+ *
+ * Being liberal here cannot leak in the other direction: what a match does is
+ * *strip* the userinfo ahead of it, so admitting too much removes text from the
+ * payload rather than adding it. The tighter guards that keep prose from reading
+ * as a host are the two-character floor and the delimiter evidence below.
  */
-const HOST_CHAR = String.raw`[\p{L}\p{N}\p{M}]`;
-const LABEL_CHAR = String.raw`[\p{L}\p{N}\p{M}-]`;
+const HOST_CHAR = String.raw`[\p{L}\p{N}\p{M}_.-]`;
+const LABEL_CHAR = String.raw`[\p{L}\p{N}\p{M}_-]`;
 
 /**
  * A host with nothing after it to mark where it ends, so its own shape is the
@@ -314,10 +329,24 @@ const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})
  * legal in a password: `:123%abc secret@host` was read as a port and its
  * password left in the message.
  *
- * Quotes and brackets are deliberately absent for the same reason, even though
- * `"https://api.example:8443"` puts one right after a port. That case is handled
- * where the evidence is unambiguous — a *balanced* delimiter, in
- * `findUrlSegmentEnd` — because `"` alone is as legal in a password as `%` is.
+ * The closing brackets `)`, `]` and `}` are in the set even though they are as
+ * legal in a password as `%` is, and what makes them safe is not their own shape
+ * but the lookahead that follows in `PORT_DIGITS`: `:123)abc secret@host` still
+ * finds its prefix, because a `@` later in the span rejects the port reading. A
+ * bracket therefore only ends a port where there is no credential to keep.
+ *
+ * Quotes are absent, and that is the one place the set is not interchangeable
+ * with a wider one. `"https://api.example:8443"` puts a quote right after a port,
+ * so adding `"` and `'` looks symmetric with the brackets and passes every test
+ * in this file — but the lookahead is what carries the brackets, and a quote can
+ * appear where the lookahead does not fire. `:123"abc secret word@host` has a
+ * second space before the `@`, and `:123"ab c secret@host` has one inside the
+ * first word; both fail the `[^@\s]*\s[^@\s]*@` shape, so with quotes in the set
+ * the digits read as a port, no prefix is found, and the password is emitted.
+ * Measured on both spellings before writing this down.
+ *
+ * The quoted-port case is handled where the evidence is unambiguous instead — a
+ * *balanced* delimiter, in `findUrlSegmentEnd`.
  */
 const PORT_END = String.raw`[,.;:!?)\]}]`;
 
@@ -433,6 +462,51 @@ const CREDENTIAL_FALLBACK_PATTERN = new RegExp(
 );
 
 /**
+ * A `user:password@` prefix whose password contains a slash.
+ *
+ * Both patterns above spell the userinfo tail `[^/?#]*?@`, which cannot cross a
+ * `/` — and it must not, in general, because a path may legally contain an `@`:
+ * crossing one in `https://host.example/path@thing` would take the `@` from the
+ * path and rewrite the host from the text beyond it. A slash is genuinely a
+ * stronger authority delimiter than a space.
+ *
+ * But a slash is also legal in a password, and there the same class is what
+ * declines the prefix: `https://user:a b/c@host.example/v1` matched neither
+ * pattern, so `findUrlEnd` cut at the first space — inside the password — and the
+ * `@`-less slice `https://user:a` came back from `sanitizeProviderBaseUrl`
+ * verbatim with `b/c@host.example/v1` re-appended as prose. This is the same leak
+ * route `findUrlEnd` documents, reached through the one delimiter the other two
+ * patterns treat as absolute.
+ *
+ * Two gates are what make crossing it safe here, and each rules out one half of
+ * the ambiguity:
+ *
+ * A space must precede the `@`. That is not a heuristic about passwords, it is
+ * the precondition for the leak: with no space before it, the first-space cut
+ * cannot land inside the credential, so there is nothing to fix and no reason to
+ * guess. It is also what a path cannot have — a space ends the URL — so the
+ * `path@thing` case above is excluded rather than traded away.
+ *
+ * The port lookahead gains `\d+[/?#]`. `PORT_DIGITS` does not treat a slash as
+ * ending a port, because until now nothing could cross one, and `:8443/v1` was
+ * therefore unreachable. Crossing makes it reachable, and it is the common
+ * spelling of a base URL: without this, `provider https://api.example:8443/v1
+ * contact admin@example.com` reads `8443/v1 contact admin@` as a userinfo and
+ * reports the host as `example.com`, deleting the prose. Rewriting a host is the
+ * failure this file works hardest to avoid, so the exclusion belongs here rather
+ * than in `PORT_DIGITS`, where it would loosen the other two patterns for a case
+ * they cannot reach.
+ *
+ * Consulted only when both patterns above have declined, so it can neither
+ * override a match nor change which `@` a recognised prefix ends at.
+ */
+const SLASHED_PASSWORD_PATTERN = new RegExp(
+  String.raw`^[^\s/?#'"\x60<>]*:(?!${PORT_DIGITS}|\d+[/?#])` +
+    String.raw`(?=[^?#@]*\s)[^?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  'u',
+);
+
+/**
  * Strips credentials from every URL in a free-text warning or error message.
  *
  * Each URL is handed to `sanitizeProviderBaseUrl`, which scopes credential
@@ -491,9 +565,15 @@ function sanitizeProviderWarning(warning: string): string {
  * and the credential is re-appended verbatim as prose.
  *
  * `CREDENTIAL_FALLBACK_PATTERN` closes that route for one spelling — a bare
- * one-character host — and not for the shapes where a port and a password are
+ * one-character host — and `SLASHED_PASSWORD_PATTERN` for another, a password
+ * containing a slash. Neither closes the shapes where a port and a password are
  * genuinely indistinguishable, which stay as `CREDENTIAL_PREFIX_PATTERN`
  * documents them.
+ *
+ * The three are consulted in decreasing order of evidence, and only the first two
+ * compete: the slashed-password pattern runs last because crossing a `/` is the
+ * weakest inference of the three, and it must not be able to move an `@` that a
+ * better-evidenced pattern already found.
  *
  * The fallback is also consulted when the primary pattern *succeeds*, because
  * succeeding is not the same as being right. A one-character host is invisible to
@@ -520,9 +600,8 @@ function findUrlEnd(segment: string, markerLength: number): number {
   ) {
     return markerLength + fallback[0].length;
   }
-  const from = credentials
-    ? markerLength + credentials[0].length
-    : markerLength;
+  const prefix = credentials ?? SLASHED_PASSWORD_PATTERN.exec(body);
+  const from = prefix ? markerLength + prefix[0].length : markerLength;
   const space = segment.slice(from).search(/\s/);
   return space === -1 ? segment.length : from + space;
 }
@@ -620,10 +699,15 @@ const PORT_AT_END = /:\d+$/;
  * follows the closer is prose in one case and the rest of a credential in the
  * other. Widening this to accept a bare `host:port` fixes that message and
  * leaves the password in the pinned one, which is the worse trade.
+ *
+ * The host middle is composed from `LABEL_CHAR` plus `.` rather than spelled
+ * out, so that widening the shared classes reaches here too. Spelled inline it
+ * did not: `HOST_CHAR` gained `_` and this pattern kept rejecting `@_host:8443`,
+ * which is the divergence that leaks a credential rather than a cosmetic one.
  */
 const CREDENTIALED_AUTHORITY_AT_END = new RegExp(
   String.raw`^[^\s/?#'"\x60<>]*:[^/?#]*?@` +
-    String.raw`${HOST_CHAR}(?:[\p{L}\p{N}\p{M}.-]*${HOST_CHAR})?:\d+$`,
+    String.raw`${HOST_CHAR}(?:(?:${LABEL_CHAR}|\.)*${HOST_CHAR})?:\d+$`,
   'u',
 );
 

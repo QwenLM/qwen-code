@@ -1413,6 +1413,139 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     },
   );
 
+  it.each([
+    ['_host', 'an underscore'],
+    ['_svc.local', 'an underscore and a dot'],
+    ['-host', 'a leading dash'],
+    ['.host', 'a leading dot'],
+  ])(
+    'strips a spaced password before a host starting with %s',
+    async (host) => {
+      // A host whose first character is one a *valid* host cannot start with was
+      // matched by neither credential pattern, so the URL was cut at the space
+      // inside the password and `user:my pass` was emitted as prose. `_host` was
+      // already leaking before this PR; `-host` and `.host` are shapes the
+      // replaced code stripped, because it tested one character class rather than
+      // matching a host grammar. Both directions are covered here so the grammar
+      // cannot narrow back to only what is addressable.
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = `Failed loading provider https://user:my pass@${host}/v1`;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      expect(result.errors?.[0]?.error).toBe(
+        `Failed loading provider https://${host}/v1`,
+      );
+      expect(JSON.stringify(result)).not.toContain('my pass');
+    },
+  );
+
+  it('strips a spaced password containing a slash', async () => {
+    // A slash is legal in a password, but both primary patterns spell the
+    // userinfo tail `[^/?#]*?@` and so declined the prefix: the cut landed at the
+    // space inside the password and `b/c@host.example/v1` came back as prose.
+    // `SLASHED_PASSWORD_PATTERN` crosses the slash, gated on a space appearing
+    // before the `@` — which is the precondition for the leak and the one thing a
+    // path cannot contain.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:a b/c@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://host.example/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('a b/c');
+  });
+
+  it('keeps a host whose path holds an @ when no credential is present', async () => {
+    // The cost of crossing a slash, and why the crossing is gated. A path may
+    // legally contain an `@`; taking it as the end of a userinfo would rewrite the
+    // host from the text beyond it. The space gate is what excludes this — a space
+    // ends the URL, so a path cannot hold one — and without it this reports
+    // `https://thing`.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://host.example/path@thing — retry';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://host.example/path@thing — retry',
+    );
+  });
+
+  it('keeps a port with a path and the email after it intact', async () => {
+    // The other cost of crossing a slash. `PORT_DIGITS` does not treat a slash as
+    // ending a port, because until the slashed-password pattern existed nothing
+    // could cross one and `:8443/v1` was unreachable. Reachable, it reads
+    // `8443/v1 contact admin@` as a userinfo and reports the host as `example.com`
+    // — the failure this file works hardest to avoid — so that pattern excludes
+    // `\d+[/?#]` itself rather than loosening `PORT_DIGITS` for the other two.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443/v1 contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443/v1 contact admin@example.com',
+    );
+  });
+
+  it.each([
+    ['123"abc secret word', 'a second space before the @'],
+    ['123"ab c secret', 'a space inside the first word'],
+  ])(
+    'strips a password whose digits are followed by a quote and %s',
+    async (password) => {
+      // Why `PORT_END` holds `)`, `]` and `}` but not `"` or `'`. The brackets are
+      // carried by the `no userinfo follows` lookahead in `PORT_DIGITS`, not by
+      // their own shape, so adding quotes for symmetry looks safe and passes every
+      // other test here. These two spellings are where the lookahead does not
+      // fire: with quotes in the set the digits read as a port, no prefix is
+      // found, and the password is emitted. Nothing else in this file catches it.
+      coreMock.throwModelsConfigError = true;
+      coreMock.modelsConfigErrorMessage = `Failed loading provider https://user:${password}@host.example/v1`;
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+      });
+
+      const result = await provider(workspace, true);
+
+      // Asserted on the message rather than on `JSON.stringify(result)`, which
+      // every other test here can use: the password holds a `"`, which stringify
+      // escapes, so a `not.toContain` on the dump passes whatever the sanitizer
+      // did and pins nothing.
+      expect(result.errors?.[0]?.error).toBe(
+        'Failed loading provider https://host.example/v1',
+      );
+    },
+  );
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),

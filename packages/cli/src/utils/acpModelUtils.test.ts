@@ -249,6 +249,29 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    // A pathless authority bounded by `?` or `#` rather than `/`. The rows above
+    // pin `?`/`#` inside the *userinfo*; these pin them as the authority
+    // terminator, which is the direction `findAuthorityEnd` exists for. Drop
+    // either from it and the later `@` becomes the userinfo terminator, so the
+    // credential is still stripped but the host is reported as `evil.com`. Only an
+    // assertion on the surviving host catches that, which is why the expectation
+    // keeps the query and fragment verbatim.
+    [
+      'https://user:secret@api.example?k=v@evil.com',
+      'https://api.example?k=v@evil.com',
+    ],
+    [
+      'https://user:secret@api.example#f@evil.com',
+      'https://api.example#f@evil.com',
+    ],
+    [
+      'https://user:secret@api.example:8443?k=v@evil.com',
+      'https://api.example:8443?k=v@evil.com',
+    ],
+    // The same two shapes with no credential to strip, so a widening of the
+    // authority cannot quietly start rewriting a host that was already clean.
+    ['https://api.example?k=v@evil.com', 'https://api.example?k=v@evil.com'],
+    ['https://api.example#f@evil.com', 'https://api.example#f@evil.com'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });
