@@ -44,27 +44,42 @@ describe('qwen serve Live Host discovery', () => {
     );
     temporaryDirectories.push(runtime);
     const workspace = path.join(runtime, 'workspace');
+    const qwenHome = path.join(runtime, 'settings-home');
     await fs.mkdir(workspace);
+    await fs.mkdir(qwenHome, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        experimental: {
+          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+        },
+      }),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    resetHomeEnvBootstrapForTesting();
     const token = 'integration-test-token';
     const discoveryPath = getLiveDiscoveryPath(runtime);
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace,
-        maxSessions: 1,
-        token,
-      },
-      {
-        preheatBridge: false,
-        daemonLogBaseDir: path.join(runtime, 'debug'),
-        liveDiscoveryStableBaseDir: runtime,
-        runtimePlatform: 'darwin',
-      },
-    );
+    let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
 
     try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          maxSessions: 1,
+          token,
+        },
+        {
+          preheatBridge: false,
+          daemonLogBaseDir: path.join(runtime, 'debug'),
+          liveDiscoveryStableBaseDir: runtime,
+          runtimePlatform: 'darwin',
+        },
+      );
+
       const record = JSON.parse(
         await fs.readFile(discoveryPath, 'utf8'),
       ) as Record<string, unknown>;
@@ -112,7 +127,10 @@ describe('qwen serve Live Host discovery', () => {
         ((await capabilities.json()) as { features: string[] }).features,
       ).not.toContain('realtime_voice');
     } finally {
-      await handle.close();
+      await handle?.close();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      resetHomeEnvBootstrapForTesting();
     }
 
     await expect(fs.stat(discoveryPath)).rejects.toMatchObject({

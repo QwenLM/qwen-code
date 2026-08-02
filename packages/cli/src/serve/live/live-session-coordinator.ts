@@ -1331,7 +1331,12 @@ export class LiveSessionCoordinator {
     if (!this.isActive(context)) {
       throw new DOMException('Live call ended.', 'AbortError');
     }
-    context.coordinatorPromise ??= this.createOrResumeCoordinator(context);
+    context.coordinatorPromise ??= this.createOrResumeCoordinator(
+      context,
+    ).catch((error) => {
+      context.coordinatorPromise = undefined;
+      throw error;
+    });
     return context.coordinatorPromise;
   }
 

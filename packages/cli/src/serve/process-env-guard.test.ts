@@ -186,6 +186,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       accesses: { whole: 1 },
     },
   ],
+  [
+    'packages/cli/src/serve/live/provider-credentials.ts',
+    {
+      reason:
+        'Embedded callers may omit the daemon-level environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
 ]);
 
 function listTypeScriptFiles(dir: string): string[] {
