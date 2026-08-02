@@ -226,8 +226,8 @@ describe('qwen-triage tmux workflow', () => {
     // pin reads it, and a path that forgets it re-pins the reinstall to an
     // empty string (which the action treats as `latest`, resurrecting the
     // stale-dist-tag bug the pin exists to prevent). Three success paths,
-    // three emissions: already-latest, fallback-to-installed (twice: registry
-    // down, install failed), and fresh-install.
+    // four emission sites (fallback-to-installed is reached twice: registry
+    // down, install failed), plus fresh-install.
     const emissions = (
       ensure.match(/echo "version=\$\{?\w+\}?" >> "\$\{GITHUB_OUTPUT\}"/g) ?? []
     ).length;
@@ -587,6 +587,8 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(installStep).toContain('qwen --version');
     expect(installStep).toContain('tmux -V');
+    expect(installStep).toContain('for attempt in 1 2 3; do');
+    expect(installStep).toContain('failed after 3 attempts');
     expect(resolverStep).not.toContain('tmux');
     expect(resolverStep).not.toContain('npm install');
     expect(resolverStep).not.toContain('qwen --version');
@@ -4001,6 +4003,8 @@ describe('qwen-triage verify round-3 hardening', () => {
     // No hardcoded Playwright pin here either: the apt list must track
     // current Playwright so it covers the lockfile-matched binary below.
     expect(tools).not.toMatch(/playwright@[\d.]/);
+    expect(tools).toContain('for attempt in 1 2 3; do');
+    expect(tools).toContain('failed after 3 attempts');
 
     // Browser binary: downloaded after npm ci, and by the CLI of the
     // package the capture harness actually imports — never a hardcoded pin
