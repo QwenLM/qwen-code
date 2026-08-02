@@ -289,35 +289,61 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(prodIdx).toBeLessThan(testIdx);
   });
 
-  it('deprioritizes generated, info-only, and non-Maven test sources too', () => {
-    // The checklist scopes out more than src/test: generated sources under the
-    // build output dirs, package-info/module-info, and non-Maven test roots
-    // (integrationTest, integTest, androidTest, testFixtures) must not fill the
-    // named slots either. A source package merely NAMED `generated` is production.
-    const noise = [
-      'target/generated-sources/com/x/Stub.java',
-      'build/generated/com/x/R.java',
-      'src/main/java/com/x/package-info.java',
-      'src/main/java/module-info.java',
-      'src/integrationTest/java/com/x/IT.java',
-      'src/integTest/java/com/x/IT2.java',
-      'src/androidTest/java/com/x/AT.java',
-      'src/testFixtures/java/com/x/Fix.java',
-    ];
-    const prod = [
-      'src/main/java/com/x/Hot.java',
-      'src/main/java/com/x/generated/Proto.java',
-    ];
-    const out = pathRulesFor([...noise, ...prod]);
+  it.each([
+    [
+      'generated build output',
+      Array.from(
+        { length: 11 },
+        (_, i) => `target/generated-sources/com/x/S${i}.java`,
+      ),
+    ],
+    [
+      'non-Maven test roots',
+      Array.from({ length: 11 }, (_, i) => {
+        const root = ['integTest', 'androidTest', 'testFixtures'][i % 3];
+        return `src/${root}/java/com/x/N${i}.java`;
+      }),
+    ],
+    [
+      'info-only sources',
+      Array.from({ length: 11 }, (_, i) =>
+        i < 6
+          ? `src/main/java/com/x/p${i}/package-info.java`
+          : `src/main/java/com/x/m${i}/module-info.java`,
+      ),
+    ],
+  ])('deprioritizes %s past the cap, not just src/test', (_label, noise) => {
+    // The checklist scopes out more than src/test. Each family below, once it
+    // outnumbers the cap, must still not fill the named slots: the noise is
+    // pushed past CAP so truncation bites, and the production path is asserted
+    // to survive it. Drop the matching branch from isOutOfScope and the family
+    // is reclassified as production, fills the ten slots, and truncates Hot.java
+    // away — so the regression fails instead of shipping green. (integrationTest
+    // is pinned by the dedicated test below.)
+    const out = pathRulesFor([...noise, 'src/main/java/com/x/Hot.java']);
     const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
-    // Both production paths — including the one in a `generated` package — must
-    // be named before any out-of-scope path.
-    const stubIdx = heading.indexOf('Stub.java');
-    expect(stubIdx).toBeGreaterThanOrEqual(0);
-    expect(heading.indexOf('Hot.java')).toBeGreaterThanOrEqual(0);
-    expect(heading.indexOf('Proto.java')).toBeGreaterThanOrEqual(0);
-    expect(heading.indexOf('Hot.java')).toBeLessThan(stubIdx);
-    expect(heading.indexOf('Proto.java')).toBeLessThan(stubIdx);
+    expect(heading).toContain('Hot.java');
+    expect(heading).toContain('…and 2 more');
+    expect(heading).not.toContain(noise[noise.length - 1]);
+  });
+
+  it('treats a source package merely named generated as production', () => {
+    // `src/main/java/com/x/generated/` is a source package that happens to be
+    // named `generated`; only build OUTPUT dirs (target/generated-sources,
+    // build/generated) are scoped out. Even with the cap full of real generated
+    // sources, the production path must keep its named slot — if the generated
+    // pattern over-matched, Proto.java would be scoped out and truncated away.
+    const noise = Array.from(
+      { length: 11 },
+      (_, i) => `target/generated-sources/com/x/S${i}.java`,
+    );
+    const out = pathRulesFor([
+      ...noise,
+      'src/main/java/com/x/generated/Proto.java',
+    ]);
+    const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
+    expect(heading).toContain('Proto.java');
+    expect(heading).toContain('…and 2 more');
   });
 
   it('treats Gradle src/integrationTest as out of scope even past the cap', () => {
