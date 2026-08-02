@@ -98,6 +98,14 @@ describe('isUserPromptSubmitContextPartText', () => {
     ).toBe(false);
   });
 
+  it('rejects a complete block without newline delimiters', () => {
+    expect(
+      isUserPromptSubmitContextPartText(
+        `${USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG}ctx${USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG}`,
+      ),
+    ).toBe(false);
+  });
+
   it('rejects a lone close tag', () => {
     expect(
       isUserPromptSubmitContextPartText(USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG),

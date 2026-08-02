@@ -267,9 +267,9 @@ describe('QwenAgent slash command history', () => {
         message: {
           parts: [{ text: 'user prompt' }, { text: hookContext }],
         },
-        systemPayload: { displayText: 'Background agent completed' },
+        systemPayload: { displayText: 'raw @file prompt' },
       }),
-    ).toContain('trusted context');
+    ).toBe('raw @file prompt');
   });
 
   it('sends slash commands as raw ACP prompts', () => {

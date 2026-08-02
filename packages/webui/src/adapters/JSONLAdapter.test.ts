@@ -94,7 +94,7 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('user promptlegacy bare hook context');
   });
 
-  it('keeps tag-like parts when another system payload is present', () => {
+  it('uses released single-field display metadata when the final tag proves provenance', () => {
     const [message] = adaptJSONLMessages([
       userMessage(
         [
@@ -107,11 +107,11 @@ describe('adaptJSONLMessages user display projection', () => {
             ].join('\n'),
           },
         ],
-        { displayText: 'Background agent completed' },
+        { displayText: 'raw @file prompt' },
       ),
     ]);
 
-    expect(message?.content).toContain('user-authored text');
+    expect(message?.content).toBe('raw @file prompt');
   });
 
   it('leaves non-Qwen user records to the existing format parser', () => {

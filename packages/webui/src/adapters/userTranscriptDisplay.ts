@@ -44,25 +44,25 @@ export function getUserTranscriptDisplayText(
 ): string | undefined {
   if (record.type !== 'user') return undefined;
 
+  const parts = Array.isArray(record.message?.parts)
+    ? record.message.parts
+    : [];
+  const hasFinalHookContextPart =
+    parts.length > 1 && isHookContextPart(parts[parts.length - 1]);
   const payload = isRecord(record.systemPayload)
     ? record.systemPayload
     : undefined;
   if (
     payload &&
-    typeof payload.hookContext === 'string' &&
-    typeof payload.displayText === 'string'
+    typeof payload.displayText === 'string' &&
+    (typeof payload.hookContext === 'string' || hasFinalHookContextPart)
   ) {
     return payload.displayText;
   }
 
-  const parts = Array.isArray(record.message?.parts)
-    ? record.message.parts
-    : [];
   if (parts.length === 0) return undefined;
   const visibleParts =
-    record.systemPayload === undefined &&
-    parts.length > 1 &&
-    isHookContextPart(parts[parts.length - 1])
+    record.systemPayload === undefined && hasFinalHookContextPart
       ? parts.slice(0, -1)
       : parts;
   return visibleParts

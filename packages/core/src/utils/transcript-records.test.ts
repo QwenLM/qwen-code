@@ -225,6 +225,24 @@ describe('projectUserTranscriptForDisplay', () => {
     ).toEqual({ displayText: '', parts: [imagePart] });
   });
 
+  it('uses released single-field display metadata when the final tag proves provenance', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: 'expanded model prompt' },
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: 'raw @file prompt' },
+      }),
+    ).toEqual({ displayText: 'raw @file prompt', parts: [imagePart] });
+  });
+
   it('does not treat notification display labels as user prompt metadata', () => {
     const modelPart = { text: 'notification model text' };
     expect(
@@ -267,9 +285,9 @@ describe('projectUserTranscriptForDisplay', () => {
     ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
   });
 
-  it('does not strip a tag-like part when system metadata is present', () => {
+  it('does not trust bare displayText without a final context tag', () => {
     const taggedPart = {
-      text: wrapUserPromptSubmitContext('user-authored text'),
+      text: '<qwen:user-prompt-submit-context>user-authored text</qwen:user-prompt-submit-context>',
     };
     expect(
       projectUserTranscriptForDisplay({

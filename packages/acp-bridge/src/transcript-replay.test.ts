@@ -419,6 +419,47 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(1);
     });
 
+    it('uses released single-field displayText when the final tag proves provenance', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-single-field-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'model-bound prompt' },
+              { text: 'legacy bare hook context' },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'raw @file prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(2);
+    });
+
     it('does not trust bare displayText on plain user records', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
@@ -434,7 +475,6 @@ describe('createTranscriptReplayMachine', () => {
               },
               { text: 'model-bound prompt' },
               { text: 'legacy bare hook context' },
-              { text: tagged },
             ],
           },
           systemPayload: {
@@ -460,12 +500,8 @@ describe('createTranscriptReplayMachine', () => {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'legacy bare hook context' },
         },
-        {
-          sessionUpdate: 'user_message_chunk',
-          content: { type: 'text', text: tagged },
-        },
       ]);
-      expect(projected).toHaveLength(4);
+      expect(projected).toHaveLength(3);
     });
 
     it('treats paired empty displayText as authoritative', () => {

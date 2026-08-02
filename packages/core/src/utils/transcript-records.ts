@@ -163,9 +163,10 @@ function isUserPromptSubmitContextPart(part: unknown): boolean {
  * Selects the user-visible projection of a transcript record.
  *
  * New user-prompt records pair authoritative `systemPayload.displayText` with
- * `hookContext` provenance. For tag-only third-party records with no metadata,
- * only a complete final hook-context part is removed. Legacy records without
- * either shape retain their model-facing parts.
+ * `hookContext` provenance. Released `displayText`-only records use a complete
+ * final hook-context part as equivalent pairing evidence. For tag-only
+ * third-party records with no metadata, only that complete final part is
+ * removed. Legacy records without either shape retain their model-facing parts.
  */
 export function projectUserTranscriptForDisplay<TPart>(record: {
   readonly message?: {
@@ -173,28 +174,27 @@ export function projectUserTranscriptForDisplay<TPart>(record: {
   };
   readonly systemPayload?: unknown;
 }): UserTranscriptDisplayProjection<TPart> {
+  const parts = record.message?.parts ?? [];
+  const hasFinalHookContextPart =
+    parts.length > 1 && isUserPromptSubmitContextPart(parts[parts.length - 1]);
   const payload = isObjectRecord(record.systemPayload)
     ? record.systemPayload
     : undefined;
   const isUserPromptPayload =
-    payload && typeof payload['hookContext'] === 'string';
+    payload &&
+    (typeof payload['hookContext'] === 'string' || hasFinalHookContextPart);
   const displayText =
     isUserPromptPayload && typeof payload['displayText'] === 'string'
       ? payload['displayText']
       : undefined;
   if (displayText !== undefined) {
-    const parts = (record.message?.parts ?? []).filter(
+    const visibleParts = parts.filter(
       (part) => !isObjectRecord(part) || typeof part['text'] !== 'string',
     );
-    return { displayText, parts };
+    return { displayText, parts: visibleParts };
   }
 
-  const parts = record.message?.parts ?? [];
-  if (
-    record.systemPayload === undefined &&
-    parts.length > 1 &&
-    isUserPromptSubmitContextPart(parts[parts.length - 1])
-  ) {
+  if (record.systemPayload === undefined && hasFinalHookContextPart) {
     return { displayText: undefined, parts: parts.slice(0, -1) };
   }
   return { displayText: undefined, parts };

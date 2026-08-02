@@ -667,16 +667,18 @@ projection carried by `submitted_prompt`; ACP, headless, `serve`, SDK, remote
 input, and other paths without that provenance record the expanded pre-hook
 prompt instead.
 
-Transcript display consumers must require `systemPayload.hookContext` to be a
-string before treating `displayText` as this user-prompt projection.
-Notification, cron, and mid-turn records can also have `displayText`, but those
-values are compact display labels and must not be substituted for their
-model-bound text. Legacy bare-context records without the two-field payload keep
-their model-bound display behavior because the context cannot be separated
-reliably. For metadata-free records that use the current tagged shape,
-compatibility consumers may remove a complete tagged context only when it is
-the final part after at least one other part; they must not infer that arbitrary
-tag-like user text is hook provenance.
+Transcript display consumers treat `displayText` as this user-prompt projection
+when `systemPayload.hookContext` is a string. For compatibility with released
+`displayText`-only user-prompt records, a complete tagged context in the final
+part after at least one other part is equivalent pairing evidence. Notification,
+cron, and mid-turn records can also have `displayText`, but those values are
+compact display labels and must not be substituted for their model-bound text
+without that evidence.
+Legacy bare-context records keep their model-bound display behavior because the
+context cannot be separated reliably. For metadata-free records that use the
+current tagged shape, compatibility consumers may remove the same complete
+final tagged part; they must not infer that arbitrary tag-like user text is hook
+provenance.
 
 Sensitive prompt telemetry attributes, when enabled, and managed auto-memory
 recall both use the pre-hook prompt. They do not include

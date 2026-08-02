@@ -41,7 +41,7 @@ describe('ChatViewer tool routing', () => {
 });
 
 describe('ChatViewer user transcript projection', () => {
-  it('renders display provenance instead of model-facing hook context', () => {
+  it('renders released single-field display provenance instead of model-facing hook context', () => {
     const taggedContext =
       '<qwen:user-prompt-submit-context>\nhook-only context\n</qwen:user-prompt-submit-context>';
     const message: ChatMessageData = {
@@ -54,7 +54,6 @@ describe('ChatViewer user transcript projection', () => {
       },
       systemPayload: {
         displayText: 'raw @file prompt',
-        hookContext: 'hook-only context',
       },
     };
 

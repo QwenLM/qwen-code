@@ -983,23 +983,25 @@ function isQwenUserPromptContextPart(part: unknown): boolean {
 }
 
 function projectQwenUserRecordText(record: JsonRecord): string {
-  const payload = isRecord(record.systemPayload)
-    ? record.systemPayload
-    : undefined;
-  const displayText =
-    payload && asString(payload.hookContext) !== undefined
-      ? asString(payload.displayText)
-      : undefined;
-  if (displayText !== undefined) return displayText;
-
   const message = toRecord(record.message);
   const parts = Array.isArray(message.parts)
     ? message.parts.filter(isRecord)
     : [];
-  const visibleParts =
-    record.systemPayload === undefined &&
+  const hasFinalHookContextPart =
     parts.length > 1 &&
-    isQwenUserPromptContextPart(parts[parts.length - 1])
+    isQwenUserPromptContextPart(parts[parts.length - 1]);
+  const payload = isRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  const displayText =
+    payload &&
+    (asString(payload.hookContext) !== undefined || hasFinalHookContextPart)
+      ? asString(payload.displayText)
+      : undefined;
+  if (displayText !== undefined) return displayText;
+
+  const visibleParts =
+    record.systemPayload === undefined && hasFinalHookContextPart
       ? parts.slice(0, -1)
       : parts;
   return visibleParts
