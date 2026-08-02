@@ -11617,6 +11617,54 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
   });
 
+  // The cancellation notice the model sees must match what actually
+  // happened. Saying "already completed" for a tool interrupted mid-flight
+  // makes the model skip work that never ran; saying "cancelled" for a tool
+  // that finished makes it redo work whose side effects already landed.
+
+  it('tells the model a mid-flight cancellation never completed', async () => {
+    const abortController = new AbortController();
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(
+        () =>
+          new Promise<ToolResult>((_resolve, reject) => {
+            abortController.abort();
+            reject(
+              Object.assign(new Error('Tool call aborted'), {
+                name: 'AbortError',
+              }),
+            );
+          }),
+      ),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(completedCall.status).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain('User cancelled tool execution.');
+    expect(responseText).not.toContain('had already completed');
+  });
+
+  it('tells the model a post-completion cancellation discarded finished work', async () => {
+    const abortController = new AbortController();
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(completedCall.status).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain('The tool had already completed');
+    expect(responseText).not.toContain('User cancelled tool execution.');
+  });
+
   it('classifies a thrown MCP invocation as an MCP execution error', async () => {
     const mcpTool = new DiscoveredMCPTool(
       {

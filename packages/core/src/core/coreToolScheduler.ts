@@ -291,6 +291,16 @@ const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 
+// The cancellation notice handed to the model depends on whether the tool's
+// work actually finished. Claiming a tool "already completed" when it was
+// interrupted mid-flight makes the model skip work that never happened; the
+// converse makes it redo work whose side effects already landed. Both sites
+// that can cancel after `execute()` was entered must pick the right one.
+const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
+  'User cancelled tool execution.';
+const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
+  'The tool had already completed; its output was discarded.';
+
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
  * execution timeout. Reported as a normal tool error so the model can adapt
@@ -4776,8 +4786,8 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        let cancelMessage =
-          'The tool had already completed; its output was discarded.';
+        // `execute()` returned a result here, so the tool's work did finish.
+        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -4832,7 +4842,8 @@ export class CoreToolScheduler {
           'cancelled',
           createCancelledResponse(
             scheduledCall.request,
-            'The tool had already completed; its output was discarded.',
+            // Reached only after `execute()` settled with a result.
+            TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
             executionStatus,
             artifacts,
           ),
@@ -5565,9 +5576,12 @@ export class CoreToolScheduler {
 
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
+        // `executionThrew` distinguishes a tool interrupted mid-flight (its
+        // work did NOT finish) from a throw raised after `execute()` already
+        // settled — e.g. by a post-processing transform.
         let cancelMessage = executionThrew
-          ? 'User cancelled tool execution.'
-          : 'The tool had already completed; its output was discarded.';
+          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5647,9 +5661,11 @@ export class CoreToolScheduler {
             'cancelled',
             createCancelledResponse(
               scheduledCall.request,
+              // The abort landed while the failure hook was running; the
+              // tool's own outcome is still what `executionThrew` says.
               executionThrew
-                ? 'User cancelled tool execution.'
-                : 'The tool had already completed; its output was discarded.',
+                ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+                : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
               executionStatus,
               failureHookArtifacts,
             ),
