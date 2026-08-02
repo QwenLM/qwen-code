@@ -25,11 +25,24 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  testPackagedSmokeWindowsLogPath();
   testUpdateManifest(path.join(root, 'manifest'));
   testVersionSynchronization(path.join(root, 'version'));
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+function testPackagedSmokeWindowsLogPath() {
+  const smoke = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'smoke-packaged.js'),
+    'utf8',
+  );
+  assert.match(
+    smoke,
+    /process\.platform === 'win32'\s*\? path\.join\(process\.env\.LOCALAPPDATA \?\? isolatedState, appId, 'logs'\)/,
+  );
+  assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
 }
 
 function testBootstrapBridgeConfiguration() {

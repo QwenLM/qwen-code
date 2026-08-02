@@ -26,9 +26,15 @@ const appId = 'com.qwen.code.desktop';
 const logRoot =
   process.platform === 'darwin'
     ? path.join(isolatedHome, 'Library', 'Logs', appId)
-    : path.join(isolatedState, appId, 'logs');
+    : process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA ?? isolatedState, appId, 'logs')
+      : path.join(isolatedState, appId, 'logs');
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
+const previousLog = fs.readFileSync(logPath, {
+  encoding: 'utf8',
+  flag: 'a+',
+});
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -36,7 +42,6 @@ const child = spawn(executable, [], {
     QWEN_DESKTOP_WORKSPACE: workspace,
     QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
     HOME: isolatedHome,
-    LOCALAPPDATA: isolatedState,
     XDG_STATE_HOME: isolatedState,
     XDG_DATA_HOME: isolatedState,
     ...(process.platform === 'linux'
@@ -88,10 +93,7 @@ async function waitForReady() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (exitFailure) throw exitFailure;
-    const contents = fs.readFileSync(logPath, {
-      encoding: 'utf8',
-      flag: 'a+',
-    });
+    const contents = readNewLog();
     const match = contents.match(
       /qwen serve listening on (http:\/\/127\.0\.0\.1:\d+)/,
     );
@@ -101,13 +103,20 @@ async function waitForReady() {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  const contents = readNewLog();
+  throw new Error(
+    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
+  );
+}
+
+function readNewLog() {
   const contents = fs.readFileSync(logPath, {
     encoding: 'utf8',
     flag: 'a+',
   });
-  throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
-  );
+  return contents.startsWith(previousLog)
+    ? contents.slice(previousLog.length)
+    : contents;
 }
 
 // The packaged smoke verifies the unauthenticated navigation boundary: the
