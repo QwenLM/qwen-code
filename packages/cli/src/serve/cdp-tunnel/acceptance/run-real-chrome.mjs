@@ -42,6 +42,7 @@ const spawnChild = (command, args, options = {}) => {
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options,
   });
+  child.on('error', () => {});
   children.add(child);
   child.once('exit', () => children.delete(child));
   return child;

@@ -10,7 +10,7 @@ export const cdpEndpoint = (env = process.env) =>
 export const parseSelectedPageUrl = (pages) => {
   const selected =
     pages.split('\n').find((line) => line.includes('[selected]')) || '';
-  const parenthesized = selected.match(/\(([^()]*)\)\s*\[selected\]\s*$/)?.[1];
+  const parenthesized = selected.match(/\((.+)\)\s*\[selected\]\s*$/)?.[1];
   const direct = selected.match(/^\s*\d+:\s+(\S+)/)?.[1];
   const candidate = parenthesized || direct;
   if (!candidate) return undefined;
@@ -49,7 +49,7 @@ export const waitForJson = async (
       );
     }
   }
-  throw new Error(`Timed out waiting for ${url}: ${lastError?.message || ''}`);
+  throw new Error(`Timed out waiting for ${url}: ${lastError?.message || 'predicate never matched'}`);
 };
 
 const waitForExit = (child) => {

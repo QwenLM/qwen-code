@@ -12,7 +12,7 @@
  * (which the bundled service worker uses). The capability model is loaded from
  * sidepanel/capability-status.js via a script tag in sidepanel.html.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, QwenCapabilityStatus */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, QwenCapabilityStatus, console */
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
@@ -92,8 +92,14 @@ async function probeJson(url, token) {
 /** Probe `/health` then `/capabilities` and reduce to an onboarding state. */
 let mcpProbeCounter = 0;
 let cachedMcpSnapshot;
+let lastProbedBaseUrl;
 async function probeState(baseUrl, token) {
   const { deriveCapabilityStatus } = QwenCapabilityStatus;
+  if (baseUrl !== lastProbedBaseUrl) {
+    lastProbedBaseUrl = baseUrl;
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+  }
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) {
     mcpProbeCounter = 0;
@@ -197,7 +203,8 @@ async function tick() {
       framedMisses = 0;
       showWelcome(status, allowOriginCommand(chrome.runtime.id));
     }
-  } catch {
+  } catch (err) {
+    console.error('sidepanel probe failed:', err);
     if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
       framedMisses += 1;
       return;

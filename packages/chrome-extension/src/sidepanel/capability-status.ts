@@ -91,6 +91,7 @@ export function deriveCapabilityStatus(
       };
     }
 
+    // Must match CHROME_DEVTOOLS_MCP_SERVER_NAME in packages/cli/src/serve/acp-http/index.ts.
     const server = mcpSnapshot.servers?.find(
       (candidate) => candidate.name === 'chrome-devtools',
     );

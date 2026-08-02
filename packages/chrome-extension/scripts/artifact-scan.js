@@ -16,6 +16,8 @@ const DEFAULT_SIGNATURES = [
   'node_modules/chrome-devtools-mcp',
   'puppeteer-core/lib/cjs/puppeteer',
 ];
+const REQUIRED_ARTIFACT_FILES = ['sidepanel/capability-status.js'];
+
 const DEFAULT_PROVENANCE_SIGNATURES = [
   'node_modules/chrome-devtools-mcp/',
   'node_modules/puppeteer-core/',
@@ -178,6 +180,15 @@ async function main() {
     await access(root).catch(() => {
       throw new Error(`Artifact directory does not exist: ${root}`);
     });
+  }
+  for (const root of roots) {
+    for (const required of REQUIRED_ARTIFACT_FILES) {
+      await access(path.join(root, required)).catch(() => {
+        throw new Error(
+          `Required artifact file missing: ${path.join(root, required)}`,
+        );
+      });
+    }
   }
   for (const root of optionalRoots ?? []) {
     const present = await access(root).then(

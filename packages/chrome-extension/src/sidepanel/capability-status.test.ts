@@ -374,4 +374,29 @@ describe('deriveCapabilityStatus', () => {
         'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
     });
   });
+
+  it('treats a bracketed ::1 tunnel endpoint as connected, not shadowed', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--wsEndpoint', 'ws://[::1]:4170/cdp'],
+              },
+            },
+          ],
+        },
+        'http://[::1]:4170',
+      ),
+    ).toEqual({
+      state: 'automation-connected',
+      shellReady: true,
+      warning: null,
+    });
+  });
 });

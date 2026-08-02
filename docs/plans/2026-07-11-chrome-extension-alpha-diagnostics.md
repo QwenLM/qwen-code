@@ -1,7 +1,5 @@
 # Chrome Extension Alpha Diagnostics Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Make the Chrome extension alpha accurately report browser automation readiness, cover its CDP bridge behavior, and generate a versioned side-loadable package.
 
 **Architecture:** Keep the extension as a thin daemon client. Derive presentation state from the existing `/health` and `/capabilities` responses without changing the daemon protocol, display a small warning only when chat is ready but browser automation is not, and keep the Web Shell iframe as the primary UI. Test the pure capability reducer and the existing `chrome.debugger` bridge directly with mocked Chrome APIs.

@@ -33,6 +33,14 @@ describe('CDP acceptance helpers', () => {
     ).toBe('about:blank');
   });
 
+  it('parses a selected page URL containing parentheses', () => {
+    expect(
+      parseSelectedPageUrl(
+        '## Pages\n1: Wiki (https://en.wikipedia.org/wiki/Rust_(language)) [selected]',
+      ),
+    ).toBe('https://en.wikipedia.org/wiki/Rust_(language)');
+  });
+
   it('aborts a stalled JSON request at the deadline', async () => {
     const fetchImpl = vi.fn(
       (_url: RequestInfo | URL, init?: RequestInit) =>

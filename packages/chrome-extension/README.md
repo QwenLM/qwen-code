@@ -60,6 +60,7 @@ Web Shell, but the daemon will not register browser automation MCP tools.
 Install the adapter separately and point the daemon at its executable:
 
 The pinned adapter requires Node.js 22.12 or newer.
+Packaging (`npm run package`) and the release test require the POSIX `zip` utility.
 
 ```bash
 npm install -g chrome-devtools-mcp@1.5.0

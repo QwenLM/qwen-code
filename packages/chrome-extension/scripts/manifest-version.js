@@ -37,6 +37,9 @@ export function resolveNightlyBuildNumber(packageVersion) {
     );
   }
   try {
+    // Monotonic within a single branch only; cross-branch ordering is not
+    // guaranteed, so a nightly built on a side branch can carry a lower number
+    // than one built on main. Chrome refuses to treat a lower version as an upgrade.
     return Number(
       execFileSync('git', ['rev-list', '--count', 'HEAD'], {
         cwd: repoRoot,
