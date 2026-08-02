@@ -323,6 +323,19 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
+  it('emits NO warning when groupAllPolicy=all and sessionScope=chat_thread', () => {
+    // chat_thread is a shared-context scope (ChannelBase treats it as shared;
+    // QQ has no threadId, so its routing key falls back to channel:chatId —
+    // identical to 'thread' under groupAllPolicy).
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'chat_thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('chat_thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
@@ -377,13 +390,13 @@ describe('purgeSingleScopeOrphans', () => {
   }
 
   function callPurge(ch: QQChannelInstance): void {
-    (
-      ch as unknown as Record<string, unknown>
-    )['purgeSingleScopeOrphans']();
+    (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
 
   it('removes only :__single__ orphan mappings, keeping normal ones', () => {
-    const removeSessionId = vi.fn((sid: string) => sid.startsWith('single-era-'));
+    const removeSessionId = vi.fn((sid: string) =>
+      sid.startsWith('single-era-'),
+    );
     const router = {
       getAll: () => [
         { key: 'test-bot:__single__', sessionId: 'single-era-1' },
@@ -401,6 +414,45 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
+  });
+
+  it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
+    // restoreSessions() re-attaches orphaned sessions via bridge.loadSession;
+    // removeSessionId alone only clears the router maps, leaving the orphan
+    // alive in the daemon until the process ends. The purge must also
+    // discard the daemon-side session.
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(discardSession).toHaveBeenCalledTimes(1);
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
   it('is a safe no-op when the router throws during purge', () => {
@@ -1549,10 +1601,12 @@ describe('lifecycle status hooks', () => {
       { msgId: string; timestamp: number }
     >;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
-    const release = (chp['releaseSessionReplyAnchor'] as (
-      sessionId: string,
-      expectedMsgId?: string,
-    ) => void).bind(ch);
+    const release = (
+      chp['releaseSessionReplyAnchor'] as (
+        sessionId: string,
+        expectedMsgId?: string,
+      ) => void
+    ).bind(ch);
 
     // Two sessions are streaming under the same msg-X; no chat-level entry
     // points at it. Releasing one must NOT purge the seq — the other session

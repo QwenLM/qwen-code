@@ -112,6 +112,8 @@ QQ Bot API V2 only delivers group messages that @mention the bot — the bot doe
 
 The QQ channel defaults to `sessionScope: "thread"`: members of the same group share a single conversation context keyed by `<channel>:<group_openid>`, while different groups are isolated from each other. Each direct message gets its own context keyed by `<channel>:<user_openid>`.
 
+A group thread session is a **shared session**: every member of the group reads and continues the same conversation history, and session-control commands (`/clear`, `/cancel`), permission-request answers, and the `!` host-shell gate apply to the shared session for the whole group. When `allowedUsers` is empty, any group member can trigger those controls and approve tool permissions for the shared session. If group members should not share history or control each other's turns, set `sessionScope: "user"` (each member gets a private session) or restrict membership via `senderPolicy` / `allowedUsers`.
+
 For full-message mode this default is already what you want — with `groupAllPolicy: "all"`, keeping `"thread"` gives you shared context within a group and isolation across groups. If you instead set `sessionScope: "user"`, full-message traffic is fragmented per sender (a separate session for every member), which is not suitable for group full-message scenarios.
 
 See [Group Chats](./overview#group-chats) for full details on group policies and mention gating.

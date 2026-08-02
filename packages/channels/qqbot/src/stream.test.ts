@@ -170,11 +170,7 @@ function onResponseBoundary(
   ).onResponseBoundary(chatId, sessionId);
 }
 
-function setReplyMsgId(
-  ch: QQChannelClass,
-  chatId: string,
-  msgId: string,
-) {
+function setReplyMsgId(ch: QQChannelClass, chatId: string, msgId: string) {
   (
     ch as unknown as {
       setReplyMsgId: (c: string, m: string) => void;
@@ -190,11 +186,7 @@ function onPromptStart(
 ) {
   (
     ch as unknown as {
-      onPromptStart: (
-        c: string,
-        s: string,
-        m?: string,
-      ) => void;
+      onPromptStart: (c: string, s: string, m?: string) => void;
     }
   ).onPromptStart(chatId, sessionId, messageId);
 }
@@ -499,8 +491,9 @@ describe('idle-flush timer', () => {
     setReplyMsgId(ch, 'test-chat', 'msg-NEW');
 
     // ChannelBase's finally invokes onPromptEnd even after cancellation.
-    (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
-      .onPromptEnd('test-chat', 'sess-A');
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 'sess-A');
     expect(sessionAnchors.has('sess-A')).toBe(false);
 
     // The next prompt on the same session anchors from ITS OWN triggering
@@ -527,13 +520,10 @@ describe('idle-flush timer', () => {
       string,
       { msgId: string; timestamp: number }
     >;
-    const promptEnd = (
-      ch: QQChannelClass,
-      chatId: string,
-      sessionId: string,
-    ) =>
-      (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
-        .onPromptEnd(chatId, sessionId);
+    const promptEnd = (ch: QQChannelClass, chatId: string, sessionId: string) =>
+      (
+        ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+      ).onPromptEnd(chatId, sessionId);
 
     // Session A streams under msg-A while the chat entry still references it.
     sessionAnchors.set('sess-A', { msgId: 'msg-A', timestamp: Date.now() });
@@ -560,13 +550,10 @@ describe('idle-flush timer', () => {
       { msgId: string; timestamp: number }
     >;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
-    const promptEnd = (
-      ch: QQChannelClass,
-      chatId: string,
-      sessionId: string,
-    ) =>
-      (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
-        .onPromptEnd(chatId, sessionId);
+    const promptEnd = (ch: QQChannelClass, chatId: string, sessionId: string) =>
+      (
+        ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+      ).onPromptEnd(chatId, sessionId);
 
     // Two concurrent sessions both stream under msg-X (e.g. two sessions in
     // the same chat triggered by the same message). Releasing one of them
@@ -602,12 +589,62 @@ describe('idle-flush timer', () => {
     // onPromptEnd must NOT clear state that the in-flight flush's .then()
     // owns — clearing it would trip the identity guard and drop the
     // residual buffer. The .then() chain re-flushes and releases instead.
-    (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
-      .onPromptEnd('test-chat', 'sess-A');
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 'sess-A');
     expect(st.has('sess-A')).toBe(true);
     expect(pendingDeletes.has('sess-A')).toBe(true);
     expect(sessionAnchors.has('sess-A')).toBe(true);
     expect(st.get('sess-A')!.buffer).toBe('tail ');
+  });
+
+  it('onPromptEnd flushes the residual buffer before tearing down stream state (cancel keeps partial output)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const turnCounter = chp['turnCounter'] as Map<string, number>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // A real turn streams a partial reply and is then cancelled mid-stream:
+    // ChannelBase skips onResponseComplete on cancel, so only onPromptEnd
+    // runs. The buffered tail must still be delivered — on origin/main the
+    // idle timer would have flushed it; dropping it here would be a silent
+    // reply loss (wenshao probe: main sends once, the old PR path sent
+    // zero times).
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'partial reply ', 'sess-1');
+
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 'sess-1');
+
+    // The flush fires immediately (no idle-timer advance needed); sendMessage
+    // awaits resolveRoute, so drive the async chain to settle.
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'partial reply ',
+    );
+    expect(body['msg_id']).toBe('msg-A');
+    expect(body['msg_seq']).toBe(1);
+
+    // Every structure the turn touched is back to empty — nothing leaks.
+    expect(streamState(ch).size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+    expect(pendingStreamDelete.size).toBe(0);
+    expect(flushedSessions.size).toBe(0);
+    expect(sessionAnchors.size).toBe(0);
+    expect(turnCounter.size).toBe(0);
+    // The released anchor's msg_seq counter was cascaded away too.
+    expect(seqMap.has('msg-A')).toBe(false);
   });
 
   it('anchors a slow turn to its triggering msgId even after the chat entry expires or moves on', async () => {
@@ -869,8 +906,9 @@ describe('onResponseComplete', () => {
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
     await onResponseComplete(ch, 'test-chat', 'hello', 'sess-1');
-    (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
-      .onPromptEnd('test-chat', 'sess-1');
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 'sess-1');
 
     expect(streamState(ch).size).toBe(0);
     expect(flushingSessions.size).toBe(0);
