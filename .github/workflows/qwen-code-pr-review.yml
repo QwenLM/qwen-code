@@ -347,7 +347,10 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    timeout-minutes: 260
+    # 300 (not 260): the per-review budget auto-scales to 240 minutes for any
+    # non-small PR (see "Run review"), and the shared retry budget plus comment
+    # posting need headroom above that within the job-level cap.
+    timeout-minutes: 300
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -415,12 +418,17 @@ jobs:
           set -euo pipefail
           DEFAULT_TIMEOUT_MINUTES=180
           TIMEOUT_MINUTES="$DEFAULT_TIMEOUT_MINUTES"
+          # Tracks whether the caller chose a timeout explicitly (workflow_dispatch
+          # input or a /review --timeout=N comment). When false, "Run review"
+          # replaces this default with a PR-size-aware tier instead.
+          TIMEOUT_EXPLICIT=false
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             REVIEW_MODE="${{ github.event.inputs.review_mode }}"
             TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '180' }}"
+            TIMEOUT_EXPLICIT=true
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
             if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -449,9 +457,11 @@ jobs:
               case "$token" in
                 --timeout=*)
                   TIMEOUT_MINUTES="${token#--timeout=}"
+                  TIMEOUT_EXPLICIT=true
                   ;;
                 timeout=*)
                   TIMEOUT_MINUTES="${token#timeout=}"
+                  TIMEOUT_EXPLICIT=true
                   ;;
               esac
             done
@@ -463,6 +473,7 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
+            echo "timeout_explicit=$TIMEOUT_EXPLICIT"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
@@ -493,6 +504,7 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
+          TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -713,6 +725,37 @@ jobs:
             fail "timeout_minutes must not exceed 240 minutes"
           fi
 
+          # Size-aware default timeout. A fixed 180-minute default times out
+          # non-trivial PRs whose deep review (chunked passes, two reverse-audit
+          # rounds, test-efficacy probes that run real builds) legitimately
+          # needs longer — e.g. #8241 (+1577) died on the clock at 180, and the
+          # same PR had finished in ~90 minutes on a less loaded runner, so the
+          # variance alone argues for a wide budget. When the caller did not
+          # pass an explicit --timeout, give any non-small PR (> 300 changed
+          # lines, additions + deletions) the full 240 cap; small PRs keep the
+          # proven 180. An explicit --timeout always wins. A size lookup failure
+          # falls back to the 180 default rather than failing the review.
+          EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"
+          if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then
+            PR_SIZE_LINES=''
+            if PR_SIZE_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json additions,deletions --jq '.additions + .deletions' 2>/dev/null)"; then
+              case "$PR_SIZE_DATA" in
+                ''|*[!0-9]*) ;;
+                *) PR_SIZE_LINES="$PR_SIZE_DATA" ;;
+              esac
+            fi
+            if [ -n "$PR_SIZE_LINES" ]; then
+              if [ "$PR_SIZE_LINES" -le 300 ]; then
+                EFFECTIVE_TIMEOUT_MINUTES=180
+              else
+                EFFECTIVE_TIMEOUT_MINUTES=240
+              fi
+              echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
+            else
+              echo "Could not determine PR #${PR_NUMBER} size; using default ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
+            fi
+          fi
+
           if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
             fail "Failed to determine state for PR #${PR_NUMBER}."
           fi
@@ -733,7 +776,10 @@ jobs:
           export QWEN_CI_REVIEW_REPO="$REPO"
           export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
           export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
-          echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "expected_head_sha=$EXPECTED_HEAD_SHA"
+            echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
+          } >> "$GITHUB_OUTPUT"
 
           PROMPT="/review ${REVIEW_URL}"
           if [ "$REVIEW_MODE" = "comment" ]; then
@@ -745,7 +791,7 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
-          QWEN_TIMEOUT="$TIMEOUT_MINUTES"
+          QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
           # quota | timeout | fatal), plus REASON/KIND for the failure paths.
@@ -901,7 +947,9 @@ jobs:
           FAILURE_REASON: "${{ steps.review.outputs.failure_reason || 'Run review failed. See workflow logs for details.' }}"
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
+          # The size-aware budget actually used by "Run review" (falls back to
+          # the raw context value if the review step failed before setting it).
+          TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
         run: |-
           pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')" || {
             echo "Could not verify PR #${PR_NUMBER}; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"

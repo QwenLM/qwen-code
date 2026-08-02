@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -192,6 +192,7 @@ describe('AgentTool', () => {
     // exercises foreground execution fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -3700,6 +3701,78 @@ describe('AgentTool', () => {
       );
     });
 
+    it("does not seed a fork with its siblings' directives", async () => {
+      // When the model launches several forks in one response, the last model
+      // message holds one functionCall per sibling, each carrying that
+      // sibling's directive in `args.prompt`. Replaying it verbatim would leak
+      // every sibling directive into this fork's seed history. Pin the
+      // end-to-end path: the seed must not contain a sibling's directive.
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'launch two forks' }],
+      };
+      const forkLaunch = {
+        role: 'model' as const,
+        parts: [
+          { text: 'Launching two forks.' },
+          {
+            functionCall: {
+              id: 'call-a',
+              name: 'agent',
+              args: { subagent_type: 'fork', prompt: 'do the thing' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call-b',
+              name: 'agent',
+              args: {
+                subagent_type: 'fork',
+                prompt: 'SIBLING_SECRET_DIRECTIVE',
+              },
+            },
+          },
+        ],
+      };
+      const getHistoryShallow = vi
+        .fn()
+        .mockReturnValue([startup, firstUser, forkLaunch]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow,
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: 'all',
+      });
+
+      await invocation.execute();
+
+      const promptConfig = vi.mocked(AgentHeadless.create).mock
+        .calls[0]?.[2] as { initialMessages?: Content[] } | undefined;
+      const initialMessages = promptConfig?.initialMessages ?? [];
+      // The sibling's directive must appear nowhere in the fork's seed history.
+      expect(JSON.stringify(initialMessages)).not.toContain(
+        'SIBLING_SECRET_DIRECTIVE',
+      );
+      // The seed still ends on a model message so the task_prompt can follow.
+      expect(initialMessages.at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: 'Understood. Executing directive now.' }],
+      });
+    });
+
     it('falls back to uncurated getHistory() when getHistoryForForkWindow is unavailable', async () => {
       // The numeric branch reads its bounded window via
       // getHistoryForForkWindow?.() ?? getHistory(). When the client does
@@ -3864,6 +3937,62 @@ describe('AgentTool', () => {
         ToolNames.ASK_USER_QUESTION,
       ]);
       expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),
+      );
+    });
+
+    it('preserves display_image in the fork declarations but denies its execution', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.DISPLAY_IMAGE,
+          description: 'Display an image',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.EDIT,
+          description: 'Edit a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'inspect images',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: [ToolNames.READ_FILE, ToolNames.DISPLAY_IMAGE],
+      });
+      await invocation.execute();
+
+      const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
+      const forkConfig = createArgs?.[1];
+      const toolConfig = createArgs?.[5];
+      expect(toolConfig?.tools).toStrictEqual([
+        ToolNames.READ_FILE,
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.EDIT,
+      ]);
+      expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(
+        forkConfig?.getToolRegistry().registerFactory,
+      ).toHaveBeenCalledWith(ToolNames.DISPLAY_IMAGE, expect.any(Function));
       expect(mockContextState.set).toHaveBeenCalledWith(
         'task_prompt',
         expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),

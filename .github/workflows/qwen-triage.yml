@@ -574,6 +574,18 @@ jobs:
           ESCAPED=$(printf '%s' "$OPENAI_MODEL" | sed -e 's/[&/\]/\\&/g')
           sed -i "s/qwen3\.7-max/${ESCAPED}/g" "$TARGET"
 
+      - name: 'Ensure qwen CLI'
+        id: 'ensure_qwen'
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen already installed:"
+          else
+            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          fi
+          qwen --version
+          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+
       - name: 'Run Qwen Triage'
         id: 'triage'
         uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
@@ -589,6 +601,12 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # Pin the action's unconditional global reinstall to the version
+          # this job already runs. Left at `latest`, the action installs with
+          # --prefer-offline and resolves the dist-tag from the runner's
+          # persistent npm cache, which lags npm publishes and has downgraded
+          # the shared ECS box back to a stale release.
+          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
           # The input name is `settings` — this action version has no
           # `settings_json` input. The old `settings_json:` block was silently
           # dropped ("Unexpected input(s) 'settings_json'" in the run log), so

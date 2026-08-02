@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
   'toolDisplayName.ExitPlanMode': '退出計畫模式',
@@ -1299,6 +1300,13 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，請等待上一個請求完成',
   'No conversation found to summarize.': '未找到要總結的對話',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路徑已存在且非產生的摘要：{{path}}',
+  'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
+  'Summary path resolves to an existing directory: {{path}}':
+    '摘要路徑解析為一個已存在的目錄：{{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路徑以分隔符結尾，但是一個已存在的檔案：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

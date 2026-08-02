@@ -192,6 +192,7 @@ export default {
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -1469,6 +1470,14 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'Already generating summary, wait for previous request to complete',
   'No conversation found to summarize.': 'No conversation found to summarize.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Summary path already exists and is not a generated summary: {{path}}',
+  'Summary path must be within the project root.':
+    'Summary path must be within the project root.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Summary path resolves to an existing directory: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Summary path ends with a separator but is an existing file: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Failed to generate project context summary: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
