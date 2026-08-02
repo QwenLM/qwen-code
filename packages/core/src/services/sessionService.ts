@@ -542,10 +542,15 @@ export class SessionService {
         const stagedOwnerMarker = path.join(stagedBackup, '.branch-owner');
         const targetOwnerMarker = path.join(targetBackup, '.branch-owner');
         const targetTranscript = this.getSessionFilePath(sessionId, 'active');
+        const archivedTranscript = this.getSessionFilePath(
+          sessionId,
+          'archived',
+        );
 
         const stagedBackupExists = fs.existsSync(stagedBackup);
         const targetBackupExists = fs.existsSync(targetBackup);
-        const targetTranscriptExists = fs.existsSync(targetTranscript);
+        const targetTranscriptExists =
+          fs.existsSync(targetTranscript) || fs.existsSync(archivedTranscript);
         if (
           (stagedBackupExists &&
             !branchOwnerMarkerMatches(stagedOwnerMarker, manifest)) ||
@@ -2282,8 +2287,6 @@ export class SessionService {
           fsyncDirectoryBestEffort(backupRoot);
         }
       }
-
-      validateTargetBranchPoint();
 
       fs.linkSync(stagedTranscriptPath, targetPath);
       committed = true;

@@ -106,6 +106,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_launch_prompt',
   'file_history_snapshot',
   'session_source',
+  'branch_checkpoint',
   'goal_state',
   'goal_runtime',
   ...ARTIFACT_RECORD_SUBTYPES,

@@ -4498,8 +4498,8 @@ describe('DaemonSessionProvider', () => {
             promptId: 'restored-prompt',
             stopReason: 'end_turn',
             branchPoint: {
-              assistantRecordUuid: 'assistant-record',
-              checkpointUuid: 'checkpoint-record',
+              assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+              checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
             },
           },
         };
@@ -4530,8 +4530,8 @@ describe('DaemonSessionProvider', () => {
         kind: 'assistant',
         text: 'completed answer',
         promptId: 'restored-prompt',
-        sourceRecordIds: ['assistant-record'],
-        branchRecordId: 'checkpoint-record',
+        sourceRecordIds: ['a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d'],
+        branchRecordId: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
         streaming: false,
       },
     ]);

@@ -3070,6 +3070,9 @@ describe('SessionService', () => {
         committed?: boolean;
         publishBackup?: boolean;
         markerOwnerToken?: string;
+        archived?: boolean;
+        stageBackup?: boolean;
+        stagedMarkerOwnerToken?: string;
       } = {},
     ) => {
       const chatsDir = realPath.join(
@@ -3112,6 +3115,14 @@ describe('SessionService', () => {
       if (options.committed) {
         fs.writeFileSync(targetTranscriptPath, 'committed transcript');
       }
+      if (options.archived) {
+        const archiveDir = realPath.join(chatsDir, 'archive');
+        fs.mkdirSync(archiveDir, { recursive: true });
+        fs.writeFileSync(
+          realPath.join(archiveDir, `${sessionId}.jsonl`),
+          'archived transcript',
+        );
+      }
       if (options.publishBackup) {
         fs.mkdirSync(targetBackupPath, { recursive: true });
         fs.writeFileSync(realPath.join(targetBackupPath, 'backup-a'), 'data');
@@ -3124,6 +3135,26 @@ describe('SessionService', () => {
           }),
         );
       }
+      const stagedBackupPath = realPath.join(
+        realTmpDir,
+        'file-history',
+        backupStagingName,
+      );
+      if (options.stageBackup) {
+        fs.mkdirSync(stagedBackupPath, { recursive: true });
+        fs.writeFileSync(
+          realPath.join(stagedBackupPath, 'backup-a'),
+          'staged-data',
+        );
+        fs.writeFileSync(
+          realPath.join(stagedBackupPath, '.branch-owner'),
+          JSON.stringify({
+            v: 1,
+            sessionId,
+            ownerToken: options.stagedMarkerOwnerToken ?? ownerToken,
+          }),
+        );
+      }
       const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
       fs.utimesSync(claimPath, stale, stale);
       return {
@@ -3131,6 +3162,7 @@ describe('SessionService', () => {
         stagedTranscriptPath,
         targetTranscriptPath,
         targetBackupPath,
+        stagedBackupPath,
       };
     };
 
@@ -4426,6 +4458,58 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.claimPath)).toBe(true);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
       expect(fs.existsSync(paths.targetBackupPath)).toBe(true);
+      expect(warnings).toEqual([
+        expect.stringContaining('owner marker mismatch'),
+      ]);
+    });
+
+    it('preserves backup of a committed branch whose transcript was archived', () => {
+      const newId = '66666666-6666-6666-6666-666666666672';
+      const ownerToken = '77777777-7777-7777-7777-777777777782';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        archived: true,
+        publishBackup: true,
+      });
+
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
+      expect(
+        fs.existsSync(realPath.join(paths.targetBackupPath, 'backup-a')),
+      ).toBe(true);
+    });
+
+    it('garbage-collects a stale staged backup with matching marker', () => {
+      const newId = '66666666-6666-6666-6666-666666666673';
+      const ownerToken = '77777777-7777-7777-7777-777777777783';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        stageBackup: true,
+      });
+
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedBackupPath)).toBe(false);
+    });
+
+    it('preserves staged backup when its owner marker mismatches', () => {
+      const newId = '66666666-6666-6666-6666-666666666674';
+      const ownerToken = '77777777-7777-7777-7777-777777777784';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        stageBackup: true,
+        stagedMarkerOwnerToken: '88888888-8888-8888-8888-888888888884',
+      });
+      const warnings: string[] = [];
+
+      const gcService = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
+      gcService['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedBackupPath)).toBe(true);
       expect(warnings).toEqual([
         expect.stringContaining('owner marker mismatch'),
       ]);

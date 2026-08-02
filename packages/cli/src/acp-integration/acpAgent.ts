@@ -705,6 +705,21 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
+function deriveForkBaseName(
+  name: unknown,
+  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
+  sessionId: string,
+): string {
+  if (typeof name === 'string' && name.trim().length > 0) {
+    return name.trim();
+  }
+  const existingTitle = recording?.getCurrentCustomTitle();
+  const stripped = existingTitle
+    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+    .trim();
+  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
+}
+
 function isHistoryTurnStart(record: ChatRecord): boolean {
   return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
 }
@@ -10251,19 +10266,7 @@ class QwenAgent implements Agent {
                 const recording = sourceConfig.getChatRecordingService();
                 const sessionService = sourceConfig.getSessionService();
 
-                let baseName: string;
-                if (typeof name === 'string' && name.trim().length > 0) {
-                  baseName = name.trim();
-                } else {
-                  const existingTitle = recording?.getCurrentCustomTitle();
-                  const stripped = existingTitle
-                    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-                    .trim();
-                  baseName =
-                    stripped && stripped.length > 0
-                      ? stripped
-                      : sessionId.slice(0, 8);
-                }
+                const baseName = deriveForkBaseName(name, recording, sessionId);
 
                 const title = await computeUniqueBranchTitle(
                   baseName,
@@ -10314,19 +10317,7 @@ class QwenAgent implements Agent {
 
         let title: string;
         try {
-          let baseName: string;
-          if (typeof name === 'string' && name.trim().length > 0) {
-            baseName = name.trim();
-          } else {
-            const existingTitle = recording?.getCurrentCustomTitle();
-            const stripped = existingTitle
-              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-              .trim();
-            baseName =
-              stripped && stripped.length > 0
-                ? stripped
-                : sessionId.slice(0, 8);
-          }
+          const baseName = deriveForkBaseName(name, recording, sessionId);
           title = baseName;
           const renamed = await sessionService.renameSession(
             newSessionId,

@@ -128,6 +128,9 @@ const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 
+const RECORD_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
   reason: string,
@@ -149,7 +152,10 @@ function assistantDoneFromTurnEvent(
       ? rawBranchPoint['checkpointUuid']
       : undefined;
   const branchPointValid =
-    assistantRecordUuid !== undefined && checkpointUuid !== undefined;
+    assistantRecordUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(assistantRecordUuid) &&
+    checkpointUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(checkpointUuid);
   return {
     type: 'assistant.done',
     reason,
