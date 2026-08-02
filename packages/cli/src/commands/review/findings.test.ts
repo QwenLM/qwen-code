@@ -608,6 +608,93 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].severity).toBe('Critical');
   });
 
+  it('says nothing when the measurement file simply is not there', () => {
+    // test-delta only runs when a test command failed AND a base tree built,
+    // so on the ordinary review the artifact does not exist. The SKILL passes
+    // the flag unconditionally, and a loud line here would report the normal
+    // path as a failure on every green run.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([{ ...base, severity: 'Critical' }]));
+    const stderr = runCapturingStderr({
+      input,
+      out: join(dir, 'findings.json'),
+      testDelta: join(dir, 'never-written.json'),
+      print: false,
+    });
+    expect(stderr).not.toContain('no holds applied');
+    expect(stderr).not.toContain('ENOENT');
+  });
+
+  it('still speaks up for a measurement that exists and will not parse', () => {
+    const input = join(dir, 'in.json');
+    const delta = join(dir, 'broken.json');
+    writeFileSync(input, JSON.stringify([{ ...base, severity: 'Critical' }]));
+    writeFileSync(delta, '{ "shared": [');
+    const stderr = runCapturingStderr({
+      input,
+      out: join(dir, 'findings.json'),
+      testDelta: delta,
+      print: false,
+    });
+    expect(stderr).toContain('no holds applied');
+  });
+
+  it('counts the holds and reaches the same severity with and without outcomes', () => {
+    const input = join(dir, 'in.json');
+    const delta = join(dir, 'test-delta.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'R1-1',
+          severity: 'Critical',
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx goes red on this change.',
+        },
+      ]),
+    );
+    writeFileSync(
+      delta,
+      JSON.stringify({
+        entries: [
+          {
+            command: 'npm test --workspace="packages/cli"',
+            netNew: [],
+            shared: ['src/ui/auth/AuthDialog.test.tsx'],
+          },
+        ],
+      }),
+    );
+    const outcomes = join(dir, 'outcomes.json');
+    writeFileSync(outcomes, JSON.stringify([{ id: 'R1-1', outcome: 'fixed' }]));
+
+    const first = join(dir, 'a.json');
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out: first,
+      testDelta: delta,
+      print: false,
+    });
+    const second = join(dir, 'b.json');
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out: second,
+      outcomes,
+      testDelta: delta,
+      print: false,
+    });
+    const a = JSON.parse(readFileSync(first, 'utf8')) as FindingsReport;
+    const b = JSON.parse(readFileSync(second, 'utf8')) as FindingsReport;
+    expect(a.counts.held).toBe(1);
+    expect(b.counts.held).toBe(1);
+    // The whole point: one input, one measurement, one answer.
+    expect(b.findings[0].severity).toBe(a.findings[0].severity);
+    expect(b.findings[0].heldByMeasurement).toEqual(
+      a.findings[0].heldByMeasurement,
+    );
+  });
+
   it('leaves severities alone when --test-delta is not passed', () => {
     const report = run([{ ...base, severity: 'Critical' }]);
     expect(report.findings[0].severity).toBe('Critical');
@@ -707,15 +794,29 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(held).toEqual([]);
   });
 
-  it('leaves a Critical the fixer already applied alone', () => {
-    // The ledger says the tree was edited for it; demoting it would print
-    // "not a passing test the PR turns red" beside that.
-    const { findings, held } = holdCriticalsFailingOnBase(
+  it('holds the same finding whether or not the fixer already applied it', () => {
+    // The SKILL runs this command twice over one input, the second time with
+    // --outcomes. An exemption for `fixed` made run 2 answer Critical where
+    // run 1 answered Suggestion — the same finding at two severities inside
+    // one review, which this file's header names as the failure it exists to
+    // prevent. The two statements are about different things: the measurement
+    // says the base was already red, the outcome says the tree was edited.
+    const plain = holdCriticalsFailingOnBase([critical], shared);
+    const fixed = holdCriticalsFailingOnBase(
       [{ ...critical, outcome: 'fixed' as const }],
       shared,
     );
-    expect(findings[0].severity).toBe('Critical');
-    expect(held).toEqual([]);
+    expect(fixed.findings[0].severity).toBe(plain.findings[0].severity);
+    expect(fixed.held).toEqual(plain.held);
+  });
+
+  it('records the hold as a field, not only as prose', () => {
+    // A later round reads the artifact. A hold discoverable only by
+    // substring-matching the scenario is a hold the round ledger cannot see.
+    const { findings } = holdCriticalsFailingOnBase([critical], shared);
+    expect(findings[0].heldByMeasurement).toEqual({
+      file: 'src/ui/auth/AuthDialog.test.tsx',
+    });
   });
 
   it('does not match on suggestedFix, where a test file is proposed work', () => {
@@ -832,7 +933,7 @@ describe('sharedFailingFilesOf — cross-workspace identity', () => {
   };
 
   it('qualifies each entry by the workspace its command names', () => {
-    expect(sharedFailingFilesOf(delta)).toEqual([
+    expect(sharedFailingFilesOf(delta).shared).toEqual([
       'packages/cli/src/utils/errors.test.ts',
     ]);
   });
@@ -841,7 +942,7 @@ describe('sharedFailingFilesOf — cross-workspace identity', () => {
     // Six test paths in this repo exist under both packages/cli/src and
     // packages/core/src. A bare suffix would demote a real finding about
     // core's copy because cli's copy was already red.
-    const shared = sharedFailingFilesOf(delta);
+    const { shared } = sharedFailingFilesOf(delta);
     const critical = {
       id: 'f1',
       severity: 'Critical' as const,
@@ -872,27 +973,62 @@ describe('sharedFailingFilesOf — cross-workspace identity', () => {
           { command: 'npm test', netNew: [], shared: ['src/a.test.ts'] },
           { command: 'npm test', netNew: ['src/a.test.ts'], shared: [] },
         ],
-      }),
+      }).shared,
     ).toEqual([]);
   });
 
-  it('reads the vitest-project key the producer documents', () => {
-    // `failingFilesOf` writes `project::path` when the runner prints a project
-    // tag. A finding never contains `::`, so an unstripped key can never match.
-    const shared = sharedFailingFilesOf({
+  it('refuses a project-keyed path it cannot place in a workspace', () => {
+    // The shape the producer can actually emit: `failingFilesOf` writes
+    // `project::path` only when the runner prints a project tag, and a
+    // `--workspace=` command never does (neither vitest config here names a
+    // project), so a key always arrives on a bare `npm test`. Stripping it
+    // would leave a project-relative path that matches as a suffix of any
+    // directory — the cross-project collapse, from the consumer side.
+    const { shared, unidentifiable } = sharedFailingFilesOf({
       entries: [
         {
-          command: 'npm test --workspace="packages/cli"',
+          command: 'npm test',
           netNew: [],
-          shared: ['@qwen-code/qwen-code::src/commands/x.test.ts'],
+          shared: [
+            '@qwen-code/qwen-code::src/utils/errors.test.ts',
+            'src/plain.test.ts',
+          ],
         },
       ],
     });
-    expect(shared).toEqual(['packages/cli/src/commands/x.test.ts']);
+    expect(shared).toEqual(['src/plain.test.ts']);
+    expect(unidentifiable).toEqual([
+      '@qwen-code/qwen-code::src/utils/errors.test.ts',
+    ]);
+  });
+
+  it('does not demote a Critical on a path it refused to place', () => {
+    const { shared } = sharedFailingFilesOf({
+      entries: [
+        {
+          command: 'npm test',
+          netNew: [],
+          shared: ['@qwen-code/qwen-code::src/utils/errors.test.ts'],
+        },
+      ],
+    });
+    const critical = {
+      id: 'f1',
+      severity: 'Critical' as const,
+      confidence: 'high' as const,
+      source: 'review' as const,
+      summary: 'this PR breaks core errors',
+      shortSummary: 'core errors',
+      failureScenario: 'packages/core/src/utils/errors.test.ts goes red.',
+      locations: [{ file: 'packages/core/src/utils/errors.ts' }],
+    };
+    expect(
+      holdCriticalsFailingOnBase([critical], shared).findings[0].severity,
+    ).toBe('Critical');
   });
 
   it('falls back to the top level only when there are no entries', () => {
-    expect(sharedFailingFilesOf({ shared: ['src/a.test.ts'] })).toEqual([
+    expect(sharedFailingFilesOf({ shared: ['src/a.test.ts'] }).shared).toEqual([
       'src/a.test.ts',
     ]);
   });
@@ -907,7 +1043,7 @@ describe('sharedFailingFilesOf', () => {
           { shared: ['src/a.test.ts', 'src/b.test.ts'] },
           { shared: ['src/c.test.ts'] },
         ],
-      }).sort(),
+      }).shared.sort(),
     ).toEqual(['src/a.test.ts', 'src/b.test.ts', 'src/c.test.ts']);
   });
 
@@ -915,7 +1051,7 @@ describe('sharedFailingFilesOf', () => {
     // An unreadable measurement must not hold a Critical back, and must not
     // take the review down either.
     for (const junk of [null, 42, 'shared', {}, { shared: 'nope' }, []]) {
-      expect(sharedFailingFilesOf(junk)).toEqual([]);
+      expect(sharedFailingFilesOf(junk).shared).toEqual([]);
     }
   });
 });

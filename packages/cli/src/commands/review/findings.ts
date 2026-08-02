@@ -32,7 +32,7 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -95,6 +95,15 @@ export interface Finding {
   outcome?: Outcome;
   /** The fixer's reason, carried from the ledger — mainly for `skipped`. */
   outcomeNote?: string;
+  /**
+   * Set when `--test-delta` lowered this finding's severity: the test file the
+   * measurement matched. Structured, not prose only — the sibling command makes
+   * the same argument about its own budget skips, and for the same reason. A
+   * later round reads the artifact, not the paragraph, so a hold discoverable
+   * only by substring-matching `failureScenario` is a hold the round ledger
+   * cannot see, and it re-files the finding at whatever severity it likes.
+   */
+  heldByMeasurement?: { file: string };
 }
 
 export interface FindingsReport {
@@ -105,6 +114,9 @@ export interface FindingsReport {
     byConfidence: Record<Confidence, number>;
     /** Present only once outcomes have been recorded. */
     byOutcome?: Record<Outcome, number>;
+    /** How many findings a measurement lowered. Counted, not inferred from
+     *  prose, so a later round can act on it. */
+    held: number;
   };
   /** True once every finding carries an outcome. */
   outcomesRecorded: boolean;
@@ -419,11 +431,6 @@ export function holdCriticalsFailingOnBase(
   const held: Array<{ id: string; file: string }> = [];
   const out = findings.map((f) => {
     if (f.severity !== 'Critical') return f;
-    // A finding the fixer already edited the tree for is not a claim awaiting
-    // adjudication. Demoting it would print "this is not a passing test the PR
-    // turns red" beside a ledger entry saying the code was changed for it —
-    // two statements about the same finding that read as contradicting.
-    if (f.outcome === 'fixed') return f;
     // `suggestedFix` is deliberately absent: it is where a finding proposes
     // work ("add a case in src/x.test.ts"), not where it asserts its claim, and
     // a test file named there is routinely unrelated to any file being red.
@@ -438,6 +445,7 @@ export function holdCriticalsFailingOnBase(
     return {
       ...f,
       severity: 'Suggestion' as Severity,
+      heldByMeasurement: { file: hit },
       failureScenario: `${f.failureScenario}\n\nHeld back from Critical by measurement: \`test-delta\` reran the failing test command on the merge base and ${hit} failed there too, so this is not a passing test the PR turns red. If the PR makes an already-red test fail for a NEW reason, say which test and quote both sides.`,
     };
   });
@@ -465,9 +473,21 @@ const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
  * in its identity for exactly this reason; discarding it here would reopen from
  * the consumer side what the producer closed.
  */
-function repoRelative(path: string, workspace: string | undefined): string {
+function repoRelative(
+  path: string,
+  workspace: string | undefined,
+): string | undefined {
   const at = path.indexOf('::');
   const bare = at < 0 ? path : path.slice(at + 2);
+  // A key with no workspace to put back cannot be re-qualified, and the bare
+  // remainder is project-relative: `namesPath` would then match it as a suffix
+  // of ANY directory, which is the cross-project collapse this whole function
+  // exists to prevent. The two shapes are mutually exclusive in practice — a
+  // project tag comes from a runner printing one, and a `--workspace=` command
+  // in this repo never does — so the qualifying half was never covering for the
+  // stripping half. Refuse: a measurement whose subject cannot be identified
+  // licenses nothing, and a missed hold costs less than a demoted Critical.
+  if (at >= 0 && !workspace) return undefined;
   if (!workspace || bare.startsWith(`${workspace}/`)) return bare;
   return `${workspace}/${bare}`;
 }
@@ -488,10 +508,15 @@ function repoRelative(path: string, workspace: string | undefined): string {
  * silently hold a Critical back, and must not throw either — the review has
  * findings to report whether or not this file parsed.
  */
-export function sharedFailingFilesOf(raw: unknown): string[] {
-  if (!raw || typeof raw !== 'object') return [];
+export function sharedFailingFilesOf(raw: unknown): {
+  shared: string[];
+  unidentifiable: string[];
+} {
+  if (!raw || typeof raw !== 'object')
+    return { shared: [], unidentifiable: [] };
   const shared = new Set<string>();
   const netNew = new Set<string>();
+  const unidentifiable = new Set<string>();
   const take = (
     into: Set<string>,
     v: unknown,
@@ -499,7 +524,10 @@ export function sharedFailingFilesOf(raw: unknown): string[] {
   ) => {
     if (!Array.isArray(v)) return;
     for (const e of v) {
-      if (typeof e === 'string' && e) into.add(repoRelative(e, workspace));
+      if (typeof e !== 'string' || !e) continue;
+      const qualified = repoRelative(e, workspace);
+      if (qualified === undefined) unidentifiable.add(e);
+      else into.add(qualified);
     }
   };
 
@@ -520,7 +548,10 @@ export function sharedFailingFilesOf(raw: unknown): string[] {
     take(shared, (raw as { shared?: unknown }).shared, undefined);
     take(netNew, (raw as { netNew?: unknown }).netNew, undefined);
   }
-  return [...shared].filter((f) => !netNew.has(f));
+  return {
+    shared: [...shared].filter((f) => !netNew.has(f)),
+    unidentifiable: [...unidentifiable],
+  };
 }
 
 /** Most severe first, then high-confidence before low, then file and line. */
@@ -660,6 +691,7 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
       total: sorted.length,
       bySeverity,
       byConfidence,
+      held: sorted.filter((f) => f.heldByMeasurement !== undefined).length,
       ...(byOutcome ? { byOutcome } : {}),
     },
     outcomesRecorded,
@@ -762,19 +794,31 @@ export const findingsCommand: CommandModule = {
       // shape-level tolerance in `sharedFailingFilesOf` covers the rest.
       // Never silent, though — a hold that did not happen because the file was
       // unreadable is exactly what a reader needs told.
+      // A file that is not there and a file that will not parse are different
+      // facts, and only the second is worth alarming about. `test-delta` runs
+      // only when a test command failed AND a base tree was available, so on
+      // the ordinary review — tests green — the artifact does not exist, and a
+      // loud line there would report the normal path as a failure on every run.
       let measurement: unknown;
-      try {
-        measurement = readJson(testDelta, 'test-delta');
-      } catch (err) {
-        measurement = undefined;
+      if (existsSync(resolve(testDelta))) {
+        try {
+          measurement = readJson(testDelta, 'test-delta');
+        } catch (err) {
+          writeStderrLine(
+            `findings: no holds applied — ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const { shared, unidentifiable } = sharedFailingFilesOf(measurement);
+      // Never a silent drop: a measured file this could not place is coverage
+      // the command chose not to use, and saying so is the difference between
+      // "nothing matched" and "something was set aside".
+      for (const f of unidentifiable) {
         writeStderrLine(
-          `findings: no holds applied — ${err instanceof Error ? err.message : String(err)}`,
+          `findings: ignored the measured file ${f} — it carries a vitest project key and no workspace to resolve it against, so which project it names cannot be established`,
         );
       }
-      ({ findings, held } = holdCriticalsFailingOnBase(
-        findings,
-        sharedFailingFilesOf(measurement),
-      ));
+      ({ findings, held } = holdCriticalsFailingOnBase(findings, shared));
     }
     const report = buildReport(findings);
 
