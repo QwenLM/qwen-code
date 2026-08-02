@@ -114,6 +114,14 @@ describe('ManagedMediaStorage', () => {
       expect(asTxt.sha256).toBe(asMp4.sha256);
       expect(asMp4.deduplicated).toBe(true);
     });
+
+    it('sanitizes .tmp extension to .bin', async () => {
+      const data = Buffer.from('tmp ext test');
+      const result = await storage.commitBuffer(data, '.tmp');
+      expect(result.objectPath).toMatch(/\.bin$/);
+      expect(result.objectPath).not.toMatch(/\.tmp$/);
+      expect(await storage.objectExists(result.managedId)).toBe(true);
+    });
   });
 
   describe('commitObject', () => {
@@ -139,6 +147,18 @@ describe('ManagedMediaStorage', () => {
       await expect(storage.commitObject(linkFile, '.bin')).rejects.toThrow(
         'symlink',
       );
+    });
+
+    it('deduplicates when content already exists', async () => {
+      const data = Buffer.from('dedup via commitObject');
+      const first = await storage.commitBuffer(data, '.bin');
+
+      const srcPath = path.join(tmpDir, 'dup-source.bin');
+      await fs.promises.writeFile(srcPath, data);
+      const second = await storage.commitObject(srcPath, '.bin');
+
+      expect(second.deduplicated).toBe(true);
+      expect(second.managedId).toBe(first.managedId);
     });
   });
 
@@ -215,6 +235,16 @@ describe('ManagedMediaStorage', () => {
         expect(await storage.objectExists(obj.managedId)).toBe(true);
       }
 
+      // Verify content is preserved
+      const wavObj = result.objects.find((o) => o.objectPath.endsWith('.wav'));
+      const txtObj = result.objects.find((o) => o.objectPath.endsWith('.txt'));
+      expect(wavObj).toBeDefined();
+      expect(txtObj).toBeDefined();
+      const wavData = await fs.promises.readFile(wavObj!.objectPath);
+      const txtData = await fs.promises.readFile(txtObj!.objectPath);
+      expect(wavData.toString()).toBe('audio data');
+      expect(txtData.toString()).toBe('hello');
+
       // staging dir should be removed
       await expect(fs.promises.stat(stagingDir)).rejects.toThrow();
     });
@@ -246,6 +276,17 @@ describe('ManagedMediaStorage', () => {
       );
       const reason = JSON.parse(await fs.promises.readFile(reasonPath, 'utf8'));
       expect(reason.reason).toBe('ffmpeg crashed');
+
+      // original artifact is preserved in quarantine
+      const artifactPath = path.join(
+        tmpDir,
+        'omni',
+        'quarantine',
+        'inv-fail',
+        'broken.bin',
+      );
+      const artifact = await fs.promises.readFile(artifactPath);
+      expect(artifact.toString()).toBe('bad');
     });
 
     it('rejects unsafe invocation IDs', async () => {
@@ -253,6 +294,19 @@ describe('ManagedMediaStorage', () => {
         'Unsafe',
       );
       await expect(storage.createStagingDir('a/b')).rejects.toThrow('Unsafe');
+    });
+
+    it('blocks staging creation when over budget', async () => {
+      const smallStorage = new ManagedMediaStorage(
+        path.join(tmpDir, 'omni-budget'),
+        testConfig({ maxTotalBytes: 10 }),
+      );
+      await smallStorage.initialize();
+      await smallStorage.commitBuffer(Buffer.from('x'.repeat(100)), '.bin');
+
+      await expect(smallStorage.createStagingDir('inv-1')).rejects.toThrow(
+        'over budget',
+      );
     });
   });
 
@@ -401,8 +455,36 @@ describe('GC', () => {
     const result = await storage.runGc(emptyRootProvider());
     expect(result.sweptCount).toBeGreaterThan(0);
 
-    // Oldest should be swept first
+    // Oldest should be swept first, newest should survive
     expect(await storage.objectExists(ids[0]!)).toBe(false);
+    expect(await storage.objectExists(ids[2]!)).toBe(true);
+  });
+
+  it('cascades upload cache invalidation on GC sweep', async () => {
+    const storage = new ManagedMediaStorage(
+      path.join(tmpDir, 'omni'),
+      testConfig({ retentionDays: 0 }),
+    );
+    await storage.initialize();
+
+    const { managedId, sha256: hash } = await storage.commitBuffer(
+      Buffer.from('cached object'),
+      '.bin',
+    );
+    storage.setUploadEntry(hash, 'model-a', {
+      ossUrl: 'oss://bucket/cached',
+      uploadedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    expect(storage.getUploadEntry(hash, 'model-a')).toBeDefined();
+
+    const objPath = await storage.findObjectPath(managedId);
+    const past = new Date(Date.now() - 86_400_000);
+    await fs.promises.utimes(objPath!, past, past);
+
+    await storage.runGc(emptyRootProvider());
+    expect(await storage.objectExists(managedId)).toBe(false);
+    expect(storage.getUploadEntry(hash, 'model-a')).toBeUndefined();
   });
 
   it('reports overBudget when all remaining objects are referenced', async () => {
@@ -617,7 +699,17 @@ describe('managedId helpers', () => {
     expect(managedIdToHash(id)).toBe(hash);
   });
 
-  it('rejects invalid managedId', () => {
+  it('rejects invalid managedId prefix', () => {
     expect(() => managedIdToHash('md5:abc')).toThrow('Invalid managedId');
+  });
+
+  it('rejects truncated hash', () => {
+    expect(() => managedIdToHash('sha256:ab12')).toThrow('Invalid managedId');
+  });
+
+  it('rejects non-hex hash', () => {
+    expect(() => managedIdToHash(`sha256:${'g'.repeat(64)}`)).toThrow(
+      'Invalid managedId',
+    );
   });
 });

@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type {
   GcResult,
@@ -131,14 +132,17 @@ export async function runGc(
   }
 
   let sweptBytes = 0;
+  let sweptCount = 0;
+  const sweptHashes: string[] = [];
   for (const obj of toSweep) {
     try {
       await fs.promises.unlink(obj.filePath);
       sweptBytes += obj.sizeBytes;
-      uploadCache.invalidate(obj.sha256);
+      sweptCount++;
+      sweptHashes.push(obj.sha256);
       debugLogger.debug(`Swept object ${obj.sha256}`);
     } catch {
-      // already gone
+      // already gone or permission error — skip
     }
   }
 
@@ -148,7 +152,6 @@ export async function runGc(
     graceRetained.reduce((s, o) => s + o.sizeBytes, 0) +
     sweptBytes;
   let currentBytes = totalBytes - sweptBytes;
-  let budgetSwept = 0;
 
   if (currentBytes > config.maxTotalBytes) {
     graceRetained.sort((a, b) => a.mtimeMs - b.mtimeMs);
@@ -158,8 +161,8 @@ export async function runGc(
         await fs.promises.unlink(obj.filePath);
         currentBytes -= obj.sizeBytes;
         sweptBytes += obj.sizeBytes;
-        budgetSwept++;
-        uploadCache.invalidate(obj.sha256);
+        sweptCount++;
+        sweptHashes.push(obj.sha256);
         debugLogger.debug(`Budget-swept object ${obj.sha256}`);
       } catch {
         // already gone
@@ -167,9 +170,11 @@ export async function runGc(
     }
   }
 
+  uploadCache.invalidateMany(sweptHashes);
+
   const overBudget = currentBytes > config.maxTotalBytes;
   const result: GcResult = {
-    sweptCount: toSweep.length + budgetSwept,
+    sweptCount,
     sweptBytes,
     retainedCount: referenced.length,
     retainedBytes: referenced.reduce((s, o) => s + o.sizeBytes, 0),
@@ -355,8 +360,9 @@ export async function runStartupRecovery(
     for (let i = 0; i < objects.length; i += step) {
       const obj = objects[i]!;
       try {
-        const data = await fs.promises.readFile(obj.filePath);
-        const actual = createHash('sha256').update(data).digest('hex');
+        const hash = createHash('sha256');
+        await pipeline(fs.createReadStream(obj.filePath), hash);
+        const actual = hash.digest('hex');
         if (actual !== obj.sha256) {
           result.hashMismatches.push(obj.sha256);
           debugLogger.warn(

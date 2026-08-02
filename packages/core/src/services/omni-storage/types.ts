@@ -27,6 +27,7 @@ export const DEFAULT_OMNI_STORAGE_CONFIG: OmniStorageConfig = {
 };
 
 const MANAGED_ID_PREFIX = 'sha256:';
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export type ManagedId = string;
 
@@ -38,7 +39,11 @@ export function managedIdToHash(managedId: ManagedId): string {
   if (!managedId.startsWith(MANAGED_ID_PREFIX)) {
     throw new Error(`Invalid managedId format: ${managedId}`);
   }
-  return managedId.slice(MANAGED_ID_PREFIX.length);
+  const hash = managedId.slice(MANAGED_ID_PREFIX.length);
+  if (!SHA256_HEX.test(hash)) {
+    throw new Error(`Invalid managedId hash: ${managedId}`);
+  }
+  return hash;
 }
 
 export interface CommitResult {

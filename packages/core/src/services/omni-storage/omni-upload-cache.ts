@@ -5,6 +5,8 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { UploadCacheEntry } from './types.js';
 
@@ -38,13 +40,15 @@ export class OmniUploadCache {
 
   private save(): void {
     try {
-      fs.writeFileSync(
-        this.filePath,
-        JSON.stringify(this.cache ?? {}, null, 2),
-        {
-          mode: 0o600,
-        },
+      const dir = path.dirname(this.filePath);
+      const tmpPath = path.join(
+        dir,
+        `.upload-cache-${randomBytes(4).toString('hex')}.tmp`,
       );
+      fs.writeFileSync(tmpPath, JSON.stringify(this.cache ?? {}, null, 2), {
+        mode: 0o600,
+      });
+      fs.renameSync(tmpPath, this.filePath);
     } catch (err) {
       debugLogger.warn('Failed to persist upload cache:', err);
     }
@@ -66,7 +70,7 @@ export class OmniUploadCache {
     this.save();
   }
 
-  /** Remove all entries for a given sha256 (called when an object is GC'd). */
+  /** Remove all entries for a given sha256 (called when an object is deleted). */
   invalidate(sha256: string): void {
     const map = this.load();
     const prefix = `${sha256}:`;
@@ -75,6 +79,23 @@ export class OmniUploadCache {
       if (key.startsWith(prefix)) {
         delete map[key];
         changed = true;
+      }
+    }
+    if (changed) this.save();
+  }
+
+  /** Batch-remove entries for multiple sha256 hashes with a single save. */
+  invalidateMany(sha256s: string[]): void {
+    if (sha256s.length === 0) return;
+    const map = this.load();
+    let changed = false;
+    for (const sha256 of sha256s) {
+      const prefix = `${sha256}:`;
+      for (const key of Object.keys(map)) {
+        if (key.startsWith(prefix)) {
+          delete map[key];
+          changed = true;
+        }
       }
     }
     if (changed) this.save();

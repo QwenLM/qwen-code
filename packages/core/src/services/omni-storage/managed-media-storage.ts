@@ -41,7 +41,7 @@ function assertSafeId(id: string, label: string): void {
 
 function sanitizeExtension(extension: string): string {
   const ext = extension.startsWith('.') ? extension : `.${extension}`;
-  if (!SAFE_EXT.test(ext)) {
+  if (!SAFE_EXT.test(ext) || ext === '.tmp') {
     return '.bin';
   }
   return ext;
@@ -442,21 +442,17 @@ export class ManagedMediaStorage {
   }
 
   private async assertNoSymlink(targetPath: string): Promise<void> {
+    let stat: fs.Stats;
     try {
-      const stat = await fs.promises.lstat(targetPath);
-      if (stat.isSymbolicLink()) {
-        throw new Error(
-          `Symlink detected at ${targetPath}. Omni storage refuses symlinks.`,
-        );
-      }
+      stat = await fs.promises.lstat(targetPath);
     } catch (err) {
-      if (
-        err instanceof Error &&
-        err.message.includes('Omni storage refuses symlinks')
-      ) {
-        throw err;
-      }
-      // ENOENT is fine — path doesn't exist yet
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        `Symlink detected at ${targetPath}. Omni storage refuses symlinks.`,
+      );
     }
   }
 }
