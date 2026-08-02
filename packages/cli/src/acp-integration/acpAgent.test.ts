@@ -10292,42 +10292,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const providers = ALL_PROVIDERS as unknown as Array<
       Record<string, unknown>
     >;
-    providers.push({
-      id: 'kimi',
-      label: 'Kimi',
-      description: 'Kimi access',
-      protocol: 'openai',
-      baseUrl: [
-        {
-          id: 'coding-plan',
-          label: 'Coding Plan',
-          url: 'https://api.kimi.com/coding/v1',
-          models: [{ id: 'k3-256k' }],
-        },
-        {
-          id: 'api-international',
-          label: 'API Key (International)',
-          url: 'https://api.moonshot.ai/v1',
-          models: [{ id: 'kimi-k3' }],
-        },
-      ],
-      envKey: 'KIMI_CODE_API_KEY',
-      models: [{ id: 'k3-256k' }],
-      modelsEditable: true,
-      modelNamePrefix: 'Kimi',
-      uiGroup: 'third-party',
-    });
-
     const settings = makeSessionSettings();
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
 
     try {
+      providers.push({
+        id: 'kimi',
+        label: 'Kimi',
+        description: 'Kimi access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'coding-plan',
+            label: 'Coding Plan',
+            url: 'https://api.kimi.com/coding/v1',
+            models: [{ id: 'k3-256k' }],
+          },
+          {
+            id: 'api-international',
+            label: 'API Key (International)',
+            url: 'https://api.moonshot.ai/v1',
+            models: [{ id: 'kimi-k3' }],
+          },
+        ],
+        envKey: 'KIMI_CODE_API_KEY',
+        models: [{ id: 'k3-256k' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Kimi',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
       await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
         {
           providers: expect.arrayContaining([
