@@ -406,7 +406,7 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('detail');
 
     // Same entryId, status changed but still active — detail must be retained.
-    h.setEntries([{ ...running, status: 'pausing' }]);
+    h.setEntries([{ ...running, status: 'paused' }]);
     expect(h.probe.current!.state.dialogMode).toBe('detail');
   });
 
