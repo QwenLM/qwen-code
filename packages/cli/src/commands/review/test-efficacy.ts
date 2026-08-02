@@ -818,6 +818,35 @@ export function collocatedProbe(
 }
 
 /**
+ * The whole sentence a mutant or hunk is held `inconclusive` with when its own
+ * collocated test was not green in the unmutated baseline — the ONLY wording
+ * either guard has, so what this returns is what the report says.
+ *
+ * It reads the reason off the baseline rather than asserting one. The two
+ * reasons are different failures with different fixes, and the guards used to
+ * name the wrong one flatly: measured on PR #8368, `AuthDialog.test.tsx`
+ * compiled, collected 26 tests and failed exactly one, and all three mutants in
+ * its source were held with "likely a compile or import error in the probe
+ * tree" — sending a reader after an import problem that was never there.
+ *
+ * A probe with no baseline entry at all takes the collected-nothing wording:
+ * the run said nothing about it, which is the same evidentiary hole and never
+ * the claim that its tests failed.
+ */
+export function collocatedNotGreenDetail(
+  kind: 'mutant' | 'hunk',
+  probe: string,
+  perFile: Array<{ file: string; verdict: ProbeVerdict }>,
+): string {
+  const reason =
+    perFile.find((p) => p.file === probe)?.verdict === 'gated'
+      ? 'it was RED there'
+      : 'it collected no tests there (a compile or import error in the probe tree, or every test skipped)';
+  const what = kind === 'mutant' ? 'the statement' : 'the hunk';
+  return `this ${kind}'s collocated test ${probe} did not run green in the unmutated baseline — ${reason}, so the remaining probes passing cannot show ${what} is uncovered`;
+}
+
+/**
  * Does the diff add or change a test collocated with this production file?
  * The repo convention is `file.test.ts` beside `file.ts`. Used only to ORDER
  * candidates under the cap, so a miss costs priority, not selection.
@@ -1940,6 +1969,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         const greenProbes = baseline.perFile
           .filter((r) => r.verdict === 'inert')
           .map((r) => r.file);
+        const notGreen = (kind: 'mutant' | 'hunk', probe: string) =>
+          collocatedNotGreenDetail(kind, probe, baseline.perFile);
         if (greenProbes.length === 0) {
           mutantsSkippedForBaseline = candidates.length;
           // Their own reason, not the budget's: the mutants ran zero suites in
@@ -2019,7 +2050,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               mutantResults.push({
                 ...c,
                 verdict: 'inconclusive' as const,
-                detail: `this mutant's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the statement is uncovered`,
+                detail: notGreen('mutant', own),
               });
               continue;
             }
@@ -2064,7 +2095,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               hunkResults.push({
                 ...meta,
                 verdict: 'inconclusive' as const,
-                detail: `this hunk's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the hunk is uncovered`,
+                detail: notGreen('hunk', own),
               });
               continue;
             }

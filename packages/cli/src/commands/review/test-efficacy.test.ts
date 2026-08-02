@@ -19,6 +19,7 @@ import {
   parseAddedLines,
   hasCollocatedNewTest,
   collocatedProbe,
+  collocatedNotGreenDetail,
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
   findVitestBin,
@@ -1310,6 +1311,65 @@ describe('collocatedProbe', () => {
         'packages/cli/src/xy.test.ts',
       ]),
     ).toBeUndefined();
+  });
+});
+
+describe('collocatedNotGreenDetail', () => {
+  const perFile = [
+    { file: 'packages/cli/src/red.test.ts', verdict: 'gated' as const },
+    {
+      file: 'packages/cli/src/empty.test.ts',
+      verdict: 'inconclusive' as const,
+    },
+  ];
+
+  it('says the test was red when the baseline collected it and it failed', () => {
+    // The case that produced this function: on PR #8368 AuthDialog.test.tsx
+    // compiled and ran 26 tests, one of which failed. Reporting that as an
+    // import error sends the reader to a file that imports fine.
+    const detail = collocatedNotGreenDetail(
+      'mutant',
+      'packages/cli/src/red.test.ts',
+      perFile,
+    );
+    expect(detail).toContain('was RED there');
+    expect(detail).not.toContain('compile or import error');
+  });
+
+  it('says nothing was collected when the baseline collected nothing', () => {
+    expect(
+      collocatedNotGreenDetail(
+        'hunk',
+        'packages/cli/src/empty.test.ts',
+        perFile,
+      ),
+    ).toContain('collected no tests there');
+  });
+
+  it('takes the collected-nothing wording for a probe the baseline never reported', () => {
+    // Absent is an evidentiary hole, never the claim that its tests failed.
+    const detail = collocatedNotGreenDetail(
+      'mutant',
+      'packages/cli/src/absent.test.ts',
+      perFile,
+    );
+    expect(detail).toContain('collected no tests there');
+    expect(detail).not.toContain('RED');
+  });
+
+  it('names the probe and what the passing probes cannot show, per kind', () => {
+    expect(
+      collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/red.test.ts',
+        perFile,
+      ),
+    ).toBe(
+      "this mutant's collocated test packages/cli/src/red.test.ts did not run green in the unmutated baseline — it was RED there, so the remaining probes passing cannot show the statement is uncovered",
+    );
+    expect(
+      collocatedNotGreenDetail('hunk', 'packages/cli/src/red.test.ts', perFile),
+    ).toContain('cannot show the hunk is uncovered');
   });
 });
 
