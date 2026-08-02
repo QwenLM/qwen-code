@@ -8839,10 +8839,9 @@ export class Session implements SessionContext {
             const filteringOptions = this.config.getFileFilteringOptions();
             const mimeType = getSpecificMimeType(canonicalPath);
             const bridgeCanRead =
-              (preserveUnsupportedImageForBridge &&
-                mimeType?.startsWith('image/')) ||
+              mimeType?.startsWith('image/') === true ||
               (preserveUnsupportedAudioForBridge &&
-                mimeType?.startsWith('audio/'));
+                mimeType?.startsWith('audio/') === true);
             if (
               bridgeCanRead &&
               this.config
@@ -8939,10 +8938,9 @@ export class Session implements SessionContext {
           !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
           (textPathSpecsToRead.has(textPath) &&
             !(
-              (preserveUnsupportedImageForBridge &&
-                getSpecificMimeType(textPath)?.startsWith('image/')) ||
+              getSpecificMimeType(textPath)?.startsWith('image/') === true ||
               (preserveUnsupportedAudioForBridge &&
-                getSpecificMimeType(textPath)?.startsWith('audio/'))
+                getSpecificMimeType(textPath)?.startsWith('audio/') === true)
             )) ||
           this.config
             .getFileService()

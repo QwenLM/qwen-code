@@ -950,6 +950,9 @@ export async function runNonInteractive(
           );
         }
         initialParts = audioBridgeResult.parts;
+        if (abortController.signal.aborted) {
+          return 1;
+        }
       }
       if (
         inlineModelOverride === undefined &&

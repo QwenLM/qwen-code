@@ -516,11 +516,21 @@ export function sanitizeVoiceErrorMessage(
     : redacted;
 }
 
+const AUDIO_FORMAT_ALIASES: Record<string, string> = {
+  'x-wav': 'wav',
+  'x-m4a': 'm4a',
+  'x-aac': 'aac',
+  'x-flac': 'flac',
+  'x-ogg': 'ogg',
+  'x-mpeg': 'mp3',
+};
+
 function inputAudioFormat(mimeType: string): string {
   const subtype = mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-  return subtype.startsWith('audio/')
+  const raw = subtype.startsWith('audio/')
     ? subtype.slice('audio/'.length) || 'wav'
     : 'wav';
+  return AUDIO_FORMAT_ALIASES[raw] ?? raw;
 }
 
 function transcriptionAbortSignal(abortSignal?: AbortSignal): AbortSignal {

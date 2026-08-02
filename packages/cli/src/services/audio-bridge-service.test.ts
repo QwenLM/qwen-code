@@ -9,6 +9,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  MAX_AUDIO_PARTS_PER_TURN,
   formatAudioBridgeNotice,
   runAudioBridge,
   shouldPreserveUnsupportedAudioForBridge,
@@ -106,6 +107,25 @@ describe('audio bridge service', () => {
     expect(result.parts.some((part) => part.inlineData)).toBe(false);
   });
 
+  it('rejects a voice model that does not support batch transcription', async () => {
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash-realtime'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      egressCount: 0,
+      error: 'the configured voice model does not support batch transcription',
+    });
+    expect(result.parts[0]?.text).toContain(
+      'does not support batch transcription',
+    );
+    expect(transcribeVoiceAudio).not.toHaveBeenCalled();
+  });
+
   it('discloses egress when transcription fails after upload', async () => {
     transcribeVoiceAudio.mockImplementation(
       async (_audio: unknown, options: { onEgress?: () => void }) => {
@@ -153,6 +173,127 @@ describe('audio bridge service', () => {
     expect(result.egressCount).toBe(1);
     expect(result.parts.some((part) => part.inlineData)).toBe(false);
     expect(result.parts.map((part) => part.text)).toContain('between');
+  });
+
+  it('returns skipped without uploading when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [{ text: 'hello' }, audio()],
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'skipped',
+      egressCount: 0,
+    });
+    expect(transcribeVoiceAudio).not.toHaveBeenCalled();
+    expect(result.parts[0]).toEqual({ text: 'hello' });
+    expect(result.parts[1]?.text).toContain('transcription was cancelled');
+  });
+
+  it('replaces oversized audio with a safe note', async () => {
+    const bigData = 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3));
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio(bigData)],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'audio too large',
+    });
+    expect(result.parts[0]?.text).toContain('audio too large');
+    expect(transcribeVoiceAudio).not.toHaveBeenCalled();
+  });
+
+  it('caps audio parts per turn and reports the surplus', async () => {
+    transcribeVoiceAudio.mockImplementation(
+      async (_audio: unknown, options: { onEgress?: () => void }) => {
+        options.onEgress?.();
+        return 'transcript';
+      },
+    );
+
+    const parts = Array.from({ length: MAX_AUDIO_PARTS_PER_TURN + 2 }, () =>
+      audio(),
+    );
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts,
+      signal: new AbortController().signal,
+    });
+
+    expect(transcribeVoiceAudio).toHaveBeenCalledTimes(
+      MAX_AUDIO_PARTS_PER_TURN,
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      audioCount: MAX_AUDIO_PARTS_PER_TURN + 2,
+      convertedCount: MAX_AUDIO_PARTS_PER_TURN,
+      error: 'too many audio attachments',
+    });
+    const surplus = result.parts.filter((part) =>
+      part.text?.includes('too many audio attachments'),
+    );
+    expect(surplus).toHaveLength(2);
+  });
+
+  it('formats a partial-conversion notice', async () => {
+    let call = 0;
+    transcribeVoiceAudio.mockImplementation(
+      async (_audio: unknown, options: { onEgress?: () => void }) => {
+        options.onEgress?.();
+        call += 1;
+        if (call === 2) throw new Error('ASR unavailable');
+        return 'transcript';
+      },
+    );
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio(), audio('T2dnUw==')],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      convertedCount: 1,
+      egressCount: 2,
+    });
+    expect(formatAudioBridgeNotice(result)).toBe(
+      'Converted 1 of 2 audio file(s) to text via qwen3-asr-flash. 2 audio file(s) were sent to that model.',
+    );
+  });
+
+  it('reports the first concrete failure reason, not a count', async () => {
+    transcribeVoiceAudio.mockImplementation(
+      async (_audio: unknown, options: { onEgress?: () => void }) => {
+        options.onEgress?.();
+        throw new Error('ASR unavailable');
+      },
+    );
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio(), audio('T2dnUw==')],
+      signal: new AbortController().signal,
+    });
+
+    expect(result.error).toBe('transcription was unavailable');
+    expect(formatAudioBridgeNotice(result)).not.toContain(
+      '2 audio file(s) could not be transcribed',
+    );
   });
 
   it('preserves unsupported attachments only for a batch voice model', () => {
