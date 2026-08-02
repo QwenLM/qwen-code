@@ -249,6 +249,7 @@ interface ArtifactPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -281,6 +282,7 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  onImageIngestionNotice,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -690,6 +692,7 @@ export function ArtifactPanel({
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
+            onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : (
           <ScheduledTaskDetail

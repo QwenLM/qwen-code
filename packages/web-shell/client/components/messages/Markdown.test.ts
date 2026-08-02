@@ -101,6 +101,10 @@ describe('isSafeImageSrc', () => {
     expect(isSafeImageSrc('data:image/webp;base64,UklG')).toBe(true);
   });
 
+  it('allows data:image/bmp base64', () => {
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=')).toBe(true);
+  });
+
   it('blocks data:image/svg+xml (can load external resources)', () => {
     expect(isSafeImageSrc('data:image/svg+xml;base64,PHN2Zz4=')).toBe(false);
   });

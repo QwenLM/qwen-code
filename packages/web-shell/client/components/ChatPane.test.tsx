@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -875,6 +876,29 @@ describe('ChatPane', () => {
     });
   });
 
+  it('submits image-only prompts and preserves first-text naming eligibility', () => {
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('', {
+      images,
+      onAdmitted: expect.any(Function),
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).not.toHaveBeenCalled();
+
+    act(() => {
+      latestOnSubmit!('name this task');
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this task');
+  });
+
   it('forwards composer annotations with an idle prompt', () => {
     const inputAnnotations = [
       {
@@ -946,6 +970,19 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
   });
 
+  it('queues an image-only prompt while the pane is already running', () => {
+    streamingStateValue = 'responding';
+    const images = [{ data: 'image-data', media_type: 'image/bmp' }];
+    render();
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+
+    expect(enqueuePrompt).toHaveBeenCalledWith('', images);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('does not submit while the pane is disconnected', () => {
     connectionState.status = 'disconnected';
     render();
@@ -984,10 +1021,13 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('reports an idle prompt failure to the pane error handler', async () => {
+  it('locks the pane when idle prompt admission outcome is unknown', async () => {
     const onError = vi.fn();
+    const onImageIngestionNotice = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
-    render({ onError });
+    render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
       latestOnSubmit!('hi', undefined, commit);
@@ -995,10 +1035,76 @@ describe('ChatPane', () => {
     });
     expect(commit).not.toHaveBeenCalled();
     expect(clearFollowup).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('uncertain'),
+    );
+    const notice = testid('pane-prompt-admission-unknown');
+    expect(notice).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    act(() => latestOnSubmit!('do not retry'));
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(true);
+
+    confirm.mockReturnValue(true);
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('discards an unknown local payload without hiding its marker', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
+    render();
+    const commit = vi.fn();
+    await act(async () => {
+      latestOnSubmit!('hi', undefined, commit);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testid('pane-prompt-admission-unknown')
+        ?.querySelectorAll('button')
+        .item(1)
+        .click();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('keeps the pane editable after a definite 413 rejection', async () => {
+    const onError = vi.fn();
+    sendPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(413, undefined, 'Too large'),
+    );
+    render({ onError });
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+
     expect(onError).toHaveBeenCalledWith(
-      expect.any(Error),
+      expect.any(DaemonHttpError),
       'Failed to send prompt',
     );
+    expect(latestChatEditorProps.disabled).toBe(false);
   });
 
   it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {

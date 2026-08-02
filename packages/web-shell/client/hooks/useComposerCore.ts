@@ -6,6 +6,8 @@ import {
   useCallback,
   useMemo,
   type ReactNode,
+  type ClipboardEventHandler,
+  type DragEventHandler,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
@@ -97,6 +99,11 @@ import type {
   WebShellAtProvider,
 } from '../customization';
 import { useWebShellPortalRoot } from '../portalRoot';
+import {
+  extractImageTransfer,
+  hasFileTransferPayload,
+  readImageTransfer,
+} from '../utils/imageIngestion';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
@@ -1040,6 +1047,7 @@ export interface UseComposerCoreOptions {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -1186,36 +1194,6 @@ function handleMultilineHistoryBoundary(
 }
 
 /**
- * Extracts pasteable images from a clipboard, shared by the CodeMirror paste
- * handler and the mobile textarea backend. Returns whether any image was
- * found; matched files are decoded asynchronously and reported via `addImage`.
- */
-function collectClipboardImages(
-  items: DataTransferItemList,
-  addImage: (image: PromptImage) => void,
-): boolean {
-  let hasImage = false;
-  for (const item of items) {
-    if (
-      item.type.startsWith('image/') &&
-      /^image\/(png|jpeg|gif|webp)$/i.test(item.type)
-    ) {
-      hasImage = true;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const mediaType = item.type;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        addImage({ data: base64, media_type: mediaType });
-      };
-      reader.readAsDataURL(file);
-    }
-  }
-  return hasImage;
-}
-
-/**
  * Editor backend for touch devices: instead of a CodeMirror EditorView, the
  * composer renders a plain controlled `<textarea>` wired to these fields.
  * Mobile virtual keyboards and IMEs interact poorly with CodeMirror's
@@ -1227,8 +1205,31 @@ export interface MobileComposerBackend {
   value: string;
   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onBlur: () => void;
-  onPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
   placeholder: string;
+}
+
+export interface ComposerImageTransferHandlers {
+  onPasteCapture: ClipboardEventHandler<HTMLDivElement>;
+  onDragEnterCapture: DragEventHandler<HTMLDivElement>;
+  onDragOverCapture: DragEventHandler<HTMLDivElement>;
+  onDragLeaveCapture: DragEventHandler<HTMLDivElement>;
+  onDropCapture: DragEventHandler<HTMLDivElement>;
+}
+
+interface ImageIngestionLane {
+  generation: number;
+  tail: Promise<void>;
+  pendingBatches: number;
+  activeReaders: Set<FileReader>;
+}
+
+function createImageIngestionLane(generation: number): ImageIngestionLane {
+  return {
+    generation,
+    tail: Promise.resolve(),
+    pendingBatches: 0,
+    activeReaders: new Set(),
+  };
 }
 
 export interface UseComposerCoreReturn {
@@ -1242,6 +1243,10 @@ export interface UseComposerCoreReturn {
   hasInput: () => boolean;
   hasAttachments: boolean;
   hasContent: boolean;
+  canSubmit: boolean;
+  pendingImageBatchCount: number;
+  imageDragActive: boolean;
+  imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
   removeImage: (index: number) => void;
@@ -1318,6 +1323,7 @@ export function useComposerCore(
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
+    onImageIngestionNotice,
     editorTheme,
   } = options;
 
@@ -1418,6 +1424,8 @@ export function useComposerCore(
   onAcceptFollowupRef.current = onAcceptFollowup;
   const onDismissFollowupRef = useRef(onDismissFollowup);
   onDismissFollowupRef.current = onDismissFollowup;
+  const onImageIngestionNoticeRef = useRef(onImageIngestionNotice);
+  onImageIngestionNoticeRef.current = onImageIngestionNotice;
   const onFocusFooterRef = useRef(onFocusFooter);
   onFocusFooterRef.current = onFocusFooter;
   const languageRef = useRef(language);
@@ -1576,6 +1584,172 @@ export function useComposerCore(
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
+  const [pendingImageBatchCount, setPendingImageBatchCount] = useState(0);
+  const [imageDragActive, setImageDragActive] = useState(false);
+  const imageDragDepthRef = useRef(0);
+  const imageIngestionLaneRef = useRef<ImageIngestionLane>(
+    createImageIngestionLane(0),
+  );
+  const clearImageDragState = useCallback(() => {
+    imageDragDepthRef.current = 0;
+    setImageDragActive(false);
+  }, []);
+  const resetImageIngestion = useCallback((updateState = true) => {
+    const previousLane = imageIngestionLaneRef.current;
+    imageIngestionLaneRef.current = createImageIngestionLane(
+      previousLane.generation + 1,
+    );
+    pastedImagesRef.current = [];
+    for (const reader of previousLane.activeReaders) {
+      reader.abort();
+    }
+    previousLane.activeReaders.clear();
+    imageDragDepthRef.current = 0;
+    if (updateState) {
+      setPastedImages([]);
+      setPendingImageBatchCount(0);
+      setImageDragActive(false);
+    }
+  }, []);
+  const emitImageIngestionNotice = useCallback(
+    (tone: 'warning' | 'error', message: string) => {
+      const handler = onImageIngestionNoticeRef.current;
+      if (handler) {
+        try {
+          handler(tone, message);
+        } catch (error) {
+          console.error('[WebShell] image ingestion notice failed', error);
+        }
+      } else if (tone === 'error') {
+        console.error(message);
+      } else {
+        console.warn(message);
+      }
+    },
+    [],
+  );
+  const enqueueImageTransfer = useCallback(
+    (dataTransfer: DataTransfer, source: 'paste' | 'drop') => {
+      const transfer = extractImageTransfer(dataTransfer, source);
+      if (!transfer.claimed) return false;
+      if (disabledRef.current) return true;
+
+      const lane = imageIngestionLaneRef.current;
+      lane.pendingBatches += 1;
+      setPendingImageBatchCount(lane.pendingBatches);
+      lane.tail = lane.tail
+        .then(async () => {
+          if (imageIngestionLaneRef.current !== lane) return;
+          const result = await readImageTransfer(transfer, {
+            onReaderCreated: (reader) => lane.activeReaders.add(reader),
+            onReaderSettled: (reader) => lane.activeReaders.delete(reader),
+          });
+          if (imageIngestionLaneRef.current !== lane) return;
+          if (result.accepted.length > 0) {
+            const next = [...pastedImagesRef.current, ...result.accepted];
+            pastedImagesRef.current = next;
+            setPastedImages(next);
+          }
+          const skipped = result.rejected.filter(
+            ({ reason }) => reason !== 'read-failed',
+          ).length;
+          const failed = result.rejected.filter(
+            ({ reason }) => reason === 'read-failed',
+          ).length;
+          if (skipped > 0) {
+            emitImageIngestionNotice(
+              'warning',
+              tRef.current('editor.imagesSkipped', { count: skipped }),
+            );
+          }
+          if (failed > 0) {
+            emitImageIngestionNotice(
+              'error',
+              tRef.current('editor.imagesReadFailed', { count: failed }),
+            );
+          }
+        })
+        .catch(() => {
+          if (imageIngestionLaneRef.current === lane) {
+            emitImageIngestionNotice(
+              'error',
+              tRef.current('editor.imagesReadFailed', { count: 1 }),
+            );
+          }
+        })
+        .then(() => {
+          if (imageIngestionLaneRef.current !== lane) return;
+          lane.pendingBatches = Math.max(0, lane.pendingBatches - 1);
+          setPendingImageBatchCount(lane.pendingBatches);
+        });
+      return true;
+    },
+    [emitImageIngestionNotice],
+  );
+  const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
+    () => ({
+      onPasteCapture: (event) => {
+        if (enqueueImageTransfer(event.clipboardData, 'paste')) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      onDragEnterCapture: (event) => {
+        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        event.preventDefault();
+        imageDragDepthRef.current += 1;
+        if (!disabledRef.current) setImageDragActive(true);
+      },
+      onDragOverCapture: (event) => {
+        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      },
+      onDragLeaveCapture: (event) => {
+        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
+        const nextTarget = event.relatedTarget;
+        if (
+          !(nextTarget instanceof Node) ||
+          !event.currentTarget.contains(nextTarget)
+        ) {
+          clearImageDragState();
+        }
+      },
+      onDropCapture: (event) => {
+        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        clearImageDragState();
+        if (disabledRef.current) return;
+        enqueueImageTransfer(event.dataTransfer, 'drop');
+        if (isTouchComposer) {
+          mobileTextareaRef.current?.focus();
+        } else {
+          viewRef.current?.focus();
+        }
+      },
+    }),
+    [clearImageDragState, enqueueImageTransfer, isTouchComposer],
+  );
+  useEffect(() => {
+    if (!imageDragActive) return;
+    window.addEventListener('dragend', clearImageDragState);
+    window.addEventListener('blur', clearImageDragState);
+    return () => {
+      window.removeEventListener('dragend', clearImageDragState);
+      window.removeEventListener('blur', clearImageDragState);
+    };
+  }, [clearImageDragState, imageDragActive]);
+  useEffect(() => {
+    if (disabled) clearImageDragState();
+  }, [clearImageDragState, disabled]);
+  useEffect(
+    () => () => {
+      resetImageIngestion(false);
+    },
+    [resetImageIngestion],
+  );
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
@@ -1984,8 +2158,6 @@ export function useComposerCore(
   };
   const shellHistoryActionsRef = useRef(shellHistory);
   shellHistoryActionsRef.current = shellHistory;
-  pastedImagesRef.current = pastedImages;
-
   const getSearchMatches = useCallback((query: string) => {
     const isShellMode = shellModeRef.current;
     const history = isShellMode
@@ -2118,21 +2290,6 @@ export function useComposerCore(
     }
   }, [isTouchComposer, mobileText]);
 
-  const handleMobilePaste = useCallback(
-    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const items = event.clipboardData?.items;
-      if (!items) return;
-      const hasImage = collectClipboardImages(items, (image) =>
-        setPastedImages((prev) => [...prev, image]),
-      );
-      // Plain text falls through to the native paste.
-      if (hasImage) {
-        event.preventDefault();
-      }
-    },
-    [],
-  );
-
   // Lives in the render scope (not the editor-creation effect) so the mobile
   // textarea backend, which never instantiates an EditorView, can reuse the
   // exact same submit pipeline with `view === null`.
@@ -2142,6 +2299,12 @@ export function useComposerCore(
     tagsOverride?: readonly WebShellComposerTag[],
     suppressFollowupCompletion = false,
   ) => {
+    if (
+      disabledRef.current ||
+      imageIngestionLaneRef.current.pendingBatches > 0
+    ) {
+      return true;
+    }
     const inlineTags =
       tagsOverride === undefined && view
         ? getInlineComposerTagPlacements(view)
@@ -2173,16 +2336,23 @@ export function useComposerCore(
             }))
         : [];
     const tags = tagsOverride ?? composerTagsRef.current;
-    if (!rawText && tags.length === 0 && inlineTags.length === 0) return true;
+    const images = pastedImagesRef.current;
+    if (
+      !rawText &&
+      tags.length === 0 &&
+      inlineTags.length === 0 &&
+      images.length === 0
+    ) {
+      return true;
+    }
     const textWithInlineTags =
       tagsOverride === undefined
         ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
         : rawText;
     const text = textWithInlineTags;
     const prompt = buildComposerPrompt(text, tags);
-    const images = pastedImagesRef.current;
     const isShellMode = shellModeRef.current;
-    const promptText = isShellMode ? `!${prompt}` : prompt;
+    const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
     const inputAnnotations = createInputAnnotationsFromComposerTags(
       promptText,
       [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
@@ -2251,6 +2421,7 @@ export function useComposerCore(
       onDismissFollowupRef.current?.();
       clearPromptHistoryDraftTags();
       setComposerTags([]);
+      pastedImagesRef.current = [];
       setPastedImages([]);
       if (view) {
         view.dispatch({
@@ -2884,18 +3055,6 @@ export function useComposerCore(
             }, 0);
             return false;
           },
-          paste(event) {
-            const items = event.clipboardData?.items;
-            if (!items) return false;
-            const hasImage = collectClipboardImages(items, (image) =>
-              setPastedImages((prev) => [...prev, image]),
-            );
-            if (hasImage) {
-              event.preventDefault();
-              return true;
-            }
-            return false;
-          },
         }),
         EditorView.theme(editorTheme),
       ],
@@ -2954,6 +3113,7 @@ export function useComposerCore(
 
     if (!sessionChanged && !workspaceChanged) return;
 
+    resetImageIngestion();
     historyActionsRef.current.reset();
     shellHistoryActionsRef.current.reset();
     historyBrowseActiveRef.current = false;
@@ -2997,7 +3157,6 @@ export function useComposerCore(
     }
 
     setComposerTags([]);
-    setPastedImages([]);
     if (view) {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
@@ -3015,6 +3174,7 @@ export function useComposerCore(
     clearPromptHistoryDraftTags,
     composerDraftStorageKey,
     isTouchComposer,
+    resetImageIngestion,
     sessionId,
     setMobileText,
   ]);
@@ -3417,7 +3577,7 @@ export function useComposerCore(
         setMobileText('');
       }
       if (clearTextOpt) {
-        setPastedImages([]);
+        resetImageIngestion();
       }
       if (clearTags) {
         setComposerTags([]);
@@ -3426,7 +3586,7 @@ export function useComposerCore(
         }
       }
     },
-    [isTouchComposer, removeInlineTags, setMobileText],
+    [isTouchComposer, removeInlineTags, resetImageIngestion, setMobileText],
   );
 
   const clearText = useCallback(() => {
@@ -3551,12 +3711,19 @@ export function useComposerCore(
   );
 
   const retryLast = useCallback(() => {
+    if (
+      disabledRef.current ||
+      imageIngestionLaneRef.current.pendingBatches > 0
+    ) {
+      return;
+    }
     const last = historyActionsRef.current.getLastEntry(
       (e) => !e.startsWith('/') && !e.startsWith('!'),
     );
     if (!last) return;
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
+    pastedImagesRef.current = [];
     setPastedImages([]);
   }, []);
 
@@ -3716,6 +3883,12 @@ export function useComposerCore(
 
   const submitSearchMatch = useCallback(
     (match: string) => {
+      if (
+        disabledRef.current ||
+        imageIngestionLaneRef.current.pendingBatches > 0
+      ) {
+        return;
+      }
       const view = viewRef.current;
       if (!view && !isTouchComposer) return;
       closeSearch(false);
@@ -3738,6 +3911,7 @@ export function useComposerCore(
       onDismissFollowupRef.current?.();
       shellHistoryActionsRef.current.push(text);
       shellHistoryActionsRef.current.reset();
+      pastedImagesRef.current = [];
       setPastedImages([]);
       replaceEditorText('');
     },
@@ -3804,11 +3978,14 @@ export function useComposerCore(
   };
 
   const removeImage = useCallback((index: number) => {
-    setPastedImages((prev) => prev.filter((_, idx) => idx !== index));
+    const next = pastedImagesRef.current.filter((_, idx) => idx !== index);
+    pastedImagesRef.current = next;
+    setPastedImages(next);
   }, []);
 
   // ---- Computed ----
 
+  const canSubmit = !disabled && pendingImageBatchCount === 0 && hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -3819,7 +3996,9 @@ export function useComposerCore(
   // ---- Imperative handle ----
 
   const restoreImages = useCallback((images: readonly PromptImage[]) => {
-    setPastedImages((prev) => [...prev, ...images]);
+    const next = [...pastedImagesRef.current, ...images];
+    pastedImagesRef.current = next;
+    setPastedImages(next);
   }, []);
   const handle = useMemo<EditorHandle>(() => {
     return {
@@ -3862,7 +4041,6 @@ export function useComposerCore(
           value: mobileText,
           onChange: handleMobileChange,
           onBlur: () => saveCurrentDraftRef.current(),
-          onPaste: handleMobilePaste,
           placeholder: composerPlaceholder,
         }
       : null,
@@ -3878,6 +4056,10 @@ export function useComposerCore(
     hasAttachments:
       hasInlineTags || composerTags.length > 0 || pastedImages.length > 0,
     hasContent,
+    canSubmit,
+    pendingImageBatchCount,
+    imageDragActive,
+    imageTransferHandlers,
     handle,
     pastedImages,
     removeImage,

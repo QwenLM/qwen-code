@@ -2,14 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef, type CSSProperties, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type {
-  DaemonInputAnnotation,
-  DaemonSessionContextUsageStatus,
-  DaemonSessionMonitorTaskStatus,
-  DaemonSessionShellTaskStatus,
-  DaemonSessionStatsStatus,
-  DaemonSettingDescriptor,
-  DaemonWorkspaceGitStatus,
+import {
+  DaemonHttpError,
+  type DaemonInputAnnotation,
+  type DaemonSessionContextUsageStatus,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionShellTaskStatus,
+  type DaemonSessionStatsStatus,
+  type DaemonSettingDescriptor,
+  type DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import type { Message } from './adapters/types';
@@ -7668,6 +7669,49 @@ describe('App session callbacks', () => {
     expect(sidebarTokens.at(-1)).not.toBe(tokenAfterSubmit);
   });
 
+  it('dispatches direct and queued submit events for image-only prompts', async () => {
+    const onSessionChange = vi.fn();
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+    const { rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('', images);
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '',
+      expect.objectContaining({ images }),
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: '',
+      queued: false,
+    });
+
+    onSessionChange.mockClear();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onSessionChange });
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('', images);
+    });
+    expect(rawEnqueuePrompt).toHaveBeenCalledWith(
+      '',
+      images,
+      undefined,
+      undefined,
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: '',
+      queued: true,
+    });
+  });
+
   it('cancels an approved direct submission after the session changes', async () => {
     let approve: (() => void) | undefined;
     const onSubmitBefore = vi.fn(
@@ -11984,6 +12028,105 @@ describe('App session callbacks', () => {
 });
 
 describe('App prompt send failure retry', () => {
+  it('does not mark delivery unknown when lazy session creation fails before prompt admission', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockRejectedValueOnce(
+      new Error('session creation failed'),
+    );
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        editorCommit,
+      );
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+  });
+
+  it('keeps an unknown lazy-session admission scoped to its allocated session', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockReturnValueOnce(firstSend.promise);
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        editorCommit,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-created';
+      rerender();
+    });
+    await act(async () => {
+      firstSend.reject(new Error('connection closed before response'));
+      await Promise.resolve();
+    });
+
+    expect(editorCommit).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).not.toBeNull();
+  });
+
+  it('locks duplicate submission when prompt admission is unknown', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      () => firstSend.promise,
+    );
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    await act(async () => {
+      firstSend.reject(new Error('connection closed before response'));
+      await Promise.resolve();
+    });
+
+    const notice = document.querySelector(
+      '[data-testid="prompt-admission-unknown"]',
+    );
+    expect(notice).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+
+    act(() => {
+      notice?.querySelectorAll('button').item(1).click();
+    });
+
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).not.toBeNull();
+  });
+
   it('marks the failed message and retries its original payload without a duplicate', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const firstSend = deferred<void>();
@@ -12011,7 +12154,7 @@ describe('App prompt send failure retry', () => {
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
     await act(async () => {
-      firstSend.reject(new Error('network down'));
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
 
@@ -12070,7 +12213,7 @@ describe('App prompt send failure retry', () => {
       rerender();
     });
     await act(async () => {
-      firstSend.reject(new Error('network down'));
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
 
@@ -12100,7 +12243,7 @@ describe('App prompt send failure retry', () => {
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
     await act(async () => {
-      firstSend.reject(new Error('network down'));
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
     act(() =>
@@ -12109,7 +12252,7 @@ describe('App prompt send failure retry', () => {
         ?.click(),
     );
     await act(async () => {
-      retrySend.reject(new Error('still down'));
+      retrySend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
 
@@ -12163,7 +12306,7 @@ describe('App prompt send failure retry', () => {
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
     await act(async () => {
-      firstSend.reject(new Error('network down'));
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
 
@@ -12234,7 +12377,7 @@ describe('App prompt send failure retry', () => {
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'first' }];
     await act(async () => {
-      firstSend.reject(new Error('network down'));
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
       await Promise.resolve();
     });
     expect(

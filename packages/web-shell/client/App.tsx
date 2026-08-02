@@ -252,6 +252,7 @@ import {
   shouldDisableComposerInput,
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
+import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
@@ -460,6 +461,15 @@ interface FailedPromptRetry {
   startedAt: number;
   admitted: boolean;
   settled: boolean;
+}
+
+interface UnknownPromptAdmission {
+  sessionId: string;
+  messageId?: string;
+  text?: string;
+  images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
+  payloadAvailable: boolean;
 }
 
 function getLatestUserBlockId(
@@ -2165,6 +2175,16 @@ export function App({
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
     useState<FailedPromptRetry | null>(null);
+  const [unknownPromptAdmission, setUnknownPromptAdmission] =
+    useState<UnknownPromptAdmission | null>(null);
+  const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
+  const updateUnknownPromptAdmission = useCallback(
+    (next: UnknownPromptAdmission | null) => {
+      unknownPromptAdmissionRef.current = next;
+      setUnknownPromptAdmission(next);
+    },
+    [],
+  );
   const updateFailedPrompt = useCallback((next: FailedPrompt | null) => {
     failedPromptRef.current = next;
     setFailedPrompt(next);
@@ -2225,6 +2245,12 @@ export function App({
       updateFailedPrompt(null);
     }
   }, [connection.sessionId, displayMessages, failedPrompt, updateFailedPrompt]);
+  useEffect(() => {
+    const unknown = unknownPromptAdmissionRef.current;
+    if (unknown && unknown.sessionId !== connection.sessionId) {
+      updateUnknownPromptAdmission(null);
+    }
+  }, [connection.sessionId, updateUnknownPromptAdmission]);
   const {
     artifacts,
     loading: artifactsLoading,
@@ -3548,6 +3574,11 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   useEffect(() => {
+    if (streamingState !== 'idle' && unknownPromptAdmissionRef.current) {
+      updateUnknownPromptAdmission(null);
+    }
+  }, [streamingState, updateUnknownPromptAdmission]);
+  useEffect(() => {
     if (
       failedPromptRetry &&
       (failedPromptRetry.sessionId !== connection.sessionId ||
@@ -3594,6 +3625,9 @@ export function App({
   }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const lastSubmittedSourceVersionRef = useRef(
+    composerSourceVersionRef.current,
+  );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
@@ -4396,6 +4430,7 @@ export function App({
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
       },
@@ -4403,18 +4438,24 @@ export function App({
       const isUserPrompt = !text.trimStart().startsWith('/');
       const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousLastSubmittedSourceVersion =
+        lastSubmittedSourceVersionRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
       const restoreCancelledSubmitState = () => {
         setIsPreparingPrompt(false);
         lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
         lastSubmittedImagesRef.current = previousLastSubmittedImages;
+        lastSubmittedSourceVersionRef.current =
+          previousLastSubmittedSourceVersion;
         retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
         setShowRetryHint(previousShowRetryHint);
       };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
+        lastSubmittedSourceVersionRef.current =
+          composerSourceVersionRef.current;
         retriedTurnErrorIdRef.current = null;
       }
       setShowRetryHint(false);
@@ -4479,7 +4520,7 @@ export function App({
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
-      if (sessionIdAfterEnsure && text.trim()) {
+      if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId: sessionIdAfterEnsure,
@@ -4491,6 +4532,7 @@ export function App({
       const previousUserMessageId = opts?.onOptimisticUserMessage
         ? getLatestUserBlockId(store.getSnapshot().blocks)
         : undefined;
+      opts?.onAdmissionStarted?.(sessionIdAfterEnsure);
       const resultPromise = (
         sessionActions.sendPrompt as (
           promptText: string,
@@ -4700,6 +4742,15 @@ export function App({
       updateFailedPrompt(null);
       return;
     }
+    const retryOwner = {
+      sourceVersion: composerSourceVersionRef.current,
+      sessionId: connectionRef.current.sessionId,
+      workspaceCwd: getComposerWorkspaceCwd(),
+    };
+    const retryOwnerIsCurrent = () =>
+      composerSourceVersionRef.current === retryOwner.sourceVersion &&
+      connectionRef.current.sessionId === retryOwner.sessionId &&
+      getComposerWorkspaceCwd() === retryOwner.workspaceCwd;
     updateFailedPrompt(null);
     const retryStartedAt = Date.now();
     setFailedPromptRetry({
@@ -4710,11 +4761,16 @@ export function App({
       settled: false,
     });
     let admitted = false;
+    let admissionStarted = false;
     sendPrompt(failed.text, failed.images, {
       optimisticUserMessage: false,
       inputAnnotations: failed.inputAnnotations,
+      onAdmissionStarted: () => {
+        admissionStarted = true;
+      },
       onAdmitted: () => {
         admitted = true;
+        if (!retryOwnerIsCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.sessionId === failed.sessionId &&
           current.messageId === failed.messageId
@@ -4724,6 +4780,24 @@ export function App({
       },
     })
       .catch((error: unknown) => {
+        if (!retryOwnerIsCurrent()) return;
+        const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+        if (admissionStarted && !admitted && !definitelyRejected) {
+          updateUnknownPromptAdmission({
+            sessionId: failed.sessionId,
+            messageId: failed.messageId,
+            text: failed.text,
+            images: failed.images ? [...failed.images] : undefined,
+            inputAnnotations: failed.inputAnnotations,
+            payloadAvailable: true,
+          });
+          pushToast('warning', t('queue.admissionUnknown'));
+          console.warn(
+            '[WebShell] prompt retry admission outcome is unknown',
+            error,
+          );
+          return;
+        }
         if (
           !admitted &&
           connectionRef.current.sessionId === failed.sessionId &&
@@ -4734,6 +4808,7 @@ export function App({
         reportError(error, 'Failed to resend message');
       })
       .finally(() => {
+        if (!retryOwnerIsCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.sessionId === failed.sessionId &&
           current.messageId === failed.messageId
@@ -4741,7 +4816,16 @@ export function App({
             : current,
         );
       });
-  }, [reportError, sendPrompt, store, updateFailedPrompt]);
+  }, [
+    getComposerWorkspaceCwd,
+    pushToast,
+    reportError,
+    sendPrompt,
+    store,
+    t,
+    updateFailedPrompt,
+    updateUnknownPromptAdmission,
+  ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
@@ -4754,6 +4838,8 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
+    restoreUnknownQueuedPrompt,
+    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     sessionId: connection.sessionId,
@@ -4805,7 +4891,7 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            if (sourceSessionId && text.trim()) {
+            if (sourceSessionId && (text.trim() || (images?.length ?? 0) > 0)) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: sourceSessionId,
@@ -4829,7 +4915,7 @@ export function App({
         inputAnnotations,
       );
       const sessionId = connectionRef.current.sessionId;
-      if (sessionId && text.trim()) {
+      if (sessionId && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId,
@@ -5675,7 +5761,10 @@ export function App({
       connected &&
       retryableTurnErrorId !== null &&
       retryableTurnErrorId !== retriedTurnErrorIdRef.current &&
-      lastSubmittedPromptRef.current.length > 0;
+      lastSubmittedSourceVersionRef.current ===
+        composerSourceVersionRef.current &&
+      (lastSubmittedPromptRef.current.length > 0 ||
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0);
     retryableTurnErrorIdRef.current = canRetry ? retryableTurnErrorId : null;
     setShowRetryHint(canRetry);
   }, [blocks, connected]);
@@ -6488,6 +6577,7 @@ export function App({
 
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      composerSourceVersionRef.current += 1;
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       setGitModeIntent({ mode: 'current' });
@@ -6893,6 +6983,13 @@ export function App({
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       if (
+        unknownPromptAdmissionRef.current?.payloadAvailable &&
+        unknownPromptAdmissionRef.current.sessionId ===
+          connectionRef.current.sessionId
+      ) {
+        return false;
+      }
+      if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
         return true;
@@ -6923,18 +7020,34 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        const admissionOwner = {
+          sourceVersion: composerSourceVersionRef.current,
+          sessionId: connectionRef.current.sessionId,
+          workspaceCwd: getComposerWorkspaceCwd(),
+        };
+        const admissionOwnerIsCurrent = () =>
+          composerSourceVersionRef.current === admissionOwner.sourceVersion &&
+          (admissionOwner.sessionId === undefined ||
+            (connectionRef.current.sessionId === admissionOwner.sessionId &&
+              getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
         let admitted = false;
+        let admissionStarted = false;
+        let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, {
           ...sendOptions,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
+          onAdmissionStarted: (sessionId) => {
+            admissionStarted = true;
+            admissionSessionId = sessionId;
+          },
           onAdmitted: () => {
             admitted = true;
           },
@@ -6946,7 +7059,32 @@ export function App({
               }
             : {}),
         }).catch((error: unknown) => {
+          if (!admissionOwnerIsCurrent()) return;
           const failedMessage = optimisticUserMessage;
+          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+          if (admissionStarted && !admitted && !definitelyRejected) {
+            updateFailedPrompt(null);
+            const uncertainSessionId =
+              failedMessage?.sessionId ??
+              admissionSessionId ??
+              connectionRef.current.sessionId;
+            if (uncertainSessionId) {
+              updateUnknownPromptAdmission({
+                sessionId: uncertainSessionId,
+                messageId: failedMessage?.messageId,
+                text: promptText,
+                images: promptImages ? [...promptImages] : undefined,
+                inputAnnotations: sendOptions.inputAnnotations,
+                payloadAvailable: true,
+              });
+            }
+            pushToast('warning', t('queue.admissionUnknown'));
+            console.warn(
+              '[WebShell] prompt admission outcome is unknown',
+              error,
+            );
+            return;
+          }
           if (
             trackSendFailure &&
             !admitted &&
@@ -7888,6 +8026,7 @@ export function App({
       blockLocalCommandDuringTurn,
       createSideTask,
       sideTasksAvailable,
+      getComposerWorkspaceCwd,
       openEnvironmentTasksPanel,
       hiddenCommands,
       pushToast,
@@ -7907,6 +8046,7 @@ export function App({
       t,
       workspaceActions,
       updateFailedPrompt,
+      updateUnknownPromptAdmission,
     ],
   );
 
@@ -7975,6 +8115,46 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
+  const discardUnknownPromptPayload = useCallback(() => {
+    const current = unknownPromptAdmissionRef.current;
+    if (
+      !current?.payloadAvailable ||
+      current.sessionId !== connectionRef.current.sessionId
+    ) {
+      return;
+    }
+    updateUnknownPromptAdmission({
+      sessionId: current.sessionId,
+      messageId: current.messageId,
+      payloadAvailable: false,
+    });
+  }, [updateUnknownPromptAdmission]);
+  const restoreUnknownPromptPayload = useCallback(() => {
+    const current = unknownPromptAdmissionRef.current;
+    const editor = editorRef.current;
+    if (
+      !current?.payloadAvailable ||
+      current.sessionId !== connectionRef.current.sessionId ||
+      !editor
+    ) {
+      return;
+    }
+    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
+    const draft = editor.getText();
+    const restoredText = current.text?.trim()
+      ? draft.trim()
+        ? `${current.text}\n${draft}`
+        : current.text
+      : draft;
+    if (restoredText !== draft) editor.setText(restoredText);
+    if (current.images?.length) editor.restoreImages(current.images);
+    editor.focus();
+    updateUnknownPromptAdmission({
+      sessionId: current.sessionId,
+      messageId: current.messageId,
+      payloadAvailable: false,
+    });
+  }, [t, updateUnknownPromptAdmission]);
   const handleCanScrollToBottomChange = useCallback(
     (canScrollToBottom: boolean) => {
       setCanScrollMessageListToBottom(canScrollToBottom);
@@ -7989,10 +8169,15 @@ export function App({
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
       connectionRef.current.sessionId &&
-      lastSubmittedPromptRef.current
+      (lastSubmittedPromptRef.current ||
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0)
     ) {
       const retryErrorId = retryableTurnErrorIdRef.current;
       const retrySessionId = connectionRef.current.sessionId;
+      const retrySourceVersion = composerSourceVersionRef.current;
+      const retryOwnerIsCurrent = () =>
+        composerSourceVersionRef.current === retrySourceVersion &&
+        connectionRef.current.sessionId === retrySessionId;
       retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
       setFailedPromptRetry({
@@ -8009,6 +8194,7 @@ export function App({
           optimisticUserMessage: false,
           retry: true,
           onAdmitted: () => {
+            if (!retryOwnerIsCurrent()) return;
             setFailedPromptRetry((current) =>
               current?.sessionId === retrySessionId &&
               current.messageId === retryErrorId
@@ -8018,8 +8204,12 @@ export function App({
           },
         },
       )
-        .catch((error: unknown) => reportError(error, 'Failed to retry prompt'))
+        .catch((error: unknown) => {
+          if (!retryOwnerIsCurrent()) return;
+          reportError(error, 'Failed to retry prompt');
+        })
         .finally(() => {
+          if (!retryOwnerIsCurrent()) return;
           setFailedPromptRetry((current) =>
             current?.sessionId === retrySessionId &&
             current.messageId === retryErrorId
@@ -9793,6 +9983,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
@@ -10175,17 +10366,61 @@ export function App({
                             {t('editor.escClearHint')}
                           </div>
                         ) : null}
+                        {unknownPromptAdmission &&
+                          unknownPromptAdmission.sessionId ===
+                            connection.sessionId && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="status"
+                            data-testid="prompt-admission-unknown"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              !
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {t('queue.admissionUnknown')}
+                            </span>
+                            {unknownPromptAdmission.payloadAvailable && (
+                              <div
+                                className={styles.composerActionTipActions}
+                              >
+                                <button
+                                  type="button"
+                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                  onClick={restoreUnknownPromptPayload}
+                                >
+                                  {t('queue.restoreUnknown')}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={styles.composerActionTipButton}
+                                  onClick={discardUnknownPromptPayload}
+                                >
+                                  {t('queue.discardUnknown')}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
+                          onRestoreUnknown={restoreUnknownQueuedPrompt}
+                          onDiscardUnknown={discardUnknownQueuedPrompt}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
-                              disabled={isDisabled}
+                              disabled={
+                                isDisabled ||
+                                unknownPromptAdmission?.payloadAvailable === true
+                              }
                               isRunning={streamingState !== 'idle'}
                               currentMode={currentMode}
                               currentModel={currentModel}
@@ -10200,6 +10435,7 @@ export function App({
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }
+                          onImageIngestionNotice={pushToast}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -10212,7 +10448,8 @@ export function App({
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            approvalOverlayActive
+                            approvalOverlayActive ||
+                            unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
                           skills={loadedSkills}
@@ -10483,6 +10720,7 @@ export function App({
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
+                    onImageIngestionNotice={pushToast}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
@@ -10538,6 +10776,7 @@ export function App({
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
+                    onImageIngestionNotice={pushToast}
                     onClose={closeArtifactPanel}
                   />
                 </div>
