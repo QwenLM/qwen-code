@@ -69,7 +69,7 @@ export function shouldPreserveUnsupportedAudioForBridge(
 function transcriptBlock(modelId: string, transcript: string): string {
   const clamped =
     transcript.length > MAX_TRANSCRIPT_CHARS
-      ? `${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}…`
+      ? `${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}\n[transcript truncated at ${MAX_TRANSCRIPT_CHARS} characters]`
       : transcript;
   return [
     `[Untrusted machine transcription of audio by ${modelId}. ` +
@@ -92,7 +92,11 @@ export function formatAudioBridgeNotice(result: AudioBridgeResult): string {
   }
   if (result.egressCount > 0 && result.modelId) {
     if (result.convertedCount > 0) {
-      return `Converted ${result.convertedCount} of ${result.audioCount} audio file(s) to text via ${result.modelId}. ${result.egressCount} audio file(s) were sent to that model.`;
+      const failedCount = result.audioCount - result.convertedCount;
+      const failureNote = result.error
+        ? ` ${failedCount} audio file(s) could not be transcribed: ${result.error}.`
+        : '';
+      return `Converted ${result.convertedCount} of ${result.audioCount} audio file(s) to text via ${result.modelId}. ${result.egressCount} audio file(s) were sent to that model.${failureNote}`;
     }
     return `Sent ${result.egressCount} audio file(s) to ${result.modelId} for transcription, but no transcript was produced.`;
   }

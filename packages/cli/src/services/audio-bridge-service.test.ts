@@ -258,6 +258,9 @@ describe('audio bridge service', () => {
       part.text?.includes('too many audio attachments'),
     );
     expect(surplus).toHaveLength(2);
+    expect(formatAudioBridgeNotice(result)).toBe(
+      'Converted 4 of 6 audio file(s) to text via qwen3-asr-flash. 4 audio file(s) were sent to that model. 2 audio file(s) could not be transcribed: too many audio attachments.',
+    );
   });
 
   it('formats a partial-conversion notice', async () => {
@@ -284,7 +287,7 @@ describe('audio bridge service', () => {
       egressCount: 2,
     });
     expect(formatAudioBridgeNotice(result)).toBe(
-      'Converted 1 of 2 audio file(s) to text via qwen3-asr-flash. 2 audio file(s) were sent to that model.',
+      'Converted 1 of 2 audio file(s) to text via qwen3-asr-flash. 2 audio file(s) were sent to that model. 1 audio file(s) could not be transcribed: transcription was unavailable.',
     );
   });
 
@@ -319,7 +322,9 @@ describe('audio bridge service', () => {
     });
 
     expect(result.status).toBe('ok');
-    expect(result.parts[0]?.text).toContain(`${'x'.repeat(10_000)}…`);
+    expect(result.parts[0]?.text).toContain(
+      `[transcript truncated at 10000 characters]`,
+    );
     expect(result.parts[0]?.text).not.toContain('x'.repeat(10_001));
   });
 

@@ -518,12 +518,15 @@ export function sanitizeVoiceErrorMessage(
 
 const AUDIO_FORMAT_ALIASES: Record<string, string> = {
   mpeg: 'mp3',
+  wave: 'wav',
+  'vnd.wave': 'wav',
   'x-wav': 'wav',
   'x-m4a': 'm4a',
   'x-aac': 'aac',
   'x-flac': 'flac',
   'x-ogg': 'ogg',
   'x-mpeg': 'mp3',
+  'x-ms-wma': 'wma',
 };
 
 function inputAudioFormat(mimeType: string): string {

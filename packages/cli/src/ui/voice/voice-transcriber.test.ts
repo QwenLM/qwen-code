@@ -613,6 +613,18 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it('blocks compressed IPv4-mapped IPv6 literals via the blanket rule', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:c612:40' }),
+      ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
   it('rejects voice model hosts when DNS safety lookup fails', async () => {
     await expect(
       transcribeVoiceAudio(
