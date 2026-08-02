@@ -1331,6 +1331,10 @@ export default {
     'Persister la sélection du modèle dans les paramètres du projet (étendue workspace)',
   'Persist the model selection to the user settings (global scope)':
     'Persister la sélection du modèle dans les paramètres utilisateur (étendue globale)',
+  'Persist to project settings (requires --default for the main model)':
+    'Persister dans les paramètres du projet (nécessite --default pour le modèle principal)',
+  'Persist to user settings (requires --default for the main model)':
+    'Persister dans les paramètres utilisateur (nécessite --default pour le modèle principal)',
   'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',

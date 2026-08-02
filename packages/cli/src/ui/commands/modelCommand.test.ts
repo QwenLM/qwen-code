@@ -282,12 +282,12 @@ describe('modelCommand', () => {
       undefined,
     );
     expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
+      SettingScope.User,
       'model.name',
       'qwen-max',
     );
     expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
+      SettingScope.User,
       'model.baseUrl',
       '',
     );
@@ -333,17 +333,17 @@ describe('modelCommand', () => {
       undefined,
     );
     expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
+      SettingScope.User,
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
     );
     expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
+      SettingScope.User,
       'model.name',
       'gpt-4',
     );
     expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
+      SettingScope.User,
       'model.baseUrl',
       '',
     );
@@ -2888,7 +2888,7 @@ describe('modelCommand', () => {
         content: expect.stringContaining('(default)'),
       });
       expect(setValue).toHaveBeenCalledWith(
-        expect.anything(),
+        SettingScope.User,
         'model.name',
         'qwen-max',
       );
@@ -3039,6 +3039,43 @@ describe('modelCommand', () => {
         content: expect.stringContaining(
           '--default requires a model ID in non-interactive mode',
         ),
+      });
+    });
+
+    it('should persist the main model for /model --default <id> in non-interactive mode', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const mockGenerator = {
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen-max',
+      };
+      const ctx = setupContext();
+      ctx.executionMode = 'non_interactive';
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
+      const result = await modelCommand.action!(ctx, '--default qwen-max');
+      expect(cfg.switchModel).toHaveBeenCalled();
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen-max',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(default)'),
       });
     });
 

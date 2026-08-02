@@ -1785,6 +1785,10 @@ export default {
     'モデルの選択をプロジェクト設定に永続化（ワークスペーススコープ）',
   'Persist the model selection to the user settings (global scope)':
     'モデルの選択をユーザー設定に永続化（グローバルスコープ）',
+  'Persist to project settings (requires --default for the main model)':
+    'プロジェクト設定に永続化（メインモデルには --default が必要）',
+  'Persist to user settings (requires --default for the main model)':
+    'ユーザー設定に永続化（メインモデルには --default が必要）',
   'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',

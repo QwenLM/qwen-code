@@ -1521,6 +1521,10 @@ export default {
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
     'Persist the model selection to the user settings (global scope)',
+  'Persist to project settings (requires --default for the main model)':
+    'Persist to project settings (requires --default for the main model)',
+  'Persist to user settings (requires --default for the main model)':
+    'Persist to user settings (requires --default for the main model)',
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
   'Select Image Model': 'Select Image Model',

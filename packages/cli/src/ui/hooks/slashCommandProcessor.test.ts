@@ -748,6 +748,29 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
+    it('should pass persistDefault and persistScope to openModelDialog', async () => {
+      const command = createTestCommand({
+        name: 'modelcmd',
+        action: vi.fn().mockResolvedValue({
+          type: 'dialog',
+          dialog: 'model',
+          persistDefault: true,
+          persistScope: 'user',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/modelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        persistScope: 'user',
+        persistDefault: true,
+      });
+    });
+
     it('should handle "dialog: voice-model" action', async () => {
       const command = createTestCommand({
         name: 'voicemodelcmd',

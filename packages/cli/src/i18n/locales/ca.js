@@ -2531,6 +2531,10 @@ export default {
     "Persistir la selecció de model a la configuració del projecte (àmbit de l'espai de treball)",
   'Persist the model selection to the user settings (global scope)':
     "Persistir la selecció de model a la configuració d'usuari (àmbit global)",
+  'Persist to project settings (requires --default for the main model)':
+    'Persistir a la configuració del projecte (requereix --default per al model principal)',
+  'Persist to user settings (requires --default for the main model)':
+    "Persistir a la configuració d'usuari (requereix --default per al model principal)",
   'Select Fast Model': 'Selecciona el model ràpid',
   'Select Vision Model': 'Seleccionar el model de visió',
   'Select Voice Model': 'Seleccionar el model de veu',

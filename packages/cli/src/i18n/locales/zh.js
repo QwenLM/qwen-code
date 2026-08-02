@@ -1459,6 +1459,10 @@ export default {
     '将模型选择持久化到项目设置（工作区）',
   'Persist the model selection to the user settings (global scope)':
     '将模型选择持久化到用户设置（全局）',
+  'Persist to project settings (requires --default for the main model)':
+    '持久化到项目设置（主模型需要 --default）',
+  'Persist to user settings (requires --default for the main model)':
+    '持久化到用户设置（主模型需要 --default）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Image Model': '选择图像模型',

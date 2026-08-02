@@ -386,7 +386,7 @@ export const modelCommand: SlashCommand = {
     );
   },
   argumentHint:
-    '[--default] [--fast|--voice|--vision|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--default [--project|--global]] [--fast|--voice|--vision|--compaction|--image [--project|--global]] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -427,13 +427,13 @@ export const modelCommand: SlashCommand = {
         {
           value: '--project',
           description: t(
-            'Persist the model selection to the project settings (workspace scope)',
+            'Persist to project settings (requires --default for the main model)',
           ),
         },
         {
           value: '--global',
           description: t(
-            'Persist the model selection to the user settings (global scope)',
+            'Persist to user settings (requires --default for the main model)',
           ),
         },
       ].filter((item) => item.value.startsWith(partialArg));
