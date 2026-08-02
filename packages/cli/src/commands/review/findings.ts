@@ -389,6 +389,14 @@ export function validateFindings(raw: unknown): Finding[] {
 function namesPath(text: string, probe: string): boolean {
   const isNameChar = (c: string | undefined) =>
     c !== undefined && /[A-Za-z0-9._-]/.test(c);
+  // `/` is NOT a leading boundary. Probes reach here repo-relative, so a `/`
+  // in front means the match sits under some other root —
+  // `third_party/packages/cli/src/a.test.ts` is a vendored copy, not this
+  // file, and treating the slash as a boundary demoted a Critical about the
+  // real one. The trailing side already required both ends; this is the same
+  // rule on the side that was left open.
+  const isBoundary = (c: string | undefined) =>
+    c === undefined || (!isNameChar(c) && c !== '/');
   let from = 0;
   for (;;) {
     const at = text.indexOf(probe, from);
@@ -405,7 +413,7 @@ function namesPath(text: string, probe: string): boolean {
           /[A-Za-z0-9]/.test(text[at + probe.length + 1] ?? '')));
     // Both ends: the leading check alone cannot see a probe matching inside a
     // longer name, where `src/a.test.ts` is satisfied by `src/a.test.tsx`.
-    if (!isNameChar(at === 0 ? undefined : text[at - 1]) && !extendsName) {
+    if (isBoundary(at === 0 ? undefined : text[at - 1]) && !extendsName) {
       return true;
     }
     from = at + 1;
@@ -438,8 +446,13 @@ function namesPath(text: string, probe: string): boolean {
 export function holdCriticalsFailingOnBase(
   findings: readonly Finding[],
   sharedFailingFiles: readonly string[],
-): { findings: Finding[]; held: Array<{ id: string; file: string }> } {
+): {
+  findings: Finding[];
+  held: Array<{ id: string; file: string }>;
+  readjudicated: Array<{ id: string; file: string }>;
+} {
   const held: Array<{ id: string; file: string }> = [];
+  const readjudicated: Array<{ id: string; file: string }> = [];
   const out = findings.map((f) => {
     if (f.severity !== 'Critical') return f;
     // `summary` and `failureScenario` only — the two fields where a finding
@@ -456,23 +469,27 @@ export function holdCriticalsFailingOnBase(
     const haystack = [f.summary, f.failureScenario].join('\n');
     const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
     if (!hit) return f;
-    held.push({ id: f.id, file: hit });
-    // Already held for this file and re-filed as Critical by a later round —
-    // lower it again, but do not append the paragraph a second time. The
-    // measurement has not changed, and two identical explanations under one
-    // finding read as two measurements. `heldByMeasurement` round-trips
-    // through `--input`, so this state is exactly what it is for.
+    // Already held for this file, and back at Critical anyway. The ledger
+    // carries a held finding forward as the Suggestion it became, so Critical
+    // plus this marker takes a deliberate act: someone read the measurement and
+    // raised it again. Re-applying the same measurement to the same finding
+    // adds nothing and silently overrides that decision — and the escape the
+    // report offers ("say which test fails for a NEW reason") names the test
+    // file, which is the match condition, so without this the door the
+    // documentation promises cannot be opened at all.
     if (f.heldByMeasurement?.file === hit) {
-      return { ...f, severity: 'Suggestion' as Severity };
+      readjudicated.push({ id: f.id, file: hit });
+      return f;
     }
+    held.push({ id: f.id, file: hit });
     return {
       ...f,
       severity: 'Suggestion' as Severity,
       heldByMeasurement: { file: hit },
-      failureScenario: `${f.failureScenario}\n\nHeld back from Critical by measurement: \`test-delta\` reran the failing test command on the merge base and ${hit} failed there too, so this is not a passing test the PR turns red. If the PR makes an already-red test fail for a NEW reason, say which test and quote both sides.`,
+      failureScenario: `${f.failureScenario}\n\nHeld back from Critical by measurement: \`test-delta\` reran the failing test command on the merge base and ${hit} failed there too, so this is not a passing test the PR turns red. If the PR makes an already-red test fail for a NEW reason, say which test, quote both sides, and file it at Critical again: a finding that already carries this measurement and is raised anyway is left where you put it.`,
     };
   });
-  return { findings: out, held };
+  return { findings: out, held, readjudicated };
 }
 
 const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
@@ -518,10 +535,11 @@ function repoRelative(
 /**
  * Every file `test-delta` measured as failing on BOTH sides, repo-relative.
  *
- * Read from `entries` when there are any, because only an entry carries the
- * `--workspace=` its paths are relative to; the top-level `shared` is the union
- * of the same files with that context already lost, and is the fallback for a
- * partial artifact rather than a second source of truth.
+ * Read from `entries` only, because only an entry carries the `--workspace=`
+ * its paths are relative to. The top-level `shared` is the union of the same
+ * files with that context already lost, so it is never honoured — an artifact
+ * with no entries measured nothing this can safely act on, and a bare
+ * workspace-relative path matches inside any package.
  *
  * A file measured `netNew` anywhere in the run is dropped even if some other
  * command called it `shared`: the two claims cannot both license a hold, and the
@@ -816,6 +834,7 @@ export const findingsCommand: CommandModule = {
       );
     }
     let held: Array<{ id: string; file: string }> = [];
+    let readjudicated: Array<{ id: string; file: string }> = [];
     if (testDelta !== undefined) {
       // A measurement that will not read is a measurement, absent — and an
       // absent measurement holds nothing back. It must not take the review
@@ -849,7 +868,10 @@ export const findingsCommand: CommandModule = {
           `findings: ignored the measured file ${f} — it carries a vitest project key and no workspace to resolve it against, so which project it names cannot be established`,
         );
       }
-      ({ findings, held } = holdCriticalsFailingOnBase(findings, shared));
+      ({ findings, held, readjudicated } = holdCriticalsFailingOnBase(
+        findings,
+        shared,
+      ));
     }
     const report = buildReport(findings);
 
@@ -870,6 +892,13 @@ export const findingsCommand: CommandModule = {
     for (const h of held) {
       writeStderrLine(
         `findings: ${h.id} held back from Critical — test-delta measured ${h.file} as failing on the merge base too`,
+      );
+    }
+    // A hold that was weighed and reversed is a decision, and a decision this
+    // command declined to overrule is exactly as reportable as one it made.
+    for (const r of readjudicated) {
+      writeStderrLine(
+        `findings: ${r.id} left at Critical — it already carries the ${r.file} measurement and was raised again anyway`,
       );
     }
     if (report.counts.byOutcome) {

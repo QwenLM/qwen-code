@@ -759,7 +759,9 @@ describe('findings (command boundary)', () => {
 describe('holdCriticalsFailingOnBase', () => {
   // The shape test-delta writes: workspace-relative paths, while a finding
   // names the repo-relative one.
-  const shared = ['src/ui/auth/AuthDialog.test.tsx'];
+  // Repo-relative, which is what `sharedFailingFilesOf` hands the helper: it
+  // qualifies each entry's paths from that entry's `--workspace=`.
+  const shared = ['packages/cli/src/ui/auth/AuthDialog.test.tsx'];
   const critical = {
     id: 'f1',
     severity: 'Critical' as const,
@@ -780,14 +782,14 @@ describe('holdCriticalsFailingOnBase', () => {
     // evidence, it does not replace it.
     expect(findings[0].failureScenario).toContain('expects MiniMax visible');
     expect(held).toEqual([
-      { id: 'f1', file: 'src/ui/auth/AuthDialog.test.tsx' },
+      { id: 'f1', file: 'packages/cli/src/ui/auth/AuthDialog.test.tsx' },
     ]);
   });
 
   it('leaves a Critical alone when the test it names is not shared', () => {
     const { findings, held } = holdCriticalsFailingOnBase(
       [critical],
-      ['src/other/unrelated.test.ts'],
+      ['packages/cli/src/other/unrelated.test.ts'],
     );
     expect(findings[0].severity).toBe('Critical');
     expect(findings[0].failureScenario).toBe(critical.failureScenario);
@@ -810,22 +812,28 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(fixed.held).toEqual(plain.held);
   });
 
-  it('does not stack a second explanation when a later round re-files it', () => {
-    // The round ledger can carry a held finding forward and re-file it as
-    // Critical. The measurement has not changed, and two identical paragraphs
-    // under one finding read as two measurements. `heldByMeasurement`
-    // round-trips through --input, which is what makes this decidable.
+  it('leaves a re-filed Critical alone once it already carries the measurement', () => {
+    // The escape the report offers — "say which test fails for a NEW reason" —
+    // names the test file, which IS the match condition, so re-applying the
+    // measurement would make the promised door unopenable. The ledger carries a
+    // held finding forward as the Suggestion it became, so Critical plus the
+    // marker is a deliberate act by someone who read it.
     const once = holdCriticalsFailingOnBase([critical], shared).findings[0];
-    const twice = holdCriticalsFailingOnBase(
+    expect(once.severity).toBe('Suggestion');
+
+    const again = holdCriticalsFailingOnBase(
       [{ ...once, severity: 'Critical' as const }],
       shared,
-    ).findings[0];
-    const count = (s: string) =>
-      (s.match(/Held back from Critical by measurement:/g) ?? []).length;
-    expect(count(once.failureScenario)).toBe(1);
-    expect(count(twice.failureScenario)).toBe(1);
-    // ...and it is still held.
-    expect(twice.severity).toBe('Suggestion');
+    );
+    expect(again.findings[0].severity).toBe('Critical');
+    expect(again.held).toEqual([]);
+    expect(again.readjudicated).toEqual([
+      { id: 'f1', file: 'packages/cli/src/ui/auth/AuthDialog.test.tsx' },
+    ]);
+    // ...and the explanation is not written twice.
+    const count = (t: string) =>
+      (t.match(/Held back from Critical by measurement:/g) ?? []).length;
+    expect(count(again.findings[0].failureScenario)).toBe(1);
   });
 
   it('records the hold as a field, not only as prose', () => {
@@ -833,7 +841,7 @@ describe('holdCriticalsFailingOnBase', () => {
     // substring-matching the scenario is a hold the round ledger cannot see.
     const { findings } = holdCriticalsFailingOnBase([critical], shared);
     expect(findings[0].heldByMeasurement).toEqual({
-      file: 'src/ui/auth/AuthDialog.test.tsx',
+      file: 'packages/cli/src/ui/auth/AuthDialog.test.tsx',
     });
   });
 
@@ -889,6 +897,26 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(held).toEqual([]);
   });
 
+  it('does not match a nested copy of the same tree', () => {
+    // `/` is not a leading boundary. The probe reaches here repo-relative, so
+    // anything in front of it means the match sits under another root: a
+    // vendored copy is not this file, and demoting a Critical about the real
+    // one on that basis is the cross-tree collapse in miniature.
+    const { findings, held } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          summary: 'the assertion is wrong',
+          failureScenario:
+            'third_party/packages/cli/src/ui/auth/AuthDialog.test.tsx is red',
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
+    expect(held).toEqual([]);
+  });
+
   it('matches a path that ends a sentence', () => {
     // Findings are prose. Treating the full stop as part of the name would
     // silently stop matching the ordinary way a file is written.
@@ -933,7 +961,7 @@ describe('holdCriticalsFailingOnBase', () => {
           locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx' }],
         },
       ],
-      ['src/ui/auth/AuthDialog.test.ts'],
+      ['packages/cli/src/ui/auth/AuthDialog.test.ts'],
     );
     expect(findings[0].severity).toBe('Critical');
   });
