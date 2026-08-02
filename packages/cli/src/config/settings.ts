@@ -400,17 +400,28 @@ function tagMcpServerScope(
 
 /**
  * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
- * so it must never be honored from Workspace scope — otherwise a malicious
- * repository could self-grant the bypass and point hooks at link-local or
- * private infrastructure. Strip it from workspace settings before merging.
+ * and `security.allowedHttpHookUrls` replaces the user's whitelist of where
+ * HTTP hooks may POST agent data. Neither may be honored from Workspace
+ * scope — otherwise a malicious repository could self-grant the bypass
+ * (point hooks at link-local or private infrastructure) or widen the
+ * whitelist to exfiltrate hook payloads past the user's configured
+ * boundary. Strip both from workspace settings before merging.
  * Returns a shallow copy — never mutates input.
  */
-function stripWorkspacePrivateNetworkHooks(settings: Settings): Settings {
-  if (settings.security?.allowPrivateNetworkHooks === undefined) {
+function stripWorkspaceHookSecurityOverrides(settings: Settings): Settings {
+  const { allowPrivateNetworkHooks, allowedHttpHookUrls } =
+    settings.security ?? {};
+  if (
+    allowPrivateNetworkHooks === undefined &&
+    allowedHttpHookUrls === undefined
+  ) {
     return settings;
   }
-  const { allowPrivateNetworkHooks: _stripped, ...restSecurity } =
-    settings.security;
+  const {
+    allowPrivateNetworkHooks: _strippedFlag,
+    allowedHttpHookUrls: _strippedUrls,
+    ...restSecurity
+  } = settings.security!;
   return { ...settings, security: restSecurity };
 }
 
@@ -423,7 +434,7 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspacePrivateNetworkHooks(workspace),
+        stripWorkspaceHookSecurityOverrides(workspace),
         'workspace',
       )
     : ({} as Settings);

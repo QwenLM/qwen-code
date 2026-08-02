@@ -3264,7 +3264,7 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.security?.allowPrivateNetworkHooks).toBe(true);
     });
 
-    it('should strip security.allowPrivateNetworkHooks from workspace scope even when trusted', () => {
+    it('should strip security.allowPrivateNetworkHooks and security.allowedHttpHookUrls from workspace scope even when trusted', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const workspaceSettingsContent = {
         security: {
@@ -3282,13 +3282,36 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      // The flag is ignored from workspace scope...
+      // Both hook-security overrides are ignored from workspace scope:
+      // a repository must not self-grant an SSRF relaxation nor replace
+      // the user's hook-payload whitelist.
       expect(
         settings.merged.security?.allowPrivateNetworkHooks,
       ).toBeUndefined();
-      // ...but other workspace security settings still merge.
+      expect(settings.merged.security?.allowedHttpHookUrls).toBeUndefined();
+    });
+
+    it('should honor security.allowedHttpHookUrls from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['*'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The workspace's self-granted "*" is stripped; the user's
+      // whitelist survives.
       expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
-        'https://hooks.example.com/*',
+        'https://hooks.corp.com/*',
       ]);
     });
 
