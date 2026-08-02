@@ -20,6 +20,9 @@ import {
   completionFor,
   messagesText,
   replyProblem,
+  anthropicStream,
+  anthropicMessage,
+  anthropicText,
   type Responder,
 } from './mock-provider.js';
 
@@ -186,6 +189,150 @@ describe('the bounds', () => {
     const rec = JSON.parse(readFileSync(log, 'utf8').trim());
     expect(rec.text.length).toBeLessThan(20_000);
     expect(rec.text).toContain('more characters');
+  });
+});
+
+describe('the Anthropic wire', () => {
+  // Shapes taken from this repo's own `anthropicContentGenerator`, not from
+  // memory: the six events it parses, `input_json_delta`, the four usage
+  // fields, and the block array. A mock whose protocol came from the author's
+  // recollection would be testing the recollection.
+  const anth = (base: string, body: unknown) =>
+    fetch(`${base}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('streams the six events, in order, and does NOT send [DONE]', async () => {
+    // `[DONE]` is OpenAI's terminator. An Anthropic client waits for
+    // `message_stop`, so sending the wrong one leaves it hanging — the same
+    // failure shape as a malformed responder, arriving from the other wire.
+    const { report } = await serve(() => ({ text: 'hello' }));
+    const body = await (
+      await anth(report.baseUrl, { stream: true, messages: [] })
+    ).text();
+    const events = [...body.matchAll(/^event: (\w+)$/gm)].map((m) => m[1]);
+    expect(events).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ]);
+    expect(body).not.toContain('[DONE]');
+  });
+
+  it('streams tool input as input_json_delta, not as a finished object', async () => {
+    // A client that accumulates partial JSON and one that expects it whole
+    // behave differently, and the real API streams it.
+    const { report } = await serve(() => ({
+      tool: 'run_shell_command',
+      args: { command: 'ls' },
+    }));
+    const body = await (
+      await anth(report.baseUrl, { stream: true, messages: [] })
+    ).text();
+    // Parsed, not grepped: keeping the delta TYPE while handing the arguments
+    // over as a finished `input` object passes a substring check and fails a
+    // client that accumulates `partial_json` — it did.
+    const deltas = [...body.matchAll(/^data: (.+)$/gm)]
+      .map((m) => JSON.parse(m[1]))
+      .filter((d) => d.type === 'content_block_delta');
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].delta.type).toBe('input_json_delta');
+    expect(typeof deltas[0].delta.partial_json).toBe('string');
+    expect(JSON.parse(deltas[0].delta.partial_json)).toEqual({ command: 'ls' });
+    expect(body).toContain('"type":"tool_use"');
+    expect(body).toContain('"stop_reason":"tool_use"');
+  });
+
+  it('answers a non-stream call with a block ARRAY and the four usage fields', async () => {
+    const { report } = await serve(() => ({ text: 'plain' }));
+    const json = (await (
+      await anth(report.baseUrl, { stream: false, messages: [] })
+    ).json()) as Record<string, never>;
+    expect(json['content']).toEqual([{ type: 'text', text: 'plain' }]);
+    expect(json['stop_reason']).toBe('end_turn');
+    expect(Object.keys(json['usage']).sort()).toEqual([
+      'cache_creation_input_tokens',
+      'cache_read_input_tokens',
+      'input_tokens',
+      'output_tokens',
+    ]);
+  });
+
+  it('gives the responder the top-level `system`, which Anthropic puts outside messages', () => {
+    // 20% of the corpus classified requests by their system prompt. On this
+    // wire the system prompt is not in `messages`, so a responder branching on
+    // prompt text would never see it.
+    expect(
+      anthropicText({
+        system: 'you are a verifier',
+        messages: [{ content: 'hi' }],
+      }),
+    ).toBe('you are a verifier\nhi');
+    expect(anthropicText({ system: [{ text: 'blocks' }], messages: [] })).toBe(
+      'blocks',
+    );
+  });
+
+  it('...and actually hands that text to the responder on this wire', async () => {
+    // The pure function being right is not the same as it being wired in.
+    // Testing only the function left the request path free to call the OpenAI
+    // flattener instead, which drops `system` entirely — and it passed.
+    let seen = '';
+    const { report } = await serve((r) => {
+      seen = r.text;
+      return { text: 'x' };
+    });
+    await anth(report.baseUrl, {
+      stream: false,
+      system: 'you are a verifier',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(seen).toContain('you are a verifier');
+    expect(anthropicText({ messages: [{ content: 'only user' }] })).toBe(
+      'only user',
+    );
+  });
+
+  it('tells the responder — and the record — which wire was dialled', async () => {
+    // An A/B whose two sides dialled different wires is not comparing the same
+    // thing, and the log is where that shows.
+    const wires: string[] = [];
+    const { report, log } = await serve((r) => {
+      wires.push(r.wire);
+      return { text: 'x' };
+    });
+    await anth(report.baseUrl, { stream: false, messages: [] });
+    await post(report.baseUrl, { stream: false, messages: [] });
+    await stop?.();
+    stop = null;
+    expect(wires).toEqual(['anthropic', 'openai']);
+    const recs = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(recs.map((r) => r.wire)).toEqual(['anthropic', 'openai']);
+  });
+
+  it('leaves the OpenAI wire exactly as it was', async () => {
+    const { report } = await serve(() => ({ text: 'x' }));
+    const body = await (
+      await post(report.baseUrl, { stream: true, messages: [] })
+    ).text();
+    expect(body).toContain('[DONE]');
+    expect(body).not.toMatch(/^event:/m);
+  });
+
+  it('builds both shapes without a socket', () => {
+    expect(anthropicMessage({ tool: 't', args: { a: 1 } })).toMatchObject({
+      content: [{ type: 'tool_use', name: 't', input: { a: 1 } }],
+      stop_reason: 'tool_use',
+    });
+    expect(anthropicStream({ text: '' })).toContain('message_stop');
   });
 });
 

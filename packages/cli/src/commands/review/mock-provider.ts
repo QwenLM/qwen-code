@@ -27,15 +27,30 @@
 // never has to get `data:` framing, chunk indices, `finish_reason` or the
 // terminator right again.
 //
-// WHAT IT IS NOT. It fakes one protocol: the OpenAI-compatible chat API. That
-// is a public shape and nothing here is qwen-specific — any project whose
-// product calls such an endpoint can drive against this — but it is also the
-// limit. Of the 94 mocks measured, 73% spoke this protocol and the rest did
-// not: 23% stood up the project's own HTTP service, and single cases faked
-// MCP/JSON-RPC, OAuth, and the Anthropic API. For those, the thing to reach
-// for is `drive`, which owns readiness, completion and cleanup for ANY process
-// the reviewer starts. The division is the usual one: a protocol shared by 73
-// files is a fixture, and a service that differs in all 22 is a judgement.
+// TWO PROTOCOLS, one responder. `/v1/chat/completions` speaks OpenAI and
+// `/v1/messages` speaks Anthropic; the caller writes one responder and gets
+// whichever wire the product under test dials.
+//
+// The corpus argues for the first and NOT the second — 73% of those 94 mocks
+// spoke OpenAI, exactly one spoke Anthropic. The product argues the other way:
+// `anthropicContentGenerator/` is 11,618 lines and three PRs touched it in the
+// last three months, #8163 and #8166 among them. One of those was settled by
+// posting the two branches' actual bytes to a real Anthropic endpoint and
+// reading back 400 versus 200 — which is the honest reading of "only one mock
+// exists": not that nobody needed it, but that faking it was harder than
+// finding a real endpoint.
+//
+// So the Anthropic shapes here are taken from THIS repo's own generator rather
+// than from memory: the six SSE events it parses, the four delta types
+// (`text_delta`, `input_json_delta`, `thinking_delta`, `signature_delta`), the
+// four usage fields including the cache counters, and the three content-block
+// types. A mock whose protocol came from the author's recollection would be
+// testing the recollection.
+//
+// WHAT IT IS STILL NOT. Anything that is not one of those two wires: 23% of
+// the corpus stood up the project's own HTTP service, and single cases faked
+// MCP/JSON-RPC and OAuth. For those the tool is `drive`, which owns readiness,
+// completion and cleanup for ANY process a reviewer starts.
 //
 // Two things it fixes that the corpus did by hand:
 //
@@ -64,8 +79,17 @@ export type MockReply =
   | { tool: string; args?: unknown }
   | { status: number; body?: unknown };
 
+/** Which wire the product dialled. The responder may branch on it; most won't. */
+export type MockWire = 'openai' | 'anthropic';
+
 /** One request, as the responder sees it and as the log records it. */
 export interface MockRequest {
+  /**
+   * `openai` for `/v1/chat/completions`, `anthropic` for `/v1/messages`.
+   * Recorded as well as passed: an A/B whose two sides dialled different wires
+   * is not comparing the same thing, and the log is where that shows.
+   */
+  wire: MockWire;
   method: string;
   path: string;
   /** Parsed JSON body when there was one, else null. */
@@ -271,6 +295,131 @@ export function completionFor(reply: MockReply): Record<string, unknown> {
   };
 }
 
+/** One `event:`/`data:` pair. Anthropic names its events; OpenAI does not. */
+function sseEvent(type: string, data: Record<string, unknown>): string {
+  return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+}
+
+/**
+ * The Anthropic stream for a reply, in the shapes this repo's own generator
+ * parses — `message_start`, `content_block_start`, `content_block_delta`,
+ * `content_block_stop`, `message_delta`, `message_stop`.
+ *
+ * There is no `[DONE]`: that is OpenAI's terminator, and a client waiting for
+ * `message_stop` would hang on it. The two wires end differently and this is
+ * the difference most easily got wrong from memory.
+ */
+export function anthropicStream(reply: MockReply): string {
+  const usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  let out = sseEvent('message_start', {
+    message: {
+      id: 'msg_qwen_review_mock',
+      type: 'message',
+      role: 'assistant',
+      model: 'qwen-review-mock',
+      content: [],
+      stop_reason: null,
+      usage,
+    },
+  });
+  if ('tool' in reply) {
+    out += sseEvent('content_block_start', {
+      index: 0,
+      content_block: {
+        type: 'tool_use',
+        id: `toolu_${reply.tool}_1`,
+        name: reply.tool,
+        input: {},
+      },
+    });
+    // Streamed as `input_json_delta`, not as a finished object: a client that
+    // accumulates partial JSON and one that expects it whole behave
+    // differently, and the real API streams it.
+    out += sseEvent('content_block_delta', {
+      index: 0,
+      delta: {
+        type: 'input_json_delta',
+        partial_json: JSON.stringify(reply.args ?? {}),
+      },
+    });
+    out += sseEvent('content_block_stop', { index: 0 });
+    out += sseEvent('message_delta', {
+      delta: { stop_reason: 'tool_use', stop_sequence: null },
+      usage: { output_tokens: 0 },
+    });
+  } else {
+    const text = 'text' in reply ? reply.text : '';
+    out += sseEvent('content_block_start', {
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    });
+    for (const piece of text.match(/[\s\S]{1,40}/g) ?? [])
+      out += sseEvent('content_block_delta', {
+        index: 0,
+        delta: { type: 'text_delta', text: piece },
+      });
+    out += sseEvent('content_block_stop', { index: 0 });
+    out += sseEvent('message_delta', {
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 0 },
+    });
+  }
+  return out + sseEvent('message_stop', {});
+}
+
+/** The non-streaming Anthropic body — content is a BLOCK ARRAY, not a string. */
+export function anthropicMessage(reply: MockReply): Record<string, unknown> {
+  const content =
+    'tool' in reply
+      ? [
+          {
+            type: 'tool_use',
+            id: `toolu_${reply.tool}_1`,
+            name: reply.tool,
+            input: reply.args ?? {},
+          },
+        ]
+      : [{ type: 'text', text: 'text' in reply ? reply.text : '' }];
+  return {
+    id: 'msg_qwen_review_mock',
+    type: 'message',
+    role: 'assistant',
+    model: 'qwen-review-mock',
+    content,
+    stop_reason: 'tool' in reply ? 'tool_use' : 'end_turn',
+    stop_sequence: null,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  };
+}
+
+/**
+ * Anthropic puts the system prompt in a top-level `system`, not in `messages`.
+ * A responder that branches on prompt text would never see it otherwise —
+ * and "the system prompt says verifier" is how 20% of the corpus classified
+ * its requests.
+ */
+export function anthropicText(body: Record<string, unknown> | null): string {
+  const sys = body?.['system'];
+  const sysText =
+    typeof sys === 'string'
+      ? sys
+      : Array.isArray(sys)
+        ? sys.map((b) => String((b as { text?: unknown })?.text ?? '')).join('')
+        : '';
+  const rest = messagesText(body);
+  return sysText && rest ? `${sysText}\n${rest}` : sysText || rest;
+}
+
 export interface MockProviderArgs {
   /** Module exporting `respond(req): MockReply`. Absent → a fixed greeting. */
   responder?: string;
@@ -346,12 +495,18 @@ export async function startMockProvider(
         }
         const path = req.url ?? '/';
         const isModels = path.startsWith('/v1/models');
+        // The wire is decided by the path the product dialled, not by a flag:
+        // whichever endpoint it chose is the one it can parse back.
+        const wire: MockWire = path.includes('/v1/messages')
+          ? 'anthropic'
+          : 'openai';
         if (!isModels) n += 1;
         const mreq: MockRequest = {
           method: req.method ?? 'GET',
           path,
           body,
-          text: messagesText(body),
+          wire,
+          text: wire === 'anthropic' ? anthropicText(body) : messagesText(body),
           stream: body?.['stream'] === true,
           n,
         };
@@ -395,7 +550,13 @@ export async function startMockProvider(
         }
         if (!mreq.stream) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(completionFor(reply)));
+          res.end(
+            JSON.stringify(
+              wire === 'anthropic'
+                ? anthropicMessage(reply)
+                : completionFor(reply),
+            ),
+          );
           return;
         }
         res.writeHead(200, {
@@ -403,8 +564,14 @@ export async function startMockProvider(
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        for (const c of chunksFor(reply)) res.write(enc(c));
-        res.write('data: [DONE]\n\n');
+        if (wire === 'anthropic') {
+          // Ends on `message_stop`. No `[DONE]` — that is OpenAI's terminator,
+          // and a client waiting for one would hang on this stream.
+          res.write(anthropicStream(reply));
+        } else {
+          for (const c of chunksFor(reply)) res.write(enc(c));
+          res.write('data: [DONE]\n\n');
+        }
         res.end();
       })();
     });
