@@ -1515,7 +1515,8 @@ describe('GithubChannel', () => {
         createHash('sha256').update(response).digest('hex'),
       );
       expect(audit).not.toContain(response);
-      expect(JSON.parse(audit)).toMatchObject({
+      const lastAuditLine = audit.trim().split('\n').pop()!;
+      expect(JSON.parse(lastAuditLine)).toMatchObject({
         outcome: 'posted',
         repository: 'owner/repo',
         number: 42,
@@ -1576,7 +1577,8 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
       const audit = readFileSync(auditPath(), 'utf-8');
-      expect(JSON.parse(audit)).toMatchObject({
+      const lastAuditLine = audit.trim().split('\n').pop()!;
+      expect(JSON.parse(lastAuditLine)).toMatchObject({
         outcome: 'failed',
         failurePhase: 'delivery',
         failureError: 'ambiguous transport failure',
@@ -1843,7 +1845,20 @@ describe('GithubChannel', () => {
     });
 
     it('drops and audits an ambiguous pending final retry failure', async () => {
-      writePending([pendingRecord({ triggerKind: 'mention' })]);
+      writePending([
+        pendingRecord({ triggerKind: 'mention', sourceMessageId: '1001' }),
+      ]);
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'reply_pending',
+          envelope: undefined,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'issue:42',
+            messageId: '1001',
+          },
+        }),
+      ]);
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('ambiguous'),
       );
@@ -1852,6 +1867,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
+      expect(existsSync(inboundTaskPath())).toBe(false);
       expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
         outcome: 'failed',
         triggerKind: 'mention',
@@ -2645,7 +2661,13 @@ describe('GithubChannel', () => {
         inboundRecoveryPending: boolean;
       };
       privateChannel.inboundRecoveryPending = true;
-      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
 
       await pollOnce();
 
@@ -2917,9 +2939,47 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('does not re-run a task whose reply was posted before a crash', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditFilePath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(join(auditFilePath, '..'), { recursive: true });
+      writeFileSync(
+        auditFilePath,
+        `${JSON.stringify({
+          at: '2026-07-02T10:00:00.000Z',
+          type: 'github_publication',
+          outcome: 'posting',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: 'session-1',
+          threadId: 'issue:42',
+          sourceMessageId: '1001',
+          bodySha256: 'abc',
+          bodyChars: 5,
+        })}\n`,
+      );
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      await privateChannel.pollOnce();
+
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
     it('restores persisted dedupe before polling after recovery', async () => {
       writeInboundTasks([makeInboundTaskRecord()]);
       channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      (channel as unknown as { botUsername: string }).botUsername = 'test-bot';
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({

@@ -159,7 +159,7 @@ interface PostedGithubComment {
 interface PublicationAuditRecord {
   at: string;
   type: 'github_publication';
-  outcome: 'posted' | 'suppressed' | 'failed';
+  outcome: 'posted' | 'suppressed' | 'failed' | 'posting';
   channel: string;
   triggerKind?: string;
   repository: string;
@@ -581,6 +581,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
 
+    this.recordPublicationAudit({
+      ...auditBase,
+      at: new Date().toISOString(),
+      type: 'github_publication',
+      outcome: 'posting',
+    });
     try {
       const comment = await this.createIssueComment(
         chatId,
@@ -1555,15 +1561,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.removeInboundTask(task.id);
         }
       } else if (!this.cancelledInboundTaskIds.has(task.id)) {
-        this.transitionInboundTask(task.id, 'failed', { error, attempts });
-        if (!task.errorCommentPosted) {
+        const alreadyPosted = task.errorCommentPosted === true;
+        this.transitionInboundTask(task.id, 'failed', {
+          error,
+          attempts,
+          errorCommentPosted: true,
+        });
+        if (!alreadyPosted) {
           await this.postErrorComment(envelope.chatId, task.issueNumber);
-          task.errorCommentPosted = true;
-          this.transitionInboundTask(task.id, 'failed', {
-            error,
-            attempts,
-            errorCommentPosted: true,
-          });
         }
       }
       return false;
@@ -1660,7 +1665,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         if (!line) continue;
         try {
           const record = JSON.parse(line) as PublicationAuditRecord;
-          if (record.outcome === 'posted' || record.outcome === 'suppressed') {
+          if (
+            record.outcome === 'posted' ||
+            record.outcome === 'suppressed' ||
+            record.outcome === 'posting'
+          ) {
             keys.add(
               `${record.repository}|${record.threadId ?? ''}|${record.sourceMessageId ?? ''}`,
             );
