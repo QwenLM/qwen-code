@@ -229,6 +229,14 @@ export class CdpBrowserEmulator {
                 targetId: PAGE_TARGET_ID,
               },
             });
+          } else {
+            return this.cb.reply({
+              id,
+              error: {
+                code: SERVER_ERROR,
+                message: `Unknown CDP session: ${String(attachedSessionId)}`,
+              },
+            });
           }
           return this.cb.reply({ id, result: {} });
         }

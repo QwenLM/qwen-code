@@ -472,4 +472,23 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     expect(replies.at(-1)).toEqual({ id: 14, result: {} });
     expect(log).not.toHaveBeenCalled();
   });
+
+  it('errors when detaching an unrecognized session id', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 60,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session-99' },
+    });
+    expect(
+      replies.find((reply) => reply.method === 'Target.detachedFromTarget'),
+    ).toBeUndefined();
+    expect(replies.at(-1)).toEqual({
+      id: 60,
+      error: {
+        code: -32000,
+        message: 'Unknown CDP session: qwen-cdp-page-session-99',
+      },
+    });
+  });
 });
