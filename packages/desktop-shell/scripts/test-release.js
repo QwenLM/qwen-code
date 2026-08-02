@@ -110,6 +110,13 @@ function testResolveLogRoot() {
       smoke.indexOf('const child = spawn(executable'),
     'previousLog must be captured before the child is spawned',
   );
+  // Pin the stale-log protection: without these, reverting readNewLog()
+  // to inline reads or dropping the prefix slice passes every assertion
+  // while silently re-matching a previous run's readiness line.
+  assert.match(smoke, /if \(!contents\.startsWith\(previousLog\)\)/);
+  assert.match(smoke, /log was truncated, resetting baseline/);
+  assert.match(smoke, /return contents\.slice\(previousLog\.length\)/);
+  assert.match(smoke, /const contents = readNewLog\(\)/);
 }
 
 function testUpdateManifest(directory) {
