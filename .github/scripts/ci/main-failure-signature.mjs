@@ -132,6 +132,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
   if (workflowName !== 'E2E Tests') return null;
 
   const cases = [];
+  const environments = [];
   const reasons = [];
   for (const job of jobs) {
     const environment = parseE2eJobName(job.name);
@@ -139,6 +140,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       reasons.push(`unsupported failed job: ${job.name || '(unnamed)'}`);
       continue;
     }
+    environments.push(environment);
     if (typeof job.log !== 'string') {
       reasons.push(`missing log for failed job: ${job.name}`);
       continue;
@@ -175,10 +177,10 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       `too many environment-specific failures: ${totalCases} > ${MAX_TARGETED_E2E_CASES}`,
     );
   }
-  if (cases.some((testCase) => testCase.os !== 'linux')) {
+  if (environments.some((environment) => environment.os !== 'linux')) {
     reasons.push('macOS E2E failures are unsupported by the Linux verifier');
   }
-  if (cases.some((testCase) => testCase.sandbox !== 'none')) {
+  if (environments.some((environment) => environment.sandbox !== 'none')) {
     reasons.push(
       'Docker E2E failures are unsupported by credential-free read-only verification',
     );
@@ -492,9 +494,7 @@ function publicMachineMarkers(body) {
     'g',
   );
   const markers = [
-    ...new Set(
-      [...text.matchAll(testMarkerPattern)].map((match) => match[0]),
-    ),
+    ...new Set([...text.matchAll(testMarkerPattern)].map((match) => match[0])),
   ];
   const signaturePattern = new RegExp(
     `^<!-- ${SIGNATURE_MARKER_PREFIX}[0-9a-f]{12} -->$`,
