@@ -24,6 +24,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import { logChatCompression } from '../telemetry/loggers.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -2271,6 +2272,13 @@ describe('ChatCompressionService.compress cache sharing', () => {
       'Keep the exact command output.',
     );
     expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
   });
 
   it('preserves per-request tool overrides used by subagent turns', async () => {
@@ -2437,6 +2445,14 @@ describe('ChatCompressionService.compress cache sharing', () => {
         hadToolCall: false,
       },
     },
+    {
+      name: 'whitespace-only snapshot',
+      response: {
+        text: '<state_snapshot> </state_snapshot>',
+        usage: {},
+        hadToolCall: false,
+      },
+    },
   ])(
     'falls back once when the shared response contains a $name',
     async ({ response }) => {
@@ -2463,6 +2479,13 @@ describe('ChatCompressionService.compress cache sharing', () => {
 
       expect(generateText).toHaveBeenCalledTimes(1);
       expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: true,
+          cache_sharing_used: false,
+        }),
+      );
     },
   );
 
@@ -2562,6 +2585,25 @@ describe('ChatCompressionService.compress cache sharing', () => {
             parts: [{ inlineData: { mimeType: 'image/png', data: 'base64' } }],
           },
           { role: 'model', parts: [{ text: 'image received' }] },
+        ],
+      },
+    },
+    {
+      name: 'document-bearing history',
+      options: {
+        history: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: 'base64',
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'document received' }] },
         ],
       },
     },
