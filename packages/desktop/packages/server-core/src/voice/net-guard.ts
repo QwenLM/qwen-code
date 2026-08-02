@@ -64,6 +64,20 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
   ].join('.');
 }
 
+function readIpv4MappedIpv6(host: string): string | undefined {
+  const dotted = host.match(/^::ffff:(\d+(?:\.\d+){3})$/i);
+  if (dotted && isIP(dotted[1]!) === 4) {
+    return dotted[1];
+  }
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!hex) {
+    return undefined;
+  }
+  const high = Number.parseInt(hex[1]!, 16);
+  const low = Number.parseInt(hex[2]!, 16);
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+}
+
 /** IP-literal private-network check; hostname resolution is handled separately. */
 export function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeHostname(hostname);
@@ -76,9 +90,9 @@ export function isPrivateNetworkIp(hostname: string): boolean {
       return isPrivateNetworkIp(ipv4Embedded[1]!);
     }
   }
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  const ipv4Mapped = readIpv4MappedIpv6(host);
   if (ipv4Mapped) {
-    return isPrivateNetworkIp(ipv4Mapped[1]!);
+    return isPrivateNetworkIp(ipv4Mapped);
   }
   const ipv4Compatible = readIpv4CompatibleIpv6(host);
   if (ipv4Compatible) {
@@ -122,6 +136,10 @@ function isAlwaysBlockedVoiceAddress(address: string): boolean {
   const ipv4Compatible = readIpv4CompatibleIpv6(host);
   if (ipv4Compatible) {
     return isAlwaysBlockedVoiceAddress(ipv4Compatible);
+  }
+  const ipv4Mapped = readIpv4MappedIpv6(host);
+  if (ipv4Mapped) {
+    return isAlwaysBlockedVoiceAddress(ipv4Mapped);
   }
   if (host.startsWith('::ffff:')) return true;
   if (isIP(host) === 4) {
@@ -174,8 +192,8 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   const host = normalizeHostname(hostname);
   if (isIP(host) !== 0) {
     if (
-      isPrivateNetworkIp(host) &&
-      (!allowInsecureBaseUrl || isAlwaysBlockedVoiceAddress(host))
+      isAlwaysBlockedVoiceAddress(host) ||
+      (!allowInsecureBaseUrl && isPrivateNetworkIp(host))
     ) {
       throw new Error(
         `Voice model '${model}': baseUrl is a private-network address.`,

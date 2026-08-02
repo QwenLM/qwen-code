@@ -573,6 +573,50 @@ describe('voice-transcriber', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('requires allowlist entries to include an explicit scheme and full path', () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+
+    for (const allowedBaseUrl of [
+      'voice.region-a.internal.example/v1',
+      'http://voice.region-a.internal.example',
+    ]) {
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Private Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl,
+            },
+          ]),
+          settings: createSettings({}, undefined, [allowedBaseUrl]),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(/security\.allowedInsecureVoiceBaseUrls/);
+    }
+  });
+
+  it('allows an exactly trusted IPv4-mapped private voice base URL', async () => {
+    const baseUrl = 'http://[::ffff:10.23.45.67]/v1';
+    const resolved = resolveVoiceTranscriptionConfig({
+      config: createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Private Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]),
+      settings: createSettings({}, undefined, [baseUrl]),
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(resolved),
+    ).resolves.toBeUndefined();
+  });
+
   it('keeps metadata DNS results blocked for a trusted voice URL', async () => {
     const trusted = {
       model: 'qwen3-asr-flash',
@@ -581,8 +625,11 @@ describe('voice-transcriber', () => {
     };
 
     for (const address of [
+      '127.0.0.1',
       '169.254.169.254',
       '100.100.100.200',
+      '::ffff:7f00:1',
+      '::ffff:a9fe:a9fe',
       'fd00:0ec2:0000:0000:0000:0000:0000:0254',
     ]) {
       await expect(
@@ -706,6 +753,25 @@ describe('voice-transcriber', () => {
     }
   });
 
+  it('does not classify an IPv4-mapped public address as private', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Public ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://[::ffff:93.184.216.34]/v1',
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).not.toThrow();
+  });
+
   it('does not over-block public-looking IPv6 literals with fc prefix', () => {
     const config = createConfig([
       {
@@ -809,7 +875,7 @@ describe('voice-transcriber', () => {
     await expect(check).rejects.toThrow('Workspace runtime was removed');
   });
 
-  it('allows localhost voice URLs for development', () => {
+  it('allows explicit loopback voice URLs without DNS lookup', async () => {
     const config = createConfig([
       {
         id: 'qwen3-asr-flash',
@@ -819,13 +885,27 @@ describe('voice-transcriber', () => {
       },
     ]);
 
-    expect(
-      resolveVoiceTranscriptionConfig({
-        config,
-        settings: createSettings(),
-        voiceModel: 'qwen3-asr-flash',
-      }).baseUrl,
-    ).toBe('http://localhost:8080/v1');
+    const resolved = resolveVoiceTranscriptionConfig({
+      config,
+      settings: createSettings(),
+      voiceModel: 'qwen3-asr-flash',
+    });
+    expect(resolved.baseUrl).toBe('http://localhost:8080/v1');
+
+    const lookupHost = vi.fn().mockRejectedValue(new Error('unexpected DNS'));
+    for (const baseUrl of [
+      resolved.baseUrl,
+      'http://127.0.0.1:8080/v1',
+      'http://[::1]:8080/v1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          { model: 'qwen3-asr-flash', baseUrl },
+          lookupHost,
+        ),
+      ).resolves.toBeUndefined();
+    }
+    expect(lookupHost).not.toHaveBeenCalled();
   });
 
   it('strips userinfo from voice base URLs', () => {

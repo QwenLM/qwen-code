@@ -136,32 +136,28 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
   })
 
-  it('normalizes a scheme-less DashScope exact model provider', async () => {
-    const config = await resolveDesktopVoiceConfig({
-      getVoiceModel: () => 'qwen3-asr-flash',
-      env: {},
-      readQwenJson: async <T,>(file: string) =>
-        (file === 'settings.json'
-          ? {
-              env: { DASHSCOPE_API_KEY: 'settings-key' },
-              modelProviders: {
-                openai: [
-                  {
-                    id: 'qwen3-asr-flash',
-                    baseUrl: 'dashscope.aliyuncs.com/compatible-mode',
-                    envKey: 'DASHSCOPE_API_KEY',
-                  },
-                ],
-              },
-            }
-          : undefined) as T | undefined,
-    })
-
-    expect(config).toEqual({
-      model: 'qwen3-asr-flash',
-      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      apiKey: 'settings-key',
-    })
+  it('requires an exact model provider to use a complete URL', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { DASHSCOPE_API_KEY: 'settings-key' },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: 'dashscope.aliyuncs.com/compatible-mode/v1',
+                      envKey: 'DASHSCOPE_API_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+      }),
+    ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
   })
 
   it('uses an exactly allowlisted private provider from qwen settings', async () => {
@@ -192,6 +188,69 @@ describe('resolveDesktopVoiceConfig', () => {
       baseUrl,
       apiKey: 'settings-key',
       allowInsecureBaseUrl: true,
+    })
+  })
+
+  it('requires allowlist entries to include an explicit scheme and full path', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+
+    for (const allowedBaseUrl of [
+      'voice.region-a.internal.example/v1',
+      'http://voice.region-a.internal.example',
+    ]) {
+      await expect(
+        resolveDesktopVoiceConfig({
+          getVoiceModel: () => 'qwen3-asr-flash',
+          env: {},
+          readQwenJson: async <T,>(file: string) =>
+            (file === 'settings.json'
+              ? {
+                  env: { PRIVATE_ASR_KEY: 'settings-key' },
+                  security: {
+                    allowedInsecureVoiceBaseUrls: [allowedBaseUrl],
+                  },
+                  modelProviders: {
+                    openai: [
+                      {
+                        id: 'qwen3-asr-flash',
+                        baseUrl,
+                        envKey: 'PRIVATE_ASR_KEY',
+                      },
+                    ],
+                  },
+                }
+              : undefined) as T | undefined,
+        }),
+      ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
+    }
+  })
+
+  it('uses a public HTTPS custom provider without an insecure allowlist entry', async () => {
+    const baseUrl = 'https://voice.example.com/openai/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { CUSTOM_ASR_KEY: 'settings-key' },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl,
+                    envKey: 'CUSTOM_ASR_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+      apiKey: 'settings-key',
     })
   })
 
@@ -281,7 +340,7 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe(baseUrl)
   })
 
-  it('does not select a private custom provider without an exact allowlist match', async () => {
+  it('rejects cleartext custom providers without an exact allowlist match', async () => {
     await expect(
       resolveDesktopVoiceConfig({
         getVoiceModel: () => 'qwen3-asr-flash',

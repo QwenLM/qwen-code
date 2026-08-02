@@ -75,6 +75,7 @@ describe('net-guard host classification', () => {
     expect(isPrivateNetworkIp('::5db8')).toBe(true)
     expect(isPrivateNetworkIp('8.8.8.8')).toBe(false)
     expect(isPrivateNetworkIp('::5db8:d822')).toBe(false)
+    expect(isPrivateNetworkIp('::ffff:5db8:d822')).toBe(false)
     expect(isPrivateNetworkIp('127.0.0.1')).toBe(false) // loopback, not private
   })
 })
@@ -254,9 +255,27 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
+        'http://[::ffff:10.0.0.8]/v1',
+        'm',
+        undefined,
+        true,
+      ),
+    ).resolves.toBeUndefined()
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
         'http://voice.internal.example/v1',
         'm',
         async () => [{ address: '10.0.0.9' }],
+        true,
+      ),
+    ).resolves.toBeUndefined()
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://voice.internal.example/v1',
+        'm',
+        async () => [{ address: '::ffff:a00:9' }],
         true,
       ),
     ).resolves.toBeUndefined()
@@ -272,6 +291,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '[::5db8]',
       '[::ffff:127.0.0.1]',
       '[::ffff:7f00:1]',
+      '[::ffff:a9fe:a9fe]',
       '[::a9fe:a9fe]',
       '[fd00:ec2::254]',
       '[fd00:0ec2:0000:0000:0000:0000:0000:0254]',
@@ -301,6 +321,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '::',
       '::ffff:127.0.0.1',
       '::ffff:7f00:1',
+      '::ffff:a9fe:a9fe',
       '::a9fe:a9fe',
       '::6464:64c8',
     ]) {
@@ -332,7 +353,15 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       called = true
       return [{ address: '0.0.0.0' }]
     }
-    await assertVoiceBaseUrlNetworkAllowed('https://127.0.0.1:8080', 'm', lookup)
+    for (const baseUrl of [
+      'http://localhost:8080/v1',
+      'http://127.0.0.1:8080/v1',
+      'http://[::1]:8080/v1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(baseUrl, 'm', lookup),
+      ).resolves.toBeUndefined()
+    }
     expect(called).toBe(false)
   })
 

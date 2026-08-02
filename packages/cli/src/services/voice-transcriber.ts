@@ -202,6 +202,20 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
   ].join('.');
 }
 
+function readIpv4MappedIpv6(host: string): string | undefined {
+  const dotted = host.match(/^::ffff:(\d+(?:\.\d+){3})$/i);
+  if (dotted && isIP(dotted[1]!) === 4) {
+    return dotted[1];
+  }
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!hex) {
+    return undefined;
+  }
+  const high = Number.parseInt(hex[1]!, 16);
+  const low = Number.parseInt(hex[2]!, 16);
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
@@ -209,9 +223,9 @@ function isPrivateNetworkIp(hostname: string): boolean {
   if (isLoopbackHost(host)) {
     return false;
   }
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  const ipv4Mapped = readIpv4MappedIpv6(host);
   if (ipv4Mapped) {
-    return isPrivateNetworkIp(ipv4Mapped[1]!);
+    return isPrivateNetworkIp(ipv4Mapped);
   }
   const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
   if (ipv4Compatible) {
@@ -250,9 +264,9 @@ function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
   if (isLoopbackHost(host)) {
     return true;
   }
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  const ipv4Mapped = readIpv4MappedIpv6(host);
   if (ipv4Mapped) {
-    return isAlwaysBlockedVoiceAddress(ipv4Mapped[1]!);
+    return isAlwaysBlockedVoiceAddress(ipv4Mapped);
   }
   const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
   if (ipv4Compatible) {
@@ -302,9 +316,8 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   }
   if (isIP(hostname) !== 0) {
     if (
-      isPrivateNetworkIp(hostname) &&
-      (!voiceConfig.allowInsecureBaseUrl ||
-        isAlwaysBlockedVoiceAddress(hostname))
+      isAlwaysBlockedVoiceAddress(hostname) ||
+      (!voiceConfig.allowInsecureBaseUrl && isPrivateNetworkIp(hostname))
     ) {
       throw new Error(
         `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
@@ -343,10 +356,11 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   }
   const records = Array.isArray(result) ? result : [result];
   if (
-    records.some((record) =>
-      voiceConfig.allowInsecureBaseUrl
-        ? isAlwaysBlockedVoiceAddress(record.address)
-        : isPrivateNetworkIp(record.address),
+    records.some(
+      (record) =>
+        isAlwaysBlockedVoiceAddress(record.address) ||
+        (!voiceConfig.allowInsecureBaseUrl &&
+          isPrivateNetworkIp(record.address)),
     )
   ) {
     throw new Error(
@@ -432,14 +446,13 @@ export function resolveVoiceTranscriptionConfig({
     !allowInsecureBaseUrl
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext.`,
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete URL to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
   if (
     !isLocalhost &&
-    isPrivateNetworkIp(parsedBaseUrl.hostname) &&
-    (!allowInsecureBaseUrl ||
-      isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname))
+    (isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname) ||
+      (!allowInsecureBaseUrl && isPrivateNetworkIp(parsedBaseUrl.hostname)))
   ) {
     throw new Error(
       `Voice model '${voiceModel}' must not use a private-network baseUrl.`,

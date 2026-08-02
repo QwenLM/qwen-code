@@ -224,9 +224,11 @@ function mergeTrustedQwenSettings(
 
 function normalizeAllowedVoiceBaseUrl(raw: string): string | undefined {
   try {
-    const normalized = normalizeBaseUrl(raw);
-    new URL(normalized);
-    return normalized;
+    const url = new URL(raw.trim());
+    if (url.username || url.password) {
+      return undefined;
+    }
+    return url.toString().replace(/\/+$/, '');
   } catch {
     return undefined;
   }
@@ -293,14 +295,6 @@ function fromQwenSettings(
     if (!baseUrl) {
       throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
     }
-    if (
-      !isDashscopeCompatible(baseUrl) &&
-      !isInsecureVoiceBaseUrlAllowed(settings, baseUrl)
-    ) {
-      throw new Error(
-        `Voice model '${voiceModel}' uses a custom baseUrl that is not listed in security.allowedInsecureVoiceBaseUrls.`,
-      );
-    }
     const envKey = provider.envKey?.trim();
     if (!envKey) {
       throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
@@ -314,8 +308,8 @@ function fromQwenSettings(
 
   // Preserve the pre-existing API-key flow for settings that provide a shared
   // DashScope endpoint rather than a model-specific voice entry. Custom
-  // allowlisted endpoints never use this fallback because selecting one for an
-  // unrelated model could cross a region or trust boundary.
+  // endpoints never use this fallback because selecting one for an unrelated
+  // model could cross a region or trust boundary.
   for (const fallback of providers) {
     if (fallback.baseUrl && isDashscopeCompatible(fallback.baseUrl)) {
       const apiKey = keyFor(fallback);
@@ -404,7 +398,9 @@ export async function resolveDesktopVoiceConfig(
     !isLoopbackHost(parsed.hostname) &&
     !allowInsecureBaseUrl
   ) {
-    throw new Error('Voice endpoint must use an https baseUrl.');
+    throw new Error(
+      'Voice endpoint must use an https baseUrl, or its exact complete URL must be listed in security.allowedInsecureVoiceBaseUrls.',
+    );
   }
   return {
     model: voiceModel,

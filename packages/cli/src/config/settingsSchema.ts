@@ -2947,11 +2947,12 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Exact normalized voice base URLs that may use HTTP or private-network addresses. Wildcards are not supported, and metadata/link-local addresses remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks.',
+          'Complete voice base URLs that may use HTTP or private-network addresses. Entries must include an explicit http:// or https:// scheme and the full provider path; only URL serialization and trailing slashes are normalized. Wildcards are not supported, and metadata/link-local addresses remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks.',
         showInDialog: false,
         items: {
           type: 'string',
-          description: 'Complete voice provider base URL (no wildcards)',
+          description:
+            'Complete voice provider base URL with explicit scheme and full path (no wildcards)',
         },
       },
     },
