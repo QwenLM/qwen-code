@@ -18,11 +18,13 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  DIGEST_FILE,
   bundleStaleness,
   reviewSourceRoots,
+  reviewSourcesDigest,
   staleBundleWarning,
 } from './lib/stale-bundle.js';
 
@@ -483,8 +485,21 @@ export const parseArgsCommand: CommandModule = {
     // reaches a reader before they act on a result.
     const bundle = process.argv[1];
     if (bundle) {
+      const distDir = join(bundle, '..');
+      const repoRoot = join(distDir, '..');
+      let stamped: string | undefined;
+      try {
+        stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+      } catch {
+        // No stamp: an installed package, or a bundle from before the build
+        // wrote one. Nothing to compare against, and it self-heals on the
+        // next rebuild.
+      }
       const warning = staleBundleWarning(
-        bundleStaleness(bundle, reviewSourceRoots(bundle)),
+        bundleStaleness(
+          stamped,
+          reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot)),
+        ),
       );
       if (warning) writeStderrLine(warning);
     }

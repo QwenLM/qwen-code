@@ -18,7 +18,8 @@
 // limitations under the License.
 
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { dirname, join, basename, resolve } from 'node:path';
+import { dirname, join, basename, resolve, relative, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
@@ -27,6 +28,56 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dirname, '..');
 const BUNDLED_SKILL_TEST_FILE_RE =
   /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?(?:\.map)?$/;
+
+/**
+ * Write `dist/review-sources.sha256`, the digest of every review source this
+ * bundle was built from. Kept in step with `stale-bundle.ts`, which re-derives
+ * it the same way — the two must fold the same files in the same order, so the
+ * shared shape lives in that module's exports and this only supplies the root.
+ */
+export function reviewSourceDigestForBuild(root) {
+  const cliCommands = join(root, 'packages', 'cli', 'src', 'commands');
+  const roots = [
+    join(cliCommands, 'review'),
+    join(cliCommands, 'review.ts'),
+    join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
+  ];
+  const files = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === 'ENOTDIR') files.push(dir);
+      return;
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile()) files.push(full);
+    }
+  };
+  for (const r of roots) walk(r);
+  if (files.length === 0) return { digest: undefined, count: 0 };
+  const hash = createHash('sha256');
+  for (const file of files.sort()) {
+    hash.update(relative(root, file).split(sep).join('/'));
+    hash.update('\0');
+    hash.update(fs.readFileSync(file));
+    hash.update('\0');
+  }
+  return { digest: hash.digest('hex'), count: files.length };
+}
+
+function stampReviewSourceDigest(root, distDir) {
+  const { digest, count } = reviewSourceDigestForBuild(root);
+  if (!digest) {
+    console.log('No review sources found; skipped the source digest.');
+    return;
+  }
+  fs.writeFileSync(join(distDir, 'review-sources.sha256'), digest);
+  console.log(`Stamped the review source digest over ${count} files.`);
+}
 
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
@@ -147,6 +198,13 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
         'Run a full `npm run build` before bundling to include the UI.',
     );
   }
+
+  // Stamp what the review sources looked like at build time. `/review` drives
+  // the bundle, not the working tree, so a review command edited after this
+  // point takes no effect — and without a record of what was built, the run
+  // cannot tell and neither can its reader. Compared, not trusted: the check
+  // reads this and re-derives the digest from the tree.
+  stampReviewSourceDigest(root, distDir);
 
   console.log('\n✅ All bundle assets copied to dist/');
 }

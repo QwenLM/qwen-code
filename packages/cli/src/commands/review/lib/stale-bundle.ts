@@ -4,23 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Is the bundle this review is about to drive OLDER than the review source it
-// was built from?
+// Is the bundle this review is about to drive built from the review source
+// beside it?
 //
 // Every `/review` subcommand runs as `"${QWEN_CODE_CLI}" review <name>`, which
 // resolves to the built bundle — not to the working tree. `QWEN_CODE_CLI`
 // already stops the review talking to a DIFFERENT program (a bare `qwen` on
 // PATH once resolved to a v0.19.10 whose `agent-prompt` predated `--role`, and
 // the review died on a missing argument). This is the other half: the right
-// program, built before the change you are trying to exercise. So editing a review
-// command, or switching to a branch that contains one, changes nothing about
-// the run until someone rebuilds. The failure is silent and total: the run
-// behaves like the last build, and every conclusion drawn from it is a
-// conclusion about that build.
+// program, built before the change you are trying to exercise. That failure is
+// silent and total — the run behaves like the last build, and every conclusion
+// drawn from it is a conclusion about that build.
 //
 // Measured on 2026-08-02, dogfooding `/review` against #8368 from a checkout
-// whose bundle was fourteen hours old. Three separate things were invalidated
-// at once and none of them announced itself:
+// whose bundle was fourteen hours old. Three things were invalidated at once
+// and none of them announced itself:
 //
 //   - `drive` and `mock-provider` had merged that morning and were absent from
 //     the binary, so "the agent never reached for them" measured nothing;
@@ -30,78 +28,84 @@
 //
 // The whole round had to be discarded and re-run after a rebuild.
 //
-// Deliberately mtime, not git. The question is "was this bundle built from this
-// source", and a git comparison answers a different one — a rebuilt bundle on
-// an unchanged tree is fine, and a fresh checkout of an old commit is fine too.
-// File times answer it directly and need no repository.
+// CONTENT, not timestamps. The first version compared the bundle's mtime
+// against the newest source file, and a warning that fires when nothing is
+// wrong is worse than none — it teaches its reader to skip the line. Measured:
+// `git checkout` rewrites every file that differs between two commits, so
+// returning to the branch you built from re-stamps those files and the bundle
+// reads as stale while being byte-for-byte correct. A digest has no margin to
+// tune, no clock to trust, and no answer but the true one.
 
-import { statSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 
-/**
- * How much newer a source file must be before it counts as newer at all.
- *
- * A checkout writes every file at once and in no guaranteed order, so a source
- * file landing a few milliseconds after the bundle says nothing. Only a gap a
- * human could have edited across is a gap worth reporting.
- */
-export const STALE_MARGIN_MS = 60_000;
+/** Where the build stamps the digest of the sources it bundled. */
+export const DIGEST_FILE = 'review-sources.sha256';
 
 export interface BundleStaleness {
-  /** `true` only when a source file is newer by more than the margin. */
+  /** `true` only when both digests are known and differ. */
   stale: boolean;
-  /** The newest source file found, and how far it is ahead. Absent when the
-   *  comparison could not be made at all. */
-  newest?: { file: string; aheadMs: number };
   /** Why no comparison was made. Absent when one was. */
   unmeasured?: string;
 }
 
 /**
- * Compare a built artifact's timestamp against the newest source file under
- * `roots`.
+ * A digest over every review source, stable across machines and checkouts.
  *
- * Returns `stale: false` whenever it cannot measure — a missing bundle, an
- * unreadable directory, a tree with no sources. A check that cannot see the
- * files must not accuse the build, and the caller has a review to run either
- * way. Every such case names itself in `unmeasured` rather than passing
- * silently for the same reason a probe does.
+ * Paths are made relative to `repoRoot` and separators normalised, so the same
+ * tree hashes the same on Windows and under any parent directory. Files are
+ * folded in sorted order, because `readdir` order is a property of the
+ * filesystem and not of the source.
+ */
+export function reviewSourcesDigest(
+  repoRoot: string,
+  roots: readonly string[],
+): string | undefined {
+  const files: string[] = [];
+  for (const root of roots) files.push(...sourceFilesUnder(root));
+  if (files.length === 0) return undefined;
+
+  const hash = createHash('sha256');
+  for (const file of files.sort()) {
+    let content: Buffer;
+    try {
+      content = readFileSync(file);
+    } catch {
+      // Vanished between listing and reading. Nothing can be said about a tree
+      // that is changing underneath the check.
+      return undefined;
+    }
+    hash.update(relative(repoRoot, file).split(sep).join('/'));
+    hash.update('\0');
+    hash.update(content);
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Compare the digest the build stamped beside the bundle against the sources
+ * present now.
+ *
+ * Returns `stale: false` whenever it cannot compare — no stamp (an installed
+ * package, or a bundle from before the build wrote one), no sources (the same
+ * install, from the other side), an unreadable tree. A check that cannot see
+ * both halves must not accuse the build, and the caller has a review to run
+ * either way. Each such case names itself in `unmeasured` rather than passing
+ * silently, for the same reason a probe does.
  */
 export function bundleStaleness(
-  bundlePath: string,
-  roots: readonly string[],
-  marginMs: number = STALE_MARGIN_MS,
+  stampedDigest: string | undefined,
+  currentDigest: string | undefined,
 ): BundleStaleness {
-  let builtAt: number;
-  try {
-    builtAt = statSync(bundlePath).mtimeMs;
-  } catch {
-    return { stale: false, unmeasured: `no bundle at ${bundlePath}` };
+  if (!stampedDigest) {
+    return { stale: false, unmeasured: 'the bundle carries no source digest' };
   }
-
-  let newest: { file: string; mtimeMs: number } | undefined;
-  let looked = false;
-  for (const root of roots) {
-    for (const file of sourceFilesUnder(root)) {
-      looked = true;
-      let mtimeMs: number;
-      try {
-        mtimeMs = statSync(file).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (!newest || mtimeMs > newest.mtimeMs) newest = { file, mtimeMs };
-    }
-  }
-  if (!looked || !newest) {
+  if (!currentDigest) {
     return { stale: false, unmeasured: 'no review sources found to compare' };
   }
-
-  const aheadMs = newest.mtimeMs - builtAt;
-  return {
-    stale: aheadMs > marginMs,
-    newest: { file: newest.file, aheadMs },
-  };
+  return { stale: stampedDigest !== currentDigest };
 }
 
 /**
@@ -129,16 +133,13 @@ function* sourceFilesUnder(root: string): Generator<string> {
 }
 
 /**
- * The review sources a bundle at `bundlePath` would have been built from, if
- * that bundle sits in a source checkout of this repo.
+ * The review sources a checkout at `repoRoot` holds.
  *
- * `<root>/dist/cli.js` is the shape `scripts/cli-entry.js` resolves, so the
- * repo root is two levels up. An installed package has no `packages/` beside
- * it, and the caller then finds no files and reports that it could not measure
- * — which is the right answer for a user who never had sources to be ahead of.
+ * An installed package has no `packages/` beside its bundle, so the caller
+ * finds no files and reports that it could not measure — the right answer for
+ * a user who never had sources to differ from.
  */
-export function reviewSourceRoots(bundlePath: string): string[] {
-  const repoRoot = join(bundlePath, '..', '..');
+export function reviewSourceRoots(repoRoot: string): string[] {
   const cli = join(repoRoot, 'packages', 'cli', 'src', 'commands');
   return [
     join(cli, 'review'),
@@ -154,24 +155,18 @@ export function reviewSourceRoots(bundlePath: string): string[] {
  * The warning a stale bundle earns, or `undefined` when there is nothing to
  * say.
  *
- * It names the file that is ahead and how far, because "rebuild" without
- * evidence is advice a reader has no way to check, and the whole point of the
- * warning is that the run they are about to trust may not be running their
- * code.
+ * "Rebuild" on its own is advice a reader cannot check, and the whole point of
+ * the line is that the run they are about to trust may not be running their
+ * code — so it says what runs from the bundle and what to do about it.
  */
 export function staleBundleWarning(
   s: BundleStaleness,
   rebuildCommand = 'npm run build:packages && npm run bundle',
 ): string | undefined {
-  if (!s.stale || !s.newest) return undefined;
-  const hours = s.newest.aheadMs / 3_600_000;
-  const ahead =
-    hours >= 1
-      ? `${hours.toFixed(1)}h`
-      : `${Math.round(s.newest.aheadMs / 60_000)}m`;
+  if (!s.stale) return undefined;
   return (
-    `review: the bundle these commands run from is ${ahead} older than ${s.newest.file}. ` +
-    `Every \`qwen review …\` step below runs the BUILT bundle, not this working tree, ` +
+    `review: the bundle these commands run from was NOT built from the review sources in this tree. ` +
+    `Every \`qwen review …\` step below runs the BUILT bundle, not the working tree, ` +
     `so a review command changed since that build will not take effect and this run ` +
     `will measure the old behaviour without saying so. Rebuild with \`${rebuildCommand}\` ` +
     `and start again, or read every result below as being about the older build.`
