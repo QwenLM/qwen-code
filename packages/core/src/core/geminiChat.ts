@@ -461,6 +461,8 @@ interface TryCompressOptions {
    * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /** Per-request overrides needed to preserve the main request cache prefix. */
+  requestGenerationConfig?: GenerateContentConfig;
   /**
    * Delay writing the compression checkpoint until the caller has run any
    * post-compression guards that may roll the in-memory chat state back.
@@ -1850,6 +1852,7 @@ export class GeminiChat {
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
+      requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
       signal,
@@ -2214,6 +2217,7 @@ export class GeminiChat {
           {
             pendingUserMessage: userContent,
             precomputedEffectiveTokens: effectiveTokens,
+            requestGenerationConfig: params.config,
             deferChatCompressionRecord: shouldForceFromHard,
             // Hard-rescue is force=true to bypass the cheap-gate breaker
             // but it remains a semantically AUTOMATIC trigger. Tag the
@@ -2695,6 +2699,7 @@ export class GeminiChat {
                     params.config?.abortSignal,
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
+                      requestGenerationConfig: params.config,
                       trigger: 'auto',
                     },
                   );
