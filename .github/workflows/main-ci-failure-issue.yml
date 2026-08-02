@@ -230,6 +230,12 @@ jobs:
           route_allowed='true'
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             if [[ "${AUTOFIX_ELIGIBLE}" != 'true' ]]; then
+              if [[ "${concurrent_reuse}" != 'true' ]]; then
+                gh issue edit "${EXISTING_ISSUE}" \
+                  --repo "${REPO}" \
+                  --body-file "${body_file}"
+                echo "Recorded this run on issue #${EXISTING_ISSUE}."
+              fi
               echo "Issue #${EXISTING_ISSUE} already tracks this failure; leaving its routing unchanged."
               echo "number=${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
               echo 'route_allowed=false' >> "${GITHUB_OUTPUT}"

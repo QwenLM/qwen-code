@@ -85,9 +85,12 @@ describe('main CI failure issue workflow', () => {
       '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
     );
     expect(workflow).toContain('--remove-label "${AUTOFIX_ROUTING_LABEL}"');
-    expect(
-      workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
-    ).toBeLessThan(workflow.indexOf('--body-file "${body_file}"'));
+    const routingLabelIndex = workflow.indexOf(
+      '--add-label "${AUTOFIX_ROUTING_LABEL}"',
+    );
+    expect(routingLabelIndex).toBeLessThan(
+      workflow.indexOf('--body-file "${body_file}"', routingLabelIndex),
+    );
     expect(
       workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
     ).toBeLessThan(workflow.indexOf("- name: 'Upload targeted E2E metadata'"));
@@ -140,9 +143,9 @@ describe('main CI failure issue workflow', () => {
     expect(
       workflow.indexOf('--add-label "${AUTOFIX_ROUTING_LABEL}"'),
     ).toBeGreaterThan(preserveIndex);
-    expect(workflow.indexOf('--body-file "${body_file}"')).toBeGreaterThan(
-      preserveIndex,
-    );
+    expect(
+      workflow.indexOf('--body-file "${body_file}"', preserveIndex),
+    ).toBeGreaterThan(preserveIndex);
     expect(workflow).toContain('if [[ "${ROUTE_ALLOWED}" != \'true\' ]]; then');
     expect(workflow).toContain('recurrence recorded without re-routing');
     expect(workflow).toContain(
@@ -219,6 +222,29 @@ describe('main CI failure issue workflow', () => {
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
     expect(workflow).toContain('gh issue view "${existing_issue}"');
     expect(workflow).toContain('--existing "${existing_body}"');
+  });
+
+  it('records recurrences on non-eligible issues before exiting', () => {
+    // Non-eligible issues have no prose-digest binding, so the body update is
+    // safe and keeps the "appended below" promise in the issue body.
+    const notEligible = workflow.indexOf(
+      'if [[ "${AUTOFIX_ELIGIBLE}" != \'true\' ]]; then',
+    );
+    expect(notEligible).toBeGreaterThan(-1);
+    const routingUnchanged = workflow.indexOf(
+      'leaving its routing unchanged.',
+      notEligible,
+    );
+    expect(routingUnchanged).toBeGreaterThan(notEligible);
+    const bodyUpdate = workflow.indexOf(
+      '--body-file "${body_file}"',
+      notEligible,
+    );
+    expect(bodyUpdate).toBeGreaterThan(notEligible);
+    expect(bodyUpdate).toBeLessThan(routingUnchanged);
+    expect(workflow).toContain(
+      'if [[ "${concurrent_reuse}" != \'true\' ]]; then',
+    );
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {
