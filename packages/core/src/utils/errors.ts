@@ -35,6 +35,20 @@ export function isAbortError(error: unknown): boolean {
     return true;
   }
 
+  // The OpenAI SDK is the request path for auth_type=openai (the most common
+  // provider here); a user cancel surfaces as its APIUserAbortError. That class
+  // does not set `.name` (it stays 'Error') and carries no ABORT_ERR code, so
+  // the checks above miss it — leaving user cancels logged as api_errors and
+  // classified 'unknown' rather than 'abort'. Key off the class name, which the
+  // build preserves (esbuild `keepNames: true`), to avoid importing the SDK
+  // into this provider-agnostic util.
+  if (
+    error instanceof Error &&
+    error.constructor?.name === 'APIUserAbortError'
+  ) {
+    return true;
+  }
+
   return false;
 }
 

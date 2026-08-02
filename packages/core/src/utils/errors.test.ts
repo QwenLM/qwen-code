@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { APIUserAbortError } from 'openai';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 
 describe('getErrorMessage cause unwrapping', () => {
@@ -230,6 +231,16 @@ describe('isAbortError', () => {
     networkError.code = 'ECONNREFUSED';
 
     expect(isAbortError(networkError)).toBe(false);
+  });
+
+  it('should return true for the OpenAI SDK APIUserAbortError (user cancel)', () => {
+    // The OpenAI SDK is the request path for auth_type=openai; a user cancel
+    // surfaces as APIUserAbortError. It does not set `.name` (stays 'Error')
+    // and has no ABORT_ERR code, so the checks above miss it.
+    const error = new APIUserAbortError({ message: 'Request was aborted.' });
+
+    expect(error.name).toBe('Error');
+    expect(isAbortError(error)).toBe(true);
   });
 });
 
