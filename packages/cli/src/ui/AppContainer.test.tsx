@@ -5092,6 +5092,60 @@ describe('AppContainer State Management', () => {
         undefined,
       );
     });
+
+    it('reports an error and skips switchModel when auth type is not available', () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+
+      mockSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+          model: { toggleModel: 'model-b' },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      vi.spyOn(mockConfig, 'getAuthType').mockReturnValue(undefined);
+      const switchModelSpy = vi
+        .spyOn(mockConfig, 'switchModel')
+        .mockResolvedValue(undefined);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(ctrlF);
+
+      expect(switchModelSpy).not.toHaveBeenCalled();
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('Cannot toggle'),
+        }),
+        expect.any(Number),
+      );
+    });
   });
 
   // Wiring coverage for the Ctrl+F toggle glue in AppContainer.tsx:

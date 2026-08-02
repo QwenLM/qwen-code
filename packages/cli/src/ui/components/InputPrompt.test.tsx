@@ -440,6 +440,21 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('syncs setInputPromptTransientMode(true) when a transient sub-mode is active', () => {
+    props.shellModeActive = true;
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const setTransientMode = mockedUseUIActions().setInputPromptTransientMode;
+    expect(setTransientMode).toHaveBeenCalledWith(true);
+    unmount();
+  });
+
+  it('syncs setInputPromptTransientMode(false) when no transient sub-mode is active', () => {
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const setTransientMode = mockedUseUIActions().setInputPromptTransientMode;
+    expect(setTransientMode).toHaveBeenCalledWith(false);
+    unmount();
+  });
+
   it('captures explicit provenance before clearing the input buffer', async () => {
     props.buffer.setText('restored prompt');
     vi.mocked(props.buffer.setText).mockClear();

@@ -1105,23 +1105,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // itself fires in AppContainer's global keypress handler.
       // In transient sub-modes (shell, reverse/command search, completion,
       // attachment), Ctrl+F should move the cursor, not toggle the model.
-      if (
-        !shellModeActive &&
-        !reverseSearchActive &&
-        !commandSearchActive &&
-        !showCompletionSuggestions &&
-        !isAttachmentMode &&
-        uiActions.handleToggleKeypress(key)
-      ) {
+      if (!inTransientMode && uiActions.handleToggleKeypress(key)) {
         return true;
       }
 
       if (
-        !shellModeActive &&
-        !reverseSearchActive &&
-        !commandSearchActive &&
-        !showCompletionSuggestions &&
-        !isAttachmentMode &&
+        !inTransientMode &&
         buffer.text.length === 0 &&
         voiceInput.handleKeypress(key)
       ) {
@@ -1909,6 +1898,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       showCompletionSuggestions,
       voiceInput,
       targetDir,
+      inTransientMode,
     ],
   );
 

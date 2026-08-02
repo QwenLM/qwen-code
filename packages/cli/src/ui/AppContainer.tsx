@@ -505,8 +505,10 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
-  const [inputPromptTransientMode, setInputPromptTransientMode] =
-    useState(false);
+  const inputPromptTransientModeRef = useRef(false);
+  const setInputPromptTransientMode = useCallback((value: boolean) => {
+    inputPromptTransientModeRef.current = value;
+  }, []);
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
@@ -1935,9 +1937,9 @@ export const AppContainer = (props: AppContainerProps) => {
         embeddedShellFocused: embeddedShellFocusedRef.current,
         agentViewHasActiveShellPty: agentViewActiveShellPtyRef.current,
         dialogsVisible: dialogsVisibleRef.current,
-        inputPromptInTransientMode: inputPromptTransientMode,
+        inputPromptInTransientMode: inputPromptTransientModeRef.current,
       }),
-    [inputPromptTransientMode],
+    [],
   );
 
   useEffect(() => {
