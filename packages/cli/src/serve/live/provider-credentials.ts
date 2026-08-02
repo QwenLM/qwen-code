@@ -71,7 +71,6 @@ function isDashScopeHost(hostname: string): boolean {
     host.endsWith('.dashscope.aliyuncs.com') ||
     host.endsWith('.dashscope-intl.aliyuncs.com') ||
     host.endsWith('.dashscope-us.aliyuncs.com') ||
-    host === 'maas.aliyuncs.com' ||
     host.endsWith('.maas.aliyuncs.com')
   );
 }

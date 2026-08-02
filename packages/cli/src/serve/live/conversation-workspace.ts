@@ -33,24 +33,20 @@ function conversationDirectoryName(sessionId: string): string {
   return `conversation-${createHash('sha256').update(sessionId).digest('hex')}`;
 }
 
-function validateRootStats(stats: Stats, label = 'root'): void {
+function validateRootStats(stats: Stats): void {
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    throw new Error(
-      `Live conversation ${label} must be a non-symlink directory`,
-    );
+    throw new Error('Live conversation root must be a non-symlink directory');
   }
   if (
     process.platform !== 'win32' &&
     typeof process.getuid === 'function' &&
     stats.uid !== process.getuid()
   ) {
-    throw new Error(
-      `Live conversation ${label} must be owned by the daemon user`,
-    );
+    throw new Error('Live conversation root must be owned by the daemon user');
   }
   if (process.platform !== 'win32' && (stats.mode & 0o077) !== 0) {
     throw new Error(
-      `Live conversation ${label} must be accessible only to its owner`,
+      'Live conversation root must be accessible only to its owner',
     );
   }
 }
@@ -69,10 +65,10 @@ async function validateConversationDirectory(
   parent: string = root.canonicalRoot,
 ): Promise<string> {
   const before = await lstat(candidate);
-  validateRootStats(before, 'directory');
+  validateRootStats(before);
   const canonical = await realpath(candidate);
   const after = await lstat(canonical);
-  validateRootStats(after, 'directory');
+  validateRootStats(after);
   const child = relative(parent, canonical);
   if (
     child !== name ||

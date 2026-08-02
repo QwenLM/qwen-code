@@ -268,7 +268,7 @@ export function registerWorkspaceManagementRoutes(
         if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
-        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+        if (projectedWorkspaceCount() > MAX_REGISTERED_WORKSPACES) {
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
