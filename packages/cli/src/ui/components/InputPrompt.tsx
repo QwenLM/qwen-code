@@ -26,6 +26,7 @@ import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { StreamingState } from '../types.js';
 import {
   ApprovalMode,
   type Config,
@@ -1197,8 +1198,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
-        // Pop queued messages into input on ESC (before double-ESC clear)
-        if (!isAttachmentMode && uiState.messageQueue.length > 0) {
+        // Pop queued messages into input on ESC (before double-ESC clear).
+        // But when the agent is actively responding, let ESC fall through to
+        // AppContainer's global handler so it cancels the ongoing work first.
+        // #8201: without this guard, ESC pops the queue and returns true,
+        // consuming the key before the global cancel-work handler can fire.
+        if (
+          !isAttachmentMode &&
+          uiState.messageQueue.length > 0 &&
+          uiState.streamingState !== StreamingState.Responding
+        ) {
           if (popQueueIntoInput()) {
             resetEscapeState();
             return true;
@@ -1206,7 +1215,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // returned false (queue already cleared) — fall through
         }
 
-        // Handle double ESC for clearing input
+        // Handle double ESC for clearing input.
+        // When the agent is actively responding, let ESC fall through to
+        // AppContainer's global handler so it cancels the ongoing work.
+        // #8201.
+        if (uiState.streamingState === StreamingState.Responding) {
+          return false;
+        }
+
         if (escPressCount === 0) {
           if (buffer.text === '') {
             return true;
