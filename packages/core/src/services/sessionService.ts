@@ -2053,7 +2053,10 @@ export class SessionService {
     {
       let lastRetained: string | null = null;
       for (const record of preFilterRecords) {
-        if (retainedUuids.has(record.uuid)) {
+        if (
+          retainedUuids.has(record.uuid) &&
+          !isSessionArtifactRecord(record)
+        ) {
           lastRetained = record.uuid;
         } else {
           nearestRetainedPredecessor.set(record.uuid, lastRetained);
@@ -2945,7 +2948,9 @@ function collectReferencedFileHistoryBackupNames(
         if (
           backup &&
           backup.failed !== true &&
-          typeof backup.backupFileName === 'string'
+          typeof backup.backupFileName === 'string' &&
+          backup.backupFileName.length > 0 &&
+          path.basename(backup.backupFileName) === backup.backupFileName
         ) {
           names.add(backup.backupFileName);
         }

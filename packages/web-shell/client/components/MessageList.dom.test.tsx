@@ -28,6 +28,7 @@ vi.mock('./MessageItem', async () => {
       showAssistantActions,
       showAssistantBranch,
       onBranchSession,
+      branchRecordId,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -36,7 +37,8 @@ vi.mock('./MessageItem', async () => {
       message: Message;
       showAssistantActions?: boolean;
       showAssistantBranch?: boolean;
-      onBranchSession?: () => void | Promise<void>;
+      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+      branchRecordId?: string;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -74,7 +76,7 @@ vi.mock('./MessageItem', async () => {
         showAssistantBranch
           ? React.createElement('button', {
               'data-testid': `branch-${message.id}`,
-              onClick: onBranchSession,
+              onClick: () => onBranchSession?.(branchRecordId),
             })
           : null,
         assistantTurnFooter,

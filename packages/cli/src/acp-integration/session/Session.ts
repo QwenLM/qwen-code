@@ -2538,6 +2538,7 @@ export class Session implements SessionContext {
           branchPoint = await recording.recordBranchCheckpointTransaction({
             startExclusiveRecordUuid: branchTurnStartRecordUuid,
             stopReason: result.stopReason,
+            promptId: channelDelivery?.deliveryId,
           });
         } catch (error) {
           debugLogger.warn(

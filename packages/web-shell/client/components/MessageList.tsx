@@ -3690,11 +3690,8 @@ export const MessageList = memo(
                 displayItem.message.id === failedPromptMessageId
               }
               onRetrySend={onRetryFailedPrompt}
-              onBranchSession={
-                onBranchSession && branchRecordId
-                  ? () => onBranchSession(branchRecordId)
-                  : undefined
-              }
+              onBranchSession={onBranchSession}
+              branchRecordId={branchRecordId}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
                 finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
