@@ -84,8 +84,11 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
  *
  * - `control-failed` — the suite ran and read green, but the positive control
  *   proved the runner could not have gone red, so the reading is not evidence.
- * - `not-run` — no probe suite was attempted for it (the worktree could not be
- *   made, or the spawn itself threw). Nothing was measured at all.
+ * - `not-run` — no probe suite was attempted for it: the worktree could not be
+ *   made, or the checkout failed. Nothing was measured at all.
+ * - `runner-died` — a suite WAS started and did not survive: killed at the
+ *   timeout, or the spawn itself failed. It may have executed most of its
+ *   tests, so "nothing ran" is a claim about it that nothing checked.
  * - `no-output` — the runner ran and produced nothing parseable, so whether it
  *   collected anything is unknown.
  * - `not-in-results` — the run produced results and this file was not among
@@ -100,6 +103,7 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 export type ProbeReason =
   | 'control-failed'
   | 'not-run'
+  | 'runner-died'
   | 'no-output'
   | 'not-in-results'
   | 'no-tests'
@@ -902,13 +906,41 @@ export function heldForRedCollocatedTest(
   return collocatedNotGreenDetail(kind, own, perFile);
 }
 
+/**
+ * Which `inconclusive` a throw out of the probe setup-and-run is.
+ *
+ * That catch covers three failures and they are not the same fact. The
+ * checkout and the tree removal fail before anything runs. The runner throws
+ * when it was KILLED — the per-run timeout fires SIGTERM, and a suite killed at
+ * the deadline may have executed most of its tests, so "no probe suite ran" is
+ * a claim about it that nothing checked. Matched on the runner's own message
+ * prefixes, which are the only thing distinguishing the three at this point.
+ */
+export function probeFailureReason(message: string): ProbeReason {
+  return /^runner (killed|spawn failed)/.test(message)
+    ? 'runner-died'
+    : 'not-run';
+}
+
+/** The reasons `classifyProbeRun` can produce — the only ones a baseline entry
+ *  can carry, and so the only ones this explanation is written for. */
+const BASELINE_REASON = new Set<ProbeReason>([
+  'no-output',
+  'not-in-results',
+  'no-tests',
+  'all-skipped',
+]);
+
 const REASON_PHRASE: Record<ProbeReason, string> = {
   // The suite ran and read green, but the control proved the runner could not
   // have reported otherwise.
   'control-failed':
     'it read green there, but the positive control failed, so nothing could have turned that run red',
-  // Nothing was attempted: no worktree, or the spawn threw before a suite ran.
+  // Nothing was attempted: no worktree, or the checkout failed.
   'not-run': 'no probe suite ran for it at all there',
+  // Started and did not survive. How much of it ran before that is unknown.
+  'runner-died':
+    'the probe suite was started there and did not survive (a timeout kill, or a spawn that failed)',
   // Nothing is known about collection here — the runner never produced output
   // to read. Saying "collected no tests" would be the same invented cause this
   // function exists to stop, one layer down: a reader sent after a compile
@@ -951,14 +983,20 @@ const NOT_REPORTED = 'the baseline did not report it';
 export function collocatedNotGreenDetail(
   kind: 'mutant' | 'hunk',
   probe: string,
-  perFile: readonly ProbeOutcome[],
+  baselinePerFile: readonly ProbeOutcome[],
 ): string {
-  const entry = perFile.find((p) => p.file === probe);
+  const entry = baselinePerFile.find((p) => p.file === probe);
   const reason =
     entry === undefined
       ? NOT_REPORTED
       : entry.verdict === 'inconclusive'
-        ? REASON_PHRASE[entry.reason]
+        ? // Three reasons are set on the run-level `results` array and never by
+          // `classifyProbeRun`, so a baseline entry cannot carry them. Reaching
+          // one means the caller passed something other than the baseline —
+          // say that, rather than emit "did not run green … it read green".
+          BASELINE_REASON.has(entry.reason)
+          ? REASON_PHRASE[entry.reason]
+          : `the baseline did not classify it (${REASON_PHRASE[entry.reason]}), so this explanation does not apply to it`
         : entry.verdict === 'gated'
           ? 'it was RED there'
           : // `inert` IS green, so the sentence this function builds does not
@@ -2315,12 +2353,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // The probe could not be set up or run. That is not evidence about any
         // test — record it and keep going, so the report (and the unreachable
         // findings, which needed no probe at all) still reaches the caller.
-        const detail = `probe could not run: ${e instanceof Error ? e.message : String(e)}`;
+        const message = e instanceof Error ? e.message : String(e);
+        const detail = `probe could not run: ${message}`;
+        const reason = probeFailureReason(message);
         results.push(
           ...probes.map((file) => ({
             file,
             verdict: 'inconclusive' as const,
-            reason: 'not-run' as const,
+            reason,
             detail,
           })),
         );

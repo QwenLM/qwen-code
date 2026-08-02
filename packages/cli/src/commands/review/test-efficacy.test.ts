@@ -20,6 +20,8 @@ import {
   hasCollocatedNewTest,
   collocatedProbe,
   collocatedNotGreenDetail,
+  probeFailureReason,
+  type ProbeReason,
   heldForRedCollocatedTest,
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
@@ -1399,6 +1401,26 @@ describe('collocatedProbe', () => {
   });
 });
 
+describe('probeFailureReason', () => {
+  it.each([
+    // Verbatim from runProbeSuite's own throw sites.
+    ['runner killed by SIGTERM (probe timed out after 300s)', 'runner-died'],
+    ['runner killed by SIGKILL', 'runner-died'],
+    ['runner spawn failed: ENOENT', 'runner-died'],
+  ])('calls %s a suite that did not survive', (message, expected) => {
+    expect(probeFailureReason(message)).toBe(expected);
+  });
+
+  it.each([
+    ['git checkout base failed: fatal: invalid reference', 'not-run'],
+    ['EACCES: permission denied, rmdir', 'not-run'],
+  ])('calls %s a suite that never started', (message, expected) => {
+    // A suite killed at the deadline ran; a checkout that failed did not, and
+    // the distinction is the whole reason the tag exists.
+    expect(probeFailureReason(message)).toBe(expected);
+  });
+});
+
 describe('collocatedNotGreenDetail', () => {
   const perFile = [
     { file: 'packages/cli/src/red.test.ts', verdict: 'gated' as const },
@@ -1423,6 +1445,28 @@ describe('collocatedNotGreenDetail', () => {
     expect(detail).toContain('was RED there');
     expect(detail).not.toContain('compile or import error');
   });
+
+  it.each(['not-run', 'runner-died', 'control-failed'] as const)(
+    'refuses to explain %s, which a baseline entry cannot carry',
+    (reason) => {
+      // These are set on the run-level results array, never by
+      // classifyProbeRun. Rendered inside this sentence, `control-failed`
+      // would read "did not run green … it read green there".
+      const detail = collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/x.test.ts',
+        [
+          {
+            file: 'packages/cli/src/x.test.ts',
+            verdict: 'inconclusive' as const,
+            reason,
+          },
+        ],
+      );
+      expect(detail).toContain('the baseline did not classify it');
+      expect(detail).toContain('does not apply');
+    },
+  );
 
   it('refuses to explain a probe the baseline reported GREEN', () => {
     // `inert` is what greenProbes is built from, so this sentence does not
@@ -1459,8 +1503,6 @@ describe('collocatedNotGreenDetail', () => {
       'produced results there but none for it',
       'a path that did not match',
     ],
-    ['not-run', 'no probe suite ran for it', 'at all there'],
-    ['control-failed', 'it read green there', 'positive control failed'],
   ])(
     'names %s as the reason rather than guessing one',
     (reason, phrase, alsoPhrase) => {
@@ -1471,7 +1513,7 @@ describe('collocatedNotGreenDetail', () => {
           {
             file: 'packages/cli/src/x.test.ts',
             verdict: 'inconclusive' as const,
-            reason: reason as 'no-output' | 'no-tests' | 'all-skipped',
+            reason: reason as ProbeReason,
           },
         ],
       );
