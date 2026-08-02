@@ -545,7 +545,6 @@ export class QwenLogger {
           status: event.status,
           execution_status: event.execution_status,
           tool_type: event.tool_type,
-          mcp_server_name: event.mcp_server_name,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,

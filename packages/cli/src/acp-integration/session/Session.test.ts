@@ -17215,6 +17215,112 @@ describe('Session', () => {
       );
     });
 
+    it('preserves a structured postprocessing error type after successful execution', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('structured_postprocess_tool', execute),
+      );
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      bridgeToolResultImagesSpy.mockRejectedValueOnce(
+        Object.assign(new Error('structured postprocessing failure'), {
+          errorType: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-structured-post', [
+        {
+          id: 'structured_postprocess_call',
+          name: 'structured_postprocess_tool',
+          args: {},
+        },
+      ]);
+
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'structured_postprocess_call',
+          status: 'error',
+          execution_status: 'success',
+          error_type: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          status: 'error',
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+    });
+
+    it('records cancellation when abort arrives during exception failure hooks', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => {
+            if (request.eventName === 'PostToolUseFailure') {
+              abortController.abort();
+            }
+            return {
+              success: true,
+              output:
+                request.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+            };
+          }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'cancel_during_failure_hook_tool',
+          vi.fn().mockRejectedValue(new Error('tool failed')),
+        ),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-failure-hook-cancel', [
+        {
+          id: 'failure_hook_cancel_call',
+          name: 'cancel_during_failure_hook_tool',
+          args: {},
+        },
+      ]);
+
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'failure_hook_cancel_call',
+          status: 'cancelled',
+          execution_status: 'error',
+        }),
+      );
+      expect(logToolCallSpy.mock.calls[0][1]).not.toHaveProperty('error_type');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          status: 'cancelled',
+          executionStatus: 'error',
+          errorType: undefined,
+        }),
+      );
+    });
+
     it('records one terminal when failure hooks and ACP updates fail', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
@@ -18619,6 +18725,9 @@ describe('Session', () => {
     });
 
     it('skips later tools after non-question permission request failure', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
       const failedPermissionExecute = vi.fn();
       const laterExecute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',
@@ -18666,6 +18775,24 @@ describe('Session', () => {
       });
       expect(failedPermissionExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'shell_call',
+          status: 'error',
+          execution_status: 'not_started',
+          error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'shell_call',
+          status: 'error',
+          executionStatus: 'not_started',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
     });
 
     it('does not treat a parent abort during permission as explicit rejection', async () => {

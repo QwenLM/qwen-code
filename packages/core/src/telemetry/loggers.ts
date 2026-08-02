@@ -164,9 +164,11 @@ type NormalizedToolCallEvent = ToolCallEvent & {
 export function normalizeToolCallEvent(
   event: ToolCallEvent,
 ): NormalizedToolCallEvent {
+  const functionName = event.function_name ?? '';
   const normalized: NormalizedToolCallEvent = {
     ...event,
-    function_name: event.function_name.trim() || 'unknown_tool',
+    function_name:
+      functionName.trim().length > 0 ? functionName : 'unknown_tool',
     success: event.status === 'success',
     execution_status: event.execution_status ?? 'unknown',
   };

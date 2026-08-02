@@ -8289,7 +8289,7 @@ export class Session implements SessionContext {
                     status: wasAborted ? 'cancelled' : 'error',
                     errorType: wasAborted
                       ? undefined
-                      : ToolErrorType.EXECUTION_DENIED,
+                      : ToolErrorType.UNHANDLED_EXCEPTION,
                     executionStatus: 'not_started',
                     stopAfterPermissionCancel: !wasAborted,
                   },
@@ -9059,7 +9059,7 @@ export class Session implements SessionContext {
           const executionTimeoutException =
             !executeReturned &&
             executionErrorType === ToolErrorType.EXECUTION_TIMEOUT;
-          const status =
+          let status: 'cancelled' | 'error' =
             executionStatus === 'cancelled' ||
             (activeToolAbortSignal.aborted && !executionTimeoutException)
               ? 'cancelled'
@@ -9098,15 +9098,23 @@ export class Session implements SessionContext {
             }
           }
 
+          if (activeToolAbortSignal.aborted && !executionTimeoutException) {
+            status = 'cancelled';
+          }
+
+          const explicitErrorType = (
+            e as { errorType?: ToolErrorType } | undefined
+          )?.errorType;
           const errorType =
             status === 'cancelled'
               ? undefined
-              : executeReturned
-                ? ToolErrorType.UNHANDLED_EXCEPTION
-                : (executionErrorType ??
-                  (!toolBuildSucceeded
-                    ? ToolErrorType.INVALID_TOOL_PARAMS
-                    : ToolErrorType.UNHANDLED_EXCEPTION));
+              : (explicitErrorType ??
+                (executeReturned
+                  ? ToolErrorType.UNHANDLED_EXCEPTION
+                  : (executionErrorType ??
+                    (!toolBuildSucceeded
+                      ? ToolErrorType.INVALID_TOOL_PARAMS
+                      : ToolErrorType.UNHANDLED_EXCEPTION))));
           return earlyErrorResponse(error, toolName, {
             status,
             errorType,

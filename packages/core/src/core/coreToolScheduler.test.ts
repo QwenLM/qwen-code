@@ -1354,6 +1354,72 @@ describe('CoreToolScheduler', () => {
     expect(fnCall.args!['originalRequest']).toBe('please plan this');
   });
 
+  it('redacts an approved plan before post-processing cancellation completes', async () => {
+    const bigPlan = '## Plan\n\nprivate implementation details';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-cancel-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-cancel', bigPlan);
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => {
+        if (request.eventName === 'PostToolUse') {
+          abortController.abort();
+        }
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        };
+      }),
+    };
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: 'User approved.',
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      messageBus,
+      disableHooks: false,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-cancel',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-cancel',
+        },
+      ],
+      abortController.signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const completedCall = onAllToolCallsComplete.mock.calls[0][0][0];
+    expect(completedCall).toMatchObject({
+      status: 'cancelled',
+      response: { executionStatus: 'success' },
+    });
+    const plan = chat.getHistory()[1]!.parts![1]!.functionCall!.args!['plan'];
+    expect(plan).not.toContain('private implementation details');
+    expect(plan).toContain(`Plan approved and saved to ${planFile}`);
+    fsSync.unlinkSync(planFile);
+  });
+
   it('redacts the plan for a leader-approved (teammate) exit_plan_mode', async () => {
     const bigPlan = '## Plan\n\nleader path fixture';
     const planFile = path.join(
@@ -12977,6 +13043,36 @@ describe('CoreToolScheduler telemetry spans', () => {
         },
       ]);
     }
+  });
+
+  it('records cancellation when abort arrives during exception failure hooks', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => {
+        if (request.eventName === 'PostToolUseFailure') {
+          abortController.abort();
+        }
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+        };
+      }),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    expect(completedCalls[0]).toMatchObject({
+      status: 'cancelled',
+      response: { executionStatus: 'error' },
+    });
   });
 
   it('every span recorded in a successful tool call is ended (#3731 Phase 2)', async () => {

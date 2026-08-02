@@ -1103,6 +1103,24 @@ describe('loggers', () => {
       expect(event.error).toBe('cancelled by user');
     });
 
+    it('preserves a nonblank function name byte-for-byte', () => {
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T00:00:00.000Z',
+        function_name: '  padded_tool  ',
+        function_args: {},
+        duration_ms: 1,
+        status: 'success',
+        success: true,
+        prompt_id: 'prompt-padded',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      expect(normalizeToolCallEvent(event).function_name).toBe(
+        '  padded_tool  ',
+      );
+    });
+
     it('preserves an explicitly classified error type', () => {
       const event = {
         'event.name': 'tool_call',

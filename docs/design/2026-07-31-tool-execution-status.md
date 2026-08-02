@@ -53,7 +53,9 @@ Normalization occurs once before all sinks:
 The terminal `status` dimension on `qwen-code.tool.call.count`, established by
 the terminal telemetry contract, is unchanged by this design. A new
 `qwen-code.tool.execution.count` counter uses only `execution_status` and
-`tool_type` dimensions. The execution failure rate is:
+`tool_type` event-specific dimensions. Globally configured common metric
+attributes, such as the opt-in `session.id`, may also be present. The execution
+failure rate is:
 
 ```text
 execution_status = error
@@ -76,6 +78,11 @@ after tool resolution and invocation validation; earlier terminal paths are
 covered by the normalized event and execution counter and do not synthesize a
 span from an unresolved request name.
 
+QwenLogger receives the normalized terminal status, execution status, call ID,
+and tool type, but not MCP server names or function arguments. MCP server names
+remain outside QwenLogger and are available to configured telemetry log and
+span exporters.
+
 ## Compatibility and Scope
 
 The public response and event fields stay optional. Built-in producers use an
@@ -91,13 +98,15 @@ When such a pre-resolution cancel is emitted through telemetry, `tool_type`
 defaults to `"native"` because the tool identity is not yet resolved; this
 is a known skew in the `tool_type` dimension for pre-validation cancels.
 
-Per-call terminal errors no longer reject the scheduler's public entry
-points. `CoreToolScheduler.schedule()` and `handleConfirmationResponse()`
-resolve with a failing tool recorded as a terminal `error` call instead of
-throwing, so one tool's failure no longer aborts its siblings. Embedders
-that previously awaited a rejection to detect a tool failure must inspect
-the returned calls' terminal `status` (and the new `executionStatus`)
-instead.
+Per-call execution errors no longer reject `CoreToolScheduler.schedule()`;
+the outcome is delivered through the existing update and completion callbacks
+as a terminal `error` call, so one tool's failure does not abort its siblings.
+The method still returns `Promise<void>` and can reject for scheduler-level
+setup or queue failures. `handleConfirmationResponse()` terminalizes
+confirmation-flow errors before rethrowing them, preserving its existing
+failure signal without leaving a call in `awaiting_approval`. Embedders should
+read terminal `status` and `executionStatus` from callback-delivered calls,
+not expect either public entry point to return completed calls.
 
 The first release covers `CoreToolScheduler` and ACP `Session.runTool`.
 Speculation, direct `/fork` execution, MCP-internal retries, provisional

@@ -627,11 +627,12 @@ describe('QwenLogger', () => {
             status: 'error',
             execution_status: 'error',
             tool_type: 'mcp',
-            mcp_server_name: 'server-1',
             success: 0,
           }),
         }),
       );
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
   });
 
@@ -1030,7 +1031,7 @@ describe('QwenLogger', () => {
   });
 
   describe('logToolCallEvent privacy', () => {
-    it('records MCP identity without forwarding function arguments', () => {
+    it('records terminal status without forwarding MCP server metadata or function arguments', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = {
@@ -1057,7 +1058,6 @@ describe('QwenLogger', () => {
             tool_name: 'remote_tool',
             status: 'error',
             tool_type: 'mcp',
-            mcp_server_name: 'private-server',
             success: 0,
             duration_ms: 42,
             error_type: 'unknown',
@@ -1067,6 +1067,7 @@ describe('QwenLogger', () => {
       );
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
   });
 });

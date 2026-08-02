@@ -5223,9 +5223,6 @@ export class CoreToolScheduler {
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
-        if (cancelAfterPostProcessing(artifacts)) {
-          return;
-        }
         // After an APPROVED exit_plan_mode, swap the large `plan` argument
         // still sitting in the model turn's functionCall for a pointer to the
         // saved plan file. The blob otherwise stays in the model's attention
@@ -5279,6 +5276,9 @@ export class CoreToolScheduler {
                 }`,
             );
           }
+        }
+        if (cancelAfterPostProcessing(artifacts)) {
+          return;
         }
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
@@ -5638,6 +5638,20 @@ export class CoreToolScheduler {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
           failureHookArtifacts = failureHookResult.artifacts;
+        }
+        if (signal.aborted && !executionTimedOut) {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            createCancelledResponse(
+              scheduledCall.request,
+              'User cancelled tool execution.',
+              executionStatus,
+              failureHookArtifacts,
+            ),
+          );
+          setToolSpanCancelled(span);
+          return;
         }
         this.setStatusInternal(
           callId,
