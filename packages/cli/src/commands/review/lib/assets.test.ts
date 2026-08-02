@@ -82,7 +82,12 @@ describe('parseAssetsRepo', () => {
     });
     for (const bad of ['just-a-name', 'a/b/c', 'a b/c', 'o/r?x=1', ' / ']) {
       const r = parseAssetsRepo(bad);
-      expect('error' in r, bad).toBe(true);
+      // Name the offending value in the assertion itself, so a regression
+      // says which shape slipped through rather than "expected true".
+      expect({ value: bad, refused: 'error' in r }).toEqual({
+        value: bad,
+        refused: true,
+      });
     }
   });
 });
