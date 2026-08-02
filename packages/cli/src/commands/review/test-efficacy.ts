@@ -1998,6 +1998,31 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             );
           }
           for (const c of harnessValidated === false ? [] : candidates) {
+            // The hunk loop's rule, which the mutants needed just as much.
+            // A mutant runs against `greenProbes` only, so a file whose OWN
+            // test was red in the unmutated baseline has that test excluded
+            // from the run — and then "every affected test still passed"
+            // is computed over a set that omits the one test most likely to
+            // catch the deletion. Measured live on PR #8213: six hunks in
+            // `bridge.ts` were correctly held at `inconclusive` because
+            // `bridge.test.ts` was not green, while eight mutants in the SAME
+            // file were scored `survived` and shipped as findings.
+            //
+            // The comment below this loop framed the asymmetry as "mutants
+            // guard the killed direction, hunks guard the survived one". That
+            // is true of an inconclusive RUN; it left the survived direction
+            // of a mutant unguarded against an absent covering test. Checked
+            // before the budget, because a candidate that cannot yield a
+            // verdict should not spend a suite run to say so.
+            const own = collocatedProbe(c.file, probes);
+            if (own && !greenProbes.includes(own)) {
+              mutantResults.push({
+                ...c,
+                verdict: 'inconclusive' as const,
+                detail: `this mutant's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the statement is uncovered`,
+              });
+              continue;
+            }
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
@@ -2027,9 +2052,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             // case this exists for: a probe-tree import error that collected
             // nothing) cannot be scored `survived`: the other probes passing
             // shows only that THEY do not cover it, not that nothing does, since
-            // the one test that would catch it never ran. Same asymmetry the
-            // mutants hold, pointed the other way: there an inconclusive run is
-            // never `killed`, here an absent covering test is never `survived`.
+            // the one test that would catch it never ran. The mutants hold
+            // BOTH halves of this now: an inconclusive run is never `killed`,
+            // and — since the loop above gained the same collocated check —
+            // an absent covering test is never `survived` there either. The
+            // two halves are separate guards; having one was read as having
+            // the rule, and eight mutant survivors shipped through the gap.
             const own = collocatedProbe(h.file, probes);
             if (own && !greenProbes.includes(own)) {
               const { patch: _patch, ...meta } = h;
