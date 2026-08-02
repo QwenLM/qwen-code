@@ -15490,6 +15490,7 @@ describe('Session', () => {
             expect.objectContaining({
               callId: 'call-1',
               status: 'error',
+              executionStatus: 'success',
               errorType: core.ToolErrorType.EXECUTION_DENIED,
             }),
           );

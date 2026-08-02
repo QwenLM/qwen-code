@@ -916,6 +916,41 @@ describe('DiscoveredMCPTool', () => {
         controller.abort();
         expect(controller.signal.aborted).toBe(true);
       });
+
+      it('forwards parent abort into the combined signal passed to the direct SDK client', async () => {
+        let capturedSignal: AbortSignal | undefined;
+        const mockDirectCallTool = vi.fn<McpDirectClient['callTool']>(
+          async (_params, _schema, options) => {
+            capturedSignal = options?.signal;
+            return new Promise(() => {});
+          },
+        );
+        const directClient: McpDirectClient = {
+          callTool: mockDirectCallTool,
+        };
+
+        const directTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          directClient,
+        );
+        const controller = new AbortController();
+        const invocation = directTool.build({ param: 'test' });
+        const promise = invocation.execute(controller.signal);
+
+        await vi.waitFor(() => expect(mockDirectCallTool).toHaveBeenCalled());
+
+        controller.abort();
+
+        expect(capturedSignal?.aborted).toBe(true);
+        await expect(promise).rejects.toThrow('Tool call aborted');
+      });
     });
   });
 

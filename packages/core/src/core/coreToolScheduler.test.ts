@@ -631,6 +631,7 @@ describe('CoreToolScheduler', () => {
     toolCalls: ToolCall[];
     autoModeFallbackCallIds: Set<string>;
     drainSpansForBatch: (callIds: Iterable<string>) => void;
+    finalizeToolSpan: (callId: string, force?: boolean) => void;
     _handleConfirmationResponseInner: (
       callId: string,
       toolCall: ToolCall,
@@ -766,6 +767,15 @@ describe('CoreToolScheduler', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('cleans denialTracking fallback call ids when finalizeToolSpan runs', () => {
+    const { internals } = createSchedulerForDenialTrackingApprovalTest();
+    internals.autoModeFallbackCallIds.add('call-1');
+
+    internals.finalizeToolSpan('call-1');
+
+    expect(internals.autoModeFallbackCallIds.has('call-1')).toBe(false);
   });
 
   function createSchedulerForLegacyToolTests(options: {
