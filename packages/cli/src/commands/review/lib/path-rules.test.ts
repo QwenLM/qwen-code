@@ -150,11 +150,11 @@ describe('pathRulesFor — the Java/JVM rule', () => {
   it('cites the thresholds a maintainer will check, correctly', () => {
     // A checklist whose thesis is "don't guess the numbers" loses all trust the
     // moment it cites a wrong one. These three were wrong in the first draft
-    // (InlineSmallCode quoted as the pre-JDK-11 value, HugeMethodLimit called a
+    // (InlineSmallCode quoted as the pre-JDK-17 value, HugeMethodLimit called a
     // product flag with a ≥ boundary, megamorphic stated as unconditional) and a
     // review measured them against a live JVM. Pin the corrected forms.
     const out = pathRulesFor(['src/Main.java']);
-    expect(out).toContain('2500 on JDK 11+');
+    expect(out).toContain('2500 on JDK 17+');
     expect(out).toContain('2000 on JDK 8');
     expect(out).toContain('DontCompileHugeMethods');
     expect(out).toMatch(/> 8000/);
@@ -296,6 +296,10 @@ describe('pathRulesFor — the Java/JVM rule', () => {
         { length: 11 },
         (_, i) => `target/generated-sources/com/x/S${i}.java`,
       ),
+    ],
+    [
+      'Gradle generated output',
+      Array.from({ length: 11 }, (_, i) => `build/generated/com/x/S${i}.java`),
     ],
     [
       'non-Maven test roots',
