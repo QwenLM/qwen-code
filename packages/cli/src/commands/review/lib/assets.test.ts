@@ -7,10 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_ASSET_BYTES,
+  MAX_TOTAL_ASSET_BYTES,
   assetsBranch,
   parseAssetsRepo,
   rawAssetUrl,
   remoteAssetPath,
+  validateAssetBatch,
   validateAssetFile,
 } from './assets.js';
 
@@ -116,5 +118,31 @@ describe('validateAssetFile', () => {
     const big = validateAssetFile('a.png', MAX_ASSET_BYTES + 1);
     expect(big.ok).toBe(false);
     if (!big.ok) expect(big.reason).toContain(String(MAX_ASSET_BYTES));
+  });
+});
+
+describe('validateAssetBatch', () => {
+  it('refuses a batch whose files individually pass but jointly exceed the cap', () => {
+    // Five 9MB files: each clears the 10MB per-file cap, 45MB total does not.
+    // Pure sizes, no fixtures — that is why the ruling lives in the lib.
+    const nine = 9 * 1024 * 1024;
+    const files = Array.from({ length: 5 }, (_, i) => ({
+      basename: `shot-${i}.png`,
+      bytes: nine,
+    }));
+    const r = validateAssetBatch(files);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain(String(MAX_TOTAL_ASSET_BYTES));
+    // Four of the same pass.
+    expect(validateAssetBatch(files.slice(0, 4)).ok).toBe(true);
+  });
+
+  it('surfaces a per-file refusal with the file named', () => {
+    const r = validateAssetBatch([
+      { basename: 'ok.png', bytes: 100 },
+      { basename: 'evil.svg', bytes: 100 },
+    ]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('evil.svg');
   });
 });

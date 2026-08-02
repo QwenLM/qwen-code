@@ -40,12 +40,11 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, ghWithInput, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
-  MAX_TOTAL_ASSET_BYTES,
   assetsBranch,
   parseAssetsRepo,
   rawAssetUrl,
   remoteAssetPath,
-  validateAssetFile,
+  validateAssetBatch,
   type AssetsManifest,
   type PublishedAsset,
 } from './lib/assets.js';
@@ -144,6 +143,20 @@ function ensureBranch(repo: string, branch: string): void {
 }
 
 export function runPublishAssets(args: PublishAssetsArgs): void {
+  // ── Gate 0: a PR identity that can name a branch ──────────────────────────
+  // yargs `type: 'number'` happily passes NaN, 0, -1 and 3.5 through, and with
+  // `--user-authorized` the authorization gate never re-parses the target — so
+  // without this check a `--pr abc` run creates branch `pr-assets/NaN-review`.
+  // Sibling discipline: `submit` guards the identical input the same way.
+  if (!Number.isInteger(args.pr) || args.pr <= 0) {
+    writeStderrLine(
+      `publish-assets: --pr must be a positive integer, got ${String(args.pr)}.`,
+    );
+    writeStdoutLine(JSON.stringify({ published: false }));
+    process.exitCode = 3;
+    return;
+  }
+
   // ── Gate 1: a designated destination ──────────────────────────────────────
   const repoResult = parseAssetsRepo(process.env['QWEN_REVIEW_ASSETS_REPO']);
   if ('error' in repoResult) {
@@ -230,15 +243,12 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     remotePath: string;
     contentBase64: string;
   }
-  const prepared: Prepared[] = [];
-  let total = 0;
-  for (const file of unique) {
+  const stats = unique.map((file) => {
     const abs = resolve(file);
-    let bytes: number;
     try {
       const st = statSync(abs);
       if (!st.isFile()) throw new Error('not a regular file');
-      bytes = st.size;
+      return { file, abs, basename: basename(abs), bytes: st.size };
     } catch (err) {
       throw new Error(
         `publish-assets: cannot read ${JSON.stringify(file)}: ${
@@ -246,28 +256,25 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
         }`,
       );
     }
-    const name = basename(abs);
-    const verdict = validateAssetFile(name, bytes);
-    if (!verdict.ok) {
-      throw new Error(`publish-assets: refused — ${verdict.reason}`);
-    }
-    total += bytes;
-    if (total > MAX_TOTAL_ASSET_BYTES) {
-      throw new Error(
-        `publish-assets: refused — total size exceeds ${MAX_TOTAL_ASSET_BYTES} bytes`,
-      );
-    }
-    const content = readFileSync(abs);
-    const sha256 = createHash('sha256').update(content).digest('hex');
-    prepared.push({
-      file,
-      name,
-      bytes,
-      sha256,
-      remotePath: remoteAssetPath(args.pr, name, sha256),
-      contentBase64: content.toString('base64'),
-    });
+  });
+  // Per-file rules and the aggregate cap live in one pure ruling
+  // (validateAssetBatch), so the 40MB total is unit-tested without fixtures.
+  const batch = validateAssetBatch(stats);
+  if (!batch.ok) {
+    throw new Error(`publish-assets: refused — ${batch.reason}`);
   }
+  const prepared: Prepared[] = stats.map((st) => {
+    const content = readFileSync(st.abs);
+    const sha256 = createHash('sha256').update(content).digest('hex');
+    return {
+      file: st.file,
+      name: st.basename,
+      bytes: st.bytes,
+      sha256,
+      remotePath: remoteAssetPath(args.pr, st.basename, sha256),
+      contentBase64: content.toString('base64'),
+    };
+  });
 
   // ── Publish ───────────────────────────────────────────────────────────────
   const branch = assetsBranch(args.pr);

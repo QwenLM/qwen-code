@@ -134,6 +134,30 @@ export function validateAssetFile(
   return { ok: true };
 }
 
+/**
+ * The whole batch's admission ruling — per-file rules plus the aggregate cap.
+ *
+ * Pure, so the 40MB total cap is testable without writing 40MB of fixtures:
+ * the command stats the files and hands the sizes here.
+ */
+export function validateAssetBatch(
+  files: ReadonlyArray<{ basename: string; bytes: number }>,
+): { ok: true } | { ok: false; reason: string } {
+  let total = 0;
+  for (const f of files) {
+    const one = validateAssetFile(f.basename, f.bytes);
+    if (!one.ok) return one;
+    total += f.bytes;
+    if (total > MAX_TOTAL_ASSET_BYTES) {
+      return {
+        ok: false,
+        reason: `total size exceeds ${MAX_TOTAL_ASSET_BYTES} bytes`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 /** One published file, as the manifest records it. */
 export interface PublishedAsset {
   /** The local path the file was read from. */

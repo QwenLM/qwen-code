@@ -157,6 +157,14 @@ describe('validateFindings — evidence assets', () => {
     ]);
   });
 
+  it('accepts the asset_files snake_case alias like its sibling aliases', () => {
+    // failure_scenario/short_summary/suggested_fix all have a snake_case test;
+    // an untested member of an otherwise-tested family is the alias a refactor
+    // deletes without noticing.
+    const [f] = validateFindings([{ ...base, asset_files: ['shots/x.png'] }]);
+    expect(f.assetFiles).toEqual(['shots/x.png']);
+  });
+
   it('rejects a non-array assetFiles, naming the finding and the field', () => {
     expect(() =>
       validateFindings([{ ...base, assetFiles: 'shot.png' }]),

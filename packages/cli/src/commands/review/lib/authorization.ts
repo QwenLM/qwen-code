@@ -130,16 +130,23 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
         `this submission targets #${req.pr}`,
     };
   }
-  if (t.type === 'pr-url' && req.repo !== undefined) {
-    const authorisedRepo = `${t.owner}/${t.repo}`;
-    if (authorisedRepo.toLowerCase() !== req.repo.toLowerCase()) {
-      return {
-        ok: false,
-        why:
-          `the review arguments authorise ${authorisedRepo}, but this ` +
-          `submission targets ${req.repo}`,
-      };
+  if (t.type === 'pr-url') {
+    if (req.repo !== undefined) {
+      const authorisedRepo = `${t.owner}/${t.repo}`;
+      if (authorisedRepo.toLowerCase() !== req.repo.toLowerCase()) {
+        return {
+          ok: false,
+          why:
+            `the review arguments authorise ${authorisedRepo}, but this ` +
+            `submission targets ${req.repo}`,
+        };
+      }
     }
+    // The host check stands on its own, NOT nested under the repo binding: a
+    // caller that omits the repo (publish-assets without --reviewed-repo)
+    // still binds the host, exactly as the docs promise ("the PR number and
+    // host alone"). Nested, an Enterprise-host mismatch slipped through
+    // whenever the repo was absent — caught by this skill's own review.
     if (req.host && t.host.toLowerCase() !== req.host.toLowerCase()) {
       return {
         ok: false,

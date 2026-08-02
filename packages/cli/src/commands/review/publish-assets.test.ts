@@ -24,8 +24,10 @@ const ghWithInputMock = vi.hoisted(() =>
 vi.mock('./lib/gh.js', () => ({
   gh: ghMock,
   ghWithInput: ghWithInputMock,
-  setGhHost: vi.fn(),
+  setGhHost: setGhHostMock,
 }));
+
+const setGhHostMock = vi.hoisted(() => vi.fn((_h: string) => {}));
 
 const stderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 const stdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
@@ -47,14 +49,22 @@ const PNG = Buffer.from(
 describe('publish-assets', () => {
   let dir: string;
   let argsFile: string;
+  let savedSessionId: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'publish-assets-'));
     argsFile = join(dir, 'args.txt');
     writeFileSync(argsFile, '8346 --comment\n');
     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    // The skillArgs test seam is honoured only when no session id is present;
+    // running this suite from inside an active Qwen Code session would
+    // otherwise route the gate at the real session-scoped path and fail eight
+    // of these tests for reasons that have nothing to do with the code.
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
     ghMock.mockReset();
     ghWithInputMock.mockReset();
+    setGhHostMock.mockClear();
     stdoutSpy.mockClear();
     stderrSpy.mockClear();
     process.exitCode = undefined;
@@ -63,6 +73,9 @@ describe('publish-assets', () => {
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
     process.exitCode = undefined;
   });
 
@@ -291,6 +304,29 @@ describe('publish-assets', () => {
     expect(without.assets).toBeUndefined();
   });
 
+  it('routes GitHub Enterprise calls through setGhHost before any API call', () => {
+    happyGh();
+    run({ files: [pngFile('a.png')], host: 'github.example.com' });
+    expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith('github.example.com');
+    // And the manifest URLs carry the host.
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'manifest.json'), 'utf8'),
+    );
+    expect(manifest.published[0].url).toMatch(
+      /^https:\/\/github\.example\.com\//,
+    );
+  });
+
+  it('refuses a non-integer --pr before any gate can be bypassed around it', () => {
+    // With --user-authorized the authorization gate never re-parses the
+    // target, so a NaN from yargs `type: 'number'` would otherwise reach
+    // branch creation as `pr-assets/NaN-review`.
+    run({ pr: Number.NaN, files: [pngFile('a.png')], userAuthorized: true });
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('refuses an empty run rather than creating an empty branch', () => {
     run({ files: [] });
     expect(process.exitCode).toBe(3);
@@ -347,5 +383,54 @@ describe('publish-assets — empty is two different things', () => {
     expect(stdoutSpy).toHaveBeenCalledWith(
       JSON.stringify({ published: false, count: 0 }),
     );
+  });
+});
+
+describe('publish-assets — host binds even without --reviewed-repo', () => {
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-host-'));
+    argsFile = join(dir, 'args.txt');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    process.exitCode = undefined;
+  });
+
+  it('refuses a host mismatch when the repo binding is absent', () => {
+    // The host check must stand outside the repo guard: an Enterprise-host
+    // authorisation must not publish evidence for a github.com run of the
+    // same PR number just because --reviewed-repo was omitted.
+    writeFileSync(
+      argsFile,
+      'https://ghe.example.com/reviewed/upstream/pull/8346 --comment\n',
+    );
+    const img = join(dir, 'a.png');
+    writeFileSync(img, Buffer.from('89504e470d0a1a0a', 'hex'));
+    runPublishAssets({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [img],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: 'github.other.com',
+      userAuthorized: false,
+      skillArgs: argsFile,
+    } as never);
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 });
