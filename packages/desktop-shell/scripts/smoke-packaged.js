@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveLogRoot } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -16,10 +17,6 @@ if (!executable)
 if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
   throw new Error(`Packaged executable is missing: ${executable}`);
 }
-const localAppData = process.env.LOCALAPPDATA;
-if (process.platform === 'win32' && !localAppData) {
-  throw new Error('LOCALAPPDATA is required to locate Windows desktop logs.');
-}
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-smoke-'));
 const isolatedHome = path.join(workspace, 'home');
@@ -27,15 +24,17 @@ const isolatedState = path.join(workspace, 'state');
 fs.mkdirSync(isolatedHome);
 fs.mkdirSync(isolatedState);
 const appId = 'com.qwen.code.desktop';
-const logRoot =
-  process.platform === 'darwin'
-    ? path.join(isolatedHome, 'Library', 'Logs', appId)
-    : process.platform === 'win32'
-      ? path.join(localAppData, appId, 'logs') // known-folder API, not env var
-      : path.join(isolatedState, appId, 'logs');
+// On Windows the log lives under the real %LOCALAPPDATA% (a machine-global
+// path shared with any running desktop app), not the smoke workspace.
+// Do not run this smoke alongside a live Qwen Code desktop instance on Windows.
+const logRoot = resolveLogRoot(process.platform, process.env, {
+  isolatedHome,
+  isolatedState,
+  appId,
+});
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
-const previousLog = fs.readFileSync(logPath, {
+let previousLog = fs.readFileSync(logPath, {
   encoding: 'utf8',
   flag: 'a+',
 });
@@ -109,7 +108,7 @@ async function waitForReady() {
   }
   const contents = readNewLog();
   throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
+    `Timed out waiting for packaged desktop runtime.\nLog: ${logPath}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
   );
 }
 
@@ -119,9 +118,11 @@ function readNewLog() {
     flag: 'a+',
   });
   if (!contents.startsWith(previousLog)) {
-    throw new Error(
-      'Desktop runtime log was truncated or rotated during the smoke.',
-    );
+    // The Tauri app truncates the log on every startup (main.rs:
+    // fs::write(&log_path, b"")).  Reset the baseline so the smoke keeps
+    // polling instead of aborting on the second run.
+    console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
+    previousLog = '';
   }
   return contents.slice(previousLog.length);
 }
