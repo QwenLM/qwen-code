@@ -520,16 +520,17 @@ export function ModelDialog({
         : isImageModelMode && parsedImageModelSetting
           ? parsedImageModelSetting.modelId
           : config?.getModel() || MAINLINE_CODER_MODEL;
-  // Check if current model is a runtime model
-  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot =
+  const isAuxiliaryModelMode =
     isFastModelMode ||
     isVoiceModelMode ||
     isVisionModelMode ||
     isCompactionModelMode ||
-    isImageModelMode
-      ? undefined
-      : config?.getActiveRuntimeModelSnapshot?.();
+    isImageModelMode;
+  // Check if current model is a runtime model
+  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
+  const activeRuntimeSnapshot = isAuxiliaryModelMode
+    ? undefined
+    : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
@@ -657,13 +658,7 @@ export function ModelDialog({
                 : '';
 
   const closeWithoutSelection = useCallback(() => {
-    if (
-      !isFastModelMode &&
-      !isVoiceModelMode &&
-      !isVisionModelMode &&
-      !isCompactionModelMode &&
-      !isImageModelMode
-    ) {
+    if (!isAuxiliaryModelMode) {
       uiState?.historyManager.addItem(
         {
           type: 'info',
@@ -674,11 +669,7 @@ export function ModelDialog({
     }
     onClose();
   }, [
-    isCompactionModelMode,
-    isFastModelMode,
-    isImageModelMode,
-    isVisionModelMode,
-    isVoiceModelMode,
+    isAuxiliaryModelMode,
     onClose,
     preferredModelId,
     uiState,
@@ -688,12 +679,7 @@ export function ModelDialog({
     (key) => {
       if (
         key.name === 'escape' ||
-        (key.name === 'left' &&
-          (isFastModelMode ||
-            isVoiceModelMode ||
-            isVisionModelMode ||
-            isCompactionModelMode ||
-            isImageModelMode))
+        (key.name === 'left' && isAuxiliaryModelMode)
       ) {
         closeWithoutSelection();
       }

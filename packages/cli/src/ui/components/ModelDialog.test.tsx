@@ -1293,24 +1293,31 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('does not report the primary model when closing an auxiliary picker', () => {
-    const { props, mockHistoryManager } = renderComponent({
-      isFastModelMode: true,
-    });
+  it.each([
+    [{ isFastModelMode: true }],
+    [{ isVoiceModelMode: true }],
+    [{ isVisionModelMode: true }],
+    [{ isCompactionModelMode: true }],
+    [{ isImageModelMode: true }],
+  ])(
+    'does not report the primary model when closing an auxiliary picker (%j)',
+    (modeProps) => {
+      const { props, mockHistoryManager } = renderComponent(modeProps);
 
-    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
-    keyPressHandler({
-      name: 'escape',
-      ctrl: false,
-      meta: false,
-      shift: false,
-      paste: false,
-      sequence: '',
-    });
+      const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+      keyPressHandler({
+        name: 'escape',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+      });
 
-    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
-    expect(props.onClose).toHaveBeenCalledTimes(1);
-  });
+      expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
