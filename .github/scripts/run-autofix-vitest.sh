@@ -14,7 +14,7 @@ config="${script_dir}/autofix-vitest.config.mjs"
 launcher="${script_dir}/autofix-cli-launcher.mjs"
 [[ -f "${config}" && -f "${launcher}" ]]
 [[ "${report_name}" =~ ^case-[0-9]+$ ]]
-[[ "${test_file}" != /* && "${test_file}" != *$'\n'* ]]
+[[ "${test_file}" != /* && "${test_file}" != *$'\n'* && "${test_file}" != *'..'* ]]
 report="${home}/reports/${report_name}/report.json"
 run_home="$(sudo mktemp -d "${home}/runs/vitest.XXXXXX")"
 sudo chown "root:${user}" "${run_home}"

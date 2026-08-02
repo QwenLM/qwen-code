@@ -133,6 +133,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
 
   const cases = [];
   const reasons = [];
+  const environments = [];
   for (const job of jobs) {
     const environment = parseE2eJobName(job.name);
     if (!environment) {
@@ -148,6 +149,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       reasons.push(`no exact Vitest failure found in job: ${job.name}`);
       continue;
     }
+    environments.push(environment);
     for (const id of failedTests) {
       const parsed = parseVitestTestId(id);
       if (!parsed) {
@@ -175,10 +177,10 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       `too many environment-specific failures: ${totalCases} > ${MAX_TARGETED_E2E_CASES}`,
     );
   }
-  if (cases.some((testCase) => testCase.os !== 'linux')) {
+  if (environments.some((environment) => environment.os !== 'linux')) {
     reasons.push('macOS E2E failures are unsupported by the Linux verifier');
   }
-  if (cases.some((testCase) => testCase.sandbox !== 'none')) {
+  if (environments.some((environment) => environment.sandbox !== 'none')) {
     reasons.push(
       'Docker E2E failures are unsupported by credential-free read-only verification',
     );

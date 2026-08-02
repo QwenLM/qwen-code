@@ -1701,6 +1701,7 @@ jobs:
           node "${RUNNER_TEMP}/run-autofix-targeted-e2e.mjs" \
             --metadata "${RUNNER_TEMP}/ci-failure.json" \
             --report "${RUNNER_TEMP}/targeted-e2e-report.md" \
+            --base "${{ steps.candidate.outputs.base_oid }}" \
             --command-wrapper "${RUNNER_TEMP}/run-autofix-verification-command.sh" \
             --vitest-wrapper "${RUNNER_TEMP}/run-autofix-vitest.sh" \
             --worktree-helper "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \

@@ -184,7 +184,6 @@ jobs:
           SEARCH_MARKERS: '${{ needs.analyze.outputs.search_markers }}'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
-          E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
           AUTOFIX_ROUTING_LABEL: 'autofix/routing'
           BUG_LABEL: 'type/bug'
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
@@ -261,6 +260,12 @@ jobs:
               route_allowed='false'
             fi
             if [[ "${route_allowed}" != 'true' ]]; then
+              existing_issue_state="$(jq -r '.state // ""' <<< "${existing_state}")"
+              if [[ "${existing_issue_state}" == 'CLOSED' && "${concurrent_reuse}" != 'true' ]]; then
+                gh issue comment "${EXISTING_ISSUE}" \
+                  --repo "${REPO}" \
+                  --body "Main CI failure recurred after this issue was closed (source run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}). Not recreating an automatically approved issue; reopen this issue or file a new one if this is a regression."
+              fi
               echo "Issue #${EXISTING_ISSUE} has a live claim, cancellation, ownership change, or linked PR; leaving it and its trusted metadata unchanged."
               echo "number=${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
               echo 'route_allowed=false' >> "${GITHUB_OUTPUT}"

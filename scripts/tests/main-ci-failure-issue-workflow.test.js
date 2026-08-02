@@ -175,6 +175,28 @@ describe('main CI failure issue workflow', () => {
     );
   });
 
+  it('records a recurrence comment when an eligible failure resolves to a closed issue', () => {
+    expect(workflow).toContain(
+      'existing_issue_state="$(jq -r \'.state // ""\' <<< "${existing_state}")"',
+    );
+    expect(workflow).toContain(
+      'if [[ "${existing_issue_state}" == \'CLOSED\' && "${concurrent_reuse}" != \'true\' ]]; then',
+    );
+    expect(workflow).toContain(
+      'Main CI failure recurred after this issue was closed',
+    );
+    expect(workflow).toContain(
+      'Not recreating an automatically approved issue',
+    );
+    const commentIndex = workflow.indexOf(
+      'Main CI failure recurred after this issue was closed',
+    );
+    expect(commentIndex).toBeGreaterThan(-1);
+    expect(commentIndex).toBeLessThan(
+      workflow.indexOf('leaving it and its trusted metadata unchanged.'),
+    );
+  });
+
   it('deduplicates by failing test and includes run context', () => {
     // The dedupe key is the failing test, not the commit: a standing red used to
     // open one issue per merge. The markers themselves live in the helper.

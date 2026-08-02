@@ -24,6 +24,11 @@ test('keeps candidate code outside the trusted Vitest worker', () => {
   assert.match(config, /singleFork: true/);
   assert.doesNotMatch(config, /execArgv|globalSetup|@qwen-code\/sdk/);
   assert.match(wrapper, /TEST_CLI_PATH="\$\{launcher\}"/);
+  assert.ok(
+    wrapper.includes(
+      `[[ "\${test_file}" != /* && "\${test_file}" != *$'\\n'* && "\${test_file}" != *'..'* ]]`,
+    ),
+  );
   assert.match(
     wrapper,
     /AUTOFIX_CANDIDATE_CLI="\$\{workspace\}\/dist\/cli\.js"/,

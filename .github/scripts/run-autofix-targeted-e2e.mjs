@@ -11,9 +11,13 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const MAX_CASES = 5;
+import { isProtectedVerificationPath } from './validate-autofix-verification-outputs.mjs';
+
+export { isProtectedVerificationPath };
+
+export const MAX_CASES = 5;
 const CASE_TIMEOUT_MS = 20 * 60 * 1000;
-const TRUSTED_EXTERNAL_PROCESS_TESTS = new Set([
+export const TRUSTED_EXTERNAL_PROCESS_TESTS = new Set([
   'cli/qwen-serve-client-mcp.test.ts',
 ]);
 const SAFE_ENV_NAMES = [
@@ -123,52 +127,30 @@ export function validateMetadata(metadata, workspace = process.cwd()) {
   });
 }
 
-export function isProtectedVerificationPath(file) {
-  return (
-    file === '.gitattributes' ||
-    file === '.gitignore' ||
-    file === '.npmrc' ||
-    file === 'esbuild.config.js' ||
-    file === 'package.json' ||
-    file === 'package-lock.json' ||
-    file === 'npm-shrinkwrap.json' ||
-    file === 'tsconfig.json' ||
-    file === 'vitest.config.ts' ||
-    file.startsWith('.github/') ||
-    file.startsWith('integration-tests/') ||
-    file.startsWith('patches/') ||
-    file.startsWith('scripts/') ||
-    file.includes('/scripts/') ||
-    file.endsWith('/package.json') ||
-    file.endsWith('/package-lock.json') ||
-    file.endsWith('/npm-shrinkwrap.json') ||
-    /(^|\/)tsconfig(?:\.[^/]+)?\.json$/.test(file) ||
-    /(^|\/)(?:test|tests|__tests__|test-utils|fixtures|__fixtures__|mocks|__mocks__)\//.test(
-      file,
-    ) ||
-    /(^|\/)node_modules(?:\/|$)/.test(file) ||
-    /(^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file) ||
-    /(^|\/)__snapshots__\//.test(file) ||
-    /(^|\/)(?:test-setup|setup-tests?)\.[cm]?[jt]sx?$/.test(file) ||
-    /(^|\/)(?:build|esbuild)\.(?:[cm]?[jt]s|sh)$/.test(file) ||
-    /(^|\/)(?:babel|esbuild|eslint|jest|playwright|postcss|rollup|tailwind|vite|vitest|webpack)(?:\.[^/]*)?\.config\.[cm]?[jt]s$/.test(
-      file,
-    ) ||
-    /(^|\/)\.eslintrc(?:\.[cm]?[jt]s|\.json)?$/.test(file)
-  );
-}
-
-export function validateCandidateScope(metadata, workspace = process.cwd()) {
+export function validateCandidateScope(
+  metadata,
+  base,
+  workspace = process.cwd(),
+) {
   const sourceSha = metadata?.source?.headSha;
   if (!/^[0-9a-f]{40}$/.test(sourceSha ?? ''))
     fail('Invalid targeted E2E source SHA');
+  if (!/^[0-9a-f]{40}$/.test(base ?? '')) fail('Invalid targeted E2E base OID');
+  // The candidate must descend from the failed source commit, but the scope
+  // diff is taken from the candidate base: unrelated main commits that land
+  // between the failure and the scheduled run must not be attributed to the
+  // candidate.
   run('git', ['merge-base', '--is-ancestor', sourceSha, 'HEAD'], {
+    cwd: workspace,
+    stdio: 'pipe',
+  });
+  run('git', ['merge-base', '--is-ancestor', base, 'HEAD'], {
     cwd: workspace,
     stdio: 'pipe',
   });
   const changedOutput = run(
     'git',
-    ['diff', '--name-only', '--no-renames', '-z', `${sourceSha}...HEAD`],
+    ['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`],
     { cwd: workspace, stdio: 'pipe', encoding: 'buffer' },
   ).stdout;
   const changedText = changedOutput.toString('utf8');
@@ -260,6 +242,7 @@ function run(command, args, options = {}) {
 export function runTargetedE2e({
   metadataPath,
   reportPath,
+  base,
   workspace = process.cwd(),
   commandWrapper,
   vitestWrapper,
@@ -273,7 +256,7 @@ export function runTargetedE2e({
   try {
     const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
     const cases = validateMetadata(metadata, workspace);
-    validateCandidateScope(metadata, workspace);
+    validateCandidateScope(metadata, base, workspace);
     directory = mkdtempSync(join(tmpdir(), 'autofix-targeted-e2e-'));
     const env = verificationEnv(join(directory, 'qwen-home'));
     const candidateOptions = {
@@ -362,10 +345,12 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   const options = parseArgs(process.argv.slice(2));
-  if (!options.metadata || !options.report) fail('Missing required arguments');
+  if (!options.metadata || !options.report || !options.base)
+    fail('Missing required arguments');
   runTargetedE2e({
     metadataPath: options.metadata,
     reportPath: options.report,
+    base: options.base,
     commandWrapper: options['command-wrapper'],
     vitestWrapper: options['vitest-wrapper'],
     worktreeHelper: options['worktree-helper'],

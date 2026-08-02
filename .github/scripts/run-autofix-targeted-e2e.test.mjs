@@ -12,6 +12,12 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
+  MAX_TARGETED_E2E_CASES,
+  TRUSTED_EXTERNAL_PROCESS_E2E_TESTS,
+} from './ci/main-failure-signature.mjs';
+import {
+  MAX_CASES,
+  TRUSTED_EXTERNAL_PROCESS_TESTS,
   escapeRegex,
   expectedFullName,
   isProtectedVerificationPath,
@@ -21,6 +27,7 @@ import {
   validateVitestReport,
   verificationEnv,
 } from './run-autofix-targeted-e2e.mjs';
+import { isProtectedVerificationPath as validatorIsProtectedPath } from './validate-autofix-verification-outputs.mjs';
 
 function withWorkspace(run) {
   const workspace = mkdtempSync(join(tmpdir(), 'targeted-e2e-test-'));
@@ -39,6 +46,26 @@ function withWorkspace(run) {
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+function initRepository(workspace) {
+  execFileSync('git', ['init'], { cwd: workspace });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: workspace,
+  });
+}
+
+function headSha(workspace) {
+  return execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: workspace,
+    encoding: 'utf8',
+  }).trim();
+}
+
+function commit(workspace, message) {
+  execFileSync('git', ['add', '.'], { cwd: workspace });
+  execFileSync('git', ['commit', '-m', message], { cwd: workspace });
 }
 
 function metadata(testCase) {
@@ -75,7 +102,9 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
     new URL('./run-autofix-targeted-e2e.mjs', import.meta.url),
     'utf8',
   );
-  const scopeAt = source.indexOf('validateCandidateScope(metadata, workspace)');
+  const scopeAt = source.indexOf(
+    'validateCandidateScope(metadata, base, workspace)',
+  );
   const installAt = source.indexOf("'--ignore-scripts'");
   const dependenciesAt = source.indexOf("[workspace, 'dependencies']");
   const generateAt = source.indexOf(
@@ -168,6 +197,8 @@ test('protects targeted E2E tests and their execution inputs', () => {
     '.gitignore',
     '.npmrc',
     'esbuild.config.js',
+    'eslint.config.js',
+    'eslint.legacy-filenames.mjs',
     'integration-tests/cli/sample.test.ts',
     'integration-tests/vitest.config.ts',
     'package.json',
@@ -201,12 +232,53 @@ test('protects targeted E2E tests and their execution inputs', () => {
     'scripts/build.js',
     'tsconfig.json',
     'vitest.config.ts',
+    'packages/cli/src/config/settings.ts',
+    'packages/cli/src/config/settingsSchema.ts',
+    'packages/cli/src/i18n/languages.ts',
+    'packages/core/src/index.ts',
+    'packages/core/src/config/approval-mode.ts',
+    'packages/core/src/config/clearContextDefaults.ts',
+    'packages/core/src/config/config.ts',
+    'packages/core/src/hooks/stopHookCap.ts',
+    'packages/core/src/services/loopDetectionService.ts',
+    'packages/core/src/telemetry/constants.ts',
+    'packages/core/src/telemetry/index.ts',
+    'packages/core/src/utils/qwenIgnoreParser.ts',
+    'packages/vscode-ide-companion/schemas/settings.schema.json',
   ]) {
     assert.equal(isProtectedVerificationPath(file), true, file);
   }
   assert.equal(
-    isProtectedVerificationPath('packages/core/src/config/settings.ts'),
+    isProtectedVerificationPath('packages/core/src/feature.ts'),
     false,
+  );
+});
+
+test('shares one protected-path allowlist with the output validator', () => {
+  assert.equal(isProtectedVerificationPath, validatorIsProtectedPath);
+  for (const file of [
+    '.github/workflows/qwen-autofix.yml',
+    'eslint.config.js',
+    'package.json',
+    'packages/cli/src/config/settings.ts',
+    'packages/core/src/index.ts',
+    'packages/vscode-ide-companion/schemas/settings.schema.json',
+    'packages/core/src/feature.ts',
+    'packages/core/src/utils/someHelper.ts',
+  ]) {
+    assert.equal(
+      isProtectedVerificationPath(file),
+      validatorIsProtectedPath(file),
+      file,
+    );
+  }
+});
+
+test('keeps producer and consumer targeted E2E limits in sync', () => {
+  assert.equal(MAX_CASES, MAX_TARGETED_E2E_CASES);
+  assert.deepEqual(
+    [...TRUSTED_EXTERNAL_PROCESS_TESTS].sort(),
+    [...TRUSTED_EXTERNAL_PROCESS_E2E_TESTS].sort(),
   );
 });
 
@@ -217,25 +289,20 @@ test('rejects candidates that change trusted targeted E2E inputs', () => {
       join(workspace, 'packages', 'core', 'src', 'feature.ts'),
       'v1',
     );
-    execFileSync('git', ['init'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
-      cwd: workspace,
-    });
-    execFileSync('git', ['add', '.'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'source'], { cwd: workspace });
-    const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: workspace,
-      encoding: 'utf8',
-    }).trim();
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
 
     writeFileSync(
       join(workspace, 'packages', 'core', 'src', 'feature.ts'),
       'v2',
     );
-    execFileSync('git', ['add', '.'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'production fix'], { cwd: workspace });
-    validateCandidateScope({ source: { headSha: sourceSha } }, workspace);
+    commit(workspace, 'production fix');
+    validateCandidateScope(
+      { source: { headSha: sourceSha } },
+      sourceSha,
+      workspace,
+    );
 
     writeFileSync(
       join(
@@ -246,39 +313,73 @@ test('rejects candidates that change trusted targeted E2E inputs', () => {
       ),
       'changed',
     );
-    execFileSync('git', ['add', '.'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'weaken test'], { cwd: workspace });
+    commit(workspace, 'weaken test');
     assert.throws(
       () =>
-        validateCandidateScope({ source: { headSha: sourceSha } }, workspace),
+        validateCandidateScope(
+          { source: { headSha: sourceSha } },
+          sourceSha,
+          workspace,
+        ),
       /Candidate changes trusted targeted E2E inputs: integration-tests\/cli\/qwen-serve-client-mcp\.test\.ts/,
+    );
+  });
+});
+
+test('scopes the candidate diff to the candidate base, not the failed source SHA', () => {
+  withWorkspace((workspace) => {
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v1',
+    );
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+
+    // An unrelated main commit touching a protected path lands after the
+    // failure and before the candidate base. Diffing from the failed source
+    // SHA would attribute it to the candidate and falsely abort.
+    mkdirSync(join(workspace, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'scripts', 'unrelated.js'),
+      '// main traffic',
+    );
+    commit(workspace, 'unrelated main change');
+    const candidateBase = headSha(workspace);
+
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v2',
+    );
+    commit(workspace, 'production fix');
+
+    validateCandidateScope(
+      { source: { headSha: sourceSha } },
+      candidateBase,
+      workspace,
     );
   });
 });
 
 test('rejects protected paths containing Git quoting characters', () => {
   withWorkspace((workspace) => {
-    execFileSync('git', ['init'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workspace });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
-      cwd: workspace,
-    });
-    execFileSync('git', ['add', '.'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'source'], { cwd: workspace });
-    const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: workspace,
-      encoding: 'utf8',
-    }).trim();
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
 
     const protectedPath = join(workspace, 'scripts', 'unsafe\nname.js');
     mkdirSync(join(workspace, 'scripts'), { recursive: true });
     writeFileSync(protectedPath, 'candidate controlled');
-    execFileSync('git', ['add', '.'], { cwd: workspace });
-    execFileSync('git', ['commit', '-m', 'quoted path'], { cwd: workspace });
+    commit(workspace, 'quoted path');
 
     assert.throws(
       () =>
-        validateCandidateScope({ source: { headSha: sourceSha } }, workspace),
+        validateCandidateScope(
+          { source: { headSha: sourceSha } },
+          sourceSha,
+          workspace,
+        ),
       /Candidate changes trusted targeted E2E inputs/,
     );
   });
