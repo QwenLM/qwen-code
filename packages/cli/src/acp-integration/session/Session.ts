@@ -6983,16 +6983,9 @@ export class Session implements SessionContext {
       }
     };
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
-    const deferredToolPresentations: DeferredToolPresentation[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
         memoryWriteCandidates.push(...result.memoryWriteCandidates);
-      }
-    };
-    const collectToolResultMetadata = (result: RunToolResult): void => {
-      collectMemoryWriteCandidates(result);
-      if (result.deferredToolPresentations) {
-        deferredToolPresentations.push(...result.deferredToolPresentations);
       }
     };
     const refreshMemoryIfNeeded = async (): Promise<void> => {
@@ -7195,7 +7188,7 @@ export class Session implements SessionContext {
           let shouldStopForLoop = false;
           for (const r of results) {
             parts.push(...r.parts);
-            collectToolResultMetadata(r);
+            collectMemoryWriteCandidates(r);
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
@@ -7210,7 +7203,6 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: false,
               loopDetected: true,
               memoryWriteCandidates,
-              deferredToolPresentations,
             });
           }
           if (shouldStop) {
@@ -7223,7 +7215,6 @@ export class Session implements SessionContext {
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
-              deferredToolPresentations,
             });
           }
         } else {
@@ -7240,7 +7231,7 @@ export class Session implements SessionContext {
               onFullTurnModel,
             );
             parts.push(...r.parts);
-            collectToolResultMetadata(r);
+            collectMemoryWriteCandidates(r);
             if (r.loopDetected) {
               await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
               return await finalizeRunToolResult({
@@ -7248,7 +7239,6 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: false,
                 loopDetected: true,
                 memoryWriteCandidates,
-                deferredToolPresentations,
               });
             }
             if (r.stopAfterPermissionCancel) {
@@ -7258,7 +7248,6 @@ export class Session implements SessionContext {
                 stopAfterPermissionCancel: true,
                 repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
-                deferredToolPresentations,
               });
             }
           }
@@ -7269,7 +7258,6 @@ export class Session implements SessionContext {
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
-        deferredToolPresentations,
       });
     };
 

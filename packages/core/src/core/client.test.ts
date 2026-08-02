@@ -1474,6 +1474,7 @@ describe('Gemini Client (client.ts)', () => {
       reg.isProxyEligibleDeferredTool.mockImplementation(
         (n: string) => n === 'cron_create',
       );
+      reg.clearProxySchemaPresentations.mockClear();
       reg.markProxySchemaPresented.mockClear();
 
       await client.startChat([
@@ -1512,6 +1513,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.markProxySchemaPresented).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: 'cron_list' }),
       );
+      expect(
+        reg.clearProxySchemaPresentations.mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(reg.markProxySchemaPresented.mock.invocationCallOrder[0]);
       const restoredSchemaText = client
         .getHistory()
         .flatMap((entry) => entry.parts ?? [])

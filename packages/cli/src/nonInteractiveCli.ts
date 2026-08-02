@@ -1764,9 +1764,10 @@ export async function runNonInteractive(
             finalizedParts.some(
               (part, partIndex) => part !== response.responseParts[partIndex],
             );
-          const deliveredPresentations = responseChanged
-            ? undefined
-            : response.deferredToolPresentations;
+          const deliveredPresentations =
+            responseChanged || response.error
+              ? undefined
+              : response.deferredToolPresentations;
           toolResponseParts.push(...finalizedParts);
           chatRecordingService?.recordToolResult?.(finalizedParts, {
             callId: request.callId,

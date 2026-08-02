@@ -482,8 +482,17 @@ describe('ToolSearchTool', () => {
   it('keeps serialized declarations byte-identical after presenting a deferred tool', async () => {
     registry.registerTool(new MockTool({ name: 'visible' }));
     registry.registerTool(new MockTool({ name: 'hidden', shouldDefer: true }));
+    registry.registerFactory(
+      ToolNames.DEFERRED_TOOL_CALL,
+      async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+      { allowReservedName: true },
+    );
+    await registry.warmAll();
 
     const before = JSON.stringify(registry.getFunctionDeclarations());
+    expect(registry.getFunctionDeclarations().map((tool) => tool.name)).toEqual(
+      [ToolNames.DEFERRED_TOOL_CALL, 'visible'],
+    );
 
     const tool = new ToolSearchTool(config);
     const result = await tool
@@ -1115,18 +1124,49 @@ describe('ToolSearchTool', () => {
       description: 'x'.repeat(2000),
       shouldDefer: true,
     });
+    const alreadyRevealed = new MockTool({
+      name: 'already_revealed',
+      shouldDefer: true,
+    });
     registry.registerTool(oversized);
+    registry.registerTool(alreadyRevealed);
+    registry.revealDeferredTool(alreadyRevealed.name);
     vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
     vi.spyOn(config, 'getGeminiClient').mockReturnValue({
       setTools: vi.fn().mockRejectedValue(new Error('provider rejected tools')),
     } as never);
 
     const result = await new ToolSearchTool(config)
-      .build({ query: 'select:oversized_deferred' })
+      .build({ query: 'select:oversized_deferred,already_revealed' })
       .execute(new AbortController().signal);
 
     expect(result.error?.message).toBe('provider rejected tools');
     expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
+    expect(registry.isDeferredToolRevealed(alreadyRevealed.name)).toBe(true);
+  });
+
+  it('preserves missing and truncated diagnostics after an oversized direct declaration', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'oversized_deferred',
+        description: 'x'.repeat(2000),
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+
+    const result = await new ToolSearchTool(config)
+      .build({
+        query: 'select:oversized_deferred,missing_tool,truncated_tool',
+        max_results: 2,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('Not found: missing_tool');
+    expect(String(result.llmContent)).toContain(
+      'Truncated by max_results — request these in a follow-up call: truncated_tool',
+    );
   });
 
   it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {

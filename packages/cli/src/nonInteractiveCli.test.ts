@@ -2018,6 +2018,59 @@ describe('runNonInteractive', () => {
       );
     });
 
+    it('does not record failed tool presentations as delivered', async () => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+      Object.assign(mockToolRegistry, { markProxySchemaPresented });
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'failed-call',
+              name: 'read',
+              response: { error: 'tool failed' },
+            },
+          },
+        ],
+        deferredToolPresentations: [
+          { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+        ],
+        error: new Error('tool failed'),
+      });
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['failed-call'], 'read', 'p-error'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-error');
+
+      expect(recordToolResult).toHaveBeenCalledOnce();
+      expect(recordToolResult.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ deferredToolPresentations: undefined }),
+      );
+      expect(markProxySchemaPresented).not.toHaveBeenCalled();
+    });
+
     it('runs side-effecting (unsafe) tool calls sequentially', async () => {
       setupMetricsMock();
       // Kind.Edit is a mutator: each unsafe call forms its own sequential

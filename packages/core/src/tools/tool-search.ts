@@ -374,6 +374,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const oversizedFallback = await this.revealOversizedSchemasDirectly(
       llmContent,
       deferredToolPresentations,
+      missing,
+      truncated,
     );
     if (oversizedFallback) {
       return oversizedFallback;
@@ -405,6 +407,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
   private async revealOversizedSchemasDirectly(
     llmContent: string,
     presentations: readonly DeferredToolPresentation[],
+    missing: readonly string[],
+    truncated: readonly string[],
   ): Promise<ToolResult | undefined> {
     const budget = this.config.getToolOutputBatchBudget();
     if (
@@ -445,8 +449,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
+    let directDeclarationMessage = `The requested deferred schemas exceeded the inline output budget, so these tools were declared directly instead: ${names.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`;
+    if (missing.length > 0) {
+      directDeclarationMessage += `\n\nNot found: ${missing.join(', ')}`;
+    }
+    if (truncated.length > 0) {
+      directDeclarationMessage += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+    }
     return {
-      llmContent: `The requested deferred schemas exceeded the inline output budget, so these tools were declared directly instead: ${names.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`,
+      llmContent: directDeclarationMessage,
       returnDisplay: `Declared ${names.length} oversized tool(s) directly`,
     };
   }
