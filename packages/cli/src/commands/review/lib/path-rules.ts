@@ -68,8 +68,57 @@ const GITHUB_ACTIONS: PathRule = {
 **Favour precision over recall here.** A false alarm on a workflow costs more reviewer trust than a missed minor nit, because a YAML finding is the easiest kind for an author to dismiss. Every finding needs the concrete trigger and the concrete outcome, like any other.`,
 };
 
+const JAVA: PathRule = {
+  title: 'Java / JVM performance',
+  matches: (p) => /\.java$/i.test(p),
+  checklist: `A Java change's most expensive regressions are decided by the JVM, not by anything a reader can see in the source: HotSpot chooses what to inline, what to scalar-replace, and what to compile at all — and a one-line change can flip each of those on a hot path. The general performance lens (N+1, repeated work, data structures) sees none of it.
+
+**You are reviewing this diff, not auditing this file.** A JVM-cost weakness the code already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a cheap path this diff **makes hot** (a new caller in a request loop, a call moved inside a loop).
+
+**Correctness traps dressed as concurrency or performance code (Critical):**
+
+- **A \`SimpleDateFormat\` shared across threads.** It is not thread-safe: concurrent \`parse\`/\`format\` corrupts its calendar state and returns silently wrong values or throws. If the diff adds a shared (static or instance field) \`SimpleDateFormat\`, or makes an existing one reachable from more than one thread, that is wrong, not slow. The fix is \`java.time.format.DateTimeFormatter\` (immutable) or a \`ThreadLocal\`.
+- **A compound action on \`ConcurrentHashMap\` built from two calls.** \`get\`-then-\`put\`, \`containsKey\`-then-\`put\`, check-then-act of any shape: the map's thread safety covers each call, not the pair, and the race loses an update or runs the guarded work twice. Say what the race corrupts — that is the finding. Fix with \`putIfAbsent\`, \`computeIfAbsent\`, or \`merge\`.
+- **Double-checked locking without \`volatile\` on the field.** The reading thread can observe a partially constructed object. If the diff adds or touches the idiom, the field must be \`volatile\` (or replaced with the holder idiom).
+
+**JVM-cost defects provable from the source (Suggestion — a cost, not a wrongness):**
+
+- **A regex compiled per call.** \`Pattern.compile(...)\` in a method body or loop, and the \`String\` conveniences that hide it — \`matches\`, \`replaceAll\`, \`replaceFirst\`, and \`split\` with a real regex (single-character splits take a fast path) — recompile the pattern on every invocation. On a per-request or per-record path that is real CPU. Fix: \`private static final Pattern\`.
+- **\`+=\` on a \`String\` inside a loop.** Each iteration rebuilds and copies the whole accumulated prefix; the loop is O(n²) in the final length. Fix: one \`StringBuilder\` outside the loop.
+- **Boxing on a hot path.** A \`Long\`/\`Integer\` loop accumulator, a \`Map<Long, …>\` over dense \`int\` keys, \`.boxed()\` in a counted stream: every box past the small-integer cache is an allocation plus a pointer chase per iteration. Fix: primitives, or the primitive streams/collections.
+- **A capturing lambda or method reference inside a hot loop.** A non-capturing lambda is a singleton; one that closes over a local allocates per iteration. If the diff moves a capturing lambda into a loop, hoist it or restructure it to capture nothing.
+- **A log message built whether or not it is logged.** \`log.debug("result: " + value)\` pays the concatenation with the level off, and even \`log.debug("{}", expensive())\` still pays \`expensive()\`. Fix: parameterized messages, and guard expensive arguments with \`isDebugEnabled()\` or a supplier-based logging API.
+- **A collection sized after the fact.** A \`HashMap\`/\`ArrayList\` the code then fills with a known N pays repeated rehash/grow-copy chains; presize it (a \`HashMap\` needs \`N/0.75 + 1\` to avoid rehashing at all).
+- **Legacy synchronized types in new code.** \`Vector\`, \`Hashtable\`, \`StringBuffer\` put a monitor on every call; the unsynchronized equivalents are the default for a reason.
+- **An exception used as control flow.** Validating by catching \`NumberFormatException\`, looping until \`EOFException\`: \`fillInStackTrace\` costs more than the work being guarded. Validate instead.
+- **Reflection rediscovered per call.** \`getMethod\`/\`getField\` on every invocation of a hot path; cache the \`Method\`/\`Field\` — or a \`MethodHandle\` — once.
+
+**JIT inlining — the regression no dimension can see, and you cannot prove from source:**
+
+HotSpot inlines by the **bytecode size of the callee**, against these product defaults (a project's own \`-XX:\` flags, or a different JVM, change them — check before citing):
+
+| callee bytecode size | inlinable |
+| --- | --- |
+| ≤ 6 (\`MaxTrivialSize\`) | always |
+| ≤ 35 (\`MaxInlineSize\`) | even when cold |
+| ≤ 325 (\`FreqInlineSize\`) | only at a hot call site |
+| > 325 | never |
+| ≥ 8000 (\`HugeMethodLimit\`) | never even JIT-compiled |
+
+Two more ways a diff can flip it: an already-compiled callee whose **native** size passes \`InlineSmallCode\` (~1000, product) stops being inlined to protect the code cache, and a call site that gains a **third** receiver implementation goes megamorphic — vtable dispatch, no inlining at any size. So the diff-shapes that matter: a small method on a hot path the change **grows** (added validation, logging, a branch), a new layer in a hot call chain, a new implementation registered for an interface invoked in a hot loop. A cold method over 325 bytes is **not** a finding — inlining only matters where the call is hot.
+
+**Measure it; do not estimate bytecode from source.** Two tiers, in order of cost:
+
+1. **Static — available whenever the project builds.** Compile (\`mvn -q -DskipTests compile\`, \`gradle classes\`, or \`javac\` the module), then \`javap -c -p <ClassName>\` and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — compile the base revision the same way and measure the same method on both sides; a method that was already over is pre-existing, not a finding.
+2. **Dynamic — when the code is runnable.** Run the workload with \`-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining\` and grep for the method: \`callee is too large\` / \`hot method too big\` is the JVM itself declining to inline. JMH gives the before/after throughput; JITWatch visualizes the same decision logs.
+
+A finding that a method "can no longer be inlined" without one of these two tiers is a guess stated as fact. Report the **mechanism** instead, at \`Confidence: low\`: the threshold at risk, what the diff added to the method, and the measurement still to run. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
+
+**Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions**: slow is a cost, not incorrect behaviour — the Critical entries above are Critical because they are *wrong*.`,
+};
+
 /** Every rule, in the order their checklists are appended. */
-export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS];
+export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
 
 /**
  * The checklists that govern `paths`, as a brief section — or `''` when none do.

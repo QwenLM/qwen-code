@@ -103,3 +103,63 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     expect(out).toContain('$GITHUB_STEP_SUMMARY');
   });
 });
+
+describe('pathRulesFor — the Java/JVM rule', () => {
+  it('attaches when a .java file changes, and names only that file', () => {
+    const out = pathRulesFor(['src/main/java/com/x/Main.java', 'src/pay.ts']);
+    expect(out).toContain('Java / JVM performance');
+    expect(out).toContain('src/main/java/com/x/Main.java');
+    expect(out).not.toContain('src/pay.ts');
+  });
+
+  it.each([
+    ['src/main/java/com/x/Main.java', true],
+    ['Main.java', true],
+    ['src/main/kotlin/Main.kt', false],
+    ['src/pay.ts', false],
+    ['docs/notes.java.md', false],
+  ])('%s → Java rule applies: %s', (path, applies) => {
+    expect(pathRulesFor([path]).includes('Java / JVM performance')).toBe(
+      applies,
+    );
+  });
+
+  it('stacks with the workflow rule when a diff touches both', () => {
+    const out = pathRulesFor(['.github/workflows/ci.yml', 'src/Main.java']);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Java / JVM performance');
+  });
+
+  it('names the inline thresholds and both verification tiers', () => {
+    const out = pathRulesFor(['src/Main.java']);
+    // The table the whole JIT section hangs on: 325 is the user's case — a hot
+    // method that outgrows FreqInlineSize stops being inlined.
+    expect(out).toContain('FreqInlineSize');
+    expect(out).toContain('325');
+    expect(out).toContain('MaxInlineSize');
+    // Static tier: compile and measure with javap; dynamic tier: PrintInlining.
+    expect(out).toContain('javap');
+    expect(out).toContain('PrintInlining');
+  });
+
+  it('refuses to estimate bytecode from source', () => {
+    // The one failure this checklist exists to prevent: an agent eyeballing a
+    // method and declaring it un-inlinable. The honest form is the mechanism,
+    // at low confidence, with the measurement named.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toMatch(/do not estimate bytecode from source/);
+    expect(out).toContain('Confidence: low');
+  });
+
+  it('keeps the severity and scoping discipline of the skill', () => {
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('reviewing this diff, not auditing this file');
+    expect(out).toContain('Favour precision over recall');
+    // Inlining only matters where the call is hot; otherwise the rule is a
+    // lint sweep over every method in the file.
+    expect(out).toMatch(/cold method over 325 bytes is \*\*not\*\* a finding/);
+    // Slow is a cost, not a wrongness — perf findings are Suggestions, and the
+    // Criticals are reserved for the correctness traps.
+    expect(out).toMatch(/Performance findings are \*\*Suggestions\*\*/);
+  });
+});
