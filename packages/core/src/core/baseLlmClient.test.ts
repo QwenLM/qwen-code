@@ -719,6 +719,7 @@ describe('BaseLlmClient', () => {
       mockGenerateContent.mockResolvedValue(
         createMockTextResponse('  plain  '),
       );
+      vi.mocked(getFunctionCalls).mockReturnValueOnce(undefined);
 
       const result = await client.generateText({
         contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
@@ -730,6 +731,27 @@ describe('BaseLlmClient', () => {
       expect(mockGenerateContent).toHaveBeenCalledTimes(1);
       expect(mockGenerateContentStream).not.toHaveBeenCalled();
       expect(result.text).toBe('plain');
+      expect(result.hadToolCall).toBe(false);
+    });
+
+    it('reports function calls from the non-streaming response', async () => {
+      const response = createMockResponseWithFunctionCall({});
+      mockGenerateContent.mockResolvedValue(response);
+      vi.mocked(getFunctionCalls).mockReturnValueOnce([
+        { name: 'respond_in_schema', args: {} },
+      ]);
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContentStream).not.toHaveBeenCalled();
+      expect(getFunctionCalls).toHaveBeenCalledWith(response);
+      expect(result.hadToolCall).toBe(true);
     });
 
     it('propagates a mid-stream error and never returns the partial text', async () => {
