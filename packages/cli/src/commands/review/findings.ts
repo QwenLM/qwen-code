@@ -357,14 +357,11 @@ export function validateFindings(raw: unknown): Finding[] {
   return findings;
 }
 
-/** Most severe first, then high-confidence before low, then file and line. */
 /**
- * Does `text` name `probe`, a path that may be written relative to a package?
- *
- * `test-delta` reports `src/ui/auth/AuthDialog.test.tsx` — relative to the
- * workspace whose test command failed — while a finding writes the repo-relative
- * `packages/cli/src/ui/auth/AuthDialog.test.tsx`. Match on a separator boundary
- * so `src/a.test.ts` cannot be satisfied by `vendor/other-src/a.test.ts`.
+ * Does `text` name `probe`? Both are repo-relative by the time this runs —
+ * `sharedFailingFilesOf` qualifies what `test-delta` reported. Match on a name
+ * boundary so `src/a.test.ts` is satisfied by neither `vendor/other-src/a.test.ts`
+ * nor `src/a.test.tsx`.
  */
 function namesPath(text: string, probe: string): boolean {
   const isNameChar = (c: string | undefined) =>
@@ -373,12 +370,19 @@ function namesPath(text: string, probe: string): boolean {
   for (;;) {
     const at = text.indexOf(probe, from);
     if (at < 0) return false;
-    // BOTH ends. The leading check alone cannot see a probe matching inside a
-    // longer name: `src/a.test.ts` would be satisfied by `src/a.test.tsx`.
-    if (
-      !isNameChar(at === 0 ? undefined : text[at - 1]) &&
-      !isNameChar(text[at + probe.length])
-    ) {
+    const after = text[at + probe.length];
+    // A trailing `.` is the end of a sentence far more often than the start of
+    // another extension — findings are prose, and "…in src/a.test.ts." is the
+    // ordinary way to write it. So a dot only extends the name when something
+    // alphanumeric follows it (`.snap`), and never at the end of the text.
+    const extendsName =
+      after !== undefined &&
+      (/[A-Za-z0-9_-]/.test(after) ||
+        (after === '.' &&
+          /[A-Za-z0-9]/.test(text[at + probe.length + 1] ?? '')));
+    // Both ends: the leading check alone cannot see a probe matching inside a
+    // longer name, where `src/a.test.ts` is satisfied by `src/a.test.tsx`.
+    if (!isNameChar(at === 0 ? undefined : text[at - 1]) && !extendsName) {
       return true;
     }
     from = at + 1;
@@ -415,10 +419,17 @@ export function holdCriticalsFailingOnBase(
   const held: Array<{ id: string; file: string }> = [];
   const out = findings.map((f) => {
     if (f.severity !== 'Critical') return f;
+    // A finding the fixer already edited the tree for is not a claim awaiting
+    // adjudication. Demoting it would print "this is not a passing test the PR
+    // turns red" beside a ledger entry saying the code was changed for it —
+    // two statements about the same finding that read as contradicting.
+    if (f.outcome === 'fixed') return f;
+    // `suggestedFix` is deliberately absent: it is where a finding proposes
+    // work ("add a case in src/x.test.ts"), not where it asserts its claim, and
+    // a test file named there is routinely unrelated to any file being red.
     const haystack = [
       f.summary,
       f.failureScenario,
-      f.suggestedFix ?? '',
       ...f.locations.map((l) => l.file),
     ].join('\n');
     const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
@@ -433,31 +444,86 @@ export function holdCriticalsFailingOnBase(
   return { findings: out, held };
 }
 
+const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
+
 /**
- * Every file `test-delta` measured as failing on BOTH sides, from its artifact.
+ * One `test-delta` path as a finding would write it: repo-relative, unkeyed.
+ *
+ * Two things are stripped away. `failingFilesOf` keys a file by its vitest
+ * project when the runner prints one (`@qwen-code/qwen-code::src/x.test.ts`) —
+ * a finding never writes that prefix, so a keyed entry could never match and the
+ * guard no-opped silently on the one shape a real projects run emits. And a
+ * per-workspace command prints paths relative to that workspace, so
+ * `src/utils/errors.test.ts` from the `packages/cli` command is qualified back
+ * to `packages/cli/src/utils/errors.test.ts`.
+ *
+ * The qualification is the part that matters. Six test paths in this repo exist
+ * under BOTH `packages/cli/src` and `packages/core/src` (`utils/errors.test.ts`
+ * among them), so a bare suffix cannot tell them apart: a Critical about core's
+ * copy would be held by cli's copy being red — demoting a real finding on a
+ * measurement that was never about it. `failingFilesOf` keeps the project token
+ * in its identity for exactly this reason; discarding it here would reopen from
+ * the consumer side what the producer closed.
+ */
+function repoRelative(path: string, workspace: string | undefined): string {
+  const at = path.indexOf('::');
+  const bare = at < 0 ? path : path.slice(at + 2);
+  if (!workspace || bare.startsWith(`${workspace}/`)) return bare;
+  return `${workspace}/${bare}`;
+}
+
+/**
+ * Every file `test-delta` measured as failing on BOTH sides, repo-relative.
+ *
+ * Read from `entries` when there are any, because only an entry carries the
+ * `--workspace=` its paths are relative to; the top-level `shared` is the union
+ * of the same files with that context already lost, and is the fallback for a
+ * partial artifact rather than a second source of truth.
+ *
+ * A file measured `netNew` anywhere in the run is dropped even if some other
+ * command called it `shared`: the two claims cannot both license a hold, and the
+ * direction that suppresses a real finding is the worse one to get wrong.
+ *
  * A shape it does not recognise yields none: an unreadable measurement must not
  * silently hold a Critical back, and must not throw either — the review has
  * findings to report whether or not this file parsed.
  */
 export function sharedFailingFilesOf(raw: unknown): string[] {
   if (!raw || typeof raw !== 'object') return [];
-  const top = (raw as { shared?: unknown }).shared;
-  const files = new Set<string>();
-  const take = (v: unknown) => {
-    if (Array.isArray(v)) {
-      for (const e of v) if (typeof e === 'string' && e) files.add(e);
+  const shared = new Set<string>();
+  const netNew = new Set<string>();
+  const take = (
+    into: Set<string>,
+    v: unknown,
+    workspace: string | undefined,
+  ) => {
+    if (!Array.isArray(v)) return;
+    for (const e of v) {
+      if (typeof e === 'string' && e) into.add(repoRelative(e, workspace));
     }
   };
-  take(top);
+
   const entries = (raw as { entries?: unknown }).entries;
-  if (Array.isArray(entries)) {
-    for (const e of entries) {
-      if (e && typeof e === 'object') take((e as { shared?: unknown }).shared);
+  const rows = Array.isArray(entries) ? entries : [];
+  if (rows.length > 0) {
+    for (const e of rows) {
+      if (!e || typeof e !== 'object') continue;
+      const command = (e as { command?: unknown }).command;
+      const workspace =
+        typeof command === 'string'
+          ? (WORKSPACE_IN_COMMAND_RE.exec(command)?.[1] ?? undefined)
+          : undefined;
+      take(shared, (e as { shared?: unknown }).shared, workspace);
+      take(netNew, (e as { netNew?: unknown }).netNew, workspace);
     }
+  } else {
+    take(shared, (raw as { shared?: unknown }).shared, undefined);
+    take(netNew, (raw as { netNew?: unknown }).netNew, undefined);
   }
-  return [...files];
+  return [...shared].filter((f) => !netNew.has(f));
 }
 
+/** Most severe first, then high-confidence before low, then file and line. */
 export function sortFindings(findings: readonly Finding[]): Finding[] {
   return [...findings].sort((a, b) => {
     const bySeverity =

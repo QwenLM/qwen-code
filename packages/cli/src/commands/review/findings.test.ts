@@ -632,6 +632,35 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(held).toEqual([]);
   });
 
+  it('leaves a Critical the fixer already applied alone', () => {
+    // The ledger says the tree was edited for it; demoting it would print
+    // "not a passing test the PR turns red" beside that.
+    const { findings, held } = holdCriticalsFailingOnBase(
+      [{ ...critical, outcome: 'fixed' as const }],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
+    expect(held).toEqual([]);
+  });
+
+  it('does not match on suggestedFix, where a test file is proposed work', () => {
+    // "add a case in src/…test.tsx" is not a claim that the file is red.
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          summary: 'The retry counter is never reset',
+          failureScenario: 'Two failures then a success leaves attempts at 2.',
+          locations: [{ file: 'packages/cli/src/retry.ts' }],
+          suggestedFix:
+            'Add a case in packages/cli/src/ui/auth/AuthDialog.test.tsx covering the guard.',
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
+  });
+
   it('never touches a finding that is not Critical', () => {
     const { findings, held } = holdCriticalsFailingOnBase(
       [{ ...critical, severity: 'Suggestion' as const }],
@@ -640,6 +669,38 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(findings[0].severity).toBe('Suggestion');
     expect(findings[0].failureScenario).toBe(critical.failureScenario);
     expect(held).toEqual([]);
+  });
+
+  it('matches a path that ends a sentence', () => {
+    // Findings are prose. Treating the full stop as part of the name would
+    // silently stop matching the ordinary way a file is written.
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          failureScenario:
+            'It goes red in packages/cli/src/ui/auth/AuthDialog.test.tsx.',
+          locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx' }],
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Suggestion');
+  });
+
+  it('does not match a longer extension on the same stem', () => {
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx.snap is stale',
+          locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx' }],
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
   });
 
   it('requires a boundary after the match, not only before it', () => {
@@ -672,6 +733,93 @@ describe('holdCriticalsFailingOnBase', () => {
       shared,
     );
     expect(findings[0].severity).toBe('Critical');
+  });
+});
+
+describe('sharedFailingFilesOf — cross-workspace identity', () => {
+  // The artifact test-delta actually writes for this repo: one entry per
+  // workspace command, paths relative to that workspace.
+  const delta = {
+    entries: [
+      {
+        command: 'npm test --workspace="packages/cli"',
+        netNew: [],
+        shared: ['src/utils/errors.test.ts'],
+      },
+      {
+        command: 'npm test --workspace="packages/core"',
+        netNew: ['src/utils/errors.test.ts'],
+        shared: [],
+      },
+    ],
+    netNew: ['src/utils/errors.test.ts'],
+    shared: ['src/utils/errors.test.ts'],
+  };
+
+  it('qualifies each entry by the workspace its command names', () => {
+    expect(sharedFailingFilesOf(delta)).toEqual([
+      'packages/cli/src/utils/errors.test.ts',
+    ]);
+  });
+
+  it('does not hold a Critical about the OTHER workspace of the same path', () => {
+    // Six test paths in this repo exist under both packages/cli/src and
+    // packages/core/src. A bare suffix would demote a real finding about
+    // core's copy because cli's copy was already red.
+    const shared = sharedFailingFilesOf(delta);
+    const critical = {
+      id: 'f1',
+      severity: 'Critical' as const,
+      confidence: 'high' as const,
+      source: 'review' as const,
+      summary: 'this PR breaks core errors',
+      shortSummary: 'core errors',
+      failureScenario: 'packages/core/src/utils/errors.test.ts goes red.',
+      locations: [{ file: 'packages/core/src/utils/errors.ts' }],
+    };
+    expect(
+      holdCriticalsFailingOnBase([critical], shared).findings[0].severity,
+    ).toBe('Critical');
+    // ...while the workspace it WAS measured in is still held.
+    const cli = {
+      ...critical,
+      failureScenario: 'packages/cli/src/utils/errors.test.ts goes red.',
+    };
+    expect(holdCriticalsFailingOnBase([cli], shared).findings[0].severity).toBe(
+      'Suggestion',
+    );
+  });
+
+  it('drops a file some other command measured as net-new', () => {
+    expect(
+      sharedFailingFilesOf({
+        entries: [
+          { command: 'npm test', netNew: [], shared: ['src/a.test.ts'] },
+          { command: 'npm test', netNew: ['src/a.test.ts'], shared: [] },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('reads the vitest-project key the producer documents', () => {
+    // `failingFilesOf` writes `project::path` when the runner prints a project
+    // tag. A finding never contains `::`, so an unstripped key can never match.
+    const shared = sharedFailingFilesOf({
+      entries: [
+        {
+          command: 'npm test --workspace="packages/cli"',
+          netNew: [],
+          shared: ['@qwen-code/qwen-code::src/commands/x.test.ts'],
+        },
+      ],
+    });
+    expect(shared).toEqual(['packages/cli/src/commands/x.test.ts']);
+  });
+
+  it('falls back to the top level only when there are no entries', () => {
+    expect(sharedFailingFilesOf({ shared: ['src/a.test.ts'] })).toEqual([
+      'src/a.test.ts',
+    ]);
   });
 });
 
