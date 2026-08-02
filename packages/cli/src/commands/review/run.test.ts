@@ -381,6 +381,60 @@ describe('review run (handler)', () => {
     expect(argvUsed[i + 1]).toBe('default');
   });
 
+  describe('child env: QWEN_CODE_CLI version skew', () => {
+    let saved: string | undefined;
+
+    beforeEach(() => {
+      saved = process.env['QWEN_CODE_CLI'];
+    });
+
+    afterEach(() => {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_CLI'];
+      } else {
+        process.env['QWEN_CODE_CLI'] = saved;
+      }
+    });
+
+    function childEnvValue(): string | undefined {
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: NodeJS.ProcessEnv },
+      ];
+      return opts.env['QWEN_CODE_CLI'];
+    }
+
+    it('blanks an inherited entry that points at a DIFFERENT build', async () => {
+      // The dogfooded failure: a review launched from inside a parent Qwen
+      // session ran the parent's install for every skill subcommand.
+      process.env['QWEN_CODE_CLI'] = process.execPath; // real file, ≠ argv[1]
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      // '' counts as unset in stampCliEntryEnv: the child re-stamps its own.
+      expect(childEnvValue()).toBe('');
+    });
+
+    it('preserves an inherited entry that IS this build', async () => {
+      // The outer-launcher case first-writer-wins exists for: an npm bin shim,
+      // cli-entry.js, or the desktop bundle stamping this same install.
+      process.env['QWEN_CODE_CLI'] = process.argv[1] as string;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(process.argv[1]);
+    });
+
+    it('blanks an inherited entry that does not resolve', async () => {
+      process.env['QWEN_CODE_CLI'] = join(dir, 'no-such-qwen');
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe('');
+    });
+  });
+
   it('treats a composed verdict without a string event as no verdict', async () => {
     // readComposed must refuse a file whose `event` is not a string, or a
     // corrupt verdict would read as completed with event null and exit 0.
