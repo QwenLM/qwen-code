@@ -44,6 +44,10 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import {
+  MAX_INLINE_IMAGE_ENCODED_LENGTH,
+  MAX_INLINE_IMAGES_PER_ITEM,
+} from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 
 // --- MOCKS ---
@@ -6218,6 +6222,167 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('caps inline images for one assistant output and reports the overflow', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const images = Array.from(
+        { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+        (_, index) => ({
+          data: Buffer.from(`assistant-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        }),
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: images.map((inlineData) => ({ inlineData })),
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show many charts');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      const assistantItems = result.current.pendingHistoryItems.filter(
+        (item) => item.type === 'gemini' || item.type === 'gemini_content',
+      );
+      expect(assistantItems.flatMap((item) => item.images ?? [])).toEqual(
+        images.slice(0, MAX_INLINE_IMAGES_PER_ITEM),
+      );
+      expect(assistantItems).toHaveLength(MAX_INLINE_IMAGES_PER_ITEM + 1);
+      expect(assistantItems.at(-1)).toMatchObject({
+        text: '',
+        omittedImageCount: 2,
+      });
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('resets the inline image cap at a finished response boundary', async () => {
+      const firstOutputImages = Array.from(
+        { length: MAX_INLINE_IMAGES_PER_ITEM },
+        (_, index) => ({
+          data: Buffer.from(`first-output-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        }),
+      );
+      const nextOutputImage = {
+        data: Buffer.from('next-output').toString('base64'),
+        mimeType: 'image/png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: firstOutputImages.map((inlineData) => ({ inlineData })),
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: [{ inlineData: nextOutputImage }],
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('show charts across responses');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems.flatMap((item) => item.images ?? [])).toEqual([
+        ...firstOutputImages,
+        nextOutputImage,
+      ]);
+      expect(assistantItems.some((item) => item.omittedImageCount)).toBe(false);
+      expect(assistantItems.at(-1)).toMatchObject({
+        type: 'gemini',
+        images: [nextOutputImage],
+      });
+    });
+
+    it('does not retain an oversized inline image payload in UI state', async () => {
+      vi.useFakeTimers();
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const oversizedData = 'A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1);
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: [
+              {
+                inlineData: {
+                  data: oversizedData,
+                  mimeType: 'image/png',
+                },
+              },
+            ],
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show oversized chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      const assistantItems = result.current.pendingHistoryItems.filter(
+        (item) => item.type === 'gemini' || item.type === 'gemini_content',
+      );
+      expect(assistantItems).toEqual([]);
+      expect(JSON.stringify(result.current.pendingHistoryItems)).not.toContain(
+        oversizedData,
+      );
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('keeps an image committable when the stream pauses after whitespace', async () => {
       vi.useFakeTimers();
 
@@ -9786,6 +9951,63 @@ describe('useGeminiStream', () => {
     });
   });
 
+  describe('ChatCompressed event', () => {
+    it('starts a fresh prefixed text item after the status row', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'before compression',
+          };
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'after compression',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test compression boundary');
+      });
+
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item as HistoryItem)
+          .filter(
+            (item) =>
+              item.type === 'gemini' ||
+              item.type === 'gemini_content' ||
+              item.type === 'info',
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'gemini',
+          text: 'before compression',
+        }),
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('compressed context'),
+        }),
+        expect.objectContaining({
+          type: 'gemini',
+          text: 'after compression',
+        }),
+      ]);
+    });
+  });
+
   describe('handleFinishedEvent', () => {
     it('commits mixed assistant output before a MAX_TOKENS warning', async () => {
       const image = {
@@ -12659,7 +12881,7 @@ describe('useGeminiStream', () => {
   });
 
   describe('HookSystemMessage Event', () => {
-    it('commits staged inline content before a displayed Goal state', async () => {
+    it('commits staged inline content and restarts after a displayed Goal state', async () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
@@ -12723,7 +12945,7 @@ describe('useGeminiStream', () => {
         { type: 'gemini_content', text: '', images: [image] },
         { type: 'gemini_content', text: 'Goal output' },
         expect.objectContaining({ type: 'goal_state', cause: 'complete' }),
-        { type: 'gemini_content', text: ' continued' },
+        expect.objectContaining({ type: 'gemini', text: ' continued' }),
       ]);
     });
 

@@ -21,6 +21,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type { HistoryItem } from '../types.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from './inline-image-parts.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
@@ -855,6 +856,43 @@ describe('resumeHistoryUtils', () => {
       },
       { id: 103, type: 'gemini_content', text: 'after' },
     ]);
+  });
+
+  it('caps restored assistant images and retains the overflow count', () => {
+    const images = Array.from(
+      { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+      (_, index) => ({
+        data: Buffer.from(`restored-image-${index}`).toString('base64'),
+        mimeType: 'image/png',
+      }),
+    );
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: {
+            parts: images.map((inlineData) => ({ inlineData })),
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+    ).filter(
+      (item) => item.type === 'gemini' || item.type === 'gemini_content',
+    );
+
+    expect(items.flatMap((item) => item.images ?? [])).toEqual(
+      images.slice(0, MAX_INLINE_IMAGES_PER_ITEM),
+    );
+    expect(items.at(-1)).toMatchObject({
+      type: 'gemini_content',
+      text: '',
+      omittedImageCount: 2,
+    });
   });
 
   it('restores images nested in persisted tool response parts', () => {

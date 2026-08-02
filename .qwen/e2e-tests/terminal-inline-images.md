@@ -33,6 +33,8 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 4. Confirm both successful and failed/cancelled tool rows retain their images.
 5. Open Ctrl+O and resume the session; confirm assistant and tool image order is
    reconstructed from persisted parts.
+6. Return six images in one assistant output and one tool response; confirm the
+   first four render and the row ends with `[+2 more images]`.
 
 ### Kitty/Ghostty
 
@@ -57,10 +59,11 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 
 1. Repeat without `chafa` and outside direct Kitty/Ghostty.
 2. Confirm a valid PNG displays `[image: <width>x<height> png]`.
-3. Repeat with malformed base64, a payload above 8 MiB, invalid
-   IHDR dimensions, and a non-PNG MIME type.
-4. Confirm no raw image sequence is written and a deterministic placeholder
-   remains visible.
+3. Repeat with malformed base64, a payload above 8 MiB, invalid IHDR
+   dimensions, and a non-PNG MIME type.
+4. Confirm no raw image sequence is written. Confirm the oversized payload is
+   excluded from UI history, while admitted malformed/non-PNG data uses a
+   deterministic placeholder.
 5. Repeat with `INK_SCREEN_READER=true`; confirm only the placeholder is
    emitted.
 

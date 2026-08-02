@@ -203,6 +203,15 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockTerminalImage:image/png');
   });
 
+  it('renders the number of omitted inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} omittedImageCount={2} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
+
   it('always shows the vision bridge disclosure for a completed read', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage

@@ -38,8 +38,8 @@ import {
 } from './history-gap-notice.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
+  collectInlineImages,
   extractInlineContentRuns,
-  extractInlineImages,
 } from './inline-image-parts.js';
 
 /**
@@ -223,6 +223,7 @@ function convertToHistoryItems(
     visionBridgeNotice?: string;
     detailedDisplay?: string;
     images?: InlineImageData[];
+    omittedImageCount?: number;
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
@@ -474,24 +475,27 @@ function convertToHistoryItems(
           }
           for (const [index, run] of displayRuns.entries()) {
             const type = index === 0 ? 'gemini' : 'gemini_content';
-            items.push(
-              run.kind === 'text'
-                ? {
-                    type,
-                    text: run.text,
-                    ...(index === 0
-                      ? { timestamp: new Date(record.timestamp).getTime() }
-                      : {}),
-                  }
-                : {
-                    type,
-                    text: '',
-                    images: [run.image],
-                    ...(index === 0
-                      ? { timestamp: new Date(record.timestamp).getTime() }
-                      : {}),
-                  },
-            );
+            const timestamp =
+              index === 0
+                ? { timestamp: new Date(record.timestamp).getTime() }
+                : {};
+            if (run.kind === 'text') {
+              items.push({ type, text: run.text, ...timestamp });
+            } else if (run.kind === 'image') {
+              items.push({
+                type,
+                text: '',
+                images: [run.image],
+                ...timestamp,
+              });
+            } else {
+              items.push({
+                type,
+                text: '',
+                omittedImageCount: run.count,
+                ...timestamp,
+              });
+            }
           }
         }
 
@@ -538,9 +542,13 @@ function convertToHistoryItems(
               rawStatus === 'error'
                 ? ToolCallStatus.Error
                 : ToolCallStatus.Success;
-            const images = extractInlineImages(responseParts);
+            const { images, omittedImageCount } =
+              collectInlineImages(responseParts);
             if (images.length > 0) {
               toolCall.images = images;
+            }
+            if (omittedImageCount > 0) {
+              toolCall.omittedImageCount = omittedImageCount;
             }
             // Full detail for the Ctrl+O transcript (§4.9): the complete
             // functionResponse parts are persisted on the tool_result record

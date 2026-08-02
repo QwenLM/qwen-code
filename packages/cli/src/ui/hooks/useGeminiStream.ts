@@ -125,6 +125,10 @@ import {
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
+import {
+  getInlineImageData,
+  MAX_INLINE_IMAGES_PER_ITEM,
+} from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -1489,7 +1493,7 @@ export const useGeminiStream = (
       if (
         (pendingItem?.type === 'gemini' ||
           pendingItem?.type === 'gemini_content') &&
-        pendingItem.images?.length
+        (pendingItem.images?.length || pendingItem.omittedImageCount)
       ) {
         if (newGeminiMessageBuffer.trim().length === 0) {
           return newGeminiMessageBuffer;
@@ -2218,6 +2222,16 @@ export const useGeminiStream = (
       let assistantOutputStarted =
         pendingHistoryItemRef.current?.type === 'gemini' ||
         pendingHistoryItemRef.current?.type === 'gemini_content';
+      let assistantInlineImageCount = [
+        ...pendingAssistantItemsRef.current,
+        pendingHistoryItemRef.current,
+      ].reduce(
+        (count, item) =>
+          item?.type === 'gemini' || item?.type === 'gemini_content'
+            ? count + (item.images?.length ?? 0)
+            : count,
+        0,
+      );
       const toolCallRequests: ToolCallRequestInfo[] = [];
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2272,6 +2286,26 @@ export const useGeminiStream = (
             }
             setIsReceivingContent(true);
             turnSawContentEventRef.current = true;
+            const pendingItem = pendingHistoryItemRef.current;
+            const isOverflowOnlyItem =
+              (pendingItem?.type === 'gemini' ||
+                pendingItem?.type === 'gemini_content') &&
+              pendingItem.text.length === 0 &&
+              !pendingItem.images?.length &&
+              Boolean(pendingItem.omittedImageCount);
+            const shouldDisplayImage =
+              assistantInlineImageCount < MAX_INLINE_IMAGES_PER_ITEM;
+
+            if (!shouldDisplayImage && isOverflowOnlyItem) {
+              setPendingHistoryItem({
+                ...pendingItem,
+                omittedImageCount: (pendingItem.omittedImageCount ?? 0) + 1,
+              });
+              geminiMessageBuffer = '';
+              assistantOutputStarted = true;
+              continue;
+            }
+
             if (pendingHistoryItemRef.current) {
               if (!stagePendingAssistantItem()) {
                 commitItemInOrder(
@@ -2282,12 +2316,22 @@ export const useGeminiStream = (
               }
             }
             geminiMessageBuffer = '';
-            setPendingHistoryItem({
-              type: assistantOutputStarted ? 'gemini_content' : 'gemini',
-              text: '',
-              images: [nextEvent.value],
-              ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
-            });
+            if (shouldDisplayImage) {
+              setPendingHistoryItem({
+                type: assistantOutputStarted ? 'gemini_content' : 'gemini',
+                text: '',
+                images: [nextEvent.value],
+                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+              });
+              assistantInlineImageCount++;
+            } else {
+              setPendingHistoryItem({
+                type: assistantOutputStarted ? 'gemini_content' : 'gemini',
+                text: '',
+                omittedImageCount: 1,
+                ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
+              });
+            }
             assistantOutputStarted = true;
             continue;
           }
@@ -2372,10 +2416,12 @@ export const useGeminiStream = (
                     bufferedEvents.push({ kind: 'content', value: part.text });
                   }
                 } else {
-                  bufferedEvents.push({
-                    kind: 'image',
-                    value: part.inlineData,
+                  const image = getInlineImageData({
+                    inlineData: part.inlineData,
                   });
+                  if (image) {
+                    bufferedEvents.push({ kind: 'image', value: image });
+                  }
                 }
               }
               scheduleBufferedStreamFlush();
@@ -2422,6 +2468,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               handleChatCompressionEvent(event.value, userMessageTimestamp);
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.ToolCallConfirmation:
             case ServerGeminiEventType.ToolCallResponse:
@@ -2438,6 +2485,7 @@ export const useGeminiStream = (
               }
               handleMaxSessionTurnsEvent();
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.SessionTokenLimitExceeded:
               flushBufferedStreamEvents();
@@ -2450,6 +2498,7 @@ export const useGeminiStream = (
               }
               handleSessionTokenLimitExceededEvent(event.value);
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.Finished:
               flushBufferedStreamEvents();
@@ -2474,6 +2523,7 @@ export const useGeminiStream = (
               geminiMessageBuffer = '';
               thoughtBuffer = '';
               assistantOutputStarted = false;
+              assistantInlineImageCount = 0;
               setThought(null);
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
@@ -2485,6 +2535,7 @@ export const useGeminiStream = (
               handleCitationEvent(event.value, userMessageTimestamp);
               if (showCitations(settings)) {
                 geminiMessageBuffer = '';
+                assistantOutputStarted = false;
               }
               break;
             case ServerGeminiEventType.LoopDetected:
@@ -2512,6 +2563,7 @@ export const useGeminiStream = (
                 setThought(null);
                 geminiMessageBuffer = '';
                 assistantOutputStarted = false;
+                assistantInlineImageCount = 0;
               } else {
                 flushBufferedStreamEvents();
               }
@@ -2544,6 +2596,7 @@ export const useGeminiStream = (
               setThought(null);
               geminiMessageBuffer = '';
               assistantOutputStarted = false;
+              assistantInlineImageCount = 0;
               toolCallRequests.length = 0;
               clearRetryCountdown();
               const fromModel =
@@ -2577,6 +2630,7 @@ export const useGeminiStream = (
                 userMessageTimestamp,
               );
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
@@ -2585,11 +2639,13 @@ export const useGeminiStream = (
                 userMessageTimestamp,
               );
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.StopHookLoop:
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               geminiMessageBuffer = '';
+              assistantOutputStarted = false;
               break;
             case ServerGeminiEventType.ActiveGoal:
               break;
@@ -2612,6 +2668,7 @@ export const useGeminiStream = (
                   userMessageTimestamp,
                 );
                 geminiMessageBuffer = '';
+                assistantOutputStarted = false;
               }
               break;
             default: {
@@ -2751,6 +2808,7 @@ export const useGeminiStream = (
       setThought,
       commitPendingThought,
       pendingHistoryItemRef,
+      pendingAssistantItemsRef,
       pendingThoughtItemRef,
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,

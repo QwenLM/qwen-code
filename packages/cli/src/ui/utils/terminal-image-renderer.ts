@@ -21,6 +21,7 @@ import {
   shouldRunThroughShell,
   type KittyImagePlaceholder,
 } from './mermaidImageRenderer.js';
+import { MAX_INLINE_IMAGE_ENCODED_LENGTH } from './inline-image-parts.js';
 
 const CHAFA_TIMEOUT_MS = 8000;
 const CHAFA_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -340,8 +341,7 @@ function getImageFormat(mimeType: string): string | null {
 }
 
 function decodeInlineImage(data: string): Buffer | null {
-  const maxEncodedLength = Math.ceil((MAX_TERMINAL_IMAGE_BYTES * 4) / 3) + 4;
-  if (data.length === 0 || data.length > maxEncodedLength) {
+  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
     return null;
   }
 

@@ -210,6 +210,22 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toContain('MockTool[image-read]');
     });
 
+    it('renders an overflow-only collapsible tool individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'overflow-read',
+          name: 'ReadFile',
+          description: 'many charts',
+          omittedImageCount: 2,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      expect(lastFrame()).toContain('MockTool[overflow-read]');
+    });
+
     it('renders mixed group with summary + individual tools', () => {
       const toolCalls = [
         createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),

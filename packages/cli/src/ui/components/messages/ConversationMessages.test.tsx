@@ -34,6 +34,19 @@ describe('<AssistantMessage />', () => {
 
     expect(lastFrame()).toContain('MockTerminalImage:image/png');
   });
+
+  it('renders the number of omitted images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        omittedImageCount={2}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
 });
 
 describe('<AssistantMessageContent />', () => {

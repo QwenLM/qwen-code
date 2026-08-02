@@ -26,6 +26,8 @@ This is the render-and-forget slice requested by issue #8090:
 - keep text/image ordering across retry, model fallback, cancellation, stream
   boundaries, and goal-state events;
 - bound retained image payloads during UI history compaction;
+- render at most four images per assistant output or tool row and collapse the
+  remainder into a `[+K more images]` marker;
 - show a deterministic text placeholder when an image cannot be rendered.
 
 Kitty deletion, resize-driven replacement, terminal cell pixel queries, and
@@ -43,6 +45,10 @@ non-thought text and image parts.
 Only the interactive TUI reads `parts`. It stages text and image history
 items in their original order. A fresh retry or model fallback discards the
 failed attempt's staged output, while a normal response boundary commits it.
+The TUI admits at most four images for one assistant output and represents any
+remaining image parts with a small overflow marker. Visible status rows end the
+current assistant display block, so later text starts with the normal assistant
+prefix instead of being attached to the status row as a continuation.
 Text-only events keep their existing runtime shape, so non-interactive output,
 SDK, ACP, daemon, channel, Web UI, and VS Code consumers continue using
 `value` unchanged.
@@ -55,7 +61,8 @@ reconstructs ordered text/image runs instead of flattening images away.
 Tool media is stored in `functionResponse.parts`. A CLI extractor reads image
 `inlineData` from top-level and nested response parts. Live scheduler mapping
 and resume mapping attach the images to the existing
-`IndividualToolCallDisplay`.
+`IndividualToolCallDisplay`. Each tool row keeps the first four images and an
+overflow count for the rest.
 
 Tools carrying images render individually even when their text-only form would
 normally collapse into a read/search summary. `ToolMessage` routes the images
@@ -83,6 +90,10 @@ becomes `[image: png]`; unsupported image MIME types retain their sanitized
 format label, such as `[image: jpeg]`. Screen-reader mode always uses the text
 placeholder and emits no raw image sequence.
 
+The same encoded-length limit is applied before inline data enters CLI history
+or tool-display state. Payloads that exceed the renderer's 8 MiB decoded-image
+budget are therefore not retained by the UI.
+
 The first slice renders validated PNG data only. Other image MIME types remain
 visible as deterministic placeholders rather than entering a second protocol
 or decoding path.
@@ -93,6 +104,8 @@ Encoded images are much larger than ordinary history text. UI compaction drops
 payloads from old assistant image items while retaining the 20 most recent
 items. Cleared images leave a visible marker instead of becoming blank rows.
 Tool image payloads participate in the existing tool-result compaction limit.
+The four-image admission cap also bounds synchronous Kitty/chafa rendering for
+each assistant output and tool row.
 
 ## Test Plan
 
@@ -105,4 +118,6 @@ Tool image payloads participate in the existing tool-result compaction limit.
   boundaries, and goal-state events.
 - Verify live and restored tool responses expose nested images.
 - Verify restored assistant history preserves text/image ordering.
+- Verify live, restored, and tool output enforce the image cap and expose the
+  overflow count without retaining oversized payloads.
 - Verify memory compaction clears old assistant and tool image payloads.

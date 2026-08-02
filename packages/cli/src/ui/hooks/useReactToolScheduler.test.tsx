@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Part } from '@google/genai';
 import { mapToDisplay, type TrackedToolCall } from './useReactToolScheduler.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
 // success branch reads. `displayName` drives the collapsible gate.
@@ -81,4 +82,26 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
       ]);
     },
   );
+
+  it('caps tool images and reports the overflow count', () => {
+    const images = Array.from(
+      { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+      (_, index) => ({
+        inlineData: {
+          data: Buffer.from(`tool-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        },
+      }),
+    );
+
+    const tool = mapToDisplay(makeCompleted('success', 'Read File', images))
+      .tools[0];
+
+    expect(tool.images).toEqual(
+      images
+        .slice(0, MAX_INLINE_IMAGES_PER_ITEM)
+        .map((part) => part.inlineData),
+    );
+    expect(tool.omittedImageCount).toBe(2);
+  });
 });

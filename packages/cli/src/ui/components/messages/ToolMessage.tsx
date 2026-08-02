@@ -58,6 +58,7 @@ import {
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
+import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -695,6 +696,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   description,
   resultDisplay,
   images,
+  omittedImageCount,
   visionBridgeNotice,
   detailedDisplay,
   status,
@@ -974,13 +976,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           </Box>
         </Box>
       )}
-      {images && images.length > 0 && (
+      {((images?.length ?? 0) > 0 ||
+        (omittedImageCount !== undefined && omittedImageCount > 0)) && (
         <Box
           paddingLeft={STATUS_INDICATOR_WIDTH}
           width="100%"
           flexDirection="column"
         >
-          {images.map((image, index) => (
+          {images?.map((image, index) => (
             <TerminalImage
               key={index}
               image={image}
@@ -988,6 +991,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               availableTerminalHeight={availableHeight}
             />
           ))}
+          {omittedImageCount !== undefined && omittedImageCount > 0 && (
+            <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+          )}
         </Box>
       )}
       {isThisShellFocused && config && (
