@@ -6,7 +6,14 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { probes, runCaptureTui } from './capture-tui.js';
@@ -107,10 +114,14 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   it('leaves no tmux server behind — the isolation is also the cleanup', () => {
     run();
     // Any server this run created is named qwen-review-capture-<ourpid>-…;
-    // asking it for sessions must fail because the server is gone.
+    // asking it for sessions must fail because the server is gone. The
+    // socket dir is resolved the way the production cleanup (and tmux)
+    // resolves it — TMUX_TMPDIR, else /tmp — so a regression in that branch
+    // cannot pass this probe vacuously.
+    const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
     const probe = spawnSync('bash', [
       '-c',
-      `for s in $(ls /tmp/tmux-$(id -u)/qwen-review-capture-${process.pid}-* 2>/dev/null); do echo "$s"; done`,
+      `for s in $(ls ${base}/tmux-$(id -u)/qwen-review-capture-${process.pid}-* 2>/dev/null); do echo "$s"; done`,
     ]);
     expect((probe.stdout ?? Buffer.from('')).toString().trim()).toBe('');
   });
@@ -209,6 +220,46 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     run({ until: undefined, settleMs: 600 });
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('fixed-delay');
+  });
+
+  it('records an empty-pane capture honestly and never hands it to freeze', () => {
+    // A pane that rendered nothing (sleep, settle 0) is the blank-capture
+    // branch: freeze on empty input fails with a misleading bounds error,
+    // so the ladder must stop at ans-only with the blank named as the why.
+    run({ command: 'sleep 30', until: undefined, settleMs: 0 });
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain('pane captured empty');
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+  });
+
+  it('records a freeze CRASH with its diagnostics, not just its absence', () => {
+    // Through a fake freeze binary that fails loudly — the probe seam is
+    // forced open so the real spawn runs and the errTail composition
+    // (status + stderr tail) is pinned by real exec, not by reading.
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'freeze'),
+      '#!/bin/sh\necho "boom: render exploded" >&2\nexit 9\n',
+      { mode: 0o755 },
+    );
+    const realFreeze = probes.freeze;
+    const realPath = process.env['PATH'];
+    probes.freeze = () => true;
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    try {
+      run();
+    } finally {
+      probes.freeze = realFreeze;
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+    }
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.degradedBecause).toContain('freeze failed (exit 9');
+    expect(manifest.degradedBecause).toContain('boom: render exploded');
   });
 
   it('degrades to ans-only when freeze is unavailable, and says why', () => {

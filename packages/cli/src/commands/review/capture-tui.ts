@@ -147,7 +147,17 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
   }
 
   const outBase = resolve(args.out);
-  mkdirSync(dirname(outBase), { recursive: true });
+  try {
+    mkdirSync(dirname(outBase), { recursive: true });
+  } catch (e) {
+    // The same principle as the regex above: an unwritable --out (EACCES,
+    // EROFS, ENOSPC) is a caller/environment mistake and gets the refusal
+    // contract, not a stack trace.
+    refuse(
+      `cannot create output directory: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
@@ -244,10 +254,10 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
       `--until never matched within ${args.timeoutMs}ms — late frame captured`,
     );
   }
-  if (ansText === '') {
-    // A zero-byte capture (the pane raced to nothing) has no pixels to
-    // render — freeze on empty input fails with a misleading bounds error,
-    // and an empty image would be evidence-shaped noise anyway.
+  if (ansText.trim() === '') {
+    // A blank capture — zero bytes or nothing but whitespace — has no pixels
+    // worth rendering: freeze fails empty input with a misleading bounds
+    // error, and a blank image would be evidence-shaped noise anyway.
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );

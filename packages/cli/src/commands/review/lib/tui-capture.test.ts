@@ -27,6 +27,9 @@ describe('validGeometry', () => {
   it('accepts sane terminals and refuses the degenerate ones', () => {
     expect(validGeometry(80, 24).ok).toBe(true);
     expect(validGeometry(500, 200).ok).toBe(true);
+    // The exact lower bounds are ACCEPTED — a `v < lo` → `v <= lo` mutation
+    // would refuse a legal 20×5 capture with a self-contradictory message.
+    expect(validGeometry(20, 5).ok).toBe(true);
     for (const [c, r] of [
       [0, 24],
       [80, 0],
@@ -88,6 +91,12 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
   });
 
   it('starts detached at the requested geometry and cwd', () => {
+    // new-session and its `-s cap` are the join key every later call
+    // targets via `-t cap` — dropping them would only fail the tmux-gated
+    // integration tests, so they are pinned here too.
+    expect(plan.start).toContain('new-session');
+    const s = plan.start.indexOf('-s');
+    expect(plan.start[s + 1]).toBe('cap');
     expect(plan.start).toContain('-d');
     const x = plan.start.indexOf('-x');
     expect(plan.start[x + 1]).toBe('80');
