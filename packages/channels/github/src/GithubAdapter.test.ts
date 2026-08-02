@@ -1515,7 +1515,9 @@ describe('GithubChannel', () => {
         createHash('sha256').update(response).digest('hex'),
       );
       expect(audit).not.toContain(response);
-      const lastAuditLine = audit.trim().split('\n').pop()!;
+      const auditLines = audit.trim().split('\n');
+      expect(JSON.parse(auditLines[0]!)).toMatchObject({ outcome: 'posting' });
+      const lastAuditLine = auditLines.pop()!;
       expect(JSON.parse(lastAuditLine)).toMatchObject({
         outcome: 'posted',
         repository: 'owner/repo',
@@ -2650,6 +2652,100 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('retries the error comment when the first post fails', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('comment creation outage'),
+      );
+
+      await pollOnce();
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 1,
+          errorCommentPosted: false,
+        }),
+      ]);
+
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 2,
+          errorCommentPosted: true,
+        }),
+      ]);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(4);
+    });
+
+    it('reuses an existing inbound task record instead of creating a duplicate', async () => {
+      await initWithoutLoop();
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'failed',
+          attempts: 2,
+          errorCommentPosted: true,
+        }),
+      ]);
+      channel.handleInboundError = new Error('agent down');
+      const privateChannel = channel as unknown as {
+        dispatchEnvelope: (
+          envelope: Record<string, unknown>,
+          issueNumber: number,
+          dedupe: Record<string, unknown>,
+        ) => Promise<boolean>;
+      };
+
+      await privateChannel.dispatchEnvelope(
+        {
+          channelName: 'test-github',
+          senderId: 'alice',
+          senderName: 'alice',
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+          messageId: '1001',
+          text: 'please fix this',
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata: 'Trigger: mention.',
+        },
+        42,
+        { dispatchedComments: ['C_1001'] },
+      );
+
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).toMatchObject({
+        id: 'inbound-task-1',
+        state: 'failed',
+        attempts: 3,
+        errorCommentPosted: true,
+      });
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(0);
+    });
+
     it('blocks cursor commit when inbound task state is invalid', async () => {
       await initWithoutLoop();
       writeInboundTasks([
@@ -2790,60 +2886,6 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
         '1001',
-      ]);
-    });
-
-    it('transitions a delivery-phase lifecycle failure to reply_pending', async () => {
-      await initWithoutLoop();
-      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
-      const privateChannel = channel as unknown as {
-        activeInboundTaskIdsByMessage: Map<string, string>;
-      };
-      privateChannel.activeInboundTaskIdsByMessage.set(
-        'owner/repo|1001',
-        'inbound-task-1',
-      );
-
-      channel.triggerTaskLifecycleForTest({
-        type: 'failed',
-        phase: 'delivery',
-        chatId: 'owner/repo',
-        messageId: '1001',
-        error: 'delivery failed',
-      });
-
-      expect(readInboundTasks()).toEqual([
-        expect.objectContaining({
-          state: 'reply_pending',
-          error: 'delivery failed',
-        }),
-      ]);
-    });
-
-    it('transitions an agent-phase lifecycle failure to failed', async () => {
-      await initWithoutLoop();
-      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
-      const privateChannel = channel as unknown as {
-        activeInboundTaskIdsByMessage: Map<string, string>;
-      };
-      privateChannel.activeInboundTaskIdsByMessage.set(
-        'owner/repo|1001',
-        'inbound-task-1',
-      );
-
-      channel.triggerTaskLifecycleForTest({
-        type: 'failed',
-        phase: 'agent',
-        chatId: 'owner/repo',
-        messageId: '1001',
-        error: 'agent failed',
-      });
-
-      expect(readInboundTasks()).toEqual([
-        expect.objectContaining({
-          state: 'failed',
-          error: 'agent failed',
-        }),
       ]);
     });
 
@@ -3028,10 +3070,10 @@ describe('GithubChannel', () => {
           postErrorComment: (
             chatId: string,
             issueNumber: number,
-          ) => Promise<void>;
+          ) => Promise<boolean>;
         },
         'postErrorComment',
-      ).mockResolvedValue(undefined);
+      ).mockResolvedValue(true);
       privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
       channel.handleInboundHook = async (envelope) => {
         await (
@@ -3167,6 +3209,68 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('re-runs a task whose audit record is failed, not delivered', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(join(auditPath, '..'), { recursive: true });
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({
+          outcome: 'failed',
+          repository: 'owner/repo',
+          threadId: 'issue:42',
+          sourceMessageId: '1001',
+        })}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      await privateChannel.pollOnce();
+
+      expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
+        '1001',
+      ]);
+    });
+
+    it('re-runs a task when the audit sourceMessageId does not match', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(join(auditPath, '..'), { recursive: true });
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({
+          outcome: 'posted',
+          repository: 'owner/repo',
+          threadId: 'issue:42',
+          sourceMessageId: '9999',
+        })}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      await privateChannel.pollOnce();
+
+      expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
+        '1001',
+      ]);
     });
 
     it('removes a reply-pending task when a posted pending delivery is reconciled', async () => {

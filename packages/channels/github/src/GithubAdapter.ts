@@ -1561,15 +1561,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.removeInboundTask(task.id);
         }
       } else if (!this.cancelledInboundTaskIds.has(task.id)) {
-        const alreadyPosted = task.errorCommentPosted === true;
+        let posted = task.errorCommentPosted === true;
+        if (!posted) {
+          posted = await this.postErrorComment(
+            envelope.chatId,
+            task.issueNumber,
+          );
+        }
         this.transitionInboundTask(task.id, 'failed', {
           error,
           attempts,
-          errorCommentPosted: true,
+          errorCommentPosted: posted,
         });
-        if (!alreadyPosted) {
-          await this.postErrorComment(envelope.chatId, task.issueNumber);
-        }
       }
       return false;
     } finally {
@@ -1800,14 +1803,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (event.type === 'cancelled') {
       this.cancelledInboundTaskIds.add(taskId);
       this.transitionInboundTask(taskId, 'cancelled');
-      return;
-    }
-    if (event.type === 'failed') {
-      this.transitionInboundTask(
-        taskId,
-        event.phase === 'delivery' ? 'reply_pending' : 'failed',
-        { error: event.error },
-      );
     }
   }
 
@@ -1990,7 +1985,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await this.githubApi(
         () =>
@@ -2002,10 +1997,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );
+      return true;
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
       );
+      return false;
     }
   }
 }
