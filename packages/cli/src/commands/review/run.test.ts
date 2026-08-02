@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   mkdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   utimesSync,
 } from 'node:fs';
@@ -432,6 +433,36 @@ describe('review run (handler)', () => {
       await runHandler();
 
       expect(childEnvValue()).toBe('');
+    });
+
+    it('preserves a sibling entry in the same package root (npm layout)', async () => {
+      // cli-entry.js stamps itself but spawns cli.js: different files, same
+      // directory. An exact-file comparison would blank this valid stamp.
+      const bundle = join(dir, 'cli.js');
+      const wrapper = join(dir, 'cli-entry.js');
+      writeFileSync(bundle, '');
+      writeFileSync(wrapper, '');
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = wrapper;
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(wrapper);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it('preserves an inherited entry that is a symlink to this build', async () => {
+      const shim = join(dir, 'qwen-shim');
+      symlinkSync(process.argv[1] as string, shim);
+      process.env['QWEN_CODE_CLI'] = shim;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(shim);
     });
   });
 

@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -228,9 +228,12 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  *
  * The inherited value is right only when it reaches THIS build (an outer
  * launcher of the same install: the npm bin shim, cli-entry.js, the desktop
- * bundle). The child runs argv[1], so compare resolved paths; on a mismatch —
- * or an inherited path that does not resolve at all — write '': empty counts
- * as unset in stampCliEntryEnv, and the child re-stamps from its own modules.
+ * bundle). The child runs argv[1], so compare the resolved package roots
+ * (dirname of realpathSync): cli-entry.js stamps itself but spawns cli.js,
+ * so an exact-file comparison would blank a valid same-install stamp. On a
+ * root mismatch — or an inherited path that does not resolve at all — write
+ * '': empty counts as unset in stampCliEntryEnv, and the child re-stamps
+ * from its own modules.
  */
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -240,7 +243,7 @@ function childEnv(): NodeJS.ProcessEnv {
     return env;
   }
   try {
-    if (realpathSync(inherited) === realpathSync(ownEntry)) {
+    if (dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))) {
       return env;
     }
   } catch {
