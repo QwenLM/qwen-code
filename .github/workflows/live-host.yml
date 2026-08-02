@@ -142,9 +142,7 @@ jobs:
           }
 
           assert_live_host_entitlements build/entitlements.mac.plist
-          if ! /usr/bin/codesign -d "$app" >/dev/null 2>&1; then
-            /usr/bin/codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app"
-          fi
+          /usr/bin/codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app"
           /usr/bin/codesign --verify --deep --strict "$app"
           /usr/bin/codesign -d --entitlements :- "$app" >"$packaged_entitlements" 2>/dev/null
           assert_live_host_entitlements "$packaged_entitlements"

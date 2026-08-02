@@ -12,6 +12,10 @@ const desktopReleaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
 );
+const liveHostCiWorkflow = readFileSync(
+  '.github/workflows/live-host.yml',
+  'utf8',
+);
 const liveHostInstaller = readFileSync(
   'packages/cli/src/serve/live/live-host-installer.ts',
   'utf8',
@@ -76,5 +80,14 @@ describe('desktop release workflow', () => {
     expect(liveHostInstaller).toContain(
       'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest',
     );
+  });
+});
+
+describe('Live Host CI workflow', () => {
+  it('replaces partial package signatures before strict verification', () => {
+    expect(liveHostCiWorkflow).toContain(
+      'codesign --force --deep --sign - --entitlements',
+    );
+    expect(liveHostCiWorkflow).not.toContain('if ! /usr/bin/codesign -d');
   });
 });
