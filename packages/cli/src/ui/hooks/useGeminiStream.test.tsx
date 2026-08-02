@@ -6359,6 +6359,82 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('preserves staged mixed-content runs on a continuation retry', async () => {
+      vi.useFakeTimers();
+
+      let emitRetry!: () => void;
+      const waitForRetry = new Promise<void>((resolve) => {
+        emitRetry = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const image = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'partial.png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          await waitForRetry;
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: true,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: ' continued',
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('show a chart');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+
+      await act(async () => {
+        emitRetry();
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after continued' },
+      ]);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('discards every staged mixed-content run on model fallback', async () => {
       vi.useFakeTimers();
 
@@ -6568,6 +6644,72 @@ describe('useGeminiStream', () => {
         expect.objectContaining({ type: 'error' }),
         expect.objectContaining({ type: 'user', text: 'second question' }),
         expect.objectContaining({ type: 'gemini', text: 'next answer' }),
+      ]);
+    });
+
+    it('does not restore staged mixed content after pending state is cleared', async () => {
+      const failedImage = {
+        data: 'aW1hZ2U=',
+        mimeType: 'image/png',
+        displayName: 'cleared.png',
+      };
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'beforeafter',
+              parts: [
+                { text: 'before' },
+                { inlineData: failedImage },
+                { text: 'after' },
+              ],
+            };
+            throw new Error('stream failed');
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'new answer',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('first question');
+      });
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          { type: 'gemini_content', text: '', images: [failedImage] },
+          { type: 'gemini_content', text: 'after' },
+          expect.objectContaining({ type: 'error' }),
+        ]),
+      );
+
+      act(() => {
+        result.current.clearPendingState();
+      });
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        await result.current.submitQuery('second question');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'new answer' }),
       ]);
     });
 

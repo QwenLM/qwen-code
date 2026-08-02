@@ -146,6 +146,18 @@ describe('terminalImageRenderer', () => {
     ).toEqual({ fallbackText: '[image: png]', result: null });
   });
 
+  it('rejects inline PNG dimensions above the shared image limit', () => {
+    expect(
+      prepareInlineTerminalImage({
+        data: pngWithSize(1_000_001, 1).toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      }),
+    ).toEqual({ fallbackText: '[image: png]', result: null });
+  });
+
   it('does not render inline image data when output is disabled', () => {
     expect(
       prepareInlineTerminalImage({

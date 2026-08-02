@@ -749,6 +749,15 @@ export const useGeminiStream = (
     pendingRetryCountdownItemRef,
     setPendingRetryCountdownItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
+  const clearPendingState = useCallback(() => {
+    setPendingAssistantItems([]);
+    setPendingHistoryItem(null);
+    setPendingRetryErrorItem(null);
+  }, [
+    setPendingAssistantItems,
+    setPendingHistoryItem,
+    setPendingRetryErrorItem,
+  ]);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
@@ -5115,6 +5124,7 @@ export const useGeminiStream = (
     submitQuery,
     initError,
     pendingHistoryItems,
+    clearPendingState,
     thought,
     cancelOngoingRequest,
     preemptGoalTurn,

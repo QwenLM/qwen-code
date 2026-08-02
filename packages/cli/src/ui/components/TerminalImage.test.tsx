@@ -227,6 +227,23 @@ describe('TerminalImage', () => {
     );
   });
 
+  it('explains why an inline image renderer is unavailable', () => {
+    mockedPrepareInlineTerminalImage.mockReturnValue({
+      fallbackText: '[image: 1x1 png]',
+      result: {
+        kind: 'unavailable',
+        reason: 'chafa is not installed',
+      },
+    });
+
+    const { lastFrame } = render(
+      <TerminalImage image={INLINE_IMAGE} contentWidth={80} />,
+    );
+
+    expect(lastFrame()).toContain('[image: 1x1 png]');
+    expect(lastFrame()).toContain('chafa is not installed');
+  });
+
   it('uses the deterministic inline placeholder for screen readers', () => {
     vi.mocked(useIsScreenReaderEnabled).mockReturnValue(true);
     mockedPrepareInlineTerminalImage.mockReturnValue({

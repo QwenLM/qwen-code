@@ -172,7 +172,11 @@ const InlineTerminalImage: React.FC<InlineTerminalImageProps> = ({
   return (
     <RenderedTerminalImage
       result={prepared.result}
-      unavailableText={prepared.fallbackText}
+      unavailableText={
+        prepared.result.kind === 'unavailable'
+          ? `${prepared.fallbackText}: ${sanitizeTerminalText(prepared.result.reason)}`
+          : prepared.fallbackText
+      }
       contentWidth={contentWidth}
       availableTerminalHeight={availableTerminalHeight}
     />

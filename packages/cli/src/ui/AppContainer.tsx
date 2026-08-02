@@ -1578,6 +1578,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // whose implementations are swapped in once the real callbacks exist.
   const openRewindSelectorRef = useRef<() => void>(() => {});
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
+  const clearPendingStateRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
   // history-bound guard is needed, so the open/close handlers can live here
@@ -1732,6 +1733,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      clearPendingState: () => clearPendingStateRef.current(),
     }),
     [
       openAuthDialog,
@@ -2041,6 +2043,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     initError,
     pendingHistoryItems: pendingGeminiHistoryItems,
+    clearPendingState,
     thought,
     cancelOngoingRequest,
     preemptGoalTurn,
@@ -2079,6 +2082,7 @@ export const AppContainer = (props: AppContainerProps) => {
     goalQueueRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
+  clearPendingStateRef.current = clearPendingState;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
