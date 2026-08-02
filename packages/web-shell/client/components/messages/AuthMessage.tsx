@@ -71,6 +71,40 @@ function modelIds(provider: DaemonAuthProviderDescriptor | null): string {
   );
 }
 
+function baseUrlOptionModelIds(
+  option: DaemonAuthProviderBaseUrlOption,
+  provider: DaemonAuthProviderDescriptor,
+  currentModelIds = '',
+): string {
+  const builtInIds = new Set([
+    ...(provider.models?.map((model) => model.id) ?? []),
+    ...(Array.isArray(provider.baseUrl)
+      ? provider.baseUrl.flatMap(
+          (item) => item.models?.map((model) => model.id) ?? [],
+        )
+      : []),
+  ]);
+  const defaults =
+    option.models?.map((model) => model.id) ??
+    provider.models?.map((model) => model.id) ??
+    [];
+  const customIds = normalizeModelIds(currentModelIds).filter(
+    (id) => !builtInIds.has(id),
+  );
+  return [...new Set([...defaults, ...customIds])].join(', ');
+}
+
+function selectedBaseUrlModelIds(
+  provider: DaemonAuthProviderDescriptor,
+  baseUrl: string,
+): string {
+  if (Array.isArray(provider.baseUrl)) {
+    const option = provider.baseUrl.find((item) => item.url === baseUrl);
+    if (option) return baseUrlOptionModelIds(option, provider);
+  }
+  return modelIds(provider);
+}
+
 function titleForStep(
   step: AuthStep,
   provider: DaemonAuthProviderDescriptor,
@@ -196,12 +230,18 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       if (typeof nextProvider.baseUrl === 'string') {
         setBaseUrl(nextProvider.baseUrl);
       } else if (Array.isArray(nextProvider.baseUrl)) {
-        setBaseUrl(nextProvider.baseUrl[0]?.url ?? '');
+        const firstOption = nextProvider.baseUrl[0];
+        setBaseUrl(firstOption?.url ?? '');
+        if (firstOption) {
+          setModels(baseUrlOptionModelIds(firstOption, nextProvider));
+        }
       } else {
         setBaseUrl(defaultBaseUrl(nextProtocol));
       }
       setApiKey('');
-      setModels(modelIds(nextProvider));
+      if (!Array.isArray(nextProvider.baseUrl)) {
+        setModels(modelIds(nextProvider));
+      }
       setThinking(false);
       setModality(false);
       setModalityImage(true);
@@ -430,7 +470,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     if (currentStep === 'baseUrl' && Array.isArray(provider.baseUrl)) {
       const selected = provider.baseUrl[optionIndex];
-      if (selected) setBaseUrl(selected.url);
+      if (selected) {
+        setBaseUrl(selected.url);
+        setApiKey('');
+        setModels(baseUrlOptionModelIds(selected, provider, models));
+      }
       goNext();
       return;
     }
@@ -445,6 +489,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     goNext,
     groupIndex,
     groups,
+    models,
     optionIndex,
     provider,
     providerIndex,
@@ -501,7 +546,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       }
       if (currentStep === 'baseUrl' && Array.isArray(provider.baseUrl)) {
         const selected = provider.baseUrl[index];
-        if (selected) setBaseUrl(selected.url);
+        if (selected) {
+          setBaseUrl(selected.url);
+          setApiKey('');
+          setModels(baseUrlOptionModelIds(selected, provider, models));
+        }
         goNext();
         return;
       }
@@ -514,6 +563,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       catalog,
       goNext,
       groups,
+      models,
       activateAdvancedOption,
       advancedOptionValues,
       provider,
@@ -645,7 +695,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
     }
     if (currentStep === 'models') {
-      const defaultIds = modelIds(provider);
+      const defaultIds = selectedBaseUrlModelIds(provider, baseUrl);
       return (
         <>
           {defaultIds && (

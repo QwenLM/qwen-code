@@ -153,17 +153,18 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
+  const providerModels = resolveProviderModels(config, inputs.baseUrl);
 
   let models: ProviderModelConfig[];
 
   // Fixed ModelSpec[] (not editable) — use specs directly
-  if (config.models && !config.modelsEditable) {
-    models = config.models.map((spec) =>
+  if (providerModels && !config.modelsEditable) {
+    models = providerModels.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  } else if (config.models && config.modelsEditable) {
+  } else if (providerModels && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
-    const specMap = new Map(config.models.map((s) => [s.id, s]));
+    const specMap = new Map(providerModels.map((s) => [s.id, s]));
     models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
@@ -359,8 +360,27 @@ function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
 // Resolve model IDs from config
 // ---------------------------------------------------------------------------
 
-export function getDefaultModelIds(config: ProviderConfig): string[] {
-  return config.models?.map((s) => s.id) ?? [];
+export function resolveProviderModels(
+  config: ProviderConfig,
+  baseUrl?: string,
+): ModelSpec[] | undefined {
+  if (baseUrl !== undefined && Array.isArray(config.baseUrl)) {
+    const resolvedBaseUrl = resolveBaseUrl(config, baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) ===
+        normalizeBaseUrlForMatching(resolvedBaseUrl),
+    );
+    if (option?.models) return option.models;
+  }
+  return config.models;
+}
+
+export function getDefaultModelIds(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string[] {
+  return resolveProviderModels(config, baseUrl)?.map((s) => s.id) ?? [];
 }
 
 function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
@@ -514,6 +534,6 @@ export function buildProviderTemplate(
   return buildModelConfigs(config, {
     baseUrl: resolved,
     apiKey: '',
-    modelIds: getDefaultModelIds(config),
+    modelIds: getDefaultModelIds(config, resolved),
   });
 }

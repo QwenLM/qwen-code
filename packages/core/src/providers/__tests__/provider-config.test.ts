@@ -376,6 +376,31 @@ describe('getDefaultModelIds', () => {
     const config = makeConfig({ models: undefined });
     expect(getDefaultModelIds(config)).toEqual([]);
   });
+
+  it('returns endpoint-specific models for a selected base URL', () => {
+    const config = makeConfig({
+      baseUrl: [
+        {
+          id: 'one',
+          label: 'One',
+          url: 'https://one.example.com/v1',
+          models: [{ id: 'one-model' }],
+        },
+        {
+          id: 'two',
+          label: 'Two',
+          url: 'https://two.example.com/v1',
+          models: [{ id: 'two-model' }],
+        },
+      ],
+      models: [{ id: 'one-model' }, { id: 'two-model' }],
+    });
+
+    expect(getDefaultModelIds(config)).toEqual(['one-model', 'two-model']);
+    expect(getDefaultModelIds(config, 'https://two.example.com/v1')).toEqual([
+      'two-model',
+    ]);
+  });
 });
 
 describe('findExistingProviderModels', () => {

@@ -5,11 +5,18 @@
  */
 
 import * as net from 'node:net';
-import { ALL_PROVIDERS, shouldShowStep } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  resolveBaseUrl,
+  resolveProviderModels,
+  shouldShowStep,
+} from '@qwen-code/qwen-code-core';
+import type { ModelSpec } from '@qwen-code/qwen-code-core';
 import type {
   ServeAuthProviderCatalog,
   ServeAuthProviderDescriptor,
   ServeAuthProviderInstallRequest,
+  ServeAuthProviderModel,
 } from '../types.js';
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -20,12 +27,36 @@ const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
   'advancedConfig',
 ];
 
+function serializeProviderModel(model: ModelSpec): ServeAuthProviderModel {
+  return {
+    id: model.id,
+    ...(model.contextWindowSize !== undefined
+      ? { contextWindowSize: model.contextWindowSize }
+      : {}),
+    ...(model.enableThinking !== undefined
+      ? { enableThinking: model.enableThinking }
+      : {}),
+    ...(model.modalities ? { modalities: model.modalities } : {}),
+    ...(model.description ? { description: model.description } : {}),
+  };
+}
+
 function buildAuthProviderDescriptor(
   provider: (typeof ALL_PROVIDERS)[number],
 ): ServeAuthProviderDescriptor {
   const steps = AUTH_PROVIDER_STEPS.filter((step) =>
     shouldShowStep(provider, step),
   );
+  const defaultBaseUrl = resolveBaseUrl(provider);
+  const models = resolveProviderModels(provider, defaultBaseUrl);
+  const baseUrl = Array.isArray(provider.baseUrl)
+    ? provider.baseUrl.map((option) => ({
+        ...option,
+        ...(option.models
+          ? { models: option.models.map(serializeProviderModel) }
+          : {}),
+      }))
+    : provider.baseUrl;
   return {
     id: provider.id,
     label: provider.label,
@@ -35,21 +66,11 @@ function buildAuthProviderDescriptor(
     ...(provider.protocolOptions
       ? { protocolOptions: [...provider.protocolOptions] }
       : {}),
-    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
     ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
-    ...(provider.models
+    ...(models
       ? {
-          models: provider.models.map((model) => ({
-            id: model.id,
-            ...(model.contextWindowSize !== undefined
-              ? { contextWindowSize: model.contextWindowSize }
-              : {}),
-            ...(model.enableThinking !== undefined
-              ? { enableThinking: model.enableThinking }
-              : {}),
-            ...(model.modalities ? { modalities: model.modalities } : {}),
-            ...(model.description ? { description: model.description } : {}),
-          })),
+          models: models.map(serializeProviderModel),
         }
       : {}),
     ...(provider.modelsEditable !== undefined

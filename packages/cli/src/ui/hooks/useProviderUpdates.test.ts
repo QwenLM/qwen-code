@@ -16,6 +16,7 @@ import {
   tokenPlanProvider,
   buildProviderTemplate,
   computeModelListVersion,
+  kimiProvider,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
@@ -263,6 +264,47 @@ describe('useProviderUpdates', () => {
         expect.objectContaining({ id: 'my-custom-model' }),
       ]),
     );
+  });
+
+  it('updates only the models for the installed endpoint', async () => {
+    const baseUrl = 'https://api.moonshot.ai/v1';
+    const apiTemplate = buildProviderTemplate(kimiProvider, baseUrl);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = { baseUrl, version: 'old-version-hash' };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: apiTemplate,
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ];
+    expect(reloaded.map((model: { id: string }) => model.id)).toEqual([
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.7-code-highspeed',
+      'kimi-k2.6',
+    ]);
   });
 
   it('executes update when user confirms with "update"', async () => {

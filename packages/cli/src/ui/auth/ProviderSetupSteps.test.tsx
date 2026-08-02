@@ -7,7 +7,7 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, kimiProvider } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -301,6 +301,26 @@ describe('ProviderSetupSteps', () => {
       '↑↓/Tab to switch input, search, and recommendations',
     );
     expect(frame).not.toContain('Enter model IDs separated by commas');
+    unmount();
+  });
+
+  it('shows only the models for the selected endpoint', () => {
+    const flow = createModelIdsFlow({
+      modelIds: 'kimi-k3, kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k2.6',
+    });
+    flow.state.provider = kimiProvider;
+    flow.state.baseUrl = 'https://api.moonshot.ai/v1';
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('kimi-k3');
+    expect(frame).toMatch(/kimi-k2\.7-code\s+262,144 tokens/);
+    expect(frame).toContain('kimi-k2.7-code-highspeed');
+    expect(frame).not.toContain('k3-256k');
+    expect(frame).not.toContain('kimi-for-coding');
     unmount();
   });
 

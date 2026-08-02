@@ -776,6 +776,7 @@ export interface QwenProviderBaseUrlOption {
   id: string
   label: string
   url: string
+  models?: QwenProviderModelSpec[]
   documentationUrl?: string
   apiKeyUrl?: string
 }

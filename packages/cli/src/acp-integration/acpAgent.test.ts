@@ -331,6 +331,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (provider: { models?: Array<{ id: string }> }) =>
       provider.models?.map((model) => model.id) ?? [],
   ),
+  resolveProviderModels: vi.fn(
+    (provider: { models?: Array<{ id: string }> }) => provider.models,
+  ),
   resolveBaseUrl: vi.fn(
     (
       provider: { baseUrl?: string | Array<{ url: string }> },
@@ -815,6 +818,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
+  ALL_PROVIDERS,
   AuthType,
   SessionEndReason,
   MCPServerConfig,
@@ -10282,6 +10286,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/providers/list includes endpoint-specific model lists', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    providers.push({
+      id: 'kimi',
+      label: 'Kimi',
+      description: 'Kimi access',
+      protocol: 'openai',
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: 'https://api.kimi.com/coding/v1',
+          models: [{ id: 'k3-256k' }],
+        },
+        {
+          id: 'api-international',
+          label: 'API Key (International)',
+          url: 'https://api.moonshot.ai/v1',
+          models: [{ id: 'kimi-k3' }],
+        },
+      ],
+      envKey: 'KIMI_CODE_API_KEY',
+      models: [{ id: 'k3-256k' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Kimi',
+      uiGroup: 'third-party',
+    });
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'kimi',
+              baseUrl: [
+                expect.objectContaining({
+                  id: 'coding-plan',
+                  models: [{ id: 'k3-256k' }],
+                }),
+                expect.objectContaining({
+                  id: 'api-international',
+                  models: [{ id: 'kimi-k3' }],
+                }),
+              ],
+            }),
+          ]),
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {

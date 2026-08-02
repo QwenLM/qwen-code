@@ -85,6 +85,7 @@ const renderAuthDialog = (
   uiActionsOverrides: UIActionsOverrides = {},
   configAuthType: AuthType | undefined = undefined,
   configApiKey: string | undefined = undefined,
+  availableTerminalHeight?: number,
 ) => {
   const uiState = createMockUIState(uiStateOverrides);
   const uiActions = createMockUIActions(uiActionsOverrides);
@@ -97,12 +98,46 @@ const renderAuthDialog = (
   return renderWithProviders(
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
-        <AuthDialog />
+        <AuthDialog availableTerminalHeight={availableTerminalHeight} />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
     { settings, config: mockConfig },
   );
 };
+
+const createSettings = () =>
+  new LoadedSettings(
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    {
+      settings: {},
+      originalSettings: {},
+      path: '',
+    },
+    {
+      settings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      originalSettings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      path: '',
+    },
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    true,
+    new Set(),
+  );
 
 /**
  * Type text into the terminal one character at a time.
@@ -252,6 +287,25 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('should paginate the main menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Alibaba ModelStudio');
+    expect(frame).not.toContain('Third-party Providers');
+    expect(frame).not.toContain('Custom Provider');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
   });
 
   it('should show an error if the initial auth type is invalid', () => {
@@ -975,7 +1029,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   );
 
   itWhenTuiInputReliable(
-    'should show preset providers in third-party provider options',
+    'should limit third-party providers to the available dialog height',
     async () => {
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -1013,23 +1067,29 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await wait();
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
         'Third-party Providers',
       );
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
         'Third-party Providers · Provider',
       );
+      await wait();
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
           expect(frame).toContain('DeepSeek API Key');
-          expect(frame).toContain('MiniMax API Key');
-          expect(frame).toContain('Z.AI API Key');
+          expect(frame).toContain('Kimi');
+          expect(frame).not.toContain('MiniMax API Key');
+          expect(frame).not.toContain('Z.AI API Key');
+          expect(frame).toContain('▲');
+          expect(frame).toContain('▼');
           expect(frame).not.toContain('OpenAI API Key');
           expect(frame).not.toContain('HuggingFace API Key');
           expect(frame).not.toContain('Standard API Key');

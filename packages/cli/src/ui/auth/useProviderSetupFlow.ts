@@ -110,6 +110,9 @@ export function useProviderSetupFlow(
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [existingProviderEnv, setExistingProviderEnv] = useState<
+    Record<string, string>
+  >({});
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
@@ -159,12 +162,13 @@ export function useProviderSetupFlow(
         prefillKey = existingEnv[envKeyName] ?? '';
       }
       setApiKey(prefillKey);
+      setExistingProviderEnv(existingEnv ?? {});
 
       setApiKeyError(null);
       // Built-in defaults go to the recommended list (checked), user-added
       // custom IDs go to the input box. The ModelIdsStep component splits
-      // flow.state.modelIds automatically based on config.models.
-      const defaultIds = getDefaultModelIds(config);
+      // flow.state.modelIds automatically based on the selected endpoint.
+      const defaultIds = getDefaultModelIds(config, resolved);
       const customIds = existingModelIds ?? [];
       setModelIds([...defaultIds, ...customIds].join(', '));
       setModelIdsError(null);
@@ -219,9 +223,27 @@ export function useProviderSetupFlow(
     (selectedUrl: string) => {
       setBaseUrl(selectedUrl);
       setBaseUrlError(null);
+      if (provider) {
+        const builtInIds = new Set(
+          provider.models?.map((model) => model.id) ?? [],
+        );
+        const customIds = normalizeModelIds(modelIds).filter(
+          (id) => !builtInIds.has(id),
+        );
+        setModelIds(
+          [...getDefaultModelIds(provider, selectedUrl), ...customIds].join(
+            ', ',
+          ),
+        );
+        const envKeyName =
+          typeof provider.envKey === 'function'
+            ? provider.envKey(protocol, selectedUrl)
+            : provider.envKey;
+        setApiKey(existingProviderEnv[envKeyName] ?? '');
+      }
       goNext();
     },
-    [goNext],
+    [existingProviderEnv, goNext, modelIds, protocol, provider],
   );
 
   const submitBaseUrl = useCallback((): boolean => {

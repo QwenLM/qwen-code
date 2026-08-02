@@ -204,7 +204,7 @@ function findAllPendingUpdates(
     if (metadata.ignoredVersion === currentVersion) continue;
 
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
-    const newModelIds = provider.models!.map((s) => s.id);
+    const newModelIds = getDefaultModelIds(provider, baseUrl);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
 
     results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
@@ -240,9 +240,10 @@ export function useProviderUpdates(
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
-        const defaultIds = getDefaultModelIds(providerCfg);
+        const defaultIds = getDefaultModelIds(providerCfg, resolved);
+        const builtInIds = new Set(getDefaultModelIds(providerCfg));
         const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
+          (id) => !builtInIds.has(id),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,

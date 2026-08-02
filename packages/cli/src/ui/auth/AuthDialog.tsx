@@ -53,8 +53,12 @@ const MAIN_ITEMS = [
     key: 'ALIBABA_MODELSTUDIO',
     title: t('Alibaba ModelStudio'),
     label: t('Alibaba ModelStudio'),
-    description: t(
-      'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t(
+          'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+        )}
+      </Text>
     ),
     value: 'ALIBABA_MODELSTUDIO' as MainOption,
   },
@@ -62,15 +66,21 @@ const MAIN_ITEMS = [
     key: 'THIRD_PARTY_PROVIDERS',
     title: t('Third-party Providers'),
     label: t('Third-party Providers'),
-    description: t('Choose a built-in provider and connect with an API key'),
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t('Choose a built-in provider and connect with an API key')}
+      </Text>
+    ),
     value: 'THIRD_PARTY_PROVIDERS' as MainOption,
   },
   {
     key: 'CUSTOM_PROVIDER',
     title: t('Custom Provider'),
     label: t('Custom Provider'),
-    description: t(
-      'Manually connect a local server, proxy, or unsupported provider',
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t('Manually connect a local server, proxy, or unsupported provider')}
+      </Text>
     ),
     value: 'CUSTOM_PROVIDER' as MainOption,
   },
@@ -81,7 +91,11 @@ function providerToItem(config: ProviderConfig) {
     key: config.id,
     title: t(config.label),
     label: t(config.label),
-    description: t(config.description),
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t(config.description)}
+      </Text>
+    ),
     value: config.id,
   };
 }
@@ -113,11 +127,41 @@ const VIEW_TITLES: Record<string, string> = {
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
 
+const DEFAULT_DIALOG_HEIGHT = 24;
+const MAIN_LIST_FIXED_ROWS = 10;
+const SUB_MENU_LIST_FIXED_ROWS = 7;
+const LIST_ITEM_ROWS = 3;
+// Two arrow rows plus the two extra gaps itemGap adds around them.
+const SCROLL_AFFORDANCE_ROWS = 4;
+
+interface AuthDialogProps {
+  availableTerminalHeight?: number;
+}
+
+function getMaxItemsToShow(
+  dialogHeight: number,
+  itemCount: number,
+  fixedRows: number,
+): number {
+  if (itemCount === 0) return 1;
+  if (fixedRows + itemCount * LIST_ITEM_ROWS <= dialogHeight) {
+    return itemCount;
+  }
+  return Math.max(
+    1,
+    Math.floor(
+      (dialogHeight - fixedRows - SCROLL_AFFORDANCE_ROWS) / LIST_ITEM_ROWS,
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
 
-export function AuthDialog(): React.JSX.Element {
+export function AuthDialog({
+  availableTerminalHeight,
+}: AuthDialogProps = {}): React.JSX.Element {
   const {
     auth: { authError },
   } = useUIState();
@@ -214,6 +258,17 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const activeSubMenu = subMenus[viewLevel];
+  const dialogHeight = availableTerminalHeight ?? DEFAULT_DIALOG_HEIGHT;
+  const maxMainItems = getMaxItemsToShow(
+    dialogHeight,
+    MAIN_ITEMS.length,
+    MAIN_LIST_FIXED_ROWS,
+  );
+  const maxSubMenuItems = getMaxItemsToShow(
+    dialogHeight,
+    activeSubMenu?.items.length ?? 0,
+    SUB_MENU_LIST_FIXED_ROWS,
+  );
 
   // -- Default main index from current auth state ---------------------------
 
@@ -324,6 +379,8 @@ export function AuthDialog(): React.JSX.Element {
               );
             }}
             itemGap={1}
+            maxItemsToShow={maxMainItems}
+            showScrollArrows={MAIN_ITEMS.length > maxMainItems}
           />
         </Box>
       )}
@@ -344,10 +401,12 @@ export function AuthDialog(): React.JSX.Element {
                 }));
               }}
               itemGap={1}
+              maxItemsToShow={maxSubMenuItems}
+              showScrollArrows={activeSubMenu.items.length > maxSubMenuItems}
             />
           </Box>
           <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
+            <Text color={theme?.text?.secondary} wrap="truncate">
               {t('Enter to select, ↑↓ to navigate, Esc to go back')}
             </Text>
           </Box>
@@ -367,10 +426,12 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'main' && (
         <>
           <Box marginY={1}>
-            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
+            <Text color={theme.border.default} wrap="truncate">
+              {'─'.repeat(80)}
+            </Text>
           </Box>
           <Box>
-            <Text color={theme.text.primary}>
+            <Text color={theme.text.primary} wrap="truncate">
               {t('Terms of Services and Privacy Notice')}:
             </Text>
           </Box>
@@ -379,7 +440,7 @@ export function AuthDialog(): React.JSX.Element {
               url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
               fallback={false}
             >
-              <Text color={theme.text.secondary} underline>
+              <Text color={theme.text.secondary} underline wrap="truncate">
                 https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
               </Text>
             </Link>

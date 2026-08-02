@@ -23,6 +23,7 @@ import {
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  resolveProviderModels,
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
@@ -2014,8 +2015,8 @@ function serializeProviderConfig(
     baseUrl: config.baseUrl,
     baseUrlPlaceholder:
       config.baseUrl === undefined ? defaultBaseUrl : undefined,
-    defaultModelIds: getDefaultModelIds(config),
-    models: config.models ?? [],
+    defaultModelIds: getDefaultModelIds(config, defaultBaseUrl),
+    models: resolveProviderModels(config, defaultBaseUrl) ?? [],
     modelsEditable: config.modelsEditable === true || !config.models,
     showAdvancedConfig: config.showAdvancedConfig === true,
     apiKeyPlaceholder: config.apiKeyPlaceholder,
@@ -2075,7 +2076,7 @@ function readProviderSetupInputs(
     throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
-  const defaultModelIds = getDefaultModelIds(config);
+  const defaultModelIds = getDefaultModelIds(config, baseUrl);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
   const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
   if (resolvedModelIds.length === 0) {

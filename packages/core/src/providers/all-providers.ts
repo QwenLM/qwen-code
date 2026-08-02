@@ -16,10 +16,12 @@ import { openRouterProvider } from './presets/openrouter.js';
 import { requestyProvider } from './presets/requesty.js';
 import { deepseekProvider } from './presets/deepseek.js';
 import { grokProvider } from './presets/grok.js';
+import { kimiProvider } from './presets/kimi.js';
 import { minimaxProvider } from './presets/minimax.js';
 import { zaiProvider } from './presets/zai.js';
 import { idealabProvider } from './presets/idealab.js';
 import { modelscopeProvider } from './presets/modelscope.js';
+import { xiaomiMimoProvider } from './presets/xiaomi-mimo.js';
 import { customProvider } from './presets/custom-provider.js';
 
 // Re-export all providers
@@ -31,10 +33,12 @@ export {
   requestyProvider,
   deepseekProvider,
   grokProvider,
+  kimiProvider,
   minimaxProvider,
   zaiProvider,
   idealabProvider,
   modelscopeProvider,
+  xiaomiMimoProvider,
   customProvider,
 };
 export {
@@ -56,12 +60,14 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   alibabaStandardProvider,
   deepseekProvider,
   grokProvider,
-  minimaxProvider,
-  zaiProvider,
   idealabProvider,
+  kimiProvider,
+  minimaxProvider,
   modelscopeProvider,
   openRouterProvider,
   requestyProvider,
+  xiaomiMimoProvider,
+  zaiProvider,
   customProvider,
 ];
 
@@ -71,7 +77,7 @@ export const ALIBABA_PROVIDERS = ALL_PROVIDERS.filter(
 );
 export const THIRD_PARTY_PROVIDERS = ALL_PROVIDERS.filter(
   (p) => p.uiGroup === 'third-party',
-);
+).sort((left, right) => left.label.localeCompare(right.label, 'en'));
 
 export function findProviderById(id: string): ProviderConfig | undefined {
   return ALL_PROVIDERS.find((p) => p.id === id);

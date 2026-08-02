@@ -73,11 +73,44 @@ function defaultBaseUrl(provider: QwenProviderSummary): string {
   return provider.baseUrlPlaceholder ?? '';
 }
 
-function initialModelIds(provider: QwenProviderSummary): string[] {
+function defaultModelIds(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): string[] {
+  if (Array.isArray(provider.baseUrl)) {
+    const option = provider.baseUrl.find((item) => item.url === baseUrl);
+    if (option?.models) return option.models.map((model) => model.id);
+  }
+  return provider.defaultModelIds;
+}
+
+function initialModelIds(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): string[] {
   const existingModelIds = provider.existingConfig?.modelIds ?? [];
   return existingModelIds.length > 0
     ? existingModelIds
-    : provider.defaultModelIds;
+    : defaultModelIds(provider, baseUrl);
+}
+
+function modelIdsAfterBaseUrlChange(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+  currentModelIds: string,
+): string[] {
+  const builtInIds = new Set([
+    ...provider.models.map((model) => model.id),
+    ...(Array.isArray(provider.baseUrl)
+      ? provider.baseUrl.flatMap(
+          (option) => option.models?.map((model) => model.id) ?? [],
+        )
+      : []),
+  ]);
+  const customIds = parseModelIds(currentModelIds).filter(
+    (id) => !builtInIds.has(id),
+  );
+  return [...defaultModelIds(provider, baseUrl), ...customIds];
 }
 
 function AnimatedSection({
@@ -194,11 +227,12 @@ export function ProviderConnectForm({
   const selectProvider = useCallback((provider: QwenProviderSummary) => {
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
+    const baseUrl = existingConfig?.baseUrl ?? defaultBaseUrl(provider);
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
-    setBaseUrl(existingConfig?.baseUrl ?? defaultBaseUrl(provider));
+    setBaseUrl(baseUrl);
     setApiKey(existingConfig?.apiKey ?? '');
-    setModelIdsText(initialModelIds(provider).join(', '));
+    setModelIdsText(initialModelIds(provider, baseUrl).join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -437,7 +471,17 @@ export function ProviderConnectForm({
             {baseUrlOptions.length > 0 ? (
               <Select
                 value={baseUrl}
-                onValueChange={setBaseUrl}
+                onValueChange={(value) => {
+                  setBaseUrl(value);
+                  setApiKey('');
+                  setModelIdsText(
+                    modelIdsAfterBaseUrlChange(
+                      selectedProvider,
+                      value,
+                      modelIdsText,
+                    ).join(', '),
+                  );
+                }}
                 disabled={submitting}
               >
                 <SelectTrigger>
