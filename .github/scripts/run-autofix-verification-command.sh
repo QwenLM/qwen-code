@@ -54,7 +54,7 @@ cleanup_processes() {
 }
 
 command_pid=''
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 terminate() {
   status="${1:?status is required}"
   cleanup_processes || true

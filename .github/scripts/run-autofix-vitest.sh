@@ -47,7 +47,7 @@ cleanup_coordinator() {
     wait "${command_pid}" 2> /dev/null || true
   fi
 }
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 terminate() {
   status="${1:?status is required}"
   cleanup_coordinator
