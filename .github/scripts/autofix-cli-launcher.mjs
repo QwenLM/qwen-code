@@ -6,9 +6,13 @@ if (!candidateCli || !Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid
   throw new Error('Missing isolated candidate CLI configuration');
 }
 
-process.setgroups([]);
-process.setgid(gid);
-process.setuid(uid);
+if (process.getuid() === 0) {
+  process.setgroups([]);
+  process.setgid(gid);
+  process.setuid(uid);
+} else if (process.getuid() !== uid || process.getgid() !== gid) {
+  throw new Error('Isolated candidate CLI is running as an unexpected user');
+}
 
 const candidate = await import(candidateCli);
 if (typeof candidate.runCliEntryPoint !== 'function') {

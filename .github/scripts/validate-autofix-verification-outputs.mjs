@@ -121,7 +121,15 @@ function readSealedDependencies(workspace) {
     throw new Error('Invalid sealed dependency manifest');
   }
   for (const file of dependencies) {
-    const stats = lstatSync(join(workspace, file));
+    let stats;
+    try {
+      stats = lstatSync(join(workspace, file));
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new Error(`Invalid sealed dependency directory: ${file}`);
+      }
+      throw error;
+    }
     if (!stats.isDirectory() || stats.isSymbolicLink()) {
       throw new Error(`Invalid sealed dependency directory: ${file}`);
     }

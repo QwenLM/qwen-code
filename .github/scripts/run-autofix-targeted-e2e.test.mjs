@@ -78,6 +78,12 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   const scopeAt = source.indexOf('validateCandidateScope(metadata, workspace)');
   const installAt = source.indexOf("'--ignore-scripts'");
   const dependenciesAt = source.indexOf("[workspace, 'dependencies']");
+  const generateAt = source.indexOf(
+    "run('npm', ['run', 'generate'], candidateOptions)",
+  );
+  const buildAt = source.indexOf(
+    "run('npm', ['run', 'build'], candidateOptions)",
+  );
   const bundleAt = source.indexOf(
     "run('npm', ['run', 'bundle'], candidateOptions)",
   );
@@ -98,6 +104,8 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
     scopeAt,
     installAt,
     dependenciesAt,
+    generateAt,
+    buildAt,
     bundleAt,
     outputAuditAt,
     finalizeAt,
@@ -111,7 +119,9 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   }
   assert.ok(scopeAt < installAt);
   assert.ok(installAt < dependenciesAt);
-  assert.ok(dependenciesAt < bundleAt);
+  assert.ok(dependenciesAt < generateAt);
+  assert.ok(generateAt < buildAt);
+  assert.ok(buildAt < bundleAt);
   assert.ok(bundleAt < outputAuditAt);
   assert.ok(outputAuditAt < finalizeAt);
   assert.ok(finalizeAt < reportAt);

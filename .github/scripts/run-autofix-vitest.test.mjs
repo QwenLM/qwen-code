@@ -28,6 +28,7 @@ test('keeps candidate code outside the trusted Vitest worker', () => {
     wrapper,
     /AUTOFIX_CANDIDATE_CLI="\$\{workspace\}\/dist\/cli\.js"/,
   );
+  assert.match(launcher, /process\.getuid\(\) === 0/);
   assert.match(launcher, /process\.setgroups\(\[\]\)/);
   assert.ok(
     launcher.indexOf('process.setgroups([])') <
@@ -41,6 +42,7 @@ test('keeps candidate code outside the trusted Vitest worker', () => {
     launcher.indexOf('process.setuid(uid)') <
       launcher.indexOf('await import(candidateCli)'),
   );
+  assert.match(launcher, /running as an unexpected user/);
   assert.match(launcher, /typeof candidate\.runCliEntryPoint !== 'function'/);
   assert.match(launcher, /await candidate\.runCliEntryPoint\(\)/);
   assert.ok(

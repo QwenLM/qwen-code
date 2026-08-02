@@ -1817,6 +1817,7 @@ jobs:
             ((.labels // []) | map(.name) |
               index("autofix/in-progress") != null and
               index("autofix/skip") == null and
+              index("autofix/routing") == null and
               index("status/need-information") == null and
               index("status/need-retesting") == null) and
             ((.assignees // []) | length > 0 and all(.login == $bot)) and
@@ -1899,6 +1900,7 @@ jobs:
               ((.labels // []) | map(.name) |
                 index("autofix/in-progress") != null and
                 index("autofix/skip") == null and
+                index("autofix/routing") == null and
                 index("status/need-information") == null and
                 index("status/need-retesting") == null) and
               ((.assignees // []) | length > 0 and all(.login == $bot)) and

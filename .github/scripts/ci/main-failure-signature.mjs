@@ -158,6 +158,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
         reasons.push(
           `E2E test does not use the trusted external-process harness: ${parsed.file}`,
         );
+        continue;
       }
       cases.push({
         id,
@@ -495,15 +496,21 @@ function publicMachineMarkers(body) {
       [...text.matchAll(testMarkerPattern)].map((match) => match[0]),
     ),
   ];
+  const signaturePattern = new RegExp(
+    `^<!-- ${SIGNATURE_MARKER_PREFIX}[0-9a-f]{12} -->$`,
+  );
   const signatureLine = text
     .split('\n')
-    .find((line) => line.startsWith(`<!-- ${SIGNATURE_MARKER_PREFIX}`));
+    .find((line) => signaturePattern.test(line));
   const { lines } = splitOccurrenceBlock(text);
+  const occurrencePattern =
+    /^- \x60[0-9a-f]{12}\x60 \u00b7 .+ \u00b7 \[run \d+\]\(.+\)$/;
+  const validLines = lines.filter((line) => occurrencePattern.test(line));
   const parts = [];
   if (signatureLine) parts.push(signatureLine);
   parts.push(...markers);
-  if (lines.length) {
-    parts.push('', OCCURRENCE_MARKER, ...lines);
+  if (validLines.length) {
+    parts.push('', OCCURRENCE_MARKER, ...validLines);
   }
   return parts.join('\n');
 }

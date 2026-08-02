@@ -153,7 +153,8 @@ export function loadMetadata({ issue, repository, output }) {
           `repos/${repository}/actions/runs/${producerRunId}`,
         );
         validateProducerRun(producerRun);
-      } catch {
+      } catch (error) {
+        process.stderr.write(`Skipping artifact ${artifact.id}: ${error}\n`);
         continue;
       }
       const name = parseArtifactName(artifact.name, issue);

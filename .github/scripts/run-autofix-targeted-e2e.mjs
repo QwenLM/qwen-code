@@ -266,6 +266,7 @@ export function runTargetedE2e({
   worktreeHelper,
   outputValidator,
 }) {
+  if (!vitestWrapper) fail('Trusted Vitest wrapper is required');
   let directory;
   let activeReport;
   const lines = ['# Targeted E2E verification', ''];
@@ -315,11 +316,8 @@ export function runTargetedE2e({
           cwd: workspace,
         });
       }
-      const jsonPath = commandWrapper
-        ? `/tmp/qwen-autofix-verify-home/reports/${reportName}/report.json`
-        : join(directory, `${reportName}.json`);
+      const jsonPath = `/tmp/qwen-autofix-verify-home/reports/${reportName}/report.json`;
       const pattern = `^${escapeRegex(testCase.fullName)}$`;
-      if (!vitestWrapper) fail('Trusted Vitest wrapper is required');
       run(vitestWrapper, [workspace, reportName, testCase.file, pattern], {
         cwd: workspace,
         timeout: CASE_TIMEOUT_MS,
