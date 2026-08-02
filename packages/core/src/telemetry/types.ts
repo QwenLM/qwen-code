@@ -563,6 +563,8 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   tokens_after: number;
   compression_input_token_count?: number;
   compression_output_token_count?: number;
+  cache_sharing_attempted?: boolean;
+  cache_sharing_used?: boolean;
 }
 
 export function makeChatCompressionEvent({
@@ -570,6 +572,8 @@ export function makeChatCompressionEvent({
   tokens_after,
   compression_input_token_count,
   compression_output_token_count,
+  cache_sharing_attempted,
+  cache_sharing_used,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
@@ -582,6 +586,10 @@ export function makeChatCompressionEvent({
     ...(compression_output_token_count !== undefined
       ? { compression_output_token_count }
       : {}),
+    ...(cache_sharing_attempted !== undefined
+      ? { cache_sharing_attempted }
+      : {}),
+    ...(cache_sharing_used !== undefined ? { cache_sharing_used } : {}),
   };
 }
 
