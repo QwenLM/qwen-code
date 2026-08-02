@@ -426,6 +426,10 @@ jobs:
               exit 1
             fi
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            edit_args=()
+            if [ "$RELEASE_DRAFT" = 'true' ]; then edit_args+=(--draft); else edit_args+=(--draft=false); fi
+            if [ "$RELEASE_PRERELEASE" = 'true' ]; then edit_args+=(--prerelease); else edit_args+=(--prerelease=false); fi
+            gh release edit "$RELEASE_TAG" "${edit_args[@]}"
             release_url="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
           else
             release_url="$(gh release create "${args[@]}")"

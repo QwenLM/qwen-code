@@ -79,6 +79,11 @@ async function verify(baseUrl) {
     finish(new Error(`Health check failed: ${response.status} ${text}`));
     return;
   }
+  // The shallow health probe triggers the deferred runtime start. Wait for
+  // deep health (served by the runtime app) before asserting the
+  // unauthenticated shell, which the delegating app 401s until the runtime
+  // is mounted.
+  await waitForDeepHealth(baseUrl);
   const shell = await fetch(baseUrl, {
     headers: { Accept: 'text/html' },
   });
@@ -89,6 +94,18 @@ async function verify(baseUrl) {
   }
   console.log(`Bundled daemon and Web Shell ready at ${baseUrl}`);
   finish();
+}
+
+async function waitForDeepHealth(baseUrl) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${baseUrl}/health?deep=true`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.ok) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error('Timed out waiting for runtime deep health');
 }
 
 function finish(error) {

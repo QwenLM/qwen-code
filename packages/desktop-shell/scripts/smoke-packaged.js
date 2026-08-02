@@ -115,14 +115,24 @@ async function waitForReady() {
 // which never reaches the server), while API routes stay bearer-gated. The
 // authenticated path is covered by smoke:runtime on the same bundle.
 async function verifyPackagedShell(baseUrl, contents) {
-  const shell = await fetch(new URL('/', baseUrl), {
-    redirect: 'manual',
-    headers: {
-      Accept: 'text/html',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-    },
-  });
+  // The daemon starts in deferred-runtime mode; the delegating app 401s
+  // unauthenticated non-bootstrap requests until the runtime is mounted.
+  // Retry until the fallback timer starts the runtime and the build finishes.
+  const deadline = Date.now() + 30_000;
+  let shell;
+  do {
+    if (exitFailure) throw exitFailure;
+    shell = await fetch(new URL('/', baseUrl), {
+      redirect: 'manual',
+      headers: {
+        Accept: 'text/html',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+      },
+    });
+    if (shell.status === 200) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
   if (shell.status !== 200) {
     throw smokeError(
       `Packaged desktop Web Shell navigation failed: ${shell.status}`,
