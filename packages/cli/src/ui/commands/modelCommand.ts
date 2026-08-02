@@ -1119,9 +1119,9 @@ export const modelCommand: SlashCommand = {
           const flag = persistDefault
             ? '--default'
             : hasProject
-              ? '--project'
+              ? '--default --project'
               : hasGlobal
-                ? '--global'
+                ? '--default --global'
                 : '';
           return {
             type: 'message',

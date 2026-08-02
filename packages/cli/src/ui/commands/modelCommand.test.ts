@@ -470,7 +470,7 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'error',
       content:
-        "Cannot combine --project with an inline prompt. Run '/model --project qwen-max' first, then send your prompt.",
+        "Cannot combine --default --project with an inline prompt. Run '/model --default --project qwen-max' first, then send your prompt.",
     });
   });
 
