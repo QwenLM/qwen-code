@@ -26,6 +26,7 @@ import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
 import { driveCommand } from './review/drive.js';
+import { mockProviderCommand } from './review/mock-provider.js';
 import { extractStepCommand } from './review/extract-step.js';
 import { scriptLintCommand } from './review/script-lint.js';
 import { submitCommand } from './review/submit.js';
@@ -53,6 +54,7 @@ export const reviewCommand: CommandModule = {
       .command(baseTreeCommand)
       .command(testDeltaCommand)
       .command(driveCommand)
+      .command(mockProviderCommand)
       .command(extractStepCommand)
       .command(scriptLintCommand)
       .command(resolveAnchorsCommand)
@@ -66,7 +68,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
