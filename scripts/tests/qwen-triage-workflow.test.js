@@ -249,6 +249,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(ensure).toContain('for attempt in 1 2 3; do');
     expect(ensure).toContain('cd "${RUNNER_TEMP:?}"');
     expect(ensure).toContain('triaging with installed qwen');
+    // The two hard-fail paths must keep failing the job — pin the exit code,
+    // not just the message: a softened `exit 0` would otherwise ship undetected.
+    expect(ensure).toContain('::error::');
+    expect(ensure).toContain('exit 1');
   });
 
   it('passes triage output through env before bash reads it', () => {
