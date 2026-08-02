@@ -518,13 +518,18 @@ export function resolveVoiceTranscriptionConfig({
       `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete URL to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
-  if (
-    !isLocalhost &&
-    (isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname) ||
-      (!allowInsecureBaseUrl && isPrivateNetworkIp(parsedBaseUrl.hostname)))
-  ) {
+  if (!isLocalhost && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
     throw new Error(
       `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
+    );
+  }
+  if (
+    !isLocalhost &&
+    !allowInsecureBaseUrl &&
+    isPrivateNetworkIp(parsedBaseUrl.hostname)
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete URL to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
 

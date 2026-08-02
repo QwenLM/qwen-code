@@ -783,6 +783,40 @@ describe('voice-transcriber', () => {
     }
   });
 
+  it('includes the allowlist hint for private-network but not always-blocked addresses', () => {
+    const privateConfig = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Private ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://10.0.0.5/v1',
+      },
+    ]);
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config: privateConfig,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/security\.allowedInsecureVoiceBaseUrls/);
+
+    const blockedConfig = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Blocked ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://169.254.169.254/v1',
+      },
+    ]);
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config: blockedConfig,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/private-network baseUrl\.$/);
+  });
+
   it('does not classify an IPv4-mapped public address as private', () => {
     const config = createConfig([
       {
