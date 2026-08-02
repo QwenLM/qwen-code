@@ -315,10 +315,9 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
-    it('prefers displayText over the tag-strip fallback and keeps image parts', () => {
-      // Without displayText the tag-strip path would also emit the middle
-      // "expanded extra" text part. displayText must win, and the image
-      // part must survive (the previous early-return path dropped it).
+    it('replaces text parts with displayText while preserving image parts', () => {
+      // displayText must replace all model-facing text while the image part
+      // survives (the previous early-return path dropped it).
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-1', 'user', {
@@ -360,9 +359,8 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(2);
     });
 
-    it('appends displayText after images when the record has no text part to replace', () => {
-      // Exercises the !replaced fallback: after stripping the trailing tagged
-      // block, only the image remains, so displayText is appended.
+    it('appends displayText after an image-only record', () => {
+      // With no text part to replace, displayText is appended after the image.
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-img-only', 'user', {
@@ -375,7 +373,6 @@ describe('createTranscriptReplayMachine', () => {
                   mimeType: 'image/png',
                 },
               },
-              { text: tagged },
             ],
           },
           systemPayload: {
