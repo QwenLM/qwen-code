@@ -64,7 +64,13 @@ export interface MockRequest {
   text: string;
   /** True when the caller asked for a stream; false for a side query. */
   stream: boolean;
-  /** 1-based, per server. A responder that answers the Nth call needs this. */
+  /**
+   * 1-based count of the requests the RESPONDER was asked about — a responder
+   * that answers the Nth call needs this, and it needs it to be its own N.
+   * `/v1/models` is served without consulting the responder, so it does not
+   * take a number: counting it produced the sequence `[1, 3]` for two calls,
+   * and a responder keyed on the third call would have fired on the second.
+   */
   n: number;
 }
 
@@ -94,6 +100,32 @@ export function messagesText(body: Record<string, unknown> | null): string {
 }
 
 const enc = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
+
+/**
+ * Ceiling on a request body, and on what the record keeps of one.
+ *
+ * Neither was bounded. Measured: a 40 MiB POST was read whole into memory,
+ * handed to the responder, and then written to the JSONL twice — once as the
+ * request and once inside the reply record — leaving an 80 MiB log. `drive`
+ * had just grown an 8 MiB log cap for exactly this hazard, and this served as
+ * a larger door beside it: the review's own machine is the one that fills up,
+ * and `build-test`'s disk floors exist because that already happened once.
+ *
+ * A body over the ceiling is refused with 413 rather than truncated. A
+ * truncated body parses to different JSON, which would make the mock answer a
+ * request the client never sent — a behaviour difference introduced by the
+ * harness, which is the one thing it must never do.
+ */
+const BODY_MAX_BYTES = 4 * 1024 * 1024;
+/** How much of a request's text the record keeps. The evidence is the SHAPE. */
+const RECORD_TEXT_MAX = 8 * 1024;
+
+/** Trim a recorded field, saying so, so a diff of two logs stays honest. */
+function forRecord(v: string): string {
+  return v.length <= RECORD_TEXT_MAX
+    ? v
+    : `${v.slice(0, RECORD_TEXT_MAX)}…[${v.length - RECORD_TEXT_MAX} more characters]`;
+}
 
 /**
  * One SSE chunk in the shape the protocol requires.
@@ -225,8 +257,31 @@ export async function startMockProvider(
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const parts: Buffer[] = [];
-    req.on('data', (d: Buffer) => parts.push(d));
+    let size = 0;
+    let tooBig = false;
+    req.on('data', (d: Buffer) => {
+      size += d.length;
+      if (size > BODY_MAX_BYTES) {
+        tooBig = true;
+        parts.length = 0;
+        return;
+      }
+      parts.push(d);
+    });
     req.on('end', () => {
+      if (tooBig) {
+        appendFileSync(
+          logPath,
+          `${JSON.stringify({ t: Date.now(), method: req.method, path: req.url, refused: 'body-too-large', bytes: size })}\n`,
+        );
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: `request body exceeded ${BODY_MAX_BYTES} bytes; refused rather than truncated, because a truncated body is a different request`,
+          }),
+        );
+        return;
+      }
       void (async () => {
         const raw = Buffer.concat(parts).toString('utf8');
         let body: Record<string, unknown> | null = null;
@@ -236,7 +291,8 @@ export async function startMockProvider(
           body = null;
         }
         const path = req.url ?? '/';
-        n += 1;
+        const isModels = path.startsWith('/v1/models');
+        if (!isModels) n += 1;
         const mreq: MockRequest = {
           method: req.method ?? 'GET',
           path,
@@ -246,8 +302,13 @@ export async function startMockProvider(
           n,
         };
 
-        if (path.startsWith('/v1/models')) {
-          record({ t: Date.now(), ...mreq, reply: 'models' });
+        if (isModels) {
+          record({
+            t: Date.now(),
+            ...mreq,
+            text: forRecord(mreq.text),
+            reply: 'models',
+          });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(
             JSON.stringify({
@@ -269,7 +330,7 @@ export async function startMockProvider(
             body: { error: String((err as Error).message) },
           };
         }
-        record({ t: Date.now(), ...mreq, reply });
+        record({ t: Date.now(), ...mreq, text: forRecord(mreq.text), reply });
 
         if ('status' in reply) {
           res.writeHead(reply.status, { 'Content-Type': 'application/json' });

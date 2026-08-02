@@ -135,6 +135,59 @@ describe('the wire', () => {
   });
 });
 
+describe('the bounds', () => {
+  it('numbers only the requests the RESPONDER saw', async () => {
+    // `/v1/models` is answered without consulting the responder, so it must
+    // not take a number. Counting it produced `[1, 3]` for two calls, and a
+    // responder keyed on its third call would have fired on the second.
+    const seen: number[] = [];
+    const { report } = await serve((r) => {
+      seen.push(r.n);
+      return { text: 'x' };
+    });
+    await post(report.baseUrl, { stream: false, messages: [] });
+    await fetch(`${report.baseUrl}/models`);
+    await post(report.baseUrl, { stream: false, messages: [] });
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('refuses an oversized body rather than truncating it', async () => {
+    // Measured before the bound: a 40 MiB POST was read whole into memory,
+    // handed to the responder, and written to the JSONL twice — an 80 MiB log
+    // on the review's own machine. Refused, not trimmed: a truncated body
+    // parses to different JSON, so the mock would answer a request the client
+    // never sent, which is the one thing a harness must never do.
+    const { report } = await serve(() => ({ text: 'x' }));
+    const res = await post(report.baseUrl, {
+      stream: false,
+      messages: [{ role: 'user', content: 'x'.repeat(8 * 1024 * 1024) }],
+    });
+    expect(res.status).toBe(413);
+    // ...and an ordinary request is untouched.
+    const ok = await post(report.baseUrl, {
+      stream: false,
+      messages: [{ role: 'user', content: 'y'.repeat(20_000) }],
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('keeps the record small, and says where it trimmed', async () => {
+    // The evidence an A/B needs is the SHAPE of the request sequence, not
+    // every byte of every prompt. A log that grows with the payload is the
+    // hazard `drive`'s 8 MiB cap exists for, arriving through a second door.
+    const { report, log } = await serve(() => ({ text: 'x' }));
+    await post(report.baseUrl, {
+      stream: false,
+      messages: [{ role: 'user', content: 'z'.repeat(200_000) }],
+    });
+    await stop?.();
+    stop = null;
+    const rec = JSON.parse(readFileSync(log, 'utf8').trim());
+    expect(rec.text.length).toBeLessThan(20_000);
+    expect(rec.text).toContain('more characters');
+  });
+});
+
 describe('the record', () => {
   it('appends one parseable JSON line per request, in order', async () => {
     // This is where an A/B gets its evidence: the same drive against two trees,
