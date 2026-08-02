@@ -224,9 +224,14 @@ export function useProviderSetupFlow(
       setBaseUrl(selectedUrl);
       setBaseUrlError(null);
       if (provider && selectedUrl !== baseUrl) {
-        const builtInIds = new Set(
-          provider.models?.map((model) => model.id) ?? [],
-        );
+        const builtInIds = new Set([
+          ...(provider.models?.map((model) => model.id) ?? []),
+          ...(Array.isArray(provider.baseUrl)
+            ? provider.baseUrl.flatMap(
+                (option) => option.models?.map((model) => model.id) ?? [],
+              )
+            : []),
+        ]);
         const customIds = normalizeModelIds(modelIds).filter(
           (id) => !builtInIds.has(id),
         );

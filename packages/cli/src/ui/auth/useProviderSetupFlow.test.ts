@@ -34,7 +34,6 @@ describe('useProviderSetupFlow', () => {
       ],
       envKey: (_protocol, baseUrl) =>
         baseUrl === firstUrl ? 'FIRST_API_KEY' : 'SECOND_API_KEY',
-      models: [{ id: 'first-model' }, { id: 'second-model' }],
       modelsEditable: true,
       modelNamePrefix: 'Endpoint',
     };
