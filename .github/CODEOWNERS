@@ -4,19 +4,19 @@
 # packages/core/ review routing is handled by the
 # core-review-router workflow, which assigns reviewers based
 # on diff size and affected sub-modules instead of requesting
-# all four maintainers on every PR.
+# every code owner on every PR.
 # The CODEOWNERS entry below is retained so the repository
 # ruleset's require_code_owner_review gate stays enforced;
 # the workflow trims the auto-assigned set to 1–2 reviewers.
 # Maintainer PRs to core are not trimmed by the workflow;
-# CODEOWNERS still auto-assigns all non-author maintainers.
+# CODEOWNERS still auto-assigns all non-author code owners.
 # Curate the reviewer set manually if fewer are desired.
 
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu
 
 # --- Core package ---
-/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan
+/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC
 
 # --- CUA Driver & Mobile MCP ---
 /packages/cua-driver/  @LaZzyMan
