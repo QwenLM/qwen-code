@@ -40,6 +40,8 @@ export function resolveNightlyBuildNumber(packageVersion) {
     // Monotonic within a single branch only; cross-branch ordering is not
     // guaranteed, so a nightly built on a side branch can carry a lower number
     // than one built on main. Chrome refuses to treat a lower version as an upgrade.
+    // The count must stay below PREVIEW_BUILD_START (60000); beyond that,
+    // toChromeManifestVersion rejects it as colliding with the preview range.
     return Number(
       execFileSync('git', ['rev-list', '--count', 'HEAD'], {
         cwd: repoRoot,

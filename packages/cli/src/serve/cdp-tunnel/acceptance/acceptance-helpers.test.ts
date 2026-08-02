@@ -57,6 +57,26 @@ describe('CDP acceptance helpers', () => {
     expect(fetchImpl).toHaveBeenCalled();
   });
 
+  it('resolves when the predicate matches after non-matching responses', async () => {
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      return {
+        ok: true,
+        json: async () => ({ n: call }),
+      } as Response;
+    });
+
+    const result = await waitForJson(
+      'http://example.test/health',
+      (v: { n: number }) => v.n === 2,
+      5_000,
+      fetchImpl,
+    );
+    expect(result).toEqual({ n: 2 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it('forces an adapter to exit when it ignores SIGTERM', async () => {
     const child = spawn(
       process.execPath,

@@ -31,9 +31,9 @@ const targetDir = path.resolve(
 );
 
 const staticSrcDir = path.join(projectRoot, 'public');
-async function syncManifestVersion() {
+export async function syncManifestVersion(sourceDir = projectRoot) {
   const packageJson = JSON.parse(
-    await fs.readFile(path.join(projectRoot, 'package.json'), 'utf8'),
+    await fs.readFile(path.join(sourceDir, 'package.json'), 'utf8'),
   );
   const manifestPath = path.join(targetDir, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
@@ -104,7 +104,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Failed to sync extension assets:', err);
-  process.exit(1);
-});
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err) => {
+    console.error('Failed to sync extension assets:', err);
+    process.exit(1);
+  });
+}

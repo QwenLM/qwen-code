@@ -72,6 +72,8 @@ async function readConfig() {
 }
 
 /** GET a daemon endpoint with a short timeout; returns parsed JSON or null. */
+// A non-JSON body returns null (not {}) so callers treat it as unreachable
+// rather than as a valid-but-empty response.
 async function probeJson(url, token) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
@@ -115,7 +117,11 @@ async function probeState(baseUrl, token) {
     // reuse the last snapshot in between. The banner content changes rarely and
     // need not contend with an in-flight generation on every 2s tick.
     if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
-      cachedMcpSnapshot = await probeJson(`${baseUrl}/workspace/mcp`, token);
+      const fresh = await probeJson(`${baseUrl}/workspace/mcp`, token);
+      // A transient failure after a successful probe keeps the previous
+      // snapshot instead of pinning automation-unavailable for
+      // MCP_POLL_EVERY ticks.
+      if (fresh !== null || !cachedMcpSnapshot) cachedMcpSnapshot = fresh;
     }
     mcpProbeCounter += 1;
     mcpSnapshot = cachedMcpSnapshot;
@@ -214,6 +220,9 @@ async function tick() {
       { state: 'down', shellReady: false, warning: null },
       allowOriginCommand(chrome.runtime.id),
     );
+    els.desc.textContent =
+      'The side panel hit an internal error. Reload the panel or ' +
+      'reinstall the extension if this persists.';
   } finally {
     ticking = false;
   }

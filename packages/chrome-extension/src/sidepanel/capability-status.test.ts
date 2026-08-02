@@ -53,7 +53,7 @@ describe('deriveCapabilityStatus', () => {
     ).toEqual({
       state: 'automation-configured',
       shellReady: true,
-      warning: null,
+      warning: 'Browser tools status is unknown until a chat session starts.',
     });
   });
 

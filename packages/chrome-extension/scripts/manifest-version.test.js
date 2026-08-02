@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -141,6 +141,40 @@ describe('toChromeManifestVersion', () => {
       expect(manifest.version_name).toBe(packageJson.version);
     } finally {
       rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('writes a nightly version through syncManifestVersion', async () => {
+    const sourceDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-ext-src-'));
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-ext-out-'));
+    const savedOutDir = process.env.EXTENSION_OUT_DIR;
+    const savedBuild = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER;
+    try {
+      writeFileSync(
+        path.join(sourceDir, 'package.json'),
+        JSON.stringify({ version: '0.21.2-nightly.20260712.abc' }),
+      );
+      writeFileSync(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({ manifest_version: 3, name: 'test', version: '0.0.0' }),
+      );
+      process.env.EXTENSION_OUT_DIR = outputDir;
+      process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER = '42';
+      const { syncManifestVersion } = await import('./sync-extension.js');
+      await syncManifestVersion(sourceDir);
+      const manifest = JSON.parse(
+        readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'),
+      );
+      expect(manifest.version).toBe('0.21.2.42');
+      expect(manifest.version_name).toBe('0.21.2-nightly.20260712.abc');
+    } finally {
+      rmSync(sourceDir, { recursive: true, force: true });
+      rmSync(outputDir, { recursive: true, force: true });
+      if (savedOutDir === undefined) delete process.env.EXTENSION_OUT_DIR;
+      else process.env.EXTENSION_OUT_DIR = savedOutDir;
+      if (savedBuild === undefined)
+        delete process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER;
+      else process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER = savedBuild;
     }
   }, 15_000);
 });

@@ -24,7 +24,17 @@ export async function packageExtension({
       cwd: source,
       stdio: 'inherit',
     });
-    child.once('error', reject);
+    child.once('error', (err) => {
+      if (err.code === 'ENOENT') {
+        reject(
+          new Error(
+            'Packaging requires the POSIX zip utility. Install it with your system package manager (e.g. apt install zip).',
+          ),
+        );
+      } else {
+        reject(err);
+      }
+    });
     child.once('exit', (code, signal) => {
       if (code === 0) resolve();
       else reject(new Error(`zip exited with ${code ?? signal}`));

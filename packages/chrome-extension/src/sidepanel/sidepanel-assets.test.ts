@@ -272,11 +272,9 @@ describe('side panel capability status assets', () => {
       value: { initialized: false, discoveryState: 'not_started', servers: [] },
     };
     await pollUntil(() =>
-      expect(
-        document
-          .getElementById('capability-warning')
-          ?.classList.contains('hidden'),
-      ).toBe(true),
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'Browser tools status is unknown until a chat session starts.',
+      ),
     );
 
     mcpResponse = { ok: true, value: { servers: [] } };

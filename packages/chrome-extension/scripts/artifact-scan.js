@@ -9,6 +9,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yauzl from 'yauzl';
 
+// Source-level signatures catch unbundled adapter code in the root dist/
+// bundle (which is not minified). The esbuild-metafile provenance scan catches
+// bundled adapters in dist/extension (which IS minified, so string signatures
+// would not survive). Both scans are needed.
 const DEFAULT_SIGNATURES = [
   'class McpContext',
   'PageCollector',
@@ -135,6 +139,18 @@ export async function scanZipArtifact(
   return findings;
 }
 
+const BINARY_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.ico',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+]);
+
 export async function scanArtifactRoots(
   roots,
   signatures = DEFAULT_SIGNATURES,
@@ -142,6 +158,7 @@ export async function scanArtifactRoots(
   const findings = [];
   for (const root of roots) {
     for (const file of await listFiles(root)) {
+      if (BINARY_EXTENSIONS.has(path.extname(file).toLowerCase())) continue;
       const content = await readFile(file, 'utf8');
       for (const signature of signatures) {
         if (content.includes(signature)) findings.push({ file, signature });
@@ -158,6 +175,7 @@ async function main() {
   );
   const repoRoot = path.resolve(packageRoot, '../..');
   const roots = process.argv.slice(2);
+  let positionalMode = false;
   let optionalRoots;
   let requiredMetafilePaths;
   let optionalMetafilePaths;
@@ -173,21 +191,24 @@ async function main() {
     zipPath = path.join(packageRoot, 'chrome-extension.zip');
   } else {
     console.warn(
-      'artifact-scan: positional roots provided; skipping esbuild metafile and zip scans',
+      'artifact-scan: positional roots provided; skipping required-file, esbuild metafile, and zip scans',
     );
+    positionalMode = true;
   }
   for (const root of roots) {
     await access(root).catch(() => {
       throw new Error(`Artifact directory does not exist: ${root}`);
     });
   }
-  for (const root of roots) {
-    for (const required of REQUIRED_ARTIFACT_FILES) {
-      await access(path.join(root, required)).catch(() => {
-        throw new Error(
-          `Required artifact file missing: ${path.join(root, required)}`,
-        );
-      });
+  if (!positionalMode) {
+    for (const root of roots) {
+      for (const required of REQUIRED_ARTIFACT_FILES) {
+        await access(path.join(root, required)).catch(() => {
+          throw new Error(
+            `Required artifact file missing: ${path.join(root, required)}`,
+          );
+        });
+      }
     }
   }
   for (const root of optionalRoots ?? []) {

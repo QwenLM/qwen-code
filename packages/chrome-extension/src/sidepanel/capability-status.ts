@@ -87,7 +87,7 @@ export function deriveCapabilityStatus(
       return {
         state: 'automation-configured',
         shellReady: true,
-        warning: null,
+        warning: 'Browser tools status is unknown until a chat session starts.',
       };
     }
 
@@ -146,5 +146,9 @@ export function deriveCapabilityStatus(
     }
     return { state: 'automation-connected', shellReady: true, warning: null };
   }
-  return { state: 'automation-configured', shellReady: true, warning: null };
+  return {
+    state: 'automation-configured',
+    shellReady: true,
+    warning: 'Browser tools status is unknown until a chat session starts.',
+  };
 }
