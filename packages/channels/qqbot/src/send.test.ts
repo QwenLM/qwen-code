@@ -2069,6 +2069,42 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
+  it('keeps msg_seq of an expired replyMsgId that is still session-anchored', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat entry for msg-A expired past the TTL, but a session is still
+    // streaming under msg-A: cleanup must evict the chat entry yet keep the
+    // msg_seq counter alive so the tail send doesn't reset the sequence.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: Date.now() });
+    replyMsgId.set('test-chat', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - ttl - 1000,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // The expired chat entry is gone, but the anchored msg_seq survives.
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
   it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));

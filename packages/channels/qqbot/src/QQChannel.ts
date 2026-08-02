@@ -1129,8 +1129,15 @@ export class QQChannel extends ChannelBase {
       // chain is safe: its .then()/.catch() identity guards compare the
       // current map entry against the captured state object, and the fresh
       // entry created below fails that guard, so the chain releases itself.
+      // The flags must be cleared here too: they belong to the old turn's
+      // in-flight chain, whose identity guards now fail against the fresh
+      // entry and would never delete them — stranding the session so the new
+      // turn's onResponseComplete/onPromptEnd both early-return and the
+      // buffer is never flushed (silent reply loss).
       if (state.timer) clearTimeout(state.timer);
       this.streamState.delete(sessionId);
+      this.flushingSessions.delete(sessionId);
+      this.pendingStreamDelete.delete(sessionId);
       state = undefined;
     }
     if (!state) {
