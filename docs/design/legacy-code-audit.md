@@ -49,7 +49,9 @@ reproduced and widened. The naive arm was much stronger this time (3
 confirmed Criticals, including a redirect-based SSRF bypass) — and the
 fan-out still covered all three while adding 19 more (22 total, zero
 false positives on both arms, ~7× recall margin, pre-declared success
-criterion was 3×). Two replication findings changed this document: the
+criterion was 3×; cost ratio ~24×, dominated by the cross-file tracer —
+see the budget rule below). Two replication findings changed this
+document: the
 cross-file tracer's event-coverage walk ("does every firing path fire?")
 produced two Criticals unique in the field — both adjacent-class siblings
 of a historical fix; and the security agent, briefed threat-model-first,
@@ -147,7 +149,12 @@ each one — including early-return, error, and abort paths in the
 _callers_. Round 2's two unique Criticals (a failure hook that never
 fires on API-error turn ends in headless mode, and on loop detection in
 ACP sessions) came from exactly this walk; both were adjacent-class
-siblings of a historical fix that had covered only one UI path.
+siblings of a historical fix that had covered only one UI path. **It
+also made 1c the single most expensive agent of either round (16M
+tokens, ~35% of the arm)** — repo-wide path enumeration scales with the
+module's fan-out, so the brief needs a budget rule: deep-read at most N
+call sites per event and register the rest by name, instead of reading
+every caller in full.
 
 **Dropped:** Agent 0 (no issue), 1b (no deletions — its entire evidence
 source is `-` lines), 7 (nothing was merged; build/test state is the
