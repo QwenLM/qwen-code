@@ -23,8 +23,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolErrorType } from './tool-error.js';
-import { StructuredToolError } from './priorReadEnforcement.js';
+import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -97,6 +96,9 @@ function createParentAbortRace(
       const reason = createToolCallAbortError();
       // Freeze the parent outcome before forwarding to the SDK, whose abort
       // rejection uses the same -32001 code as a genuine request timeout.
+      // Ordering-safe: resolve() queues its Promise.race reaction as a
+      // microtask before forwardAbort triggers the SDK rejection, so the
+      // parent outcome always wins the race.
       resolve({ [PARENT_ABORT_OUTCOME]: true, reason });
       forwardAbort?.(reason);
     };

@@ -147,7 +147,18 @@ import {
 import { safeSetStatus } from '../telemetry/tracer.js';
 import {
   TOOL_FAILURE_KIND_ATTRIBUTE,
+  TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
   TOOL_FAILURE_KIND_CANCELLED,
+  TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED,
+  TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
+  TOOL_FAILURE_KIND_PERMISSION_DENIED,
+  TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
+  TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+  TOOL_FAILURE_KIND_POST_HOOK_STOPPED,
+  TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+  TOOL_FAILURE_KIND_TIMEOUT,
+  TOOL_FAILURE_KIND_TOOL_ERROR,
+  TOOL_FAILURE_KIND_TOOL_EXCEPTION,
 } from '../telemetry/constants.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
@@ -260,20 +271,6 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
   return '';
 }
 
-const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
-const TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED = 'invocation_guard_denied';
-const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
-const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
-const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
-// Approval-flow failure kinds — distinct from `pre_hook_blocked` (which
-// only applies to actual PreToolUse hook denials in `_executeToolCallBody`)
-// so dashboards can attribute denies to their real cause (#4321 review).
-const TOOL_FAILURE_KIND_PERMISSION_DENIED = 'permission_denied';
-const TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED = 'permission_hook_denied';
-const TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED = 'plan_mode_blocked';
-const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED = 'non_interactive_denied';
-const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
-
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 const TOOL_SPAN_STATUS_INVOCATION_GUARD_DENIED =
   'Tool execution blocked by host policy';
@@ -292,9 +289,6 @@ const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
 const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
-// Timeout-specific observability constants — distinguish timeouts from
-// generic tool errors in OTel traces.
-const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';
 const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 
 /**
@@ -1170,17 +1164,18 @@ function withPostToolBatchStop(
   const calls = [...completedCalls];
   const lastCall = calls[calls.length - 1];
   const executionStatus = lastCall.response.executionStatus;
-  const response: ToolCallResponseInfo = createErrorResponse(
+  // A batch stop must not invent an outcome the tool never produced:
+  // when the replaced response had no executionStatus, omit it here too.
+  const { executionStatus: _es, ...baseResponse } = createErrorResponse(
     lastCall.request,
     new Error(stopReason),
     ToolErrorType.EXECUTION_DENIED,
     executionStatus ?? 'not_started',
   );
-  // Preserve a missing execution status from the replaced response: a batch
-  // stop must not invent an outcome the tool never produced.
-  if (executionStatus === undefined) {
-    delete response.executionStatus;
-  }
+  const response: ToolCallResponseInfo =
+    executionStatus !== undefined
+      ? { ...baseResponse, executionStatus }
+      : baseResponse;
   calls[calls.length - 1] = {
     status: 'error',
     request: lastCall.request,
@@ -1771,6 +1766,10 @@ export class CoreToolScheduler {
     // PostToolBatch can replace the response at the last position in request
     // order, which is not necessarily the call that settles last. Keep that
     // specific span open until the hook has produced the terminal result.
+    // Known window: if a batch never reaches completion for a non-abort
+    // reason (e.g. a sibling parked in awaiting_approval when the session
+    // tears down), this span stays open until process exit. Force-finalize
+    // on session dispose would close this gap.
     if (callId === this.postToolBatchSpanCallId && !force) return;
     const span = this.toolSpans.get(callId);
     if (!span) return;
@@ -4777,7 +4776,8 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        let cancelMessage = 'User cancelled tool execution.';
+        let cancelMessage =
+          'The tool had already completed; its output was discarded.';
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -4832,7 +4832,7 @@ export class CoreToolScheduler {
           'cancelled',
           createCancelledResponse(
             scheduledCall.request,
-            'User cancelled tool execution.',
+            'The tool had already completed; its output was discarded.',
             executionStatus,
             artifacts,
           ),
@@ -5565,7 +5565,8 @@ export class CoreToolScheduler {
 
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
-        let cancelMessage = 'User cancelled tool execution.';
+        let cancelMessage =
+          'The tool had already completed; its output was discarded.';
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5645,7 +5646,7 @@ export class CoreToolScheduler {
             'cancelled',
             createCancelledResponse(
               scheduledCall.request,
-              'User cancelled tool execution.',
+              'The tool had already completed; its output was discarded.',
               executionStatus,
               failureHookArtifacts,
             ),

@@ -16800,7 +16800,7 @@ describe('Session', () => {
       ]);
 
       expect(result.parts[0].functionResponse?.response).toEqual({
-        error: 'Tool execution was cancelled.',
+        error: 'The tool had already completed; its output was discarded.',
       });
       expect(endExecutionSpanSpy).toHaveBeenCalledWith(
         expect.anything(),
@@ -17527,7 +17527,7 @@ describe('Session', () => {
         );
 
         expect(result.parts[0].functionResponse?.response).toEqual({
-          error: 'Tool execution was cancelled.',
+          error: 'The tool had already completed; its output was discarded.',
         });
         expect(logToolCallSpy).toHaveBeenCalledWith(
           mockConfig,
@@ -17599,7 +17599,7 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalledOnce();
       expect(result.parts[0].functionResponse?.response).toEqual({
-        error: 'Tool execution was cancelled.',
+        error: 'The tool had already completed; its output was discarded.',
       });
       expect(logToolCallSpy).toHaveBeenCalledWith(
         mockConfig,
@@ -19427,7 +19427,9 @@ describe('Session', () => {
         expect(
           result.parts.map((part) => part.functionResponse?.response),
         ).toEqual([
-          { error: 'Tool execution was cancelled.' },
+          {
+            error: 'The tool had already completed; its output was discarded.',
+          },
           { error: 'Tool call was cancelled before execution.' },
         ]);
         await vi.waitFor(() => {

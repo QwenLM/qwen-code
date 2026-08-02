@@ -1150,6 +1150,41 @@ describe('loggers', () => {
       });
     });
 
+    it('normalizes a missing execution_status to unknown end-to-end', () => {
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({ recordUiTelemetryEvent: vi.fn() }),
+      } as unknown as Config;
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T00:00:00.000Z',
+        function_name: 'legacy_tool',
+        function_args: {},
+        duration_ms: 42,
+        status: 'success',
+        success: true,
+        prompt_id: 'prompt-legacy',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      expect(event).not.toHaveProperty('execution_status');
+
+      logToolCall(configWithRecording, event);
+
+      expect(mockMetrics.recordToolExecutionMetrics).toHaveBeenCalledWith(
+        configWithRecording,
+        {
+          execution_status: 'unknown',
+          tool_type: 'native',
+        },
+      );
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          execution_status: 'unknown',
+        }),
+      );
+    });
+
     it.each([
       { status: 'success' as const, expectedSuccess: true },
       { status: 'cancelled' as const, expectedSuccess: false },

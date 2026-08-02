@@ -116,3 +116,13 @@ and generic failure phases remain out of scope.
 Core and ACP must ship together. Dashboards should cut over by deployment time
 or `service.version`, monitor `unknown` separately, and never use the legacy
 `success` metric as the execution-failure SLI.
+
+## Known Maintenance Hazards
+
+The pre-execution cancellation invariant ("every `await` in the pre-execution
+path is followed by an abort check") is enforced by hand-placed checks at each
+call site in `CoreToolScheduler` and `Session.runTool` rather than by a
+structural mechanism. Adding a new `await` to either path without a following
+check silently reintroduces the stale-execution bug this design fixes. A
+future refactor should wrap the awaits in a guarded helper; until then,
+reviewers of those paths should verify the invariant manually.

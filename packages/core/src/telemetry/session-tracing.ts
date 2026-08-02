@@ -1163,6 +1163,8 @@ export function endToolExecutionSpan(
     const executionStatus = metadata?.executionStatus;
     const cancelled =
       metadata?.cancelled === true || executionStatus === 'cancelled';
+    // The not_started guard is unreachable by construction (the span only
+    // exists once execution is attempted); kept as defence-in-depth.
     if (metadata && !cancelled && executionStatus !== 'not_started') {
       const succeeded =
         executionStatus === undefined

@@ -161,6 +161,11 @@ type NormalizedToolCallEvent = ToolCallEvent & {
   execution_status: NonNullable<ToolCallEvent['execution_status']>;
 };
 
+/**
+ * Normalizes a tool call event for telemetry sinks. Error fields are
+ * deleted (not set to undefined) on success so downstream consumers
+ * see key-absent rather than key-present-with-undefined.
+ */
 export function normalizeToolCallEvent(
   event: ToolCallEvent,
 ): NormalizedToolCallEvent {

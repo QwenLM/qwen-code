@@ -140,3 +140,5 @@ export enum ToolErrorType {
   SEND_MESSAGE_NOT_FOUND = 'send_message_not_found',
   SEND_MESSAGE_NOT_RUNNING = 'send_message_not_running',
 }
+
+export { StructuredToolError } from './priorReadEnforcement.js';

@@ -448,6 +448,8 @@ const LOOP_DETECTED_SKIP_MESSAGE =
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
+const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
+  'The tool had already completed; its output was discarded.';
 
 function createDaemonToolLoopState(): DaemonToolLoopState {
   return {
@@ -8801,9 +8803,9 @@ export class Session implements SessionContext {
               callId,
             );
 
-            if (activeToolAbortSignal.aborted && !isExecutionTimeout) {
+            if (activeToolAbortSignal.aborted) {
               return earlyErrorResponse(
-                new Error(TOOL_EXECUTION_CANCELLED_MESSAGE),
+                new Error(TOOL_POST_EXECUTION_CANCELLED_MESSAGE),
                 toolName,
                 {
                   status: 'cancelled',
@@ -8910,8 +8912,8 @@ export class Session implements SessionContext {
             responseParts = convertToFunctionErrorResponse(
               toolName,
               callId,
-              TOOL_EXECUTION_CANCELLED_MESSAGE,
-              TOOL_EXECUTION_CANCELLED_MESSAGE,
+              TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+              TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
             );
           }
           terminalStatus = status;
@@ -8920,7 +8922,7 @@ export class Session implements SessionContext {
             status === 'error' && toolResult.error
               ? new Error(toolResult.error.message)
               : status === 'cancelled'
-                ? new Error(TOOL_EXECUTION_CANCELLED_MESSAGE)
+                ? new Error(TOOL_POST_EXECUTION_CANCELLED_MESSAGE)
                 : undefined;
           if (isTrustedTodoWriteTool && status === 'cancelled') {
             this.todoStopGuard.suspend();
