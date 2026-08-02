@@ -1399,9 +1399,15 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           if (current === state) {
             this.streamState.delete(sessionId);
-            if (state.msgId !== undefined) {
-              this.releaseSessionReplyAnchor(sessionId, state.msgId);
-            }
+          }
+          // Release the anchor regardless of whether a successor turn replaced
+          // the streamState entry: the expectedMsgId identity check (plus the
+          // internal cascade guards) keeps the successor's anchor untouched
+          // while still cascading THIS turn's msg_seq counter away — without
+          // it, a superseded turn's permanent failure orphans the counter
+          // forever, contradicting releaseSessionReplyAnchor's guarantee.
+          if (state.msgId !== undefined) {
+            this.releaseSessionReplyAnchor(sessionId, state.msgId);
           }
           if (this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
@@ -1576,6 +1582,16 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
   ): Promise<void> {
     const state = this.streamState.get(sessionId);
+    const currentTurn = this.turnCounter.get(sessionId) ?? 0;
+    if (state && state.turn !== currentTurn) {
+      // Stale entry owned by a previous turn's deferred flush chain — it
+      // will deliver its own residual and tear itself down. Send this turn's
+      // text through the base path so it is neither lost nor mixed with the
+      // old turn's anchor.
+      await super.onResponseComplete(chatId, fullText, sessionId);
+      this.releaseSessionReplyAnchor(sessionId);
+      return;
+    }
     if (state?.timer) {
       clearTimeout(state.timer);
       state.timer = null;
