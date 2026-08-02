@@ -23,6 +23,7 @@ import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
   buildLedger,
+  repositoryContextGate,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -97,6 +98,7 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -110,6 +112,9 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.repositoryContext === undefined
+        ? {}
+        : { repositoryContext: opts.repositoryContext }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -328,6 +333,7 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -454,6 +460,64 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.lowSignal).toBeNull();
     expect(verdictLine(r)).not.toContain('low signal');
+  });
+});
+
+describe('repository context proof boundary', () => {
+  it('derives unreviewed dimensions from the validated plan, not model input', () => {
+    const planPath = join(dir, 'repository-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          adapter: 'openjdk',
+          domains: ['hotspot'],
+          relatedPaths: [],
+          testSelections: [],
+          requiredConfigurations: ['linux-x64'],
+          specialists: ['openjdk-platform-impact'],
+          unverifiedDimensions: [
+            'cross-platform implementations were not verified on every affected target',
+          ],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      'cross-platform implementations were not verified on every affected target — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('returns no extra disclosure when the plan has no repository context', () => {
+    const planPath = join(dir, 'generic-plan.json');
+    writeFileSync(planPath, JSON.stringify({ files: [] }));
+    expect(repositoryContextGate(planPath)).toEqual([]);
+  });
+
+  it('discloses repository proof boundaries without permanently capping approval', () => {
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        adapter: 'openjdk',
+        domains: ['hotspot'],
+        relatedPaths: [],
+        testSelections: [],
+        requiredConfigurations: ['linux-x64'],
+        specialists: [],
+        unverifiedDimensions: [
+          'cross-platform implementations were not verified on every affected target',
+        ],
+      },
+    });
+
+    const result = composeReview({ planPath, env: ENV, modelId: MODEL });
+
+    expect(result.event).toBe('APPROVE');
+    expect(result.cappedBy).not.toContain('unreviewed-dimension');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain(
+      'cross-platform implementations were not verified on every affected target',
+    );
   });
 });
 

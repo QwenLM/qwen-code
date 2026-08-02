@@ -49,6 +49,7 @@ import {
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
+import { repositoryContextOf } from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
   requiredAgents,
@@ -100,6 +101,7 @@ interface PlanReport {
   ownerRepo?: unknown;
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -711,6 +713,42 @@ function invariantFileBlock(
   return parts;
 }
 
+function repositoryContextBlock(report: PlanReport): string[] {
+  const context = repositoryContextOf(report);
+  if (!context) return [];
+  const list = (values: string[]) =>
+    values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+  return [
+    '## OpenJDK repository context',
+    '',
+    `Domains: ${context.domains.join(', ') || '(none)'}`,
+    '',
+    'Related paths:',
+    ...list(context.relatedPaths),
+    '',
+    `Recommended tests: ${context.testSelections.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Unverified dimensions:',
+    ...list(context.unverifiedDimensions),
+  ];
+}
+
+function repositoryBuildBoundary(report: PlanReport): string[] {
+  const context = repositoryContextOf(report);
+  if (!context) return [];
+  return [
+    '## Repository-specific verification boundary',
+    '',
+    `Recommended tests: ${context.testSelections.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Do not treat the OpenJDK root Makefile as a generic `make build` project. ' +
+      'This context is advisory in version 1: report these selections and configurations ' +
+      'as unexecuted unless an already-configured OpenJDK build provides an explicit command.',
+  ];
+}
+
 /**
  * The launch prompt for any role that is not a territory agent.
  *
@@ -756,6 +794,15 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
+  if (brief.reviewsCode) {
+    const repositoryContext = repositoryContextBlock(report);
+    if (repositoryContext.length > 0) {
+      parts.push('', ...repositoryContext);
+    }
+  } else if (role === '7') {
+    const buildBoundary = repositoryBuildBoundary(report);
+    if (buildBoundary.length > 0) parts.push('', ...buildBoundary);
+  }
 
   // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
   // one, and the degradation used to be a sentence the orchestrator was told to add

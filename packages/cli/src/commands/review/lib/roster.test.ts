@@ -165,6 +165,28 @@ describe('requiredAgents — Step 3A', () => {
     // But there IS a tree, so the tracer and the build still run.
     expect(keys(local)).toEqual(expect.arrayContaining(['1c', '7']));
   });
+
+  it('requires the specialist recorded by validated repository context', () => {
+    const context = {
+      version: 1,
+      adapter: 'openjdk',
+      domains: ['hotspot', 'platform-native'],
+      relatedPaths: ['src/hotspot/share/runtime/os.hpp'],
+      testSelections: ['hotspot:hotspot_runtime'],
+      requiredConfigurations: ['linux-x64'],
+      specialists: ['openjdk-platform-impact'],
+      unverifiedDimensions: [
+        'cross-platform implementations were not verified on every affected target',
+      ],
+    };
+    expect(keys({ ...PR, repositoryContext: context })).toContain(
+      'openjdk-platform-impact',
+    );
+  });
+
+  it('keeps the generic roster when repository context is absent', () => {
+    expect(keys(PR)).not.toContain('openjdk-platform-impact');
+  });
 });
 
 describe('hasExecutableScript — the script-lint gate predicate', () => {

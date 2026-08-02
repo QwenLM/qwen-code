@@ -39,6 +39,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { repositoryContextOf } from './lib/repository-context.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -405,12 +406,18 @@ function composeReviewBody(
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
+  // Repository proof boundaries are also disclosures, not findings or permanent
+  // approval caps. The first schema has no validated evidence channel that could
+  // resolve one after a specialist inspects it, so capping here would make every
+  // affected review impossible to approve.
+  const repositoryContextNotes: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
+    repositoryContextNotes.push(...repositoryContextGate(input.planPath));
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -1029,6 +1036,15 @@ function composeReviewBody(
       ]
     : [];
 
+  const repositoryContextBlock: Bi[] = repositoryContextNotes.length
+    ? [
+        {
+          en: `Repository proof boundary (not a blocker): ${repositoryContextNotes.join('; ')}.`,
+          zh: `仓库验证边界（非阻断）：${repositoryContextNotes.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -1040,6 +1056,7 @@ function composeReviewBody(
       ...notReviewedParts,
       ...deferredBlock,
       ...testPlanBlock,
+      ...repositoryContextBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -1062,8 +1079,13 @@ function composeReviewBody(
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...deferredBlock,
           ...testPlanBlock,
+          ...repositoryContextBlock,
         ],
-        deferredBlock.length || testPlanBlock.length ? '\n\n' : ' ',
+        deferredBlock.length ||
+          testPlanBlock.length ||
+          repositoryContextBlock.length
+          ? '\n\n'
+          : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -1180,6 +1202,10 @@ function composeReviewBody(
   //     the reviewed tree does not bear out.
   clauses.push(...testPlanBlock);
 
+  // 6d. Repository proof boundaries (non-capping) — dimensions the context
+  //     planner recommends disclosing without claiming the code is defective.
+  clauses.push(...repositoryContextBlock);
+
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
   //    cap. Either way the body copy is the ONLY copy of an unanchorable
@@ -1291,6 +1317,21 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
   );
   return (JSON.parse(json) as { body?: string }).body ?? '';
 };
+
+export function repositoryContextGate(planPath: string): string[] {
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
+    const context = repositoryContextOf(plan);
+    return (context?.unverifiedDimensions ?? []).map(
+      (dimension) =>
+        `${dimension} — the repository context marks this proof boundary as unverified`,
+    );
+  } catch {
+    // Coverage reads and validates the same plan and supplies the fail-closed
+    // disclosure. Repeating it here would post the same broken-plan cause twice.
+    return [];
+  }
+}
 
 /**
  * Read the script-lint report the orchestrator wrote and turn it into verdict

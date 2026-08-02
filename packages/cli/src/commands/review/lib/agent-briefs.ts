@@ -52,6 +52,7 @@ export type RoleId =
   | 'invariant-a'
   | 'invariant-b'
   | 'invariant-c'
+  | 'openjdk-platform-impact'
   | 'verify'
   | 'reverse-audit';
 
@@ -526,6 +527,24 @@ This file is largely rewritten, and reviewing it as a diff is the wrong frame. T
 - **Early returns.** Does any early return skip a side effect a later path depends on — a cache populated, an id extracted and stored, a sequence number bumped? Pay particular attention to a blank/empty-input guard placed **before** a side effect rather than after it.
 
 Report a **Critical** for each violation, and give **both** locations that together make it a bug (\`<file>:<lineA>\` and \`<file>:<lineB>\`), not just one.`,
+  },
+
+  'openjdk-platform-impact': {
+    reviewsCode: true,
+    label: 'OpenJDK platform-impact specialist',
+    publicLabel: 'the OpenJDK platform-impact check',
+    publicLabelZh: 'OpenJDK 平台影响检查',
+    readsDiff: true,
+    brief: `You are the **OpenJDK platform-impact specialist**. The review plan carries a validated repository context with the domains, related paths, test selections, required configurations, and dimensions this run has not verified. Read that context and use it as the boundary of your investigation.
+
+Check only repository-specific integration risks:
+
+- For HotSpot changes, trace the contract across \`share\`, \`cpu/<arch>\`, \`os/<os>\`, and \`os_cpu/<os>_<arch>\`. Decide whether the changed contract genuinely requires a sibling implementation; do not demand mechanical parity between ports.
+- For module overlays, compare shared and platform-specific classes, \`module-info.java\`, and \`module-info.java.extra\` where the context names them.
+- For native sources, inspect the existing shared/platform basename counterparts and the Java declaration when the context names one. Do not infer a JNI mismatch from naming alone.
+- Check whether the recommended tests and configurations exercise the claimed platform behavior, but report a test gap only when you can name the specific behavior that escapes them.
+
+A platform or configuration that was not executed is an **unverified dimension, not a defect**. Report a finding only when the current code proves a concrete missing implementation, incompatible contract, or reachable wrong behavior. In every finding name the changed path, the affected sibling or consumer, and the execution configuration that reaches the failure.`,
   },
 
   verify: {

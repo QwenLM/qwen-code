@@ -227,6 +227,24 @@ gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
 
+At **medium and high effort**, when the review has a local tree, enrich the plan with repository-native context before building the roster:
+
+```bash
+# same-repo PR: use absolute paths because this command runs from the isolated worktree
+"${QWEN_CODE_CLI:-qwen}" review repo-context \
+  --plan <absolute path to the Step 1 plan in the main checkout> \
+  --worktree <absolute worktreePath> \
+  --out <absolute path to .qwen/tmp/qwen-review-<target>-repository-context.json in the main checkout>
+
+# local-diff or file-path review: use the current repository tree
+"${QWEN_CODE_CLI:-qwen}" review repo-context \
+  --plan <absolute path to the Step 1 plan> \
+  --worktree . \
+  --out <absolute path to .qwen/tmp/qwen-review-<target>-repository-context.json>
+```
+
+The command currently recognizes OpenJDK from `.jcheck/conf`. For same-repo PR plans it reads repository identity from the trusted `mergeBaseSha` recorded by `fetch-pr`, so the PR cannot opt out by editing that file; it still uses the isolated PR worktree for post-change sibling inspection. Local plans have no merge base and use the current tree for both. The command writes a diagnostic artifact and embeds the same validated object into the plan. That embedded field is what `agent-prompt --roster`, `check-coverage`, and `compose-review` trust; do not hand-edit it or pass a second context path downstream. If no supported repository is detected, the artifact is `null` and the plan retains the generic roster. Skip this command for cross-repo lightweight mode (there is no tree) and at low effort (there is no agent roster to enrich).
+
 **Choose the topology from `srcDiffLines`, not from `diffLines`.**
 
 - **`srcDiffLines` ≤ 500 and `diffLines` ≤ 3200** — use the dimension fan-out in Step 3A.

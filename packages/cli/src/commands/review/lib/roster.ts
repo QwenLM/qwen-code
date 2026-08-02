@@ -25,6 +25,7 @@
 // roster that gets shrunk.
 
 import type { RoleId } from './agent-briefs.js';
+import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
 
 /**
@@ -72,6 +73,7 @@ export interface RosterPlan {
    * recomputation then all read the same value and cannot disagree.
    */
   effort?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -271,6 +273,11 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('invariant-b', file);
       add('invariant-c', file);
     }
+  }
+
+  const repositoryContext = repositoryContextOf(plan);
+  for (const specialist of repositoryContext?.specialists ?? []) {
+    add(specialist);
   }
 
   return out;

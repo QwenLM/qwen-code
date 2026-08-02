@@ -1797,6 +1797,48 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('injects repository context into reviewers and a verification boundary into Agent 7', () => {
+    const contextPlan = {
+      ...PR_PLAN,
+      repositoryContext: {
+        version: 1,
+        adapter: 'openjdk',
+        domains: ['c2', 'compiler', 'hotspot'],
+        relatedPaths: [
+          'src/hotspot/share/opto/loopTransform.hpp',
+          'test/hotspot/jtreg/compiler/loopopts',
+        ],
+        testSelections: ['hotspot:hotspot_compiler'],
+        requiredConfigurations: ['fastdebug', 'server'],
+        specialists: ['openjdk-platform-impact'],
+        unverifiedDimensions: [
+          'CPU backend interactions were not verified on every target architecture',
+        ],
+      },
+    };
+
+    for (const role of ['1a', 'openjdk-platform-impact'] as const) {
+      const p = buildRoleBrief(contextPlan, role);
+      expect(p).toContain('OpenJDK repository context');
+      expect(p).toContain('c2, compiler, hotspot');
+      expect(p).toContain('src/hotspot/share/opto/loopTransform.hpp');
+      expect(p).toContain('hotspot:hotspot_compiler');
+      expect(p).toContain('fastdebug, server');
+      expect(p).toContain(
+        'CPU backend interactions were not verified on every target architecture',
+      );
+    }
+
+    const buildBrief = buildRoleBrief(contextPlan, '7');
+    expect(buildBrief).not.toContain('OpenJDK repository context');
+    expect(buildBrief).toContain('Repository-specific verification boundary');
+    expect(buildBrief).toContain('hotspot:hotspot_compiler');
+    expect(buildBrief).toContain('fastdebug, server');
+    expect(buildBrief).toContain(
+      'Do not treat the OpenJDK root Makefile as a generic `make build` project',
+    );
+  });
+
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
     // The all-role test above proves every brief gets the diff and the format; it
     // cannot see whether a *specific* lens reached its role. If prompt assembly
