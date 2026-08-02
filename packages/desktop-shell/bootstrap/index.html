@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>Qwen Code</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+        background: #070b12;
+        color: #f4f7fb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 18% 20%,
+            rgba(104, 82, 255, 0.28),
+            transparent 34rem
+          ),
+          radial-gradient(
+            circle at 86% 76%,
+            rgba(24, 197, 164, 0.14),
+            transparent 28rem
+          ),
+          linear-gradient(135deg, #080c14 0%, #0c111c 56%, #090d14 100%);
+      }
+      body::before {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        content: '';
+        opacity: 0.28;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.026) 1px, transparent 1px),
+          linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.026) 1px,
+            transparent 1px
+          );
+        background-size: 38px 38px;
+        mask-image: linear-gradient(to bottom, black, transparent 82%);
+      }
+      main {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        padding: 48px;
+      }
+      .shell {
+        width: min(720px, 100%);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 28px;
+        padding: 42px;
+        background: linear-gradient(
+          145deg,
+          rgba(21, 28, 43, 0.92),
+          rgba(10, 15, 24, 0.94)
+        );
+        box-shadow:
+          0 40px 120px rgba(0, 0, 0, 0.5),
+          inset 0 1px rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(28px);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 58px;
+        height: 58px;
+        border-radius: 18px;
+        background: linear-gradient(145deg, #7f6dff, #4d34df);
+        box-shadow: 0 14px 34px rgba(88, 63, 226, 0.38);
+        font:
+          700 26px/1 ui-monospace,
+          monospace;
+      }
+      h1 {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: -0.035em;
+      }
+      .eyebrow {
+        margin: 3px 0 0;
+        color: #8d98aa;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      .status {
+        display: grid;
+        grid-template-columns: 22px 1fr;
+        gap: 14px;
+        margin-top: 40px;
+        padding: 22px 24px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: rgba(4, 8, 14, 0.48);
+      }
+      .pulse {
+        width: 12px;
+        height: 12px;
+        margin-top: 5px;
+        border-radius: 50%;
+        background: #8f7cff;
+        box-shadow: 0 0 0 0 rgba(143, 124, 255, 0.65);
+        animation: pulse 1.7s infinite;
+      }
+      .pulse.error {
+        background: #ff796b;
+        animation: none;
+        box-shadow: 0 0 22px rgba(255, 121, 107, 0.4);
+      }
+      .pulse.idle {
+        background: #54d5bc;
+        animation: none;
+      }
+      @keyframes pulse {
+        70% {
+          box-shadow: 0 0 0 12px rgba(143, 124, 255, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(143, 124, 255, 0);
+        }
+      }
+      h2 {
+        margin: 0;
+        font-size: 17px;
+      }
+      #detail {
+        margin: 7px 0 0;
+        color: #9ba6b7;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+      }
+      .workspace {
+        margin-top: 18px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        color: #b9c2d0;
+        background: rgba(255, 255, 255, 0.045);
+        font:
+          12px/1.5 ui-monospace,
+          'SFMono-Regular',
+          Consolas,
+          monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 26px;
+      }
+      button {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        padding: 11px 16px;
+        color: #e9edf5;
+        background: rgba(255, 255, 255, 0.055);
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1;
+        cursor: pointer;
+        transition:
+          transform 0.16s ease,
+          border-color 0.16s ease,
+          background 0.16s ease;
+      }
+      button:hover {
+        transform: translateY(-1px);
+        border-color: rgba(255, 255, 255, 0.25);
+        background: rgba(255, 255, 255, 0.09);
+      }
+      button.primary {
+        border-color: transparent;
+        background: #705cff;
+        box-shadow: 0 9px 24px rgba(80, 58, 220, 0.28);
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.55;
+        transform: none;
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        margin-top: 32px;
+        color: #697587;
+        font-size: 12px;
+      }
+      #error {
+        display: none;
+        margin-top: 16px;
+        color: #ff9c91;
+        font:
+          12px/1.55 ui-monospace,
+          monospace;
+        white-space: pre-wrap;
+      }
+      @media (max-width: 640px) {
+        main {
+          padding: 22px;
+        }
+        .shell {
+          padding: 28px;
+        }
+        footer {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="shell" aria-live="polite">
+        <div class="brand">
+          <div class="mark">Q</div>
+          <div>
+            <h1>Qwen Code</h1>
+            <p class="eyebrow">Desktop workspace</p>
+          </div>
+        </div>
+        <div class="status">
+          <div id="pulse" class="pulse idle"></div>
+          <div>
+            <h2 id="title">Choose where to work</h2>
+            <p id="detail">
+              Qwen Code runs locally and keeps the existing Web Shell as the
+              only interface.
+            </p>
+            <div id="workspace" class="workspace" hidden></div>
+            <pre id="error"></pre>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="choose" class="primary">Choose workspace</button>
+          <button id="retry" hidden>Retry</button>
+          <button id="logs">Open logs</button>
+          <button id="update" hidden>Install update</button>
+        </div>
+        <footer>
+          <span id="version">Desktop</span
+          ><span>Local daemon · authenticated loopback</span>
+        </footer>
+      </section>
+    </main>
+    <script src="./bootstrap.js"></script>
+  </body>
+</html>

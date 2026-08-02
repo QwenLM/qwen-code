@@ -30,6 +30,7 @@ export type ChannelEditorValidationCode =
   | 'required'
   | 'duplicate'
   | 'invalid'
+  | 'invalidOption'
   | 'number'
   | 'policy';
 
@@ -37,6 +38,16 @@ export type ChannelEditorValidationErrors = Record<
   string,
   ChannelEditorValidationCode
 >;
+
+export function hasDescriptorSenderPolicy(
+  descriptor: DaemonChannelTypeDescriptor,
+): boolean {
+  return descriptor.fields.some((f) => f.key === 'senderPolicy');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function initialFieldValue(
   field: DaemonChannelConfigFieldDescriptor,
@@ -48,6 +59,19 @@ function initialFieldValue(
   }
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';
+  }
+  if (field.kind === 'string-list') {
+    return Array.isArray(value) ? value.join(', ') : '';
+  }
+  if (field.kind === 'record') {
+    if (isRecord(value)) {
+      return JSON.stringify(value);
+    }
+    return '';
+  }
+  if (field.kind === 'enum') {
+    if (typeof value === 'string' && value) return value;
+    return instance ? '' : (field.default ?? field.options?.[0]?.value ?? '');
   }
   return typeof value === 'string' ? value : '';
 }
@@ -67,13 +91,15 @@ export function createChannelEditorDraft(
     }
     values[field.key] = initialFieldValue(field, instance);
   }
+  const hasDescriptorPolicy = hasDescriptorSenderPolicy(descriptor);
   const configuredPolicy = instance?.config['senderPolicy'];
   return {
     name: instance?.name ?? '',
     values,
     secrets,
-    senderPolicy:
-      configuredPolicy === 'pairing' || configuredPolicy === 'open'
+    senderPolicy: hasDescriptorPolicy
+      ? ''
+      : configuredPolicy === 'pairing' || configuredPolicy === 'open'
         ? configuredPolicy
         : instance
           ? ''
@@ -92,6 +118,18 @@ function isMissingField(
     return !secret?.value?.trim();
   }
   const value = draft.values[field.key];
+  if (field.kind === 'record') {
+    if (typeof value !== 'string' || !value.trim()) return true;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!isRecord(parsed)) return true;
+      return Object.values(parsed).every(
+        (v) => typeof v !== 'string' || !v.trim(),
+      );
+    } catch {
+      return true;
+    }
+  }
   return typeof value === 'string' ? value.trim().length === 0 : false;
 }
 
@@ -122,9 +160,22 @@ export function validateChannelEditorDraft(
       !Number.isFinite(Number(draft.values[field.key]))
     ) {
       errors[field.key] = 'number';
+    } else if (field.kind === 'string-list' && field.options) {
+      const rawValue = draft.values[field.key];
+      if (typeof rawValue === 'string') {
+        const allowed = new Set(field.options.map((option) => option.value));
+        const invalid = rawValue
+          .split(',')
+          .map((token) => token.trim().toLowerCase())
+          .filter((token) => token.length > 0)
+          .some((token) => !allowed.has(token));
+        if (invalid) {
+          errors[field.key] = 'invalidOption';
+        }
+      }
     }
   }
-  if (!draft.senderPolicy) {
+  if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
     errors['senderPolicy'] = 'policy';
   }
   return errors;
@@ -144,7 +195,36 @@ function assignField(
     delete config[field.key];
     return;
   }
-  config[field.key] = field.kind === 'number' ? Number(value) : value;
+  if (field.kind === 'number') {
+    config[field.key] = Number(value);
+  } else if (field.kind === 'string-list') {
+    config[field.key] = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } else if (field.kind === 'record') {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!isRecord(parsed)) {
+        delete config[field.key];
+        return;
+      }
+      const filtered = Object.fromEntries(
+        Object.entries(parsed).filter(
+          ([, v]) => typeof v === 'string' && v.trim(),
+        ),
+      );
+      if (Object.keys(filtered).length > 0) {
+        config[field.key] = filtered;
+      } else {
+        delete config[field.key];
+      }
+    } catch {
+      delete config[field.key];
+    }
+  } else {
+    config[field.key] = value;
+  }
 }
 
 export function buildChannelUpsertRequest(
@@ -169,6 +249,8 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  config['senderPolicy'] = draft.senderPolicy;
+  if (!hasDescriptorSenderPolicy(descriptor)) {
+    config['senderPolicy'] = draft.senderPolicy;
+  }
   return { expectedRevision, config, secrets };
 }
