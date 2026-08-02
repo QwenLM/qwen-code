@@ -400,11 +400,11 @@ const ListBody: React.FC<{
         {visible.map((entry, visibleIdx) => {
           const idx = windowStart + visibleIdx;
           const isSelected = idx === selectedIndex;
-          const terminal = statusPresentation(entry.status);
+          const presentation = statusPresentation(entry.status);
           const labelColor = isSelected
             ? theme.text.accent
-            : terminal
-              ? terminal.labelColor
+            : presentation
+              ? presentation.labelColor
               : theme.text.primary;
           const treePrefix =
             entry.kind === 'agent'
@@ -520,7 +520,7 @@ const DreamDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = t('Dream');
-  const terminal = statusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.sessionCount !== undefined) {
     dimSubtitleParts.push(formatSessionCount(entry.sessionCount));
@@ -550,9 +550,9 @@ const DreamDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -693,7 +693,7 @@ const AgentDetailBody: React.FC<{
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
-  const terminal = statusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
@@ -814,9 +814,9 @@ const AgentDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -998,7 +998,7 @@ const ShellDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Shell')} \u203A ${entry.command}`;
 
-  const terminal = statusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -1023,9 +1023,9 @@ const ShellDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -1079,7 +1079,7 @@ const MonitorDetailBody: React.FC<{
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Monitor')} › ${entry.description}`;
 
-  const terminal = statusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
     dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
@@ -1115,9 +1115,9 @@ const MonitorDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -1170,7 +1170,7 @@ const WorkflowDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
-  const terminal = statusPresentation(entry.status);
+  const presentation = statusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.agentsDispatched > 0) {
     dimSubtitleParts.push(
@@ -1221,9 +1221,9 @@ const WorkflowDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+        {presentation && (
+          <Text color={presentation.color}>
+            {`${presentation.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>

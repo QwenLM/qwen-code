@@ -122,6 +122,26 @@ describe('WorkflowRunRegistry', () => {
     cleanup();
   });
 
+  it('parks an approval while the entry is pausing', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_pausing_approval', { isBackgrounded: true }));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const respond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_pausing_approval', emitter);
+
+    r.onDispatchStateChange('wf_pausing_approval', 'pausing');
+    expect(r.get('wf_pausing_approval')!.status).toBe('pausing');
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond }),
+    );
+
+    const approvals = r.get('wf_pausing_approval')!.pendingApprovals;
+    expect(approvals).toHaveLength(1);
+    expect(respond).not.toHaveBeenCalled();
+  });
   it('rejects pending approvals exactly once when a run is cancelled', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_cancel_approval'));
@@ -802,6 +822,19 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.status).toBe('cancelled');
   });
 
+  it('caps agentsCompleted at agentsDispatched on double completion', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_overcount', { isBackgrounded: true }));
+
+    r.onAgentDispatched(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    expect(entry.agentsCompleted).toBe(1);
+
+    r.cancel(entry.runId, 2_000);
+    r.onAgentCompleted(entry.runId);
+    expect(entry.agentsCompleted).toBe(1);
+  });
   it('does not pause a foreground workflow', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_foreground'));

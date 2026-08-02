@@ -132,7 +132,7 @@ describe('workflowsCommand', () => {
       result.content.indexOf('Recent'),
     );
     expect(result.content).toContain('Background tasks');
-    expect(result.content).toContain('p');
+    expect(result.content).toContain('Background tasks + p');
     expect(result.content).toContain('cooperative');
   });
 

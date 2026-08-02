@@ -63,7 +63,7 @@ describe('WorkflowDispatchScheduler', () => {
     void gatedResult.then(() => {
       gateSettled = true;
     });
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(scheduler.snapshot()).toEqual({
       state: 'paused',
