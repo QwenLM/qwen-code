@@ -964,6 +964,35 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
 
 **Bilingual comments when the author writes Chinese.** If the Step 1 fetch report says `prDescriptionHasHan: true` — or, when no fetch report exists (a `plan-diff` or improvised pipeline), the PR description itself is written in Chinese — write every inline comment bilingually: the English finding first — marker, description, failure scenario, ` ```suggestion ` block — then the complete Chinese translation collapsed in a `<details><summary>中文说明</summary>…</details>` block, before the model footer. The severity marker and any ` ```suggestion ` block stay in the English half only (the marker is what tooling filters on; a duplicated suggestion block would render twice). The review `body` needs nothing from you: `submit` composes it from `state`, and its bilingual rendering reads the same plan flag on its own.
 
+### Evidence images (`publish-assets`) — only for an authorised, posting run
+
+**When a finding's evidence is an image** — a TUI screenshot, a rendered-output comparison, a browser capture produced during verification — a comment that embeds it is worth more than one that describes it. GitHub's API cannot attach images to review comments (the web UI's drag-and-drop upload has no API equivalent), so image evidence is hosted in a **user-designated assets repository** and referenced by URL. The designation is the `QWEN_REVIEW_ASSETS_REPO` environment variable (`owner/repo` the user can push to — the repo under review for maintainers, a fork or scratch repo otherwise). It is deliberately a **different** variable from `QWEN_REVIEW_SCRATCH_REPO`: the scratch repo's contract forbids PR-derived content, and an evidence screenshot is exactly that.
+
+Findings carry their evidence as local paths in the artifact's `assetFiles` field (Step 6's `qwen review findings` accepts it per finding). Publish them in one call, which weaves the resulting URLs back into the artifact as `assets`:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review publish-assets --pr <n> \
+  --findings .qwen/tmp/qwen-review-{target}-findings.json \
+  --findings-out .qwen/tmp/qwen-review-{target}-findings.json \
+  --out .qwen/tmp/qwen-review-{target}-assets-manifest.json
+# GitHub Enterprise: add --host <host>, same as the other subcommands.
+# URL-target reviews: also pass --reviewed-repo <owner>/<repo> (the repo the PR
+# lives in) — it strengthens the authorisation binding from PR-number-only to
+# the full target the user named.
+```
+
+Then reference each finding's `assets` URLs in its inline comment body as `![evidence](<url>)`, after the failure scenario and before the model footer (in a bilingual comment, the image goes in the English half only — one embed, not two).
+
+**What the command enforces, so you do not have to remember it:**
+
+- **No designation, no publish** — unset or malformed `QWEN_REVIEW_ASSETS_REPO` is exit 3 and `{"published": false}`, not a fallback to some repo it picked. A refusal is a complete outcome: the findings keep their local `assetFiles` paths, which the terminal report and the saved report can still name.
+- **Unauthorised run, no publish** — it reads the same verbatim args record `submit` reads, through the same shared gate (`lib/authorization.ts`), and refuses unless this run was authorised to post the review itself (an effective `--comment` naming this PR, or `--user-authorized` under Step 7's rules). A terminal-only review must not push the PR's behaviour to a public branch. Since an effective `--comment` forces high effort, low and medium runs can never publish — no separate rule needed.
+- **Images only, capped** — an extension allowlist (png/jpg/jpeg/gif/webp — SVG is a script container and is refused), per-file and per-batch size caps, and all-or-nothing validation: one refused file refuses the batch before anything is pushed.
+- **Immutable references** — files land on `pr-assets/<pr>-review` of the assets repo (the manual `pr-assets/<PR>-verify` convention, suffixed so the two flows never collide), and every URL is pinned to the **commit**, not the branch, so a posted comment's evidence cannot be changed from under it. Content-hashed remote names make a re-run idempotent rather than accumulative.
+- **Auditable** — the manifest names every file pushed and the commit they landed on, next to the other review artifacts, where Step 9's sweep and a curious human can find it.
+
+**What you must still judge: the image's content.** The command can check extensions and sizes; it cannot see that a terminal screenshot has an env dump in the scrollback. Publish only evidence the review itself produced — a capture of a rendering the verification ran, a before/after the A/B produced — and never a capture of the user's own terminal or editor. When in doubt, keep the finding's evidence as prose and local paths.
+
 **Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. It carries three things and **no verdict** — `submit` computes the event and body itself, from the `state` you hand it and the comments you attach, and **refuses a payload that carries `event` or `body`** (a run that skipped the computation and typed its own Approve is exactly what that refusal stops). Every high-confidence Critical or Suggestion finding that maps to a diff line is an entry in `comments`:
 
 ````jsonc
