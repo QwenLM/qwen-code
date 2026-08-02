@@ -1020,6 +1020,7 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['authCommand', 'auth'],
+      ['auditCommand', 'audit'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
