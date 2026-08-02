@@ -48,9 +48,14 @@ function testPackagedSmokeWindowsLogPath() {
   );
   assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
   assert.match(smoke, /const previousLog = fs\.readFileSync\(logPath/);
+  assert.ok(
+    smoke.indexOf('const previousLog = fs.readFileSync(logPath') <
+      smoke.indexOf('const child = spawn(executable'),
+    'previousLog must be captured before the child is spawned',
+  );
   assert.match(
     smoke,
-    /contents\.startsWith\(previousLog\)\s*\?\s*contents\.slice\(previousLog\.length\)/,
+    /contents\.startsWith\(previousLog\)\s*\?\s*contents\.slice\(previousLog\.length\)\s*:\s*contents/,
   );
 }
 
