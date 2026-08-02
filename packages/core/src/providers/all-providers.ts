@@ -47,6 +47,9 @@ export {
 // ---------------------------------------------------------------------------
 
 /** All known providers, in display order. */
+// Adding a provider that reads credentials from a new env key? Also add that
+// key to the no-AK gate's cleared-env list in .github/workflows/ci.yml and to
+// scripts/tests/no-ak-integration-ci.test.js, or the gate can leak runner creds.
 export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   codingPlanProvider,
   tokenPlanProvider,

@@ -3207,7 +3207,7 @@ describe('GeminiChat', async () => {
       ).toBe(200);
     });
 
-    it('forwards the pending user message to the compression cheap-gate', async () => {
+    it('forwards the pending user message and request config to compression', async () => {
       // The cheap-gate inside ChatCompressionService.compress uses
       // estimatePromptTokens(history, pendingUserMessage, lastPromptTokenCount)
       // so the very first send after inherited history (where
@@ -3235,9 +3235,16 @@ describe('GeminiChat', async () => {
       );
 
       const userMessageText = 'next user prompt';
+      const requestTools = [
+        {
+          functionDeclarations: [
+            { name: 'subagent_tool', description: 'Subagent-only tool' },
+          ],
+        },
+      ];
       const stream = await chat.sendMessageStream(
         'test-model',
-        { message: userMessageText },
+        { message: userMessageText, config: { tools: requestTools } },
         'prompt-id-first-turn',
       );
       // The first event in the stream should be COMPRESSED because the
@@ -3260,6 +3267,9 @@ describe('GeminiChat', async () => {
           (part) => part.text === userMessageText,
         ),
       ).toBe(true);
+      expect(compressSpy.mock.calls[0][1].requestGenerationConfig?.tools).toBe(
+        requestTools,
+      );
     });
 
     it('triggers compaction end-to-end through the real ChatCompressionService when lastPromptTokenCount === 0 and inherited history is large (R3.4)', async () => {
