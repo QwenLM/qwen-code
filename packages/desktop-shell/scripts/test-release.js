@@ -255,6 +255,30 @@ function testElectronBridgeManifest(directory) {
   );
   assert.notEqual(failure.status, 0);
   assert.match(failure.stderr, /Missing Electron bridge artifact/);
+
+  const invalidVersion = spawnSync(
+    process.execPath,
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--version',
+      '0.1',
+      '--output',
+      output,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(invalidVersion.status, 0);
+  assert.match(invalidVersion.stderr, /Invalid --version/);
+
+  const missingOutput = spawnSync(
+    process.execPath,
+    [electronBridgeScript, '--assets', assets, '--version', '0.1.0'],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(missingOutput.status, 0);
+  assert.match(missingOutput.stderr, /Missing --output/);
 }
 
 function testVersionSynchronization(directory) {
