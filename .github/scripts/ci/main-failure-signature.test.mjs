@@ -787,6 +787,8 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(recurrence.body.includes(`<!-- ${historicalMarker} -->`));
   assert.ok(!recurrence.body.includes('not-hex-input'));
   assert.ok(!recurrence.body.includes('0123456789abcdef'));
+  assert.ok(recurrence.body.includes('[run 301]'));
+  assert.ok(recurrence.body.includes('[run 302]'));
 });
 
 test('runCli plan --existing merges recorded recurrences from the file', () => {

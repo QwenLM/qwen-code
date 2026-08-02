@@ -670,9 +670,7 @@ jobs:
     outputs:
       issue: '${{ steps.decision.outputs.go_issue }}'
       targeted_e2e_required: '${{ steps.targeted-e2e.outputs.required }}'
-      comment_id: '${{ steps.claim-comment.outputs.comment_id }}'
       claim_owned: '${{ steps.claim.outputs.claim_owned }}'
-      claimed: '${{ steps.claim.outputs.claimed }}'
       claim_oid: '${{ steps.claim.outputs.claim_oid }}'
       approved_prose_sha256: '${{ steps.claim.outputs.approved_prose_sha256 }}'
       base_oid: '${{ steps.trusted-base.outputs.oid }}'
@@ -1758,8 +1756,6 @@ jobs:
       REPO: '${{ github.repository }}'
       ISSUE: '${{ needs.issue-autofix.outputs.issue }}'
       BRANCH: 'autofix/issue-${{ needs.issue-autofix.outputs.issue }}'
-      COMMENT_ID: '${{ needs.issue-autofix.outputs.comment_id }}'
-      CLAIMED: '${{ needs.issue-autofix.outputs.claimed }}'
       CLAIM_OID: '${{ needs.issue-autofix.outputs.claim_oid }}'
       APPROVED_PROSE_SHA256: '${{ needs.issue-autofix.outputs.approved_prose_sha256 }}'
       E2E_REQUIRED: '${{ needs.issue-autofix.outputs.targeted_e2e_required }}'

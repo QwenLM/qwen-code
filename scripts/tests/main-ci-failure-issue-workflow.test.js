@@ -186,14 +186,9 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('--run-attempt "${WORKFLOW_RUN_ATTEMPT}"');
     expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
-    expect(workflow).toContain('--state all');
-    expect(workflow).toContain('--json number,state');
-    expect(workflow).toContain(
-      '(map(select(.state == "OPEN"))[0] // map(select(.state == "CLOSED"))[0]).number // ""',
-    );
-    expect(workflow).not.toContain(
-      '(map(select(.state == "CLOSED"))[0] // .[0]).number // ""',
-    );
+    expect(workflow).toContain('--state open');
+    expect(workflow).toContain('--json number');
+    expect(workflow).toContain('.[0].number // ""');
     expect(workflow).toContain('--author "${AUTOFIX_BOT}"');
     expect(workflow).toContain(
       'search_markers=$(jq -c \'.searchMarkers\' "${plan}")',

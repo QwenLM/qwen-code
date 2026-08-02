@@ -2266,6 +2266,7 @@ describe('qwen-autofix workflow', () => {
     expect(issueAutofixPublishJob).not.toContain('npm run');
     expect(issueAutofixPublishJob).not.toContain('vitest');
     expect(issueAutofixPublishJob).not.toContain('run-agent.mjs');
+    expect(publishPrStep.indexOf('git rev-parse HEAD')).toBeGreaterThan(-1);
     expect(publishPrStep.indexOf('git rev-parse HEAD')).toBeLessThan(
       publishPrStep.indexOf('--force-with-lease="refs/heads/${BRANCH}:"'),
     );
@@ -2583,6 +2584,9 @@ printf '%s\\n' "\${status}"
       'assign someone else or add the \\`autofix/skip\\` label',
     );
     expect(claimCommentStep).not.toContain('comment or assign someone');
+    expect(
+      claimIssueStep.indexOf('autofix-approved-prose-sha256'),
+    ).toBeGreaterThan(-1);
     expect(
       claimIssueStep.indexOf('autofix-approved-prose-sha256'),
     ).toBeLessThan(
@@ -5528,6 +5532,7 @@ printf '%s\\n' "\${status}"
     const claimOidOutputIndex = claimIssueStep.indexOf(
       'echo "claim_oid=${claim_oid}" >> "${GITHUB_OUTPUT}"',
     );
+    expect(claimOidOutputIndex).toBeGreaterThan(-1);
     expect(claimOwnedOutputIndex).toBeGreaterThan(
       claimIssueStep.indexOf('"${claim_oid}:${claim_ref}"'),
     );
@@ -5577,9 +5582,6 @@ printf '%s\\n' "\${status}"
       "${{ steps.claim.outputs.claimed == 'true' }}",
     );
     expect(claimCommentStep).toContain('gh issue comment "${ISSUE}"');
-    expect(workflow).toContain(
-      "comment_id: '${{ steps.claim-comment.outputs.comment_id }}'",
-    );
   });
 
   it('atomically owns claim refs and rejects stale ABA cleanup', () => {

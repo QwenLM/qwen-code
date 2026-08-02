@@ -327,17 +327,17 @@ function splitOccurrenceBlock(body) {
   return { head, lines, tail: rest.slice(cursor).join('\n').trim() };
 }
 
-/**
- * A run that failed before any test result was reported — an install or build
- * break — has nothing to dedupe on, so it keeps the original per-commit marker
- * and title.
- */
 function autofixDisposition(analysis) {
   return isAutofixEligible(analysis)
     ? 'This issue is eligible for Autofix to create a verified repair PR.'
     : 'This failure is not eligible for Autofix and requires human investigation.';
 }
 
+/**
+ * A run that failed before any test result was reported — an install or build
+ * break — has nothing to dedupe on, so it keeps the original per-commit marker
+ * and title.
+ */
 function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
@@ -471,7 +471,7 @@ export function renderIssueBody({
 }
 
 function publicIssueAnalysis(analysis) {
-  if (!isAutofixEligible(analysis)) return analysis;
+  if (!isAutofixEligible(analysis) || !analysis.tests.length) return analysis;
   const tests = analysis.tests.map((test) => ({
     ...test,
     id: `case ${test.key}`,
@@ -485,15 +485,27 @@ function publicIssueAnalysis(analysis) {
 }
 
 function publicMachineMarkers(body) {
-  const pattern = new RegExp(
+  const text = String(body ?? '');
+  const testMarkerPattern = new RegExp(
     `<!-- ${TEST_MARKER_PREFIX}([0-9a-f]{12}) -->`,
     'g',
   );
-  return [
+  const markers = [
     ...new Set(
-      [...String(body ?? '').matchAll(pattern)].map((match) => match[0]),
+      [...text.matchAll(testMarkerPattern)].map((match) => match[0]),
     ),
-  ].join('\n');
+  ];
+  const signatureLine = text
+    .split('\n')
+    .find((line) => line.startsWith(`<!-- ${SIGNATURE_MARKER_PREFIX}`));
+  const { lines } = splitOccurrenceBlock(text);
+  const parts = [];
+  if (signatureLine) parts.push(signatureLine);
+  parts.push(...markers);
+  if (lines.length) {
+    parts.push('', OCCURRENCE_MARKER, ...lines);
+  }
+  return parts.join('\n');
 }
 
 function parseArgs(argv) {

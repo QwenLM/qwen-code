@@ -51,11 +51,14 @@ jobs:
           mkdir -p "${log_dir}"
 
           jobs_json="${RUNNER_TEMP}/failed-jobs.json"
-          gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${WORKFLOW_RUN_ATTEMPT}/jobs?per_page=100" \
+          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${WORKFLOW_RUN_ATTEMPT}/jobs?per_page=100" \
             --paginate \
             --slurp \
             | jq '[.[].jobs[] | select(.conclusion == "failure") | {id, name}]' \
-              > "${jobs_json}"
+            > "${jobs_json}"; then
+            echo "::warning::Could not list failed jobs; falling back to per-commit issue" >&2
+            echo '[]' > "${jobs_json}"
+          fi
           echo "Failed jobs: $(jq 'length' "${jobs_json}")"
 
           manifest="${RUNNER_TEMP}/failed-job-manifest.json"
@@ -63,7 +66,7 @@ jobs:
             job_id="$(jq -r '.id' <<< "${job}")"
             log_path="${log_dir}/${job_id}.log"
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > "${log_path}"; then
-              echo "::warning::Could not download the log of job ${job_id}"
+              echo "::warning::Could not download the log of job ${job_id}" >&2
               rm -f "${log_path}"
               log_path=''
             fi
@@ -119,11 +122,11 @@ jobs:
             existing_issue="$(
               gh issue list \
                 --repo "${REPO}" \
-                --state all \
+                --state open \
                 --author "${AUTOFIX_BOT}" \
                 --search "${marker} in:body" \
-                --json number,state \
-                --jq '(map(select(.state == "OPEN"))[0] // map(select(.state == "CLOSED"))[0]).number // ""'
+                --json number \
+                --jq '.[0].number // ""'
             )"
             if [[ -n "${existing_issue}" ]]; then
               echo "Issue #${existing_issue} already tracks this failure (${marker})."
@@ -206,12 +209,12 @@ jobs:
               concurrent_issue="$(
                 gh issue list \
                   --repo "${REPO}" \
-                  --state all \
+                  --state open \
                   --author "${AUTOFIX_BOT}" \
                   --search "${marker} in:body" \
-                  --json number,state \
-                  --jq '(map(select(.state == "OPEN"))[0] // map(select(.state == "CLOSED"))[0]).number // ""'
-              )"
+                  --json number \
+                  --jq '.[0].number // ""'
+              )" || concurrent_issue=''
               if [[ -n "${concurrent_issue}" ]]; then
                 echo "Issue #${concurrent_issue} was created by a concurrent run; reusing it without overwriting its body."
                 EXISTING_ISSUE="${concurrent_issue}"

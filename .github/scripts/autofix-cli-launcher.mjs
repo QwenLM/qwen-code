@@ -2,7 +2,7 @@ const candidateCli = process.env['AUTOFIX_CANDIDATE_CLI'];
 const uid = Number(process.env['AUTOFIX_VERIFY_UID']);
 const gid = Number(process.env['AUTOFIX_VERIFY_GID']);
 
-if (!candidateCli || !Number.isInteger(uid) || !Number.isInteger(gid)) {
+if (!candidateCli || !Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid) || gid <= 0) {
   throw new Error('Missing isolated candidate CLI configuration');
 }
 
