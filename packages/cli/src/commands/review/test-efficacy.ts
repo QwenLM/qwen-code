@@ -76,6 +76,27 @@ import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
+/**
+ * WHY a probe was `inconclusive`, as the classifier knew it at the time.
+ *
+ * Three different things arrive at the same verdict and they are not
+ * interchangeable: `no-output` is the runner failing to produce parseable JSON,
+ * where nothing at all is known about collection; `no-tests` is a run that
+ * produced results without this file, the shape a compile or import error takes;
+ * `all-skipped` is a file that collected tests and executed none. Anything
+ * downstream that explains an `inconclusive` has to pick between them, and the
+ * prose `detail` is written for a human, not for that decision.
+ */
+export type ProbeReason = 'no-output' | 'no-tests' | 'all-skipped';
+
+export interface ProbeResult {
+  file: string;
+  verdict: ProbeVerdict;
+  detail: string;
+  /** Set only when `verdict` is `inconclusive`. */
+  reason?: ProbeReason;
+}
+
 export interface FileEntry {
   path: string;
   kind: string;
@@ -833,15 +854,63 @@ export function collocatedProbe(
  * the run said nothing about it, which is the same evidentiary hole and never
  * the claim that its tests failed.
  */
+/**
+ * Should this candidate be held `inconclusive` because the test collocated with
+ * the file it touches was not green in the unmutated baseline — and if so, with
+ * what explanation?
+ *
+ * ONE decision for both loops. The rule and its wording had already been
+ * duplicated across the mutant and hunk guards, and the duplication had already
+ * drifted twice: the hunk loop had the rule first and the mutant loop shipped
+ * eight survivors through the gap before it was copied over, and the shared
+ * explanation was then corrected in one place and hand-copied to the other.
+ * A rule stated twice is a rule that will be true in one place.
+ */
+export function heldForRedCollocatedTest(
+  kind: 'mutant' | 'hunk',
+  file: string,
+  probes: readonly string[],
+  greenProbes: readonly string[],
+  perFile: ReadonlyArray<Pick<ProbeResult, 'file' | 'verdict' | 'reason'>>,
+): string | undefined {
+  const own = collocatedProbe(file, [...probes]);
+  if (!own || greenProbes.includes(own)) return undefined;
+  return collocatedNotGreenDetail(kind, own, perFile);
+}
+
+const REASON_PHRASE: Record<ProbeReason | 'unspecified', string> = {
+  // Nothing is known about collection here — the runner never produced output
+  // to read. Saying "collected no tests" would be the same invented cause this
+  // function exists to stop, one layer down: a reader sent after a compile
+  // error that is not there, while the runner itself is what fell over.
+  'no-output':
+    'the runner produced no parseable output there, so nothing at all is known about it',
+  'no-tests':
+    'it collected no tests there — the shape a compile or import error in the probe tree takes',
+  'all-skipped': 'it collected tests there but executed none of them',
+  // An entry that is inconclusive without saying which way. Older artifacts and
+  // any future branch that forgets to tag itself land here, and the honest
+  // answer is the disjunction rather than a guess at one of its arms.
+  unspecified:
+    'it did not come back green there (a compile or import error, every test skipped, or no parseable output)',
+};
+
+/** No entry at all — the baseline never reported this probe. Absent is its own
+ *  state, and is not evidence that its tests failed. */
+const NOT_REPORTED = 'the baseline did not report it';
+
 export function collocatedNotGreenDetail(
   kind: 'mutant' | 'hunk',
   probe: string,
-  perFile: Array<{ file: string; verdict: ProbeVerdict }>,
+  perFile: ReadonlyArray<Pick<ProbeResult, 'file' | 'verdict' | 'reason'>>,
 ): string {
+  const entry = perFile.find((p) => p.file === probe);
   const reason =
-    perFile.find((p) => p.file === probe)?.verdict === 'gated'
-      ? 'it was RED there'
-      : 'it collected no tests there (a compile or import error in the probe tree, or every test skipped)';
+    entry === undefined
+      ? NOT_REPORTED
+      : entry.verdict === 'gated'
+        ? 'it was RED there'
+        : REASON_PHRASE[entry.reason ?? 'unspecified'];
   const what = kind === 'mutant' ? 'the statement' : 'the hunk';
   return `this ${kind}'s collocated test ${probe} did not run green in the unmutated baseline — ${reason}, so the remaining probes passing cannot show ${what} is uncovered`;
 }
@@ -935,7 +1004,7 @@ export function classifyProbeRun(
   stdout: string,
   probes: string[],
   stderr = '',
-): Array<{ file: string; verdict: ProbeVerdict; detail: string }> {
+): ProbeResult[] {
   let parsed: VitestJson | undefined;
   const start = stdout.indexOf('{');
   if (start >= 0) {
@@ -952,6 +1021,7 @@ export function classifyProbeRun(
     return probes.map((file) => ({
       file,
       verdict: 'inconclusive' as const,
+      reason: 'no-output' as const,
       detail: `runner produced no parseable JSON (exit ${exitCode})${why ? `: ${why}` : ''}`,
     }));
   }
@@ -990,6 +1060,7 @@ export function classifyProbeRun(
       return {
         file,
         verdict: 'inconclusive' as const,
+        reason: 'no-tests' as const,
         detail: `collected no tests with the source reverted (run exit ${exitCode}) — likely a compile or import error, which is not evidence either way`,
       };
     }
@@ -1008,6 +1079,7 @@ export function classifyProbeRun(
       return {
         file,
         verdict: 'inconclusive' as const,
+        reason: 'all-skipped' as const,
         detail: `${assertions.length} test(s) collected but none executed with the source reverted (all skipped) — not evidence either way`,
       };
     }
@@ -1263,7 +1335,7 @@ function runProbeSuite(
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
 ): {
-  perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
+  perFile: ProbeResult[];
   ms: number;
   exposed: { linked: number; failed: number };
 } {
@@ -1969,8 +2041,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         const greenProbes = baseline.perFile
           .filter((r) => r.verdict === 'inert')
           .map((r) => r.file);
-        const notGreen = (kind: 'mutant' | 'hunk', probe: string) =>
-          collocatedNotGreenDetail(kind, probe, baseline.perFile);
         if (greenProbes.length === 0) {
           mutantsSkippedForBaseline = candidates.length;
           // Their own reason, not the budget's: the mutants ran zero suites in
@@ -2045,12 +2115,18 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             // of a mutant unguarded against an absent covering test. Checked
             // before the budget, because a candidate that cannot yield a
             // verdict should not spend a suite run to say so.
-            const own = collocatedProbe(c.file, probes);
-            if (own && !greenProbes.includes(own)) {
+            const heldDetail = heldForRedCollocatedTest(
+              'mutant',
+              c.file,
+              probes,
+              greenProbes,
+              baseline.perFile,
+            );
+            if (heldDetail) {
               mutantResults.push({
                 ...c,
                 verdict: 'inconclusive' as const,
-                detail: notGreen('mutant', own),
+                detail: heldDetail,
               });
               continue;
             }
@@ -2089,13 +2165,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             // an absent covering test is never `survived` there either. The
             // two halves are separate guards; having one was read as having
             // the rule, and eight mutant survivors shipped through the gap.
-            const own = collocatedProbe(h.file, probes);
-            if (own && !greenProbes.includes(own)) {
+            const heldDetail = heldForRedCollocatedTest(
+              'hunk',
+              h.file,
+              probes,
+              greenProbes,
+              baseline.perFile,
+            );
+            if (heldDetail) {
               const { patch: _patch, ...meta } = h;
               hunkResults.push({
                 ...meta,
                 verdict: 'inconclusive' as const,
-                detail: notGreen('hunk', own),
+                detail: heldDetail,
               });
               continue;
             }

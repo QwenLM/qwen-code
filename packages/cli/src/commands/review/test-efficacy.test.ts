@@ -20,6 +20,7 @@ import {
   hasCollocatedNewTest,
   collocatedProbe,
   collocatedNotGreenDetail,
+  heldForRedCollocatedTest,
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
   findVitestBin,
@@ -1336,26 +1337,58 @@ describe('collocatedNotGreenDetail', () => {
     expect(detail).not.toContain('compile or import error');
   });
 
-  it('says nothing was collected when the baseline collected nothing', () => {
-    expect(
-      collocatedNotGreenDetail(
-        'hunk',
-        'packages/cli/src/empty.test.ts',
-        perFile,
-      ),
-    ).toContain('collected no tests there');
+  it('gives the disjunction for an inconclusive entry that names no reason', () => {
+    // An older artifact, or a future branch that forgets to tag itself: say
+    // what is not known instead of picking one of its arms.
+    const detail = collocatedNotGreenDetail(
+      'hunk',
+      'packages/cli/src/empty.test.ts',
+      perFile,
+    );
+    expect(detail).toContain('did not come back green there');
+    expect(detail).toContain('no parseable output');
   });
 
-  it('takes the collected-nothing wording for a probe the baseline never reported', () => {
-    // Absent is an evidentiary hole, never the claim that its tests failed.
+  it('says the baseline never reported a probe it has no entry for', () => {
+    // Absent is an evidentiary hole, never the claim that its tests failed —
+    // and not the claim that it collected nothing either, which is a
+    // measurement the baseline never took.
     const detail = collocatedNotGreenDetail(
       'mutant',
       'packages/cli/src/absent.test.ts',
       perFile,
     );
-    expect(detail).toContain('collected no tests there');
+    expect(detail).toContain('did not report it');
     expect(detail).not.toContain('RED');
   });
+
+  it.each([
+    ['no-output', 'produced no parseable output', 'nothing at all is known'],
+    ['no-tests', 'collected no tests there', 'compile or import error'],
+    ['all-skipped', 'executed none of them', 'collected tests there'],
+  ])(
+    'names %s as the reason rather than guessing one',
+    (reason, phrase, alsoPhrase) => {
+      const detail = collocatedNotGreenDetail(
+        'mutant',
+        'packages/cli/src/x.test.ts',
+        [
+          {
+            file: 'packages/cli/src/x.test.ts',
+            verdict: 'inconclusive' as const,
+            reason: reason as 'no-output' | 'no-tests' | 'all-skipped',
+          },
+        ],
+      );
+      expect(detail).toContain(phrase);
+      expect(detail).toContain(alsoPhrase);
+      // The runner falling over is not a compile error, and the message that
+      // says so is the whole point of carrying the reason.
+      if (reason === 'no-output') {
+        expect(detail).not.toContain('compile or import error');
+      }
+    },
+  );
 
   it('names the probe and what the passing probes cannot show, per kind', () => {
     expect(
@@ -1370,6 +1403,58 @@ describe('collocatedNotGreenDetail', () => {
     expect(
       collocatedNotGreenDetail('hunk', 'packages/cli/src/red.test.ts', perFile),
     ).toContain('cannot show the hunk is uncovered');
+  });
+});
+
+describe('heldForRedCollocatedTest — the one decision both loops make', () => {
+  const perFile = [
+    {
+      file: 'packages/cli/src/x.test.ts',
+      verdict: 'gated' as const,
+    },
+    {
+      file: 'packages/cli/src/ok.test.ts',
+      verdict: 'inert' as const,
+    },
+  ];
+  const probes = ['packages/cli/src/x.test.ts', 'packages/cli/src/ok.test.ts'];
+
+  it('holds when the collocated test was not green, and explains why', () => {
+    const detail = heldForRedCollocatedTest(
+      'mutant',
+      'packages/cli/src/x.ts',
+      probes,
+      ['packages/cli/src/ok.test.ts'],
+      perFile,
+    );
+    expect(detail).toContain('was RED there');
+    expect(detail).toContain('packages/cli/src/x.test.ts');
+  });
+
+  it('does not hold when the collocated test was green', () => {
+    expect(
+      heldForRedCollocatedTest(
+        'hunk',
+        'packages/cli/src/ok.ts',
+        probes,
+        ['packages/cli/src/ok.test.ts'],
+        perFile,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does not hold when the file has no collocated probe at all', () => {
+    // No covering test was measured either way, so this guard has nothing to
+    // say — the other probes decide.
+    expect(
+      heldForRedCollocatedTest(
+        'mutant',
+        'packages/cli/src/untested.ts',
+        probes,
+        [],
+        perFile,
+      ),
+    ).toBeUndefined();
   });
 });
 
