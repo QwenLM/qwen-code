@@ -311,12 +311,14 @@ describe('onResponseChunk', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Set<string>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    vi.spyOn(global, 'clearTimeout');
 
     // Turn 1 anchors and streams; a deferred send leaves its flush flags
     // set (pendingStreamDelete parked, flushingSessions armed) when the new
     // prompt starts before the send settles.
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-1');
     onResponseChunk(ch, 'test-chat', 'turn-1-buffer', 'sess-1');
+    const t1 = streamState(ch).get('sess-1')!.timer;
     expect(streamState(ch).get('sess-1')!.turn).toBe(1);
     flushingSessions.add('sess-1');
     pendingStreamDelete.add('sess-1');
@@ -328,6 +330,9 @@ describe('onResponseChunk', () => {
     // (turn=1) is dropped along with its flags, and a fresh entry is created
     // under turn 2's anchor.
     onResponseChunk(ch, 'test-chat', 'turn-2-chunk', 'sess-1');
+
+    // The stale turn's idle timer is cleared as part of dropping its state.
+    expect(clearTimeout).toHaveBeenCalledWith(t1);
 
     const st = streamState(ch).get('sess-1')!;
     expect(st.buffer).toBe('turn-2-chunk');
@@ -547,6 +552,37 @@ describe('idle-flush timer', () => {
     expect(seqMap.has('msg-A')).toBe(false);
   });
 
+  it('releasing one of two sessions anchored to the same msgId keeps the shared seq counter', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const promptEnd = (
+      ch: QQChannelClass,
+      chatId: string,
+      sessionId: string,
+    ) =>
+      (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
+        .onPromptEnd(chatId, sessionId);
+
+    // Two concurrent sessions both stream under msg-X (e.g. two sessions in
+    // the same chat triggered by the same message). Releasing one of them
+    // must NOT purge msg-X's seq counter while the other is still anchored.
+    sessionAnchors.set('sess-A', { msgId: 'msg-X', timestamp: Date.now() });
+    sessionAnchors.set('sess-B', { msgId: 'msg-X', timestamp: Date.now() });
+    seqMap.set('msg-X', 3);
+
+    promptEnd(ch, 'test-chat', 'sess-A');
+
+    // sess-B still anchors msg-X → isMsgIdAnchoredBySession keeps the seq.
+    expect(seqMap.get('msg-X')).toBe(3);
+    expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(sessionAnchors.has('sess-B')).toBe(true);
+  });
+
   it('onPromptEnd leaves a deferred (in-flight flush) session for its promise chain to finish', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -666,6 +702,25 @@ describe('onToolCall flush', () => {
     );
   });
 
+  it('flushes the tool-call buffer anchored to the session triggering msgId', async () => {
+    const ch = makeChannel();
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'thinking before tool', 'sess-1');
+
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body['markdown'] as Record<string, string>)['content']).toBe(
+      'thinking before tool',
+    );
+    // The tool-call flush goes out under the session's own triggering msgId,
+    // not whatever the chat-level entry points at.
+    expect(body['msg_id']).toBe('msg-A');
+    expect(body['msg_seq']).toBe(1);
+  });
+
   it('does nothing when there is no buffer for the session', () => {
     const ch = makeChannel();
     ch.onToolCall('test-chat', toolCall('sess-unknown'));
@@ -723,11 +778,21 @@ describe('onToolCall flush', () => {
     });
     mockSendQQMessage.mockReturnValue(sendPromise);
 
+    // Anchor the session (a real turn triggered the stream) and simulate an
+    // already-succeeded flush record; the retry-exhaustion path must clean
+    // up both along with the reply anchor.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'text before tool', 'sess-1');
     ch.onToolCall('test-chat', toolCall('sess-1'));
 
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    flushedSessions.add('sess-1');
     pendingStreamDelete.add('sess-1');
 
     rejectSend!(new Error('send failed'));
@@ -752,6 +817,11 @@ describe('onToolCall flush', () => {
       await drain();
     }
     expect(streamState(ch).has('sess-1')).toBe(false);
+    // Retry exhaustion releases the pending flag, the flushed record, and
+    // the session's reply anchor (all exactly once).
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(flushedSessions.has('sess-1')).toBe(false);
+    expect(sessionAnchors.has('sess-1')).toBe(false);
   });
 });
 
@@ -780,17 +850,59 @@ describe('onResponseComplete', () => {
     expect(streamState(ch).has('sess-1')).toBe(false);
   });
 
+  it('a complete turn leaves all six streaming structures empty', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const turnCounter = chp['turnCounter'] as Map<string, number>;
+
+    // A full turn: prompt starts (anchors + bumps the turn counter), chunks
+    // stream, the response completes (final flush), then the prompt ends
+    // (ChannelBase's finally). Every structure the turn touched must be back
+    // to empty — nothing may leak into the next turn.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
+    await onResponseComplete(ch, 'test-chat', 'hello', 'sess-1');
+    (ch as unknown as { onPromptEnd: (c: string, s: string) => void })
+      .onPromptEnd('test-chat', 'sess-1');
+
+    expect(streamState(ch).size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+    expect(pendingStreamDelete.size).toBe(0);
+    expect(flushedSessions.size).toBe(0);
+    expect(sessionAnchors.size).toBe(0);
+    expect(turnCounter.size).toBe(0);
+  });
+
   it('final segment keeps the captured per-session msgId even after replyMsgId is overwritten', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    // onPromptStart anchors sess-A to msg-A; the chat-level entry also
-    // points at msg-A initially.
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    // Real flow: the triggering message sets the chat-level entry, the
+    // session anchors to it, and the stream has already sent two segments
+    // under msg-A (seq counter at 2).
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
     onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'final tail', 'sess-A');
-    // A concurrent message overwrites the chat-level entry mid-stream.
-    (
-      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
-    ).set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
+    seqMap.set('msg-A', 2);
+
+    // A concurrent message overwrites the chat-level entry mid-stream via
+    // the real setReplyMsgId path. sess-A still anchors msg-A, so the
+    // isMsgIdAnchoredBySession guard inside setReplyMsgId must keep msg-A's
+    // seq counter alive — the previous version wrote the map directly and
+    // never exercised that guard.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    expect(seqMap.get('msg-A')).toBe(2);
 
     await onResponseComplete(ch, 'test-chat', 'ignored-fulltext', 'sess-A');
 
@@ -799,7 +911,11 @@ describe('onResponseComplete', () => {
     expect((body.markdown as Record<string, string>).content).toBe(
       'final tail',
     );
+    // The final segment stays under A's msg_id and continues its seq counter.
     expect(body['msg_id']).toBe('msg-A');
+    expect(body['msg_seq']).toBe(3);
+    // The anchor is released after the final segment goes out.
+    expect(sessionAnchors.has('sess-A')).toBe(false);
   });
 
   it('final segment continues the msg_seq counter of its session anchor', async () => {
@@ -873,9 +989,20 @@ describe('onResponseComplete', () => {
 
   it('drops accumulated buffer at response boundary', async () => {
     const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'intermediate ', 'sess-1');
 
     onResponseBoundary(ch, 'test-chat', 'sess-1');
+
+    // A window gap between response windows must keep the reply anchor alive
+    // so the next window's fresh streamState entry reuses the same msgId.
+    expect(sessionAnchors.has('sess-1')).toBe(true);
+
     await onResponseComplete(ch, 'test-chat', 'final', 'sess-1');
 
     expect(streamState(ch).has('sess-1')).toBe(false);
@@ -939,6 +1066,10 @@ describe('pendingStreamDelete coordination', () => {
     });
     mockSendQQMessage.mockReturnValue(sendPromise);
 
+    // A real turn anchored the session; the deferred-complete .then() else
+    // branch must release that anchor (previously a no-op because no test
+    // built an anchor, so the release path was never exercised).
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'streaming text', 'sess-1');
     vi.advanceTimersByTime(2000);
     await drain();
@@ -946,6 +1077,11 @@ describe('pendingStreamDelete coordination', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Set<string>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
     expect(flushingSessions.has('sess-1')).toBe(true);
@@ -964,6 +1100,10 @@ describe('pendingStreamDelete coordination', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
     expect(streamState(ch).has('sess-1')).toBe(false);
     expect(flushingSessions.has('sess-1')).toBe(false);
+    // The deferred chain's else branch released the anchor and cascaded the
+    // orphaned msg_seq counter away.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(seqMap.has('msg-A')).toBe(false);
   });
 
   it('pendingStreamDelete failure re-buffers and retries (no leak)', async () => {
@@ -974,12 +1114,22 @@ describe('pendingStreamDelete coordination', () => {
     });
     mockSendQQMessage.mockReturnValue(sendPromise);
 
+    // A real turn anchored the session; simulate an already-succeeded flush
+    // record so the retry-exhaustion path is verified to clean up the
+    // pending flag, the flushed record, AND the reply anchor.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'text', 'sess-1');
     vi.advanceTimersByTime(2000);
     await drain();
 
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    flushedSessions.add('sess-1');
     pendingStreamDelete.add('sess-1');
 
     rejectSend!(new Error('send failed'));
@@ -1004,6 +1154,11 @@ describe('pendingStreamDelete coordination', () => {
       await drain();
     }
     expect(streamState(ch).has('sess-1')).toBe(false);
+    // Exhaustion releases the pending flag, the flushed record, and the
+    // session's reply anchor.
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(flushedSessions.has('sess-1')).toBe(false);
+    expect(sessionAnchors.has('sess-1')).toBe(false);
   });
 });
 
@@ -1357,6 +1512,42 @@ describe('buffer limit flush (#11)', () => {
       bigChunk + 'b'.repeat(2000),
     );
   });
+
+  it('re-buffers and re-arms the timer when the size cap is hit while a send is in flight', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+
+    // Start a flush and leave the send in flight (flushingSessions armed).
+    onResponseChunk(ch, 'test-chat', 'first part', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(flushingSessions.has('sess-1')).toBe(true);
+
+    // Chunks that push the buffer past the cap while the send is still in
+    // flight must NOT fire a concurrent send — the size-cap branch re-buffers
+    // and re-arms the idle timer so the in-flight chain's .then() picks the
+    // overflow up instead.
+    const bigChunk = 'a'.repeat(3000);
+    onResponseChunk(ch, 'test-chat', bigChunk, 'sess-1');
+    onResponseChunk(ch, 'test-chat', 'b'.repeat(2000), 'sess-1');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const st = streamState(ch).get('sess-1')!;
+    expect(st.buffer).toBe(bigChunk + 'b'.repeat(2000));
+    expect(st.timer).not.toBeNull();
+
+    // Clean up: resolve the in-flight send and let the chain settle.
+    resolveSend!(mockResponse(true));
+    await drain();
+  });
 });
 
 describe('idleFlush guard re-schedule (#5)', () => {
@@ -1431,6 +1622,18 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     });
     mockSendQQMessage.mockReturnValue(sendPromise);
 
+    // Anchor the session so the re-flush chain's release is observable
+    // (the anchor and its msg_seq must survive until the tail's send has
+    // resolved its msg_seq from msgSeqMap, then be cascaded away).
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'part1', 'sess-1');
     vi.advanceTimersByTime(2000);
     await drain();
@@ -1438,8 +1641,6 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     // First send in-flight. New content arrives.
     onResponseChunk(ch, 'test-chat', ' part2', 'sess-1');
 
-    const chp = ch as unknown as Record<string, unknown>;
-    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     pendingStreamDelete.add('sess-1');
 
     // Resolve the send
@@ -1449,10 +1650,39 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     // .then() should: delete pendingStreamDelete, re-arm it for the re-flush
     // chain (residual buffer still queued — the anchor must survive until the
     // tail's send has read its msg_seq), and schedule a new idleFlush timer
+    // (the immediate re-flush is blocked by the flushingSessions guard until
+    // .finally() clears it).
     expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe(' part2');
     expect(streamState(ch).get('sess-1')!.timer).not.toBeNull();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // The anchor survived the first chain — the residual tail still needs it.
+    expect(sessionAnchors.has('sess-1')).toBe(true);
+
+    // The re-armed idle timer fires the residual re-flush; the shared mock
+    // promise is already resolved so the tail send settles within the drain.
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    const tailBody = mockSendQQMessage.mock.calls[1][3] as Record<
+      string,
+      unknown
+    >;
+    expect((tailBody['markdown'] as Record<string, string>)['content']).toBe(
+      ' part2',
+    );
+    // Tail continues msg-A's sequence (msg_seq 2) instead of resetting.
+    expect(tailBody['msg_id']).toBe('msg-A');
+    expect(tailBody['msg_seq']).toBe(2);
+
+    // The tail's settle path released the anchor and cascaded the now-orphaned
+    // msg_seq counter away — the whole turn is cleaned up.
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(seqMap.has('msg-A')).toBe(false);
   });
 });
 

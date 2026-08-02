@@ -1179,6 +1179,8 @@ describe('群管理事件', () => {
           buffer: string;
           timer: ReturnType<typeof setTimeout> | null;
           retryCount: number;
+          msgId?: string;
+          turn: number;
         }
       >;
 
@@ -1202,12 +1204,16 @@ describe('群管理事件', () => {
         buffer: '',
         timer: null,
         retryCount: 0,
+        msgId: undefined,
+        turn: 1,
       });
       streamState.set('cron-sid-2', {
         chatId: 'group-cron',
         buffer: '',
         timer: null,
         retryCount: 0,
+        msgId: undefined,
+        turn: 1,
       });
 
       const spy = vi.spyOn(globalThis, 'clearTimeout');
@@ -1307,6 +1313,153 @@ describe('群管理事件', () => {
       pvt['handleGroupDelRobot'](evt);
 
       expect(streamState.has('sid-detect')).toBe(false);
+    });
+
+    // B3: full cleanup — reply anchor, msgSeqMap cascade, session sets,
+    // group-level state, onSessionDied
+    it('释放 sessionReplyMsgId 锚点并级联清理 msgSeqMap/会话集/group 级状态', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-full-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
+      const _lastKeywordNoMatchLog = chp['_lastKeywordNoMatchLog'] as Map<
+        string,
+        number
+      >;
+
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: 'pending text',
+        timer: setTimeout(() => {}, 9999),
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+      flushingSessions.add('sid-1');
+      pendingStreamDelete.add('sid-1');
+      flushedSessions.add('sid-1');
+      botOpenIdByGroup.set(groupId, 'bot-openid-1');
+      _lastKeywordNoMatchLog.set(groupId, Date.now());
+
+      const onSessionDiedSpy = vi.spyOn(ch, 'onSessionDied');
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Reply anchor released (and msgSeqMap entry cascaded away)
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(msgSeqMap.has('msg-xyz')).toBe(false);
+      // Session sets cleaned
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(pendingStreamDelete.has('sid-1')).toBe(false);
+      expect(flushedSessions.has('sid-1')).toBe(false);
+      expect(streamState.has('sid-1')).toBe(false);
+      // Group-level state cleaned
+      expect(botOpenIdByGroup.has(groupId)).toBe(false);
+      expect(_lastKeywordNoMatchLog.has(groupId)).toBe(false);
+      // onSessionDied fired (sessionScope 'user' !== 'single')
+      expect(onSessionDiedSpy).toHaveBeenCalledWith('sid-1');
+
+      onSessionDiedSpy.mockRestore();
+    });
+
+    // B4: msgSeqMap guard — another live session still anchored to the
+    // same msgId keeps the seq counter alive
+    it('其他 session 仍锚定 msg-xyz 时保留 msgSeqMap 计数', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-guard-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // sid-1 will be cleaned by handleGroupDelRobot; sid-2 is a live
+      // session anchored to the same msgId but routed to another group.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      sessionReplyMsgId.set('sid-2', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // sid-1's anchor is released, but sid-2 still anchors msg-xyz so the
+      // msgSeqMap counter is preserved
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.get('sid-2')!.msgId).toBe('msg-xyz');
+      expect(msgSeqMap.get('msg-xyz')).toBe(3);
     });
   });
 
