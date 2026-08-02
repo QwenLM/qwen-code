@@ -486,6 +486,108 @@ describe('publish-assets — round-2 review pins', () => {
   });
 });
 
+describe('publish-assets — round-3 self-review pins', () => {
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-r3-'));
+    argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, '8346 --comment\n');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockClear();
+    stdoutSpy.mockClear();
+    stderrSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+    process.exitCode = undefined;
+  });
+
+  const png = (name: string): string => {
+    const p = join(dir, name);
+    writeFileSync(p, Buffer.from('89504e470d0a1a0a0000000d', 'hex'));
+    return p;
+  };
+  const baseArgs = () =>
+    ({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [png('a.png')],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    }) as never;
+
+  it('a malformed operator GH_HOST is a refusal naming its source, not a TypeError', () => {
+    process.env['GH_HOST'] = 'not a hostname';
+    setGhHostMock.mockImplementation(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    runPublishAssets(baseArgs());
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('GH_HOST environment variable');
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable findings artifact keeps the refusal contract', () => {
+    runPublishAssets({
+      ...(baseArgs() as object),
+      files: undefined,
+      findings: join(dir, 'absent.json'),
+    } as never);
+    expect(process.exitCode).toBe(3);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('a non-JSON findings artifact keeps the refusal contract too', () => {
+    const bad = join(dir, 'findings.json');
+    writeFileSync(bad, 'not json');
+    runPublishAssets({
+      ...(baseArgs() as object),
+      files: undefined,
+      findings: bad,
+    } as never);
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('a branch-create 422 that is NOT already-exists surfaces, never swallowed', () => {
+    // "Object does not exist" (a bad base sha) is also a 422; treating it as
+    // success would leave every later PUT failing against a branch that was
+    // never created, far from the cause.
+    ghMock
+      .mockImplementationOnce(() => {
+        throw new Error('HTTP 404: Not Found');
+      })
+      .mockImplementationOnce(() => 'main')
+      .mockImplementationOnce(() => 'basesha');
+    ghWithInputMock.mockImplementation(() => {
+      throw new Error('HTTP 422: Validation Failed — Object does not exist');
+    });
+    expect(() => runPublishAssets(baseArgs())).toThrow(/Object does not exist/);
+  });
+});
+
 describe('publish-assets — empty is two different things', () => {
   let dir: string;
   let argsFile: string;

@@ -102,9 +102,15 @@ function putContent(
       `${api}?ref=${encodeURIComponent(branch)}`,
       '--jq',
       '.sha',
-    );
+    ).trim();
+    if (existing === '' || existing === 'null') {
+      // The path is claimed to exist yet has no blob sha to update against —
+      // whatever is going on, a PUT with sha:"null" would only bury the
+      // original error under a second 422. Surface the first failure.
+      throw err;
+    }
     ghWithInputRetried(
-      payload(existing.trim()),
+      payload(existing),
       'api',
       '-X',
       'PUT',
@@ -137,6 +143,7 @@ function ensureBranch(repo: string, branch: string): void {
   }
   const defaultBranch = gh('api', `repos/${repo}`, '--jq', '.default_branch');
   let baseSha: string;
+  // (validated non-empty below — a jq miss must not POST sha:"")
   try {
     baseSha = gh(
       'api',
@@ -158,9 +165,16 @@ function ensureBranch(repo: string, branch: string): void {
     }
     throw err;
   }
+  const base = baseSha.trim();
+  if (base === '' || base === 'null') {
+    throw new Error(
+      `could not resolve the head of ${repo}@${defaultBranch.trim()} — the ` +
+        'ref lookup returned nothing to branch from.',
+    );
+  }
   try {
     ghWithInputRetried(
-      JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseSha.trim() }),
+      JSON.stringify({ ref: `refs/heads/${branch}`, sha: base }),
       'api',
       '-X',
       'POST',
@@ -170,10 +184,13 @@ function ensureBranch(repo: string, branch: string): void {
     );
   } catch (err) {
     // A retried create can double-fire after a proxy 502 that GitHub in fact
-    // processed; the duplicate answers 422 already-exists, and an existing
-    // branch is this function's goal, not a failure.
+    // processed; the duplicate answers "Reference already exists", and an
+    // existing branch is this function's goal, not a failure. ONLY that
+    // message — a broad HTTP 422 here would also swallow "Object does not
+    // exist" (a bad sha), leaving every later PUT to fail against a branch
+    // that was never created, far from the cause.
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/already exists|HTTP 422/i.test(msg)) throw err;
+    if (!/already exists/i.test(msg)) throw err;
   }
 }
 
@@ -236,17 +253,50 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // is part of the input; read it once and use it for both.
   const effectiveHost =
     args.host ?? process.env['GH_HOST']?.trim() ?? undefined;
-  if (effectiveHost) setGhHost(effectiveHost);
+  if (effectiveHost) {
+    try {
+      setGhHost(effectiveHost);
+    } catch (err) {
+      // setGhHost validates the hostname and throws on garbage. From the
+      // --host flag that is the caller's own typo; from an operator-exported
+      // GH_HOST it would be an uncaught TypeError with a stack trace for an
+      // input this command chose to read. Same answer either way, in the
+      // refusal language: name the value and where it came from.
+      writeStderrLine(
+        `publish-assets: refused — ${
+          err instanceof Error ? err.message : String(err)
+        } (from ${args.host !== undefined ? '--host' : 'the GH_HOST environment variable'})`,
+      );
+      writeStdoutLine(JSON.stringify({ published: false }));
+      process.exitCode = 3;
+      return;
+    }
+  }
 
   // ── Collect the files: --files, or every assetFiles in the artifact ───────
   let findings: Finding[] | undefined;
   const fileList: string[] = [...(args.files ?? [])];
   if (args.findings) {
-    const artifact = JSON.parse(readFileSync(resolve(args.findings), 'utf8'));
-    // Accept either the raw findings array or the canonical report shape.
-    findings = validateFindings(
-      Array.isArray(artifact) ? artifact : artifact.findings,
-    );
+    // The same refusal contract as every other malformed input in this
+    // command — an unreadable or invalid artifact must not surface as a yargs
+    // stack trace two screens after this file established exit-3 +
+    // {"published": false} as the refusal language.
+    try {
+      const artifact = JSON.parse(readFileSync(resolve(args.findings), 'utf8'));
+      // Accept either the raw findings array or the canonical report shape.
+      findings = validateFindings(
+        Array.isArray(artifact) ? artifact : artifact.findings,
+      );
+    } catch (err) {
+      writeStderrLine(
+        `publish-assets: refused — cannot use the findings artifact at ${JSON.stringify(args.findings)}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      writeStdoutLine(JSON.stringify({ published: false }));
+      process.exitCode = 3;
+      return;
+    }
     for (const f of findings) {
       for (const a of f.assetFiles ?? []) fileList.push(a);
     }
@@ -324,18 +374,31 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     refuse(batch.reason);
     return;
   }
-  const prepared: Prepared[] = stats.map((st) => {
-    const content = readFileSync(st.abs);
+  const prepared: Prepared[] = [];
+  for (const st of stats) {
+    let content: Buffer;
+    try {
+      content = readFileSync(st.abs);
+    } catch (err) {
+      // stat succeeded moments ago; a file vanishing between the two is the
+      // same refusal as one that never existed.
+      refuse(
+        `cannot read ${JSON.stringify(st.file)}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
     const sha256 = createHash('sha256').update(content).digest('hex');
-    return {
+    prepared.push({
       file: st.file,
       name: st.basename,
       bytes: st.bytes,
       sha256,
       remotePath: remoteAssetPath(args.pr, st.basename, sha256),
       contentBase64: content.toString('base64'),
-    };
-  });
+    });
+  }
 
   // ── Publish ───────────────────────────────────────────────────────────────
   const branch = assetsBranch(args.pr);
