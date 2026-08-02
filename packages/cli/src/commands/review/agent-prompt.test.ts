@@ -2371,6 +2371,11 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toMatch(/documentation does not make a harm safe/);
     // Agent 0 findings are not disproved by a green test.
     expect(p).toMatch(/do not reject an issue-fidelity/i);
+    // The falsify-not-verify asymmetry: "could not verify" and "its evidence is
+    // somewhere I did not look" are not rejection grounds — the rule a future edit
+    // could silently drop.
+    expect(p).toContain('falsify, not to fail-to-verify');
+    expect(p).toContain('go read the claimed source first');
   });
 
   it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
