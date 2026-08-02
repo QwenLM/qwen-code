@@ -42,6 +42,22 @@ Two more measurements shape this design:
   the ones that produced findings no other agent could. Effort tiers must
   cut by expected marginal yield, not by price.
 
+**Replication (2026-08-03, `packages/core/src/hooks/` — 23 files, 8,516
+lines, a lifecycle/event-dispatch module, deliberately different in
+character from the parser-heavy permissions module):** the margin
+reproduced and widened. The naive arm was much stronger this time (3
+confirmed Criticals, including a redirect-based SSRF bypass) — and the
+fan-out still covered all three while adding 19 more (22 total, zero
+false positives on both arms, ~7× recall margin, pre-declared success
+criterion was 3×). Two replication findings changed this document: the
+cross-file tracer's event-coverage walk ("does every firing path fire?")
+produced two Criticals unique in the field — both adjacent-class siblings
+of a historical fix; and the security agent, briefed threat-model-first,
+produced four single-source Criticals at the trust boundary (frontmatter
+hooks bypassing folder trust, a workspace-writable HTTP-hook whitelist,
+env-resolution paths defeating a prior secrets-stripping fix). Full
+record: `.qwen/investigations/legacy-review-ab-2/REPORT.md`.
+
 ## Scope and non-goals
 
 **In scope:** auditing a directory or module of existing, merged code —
@@ -105,16 +121,33 @@ experiment showed is a mechanical change: "walk every hunk line by line"
 becomes "walk every production file line by line"; "for every block the
 diff adds" becomes "for every non-trivial block in the module".
 
-| Role                 | Legacy re-anchor                        | Notes                                                            |
-| -------------------- | --------------------------------------- | ---------------------------------------------------------------- |
-| 1a line-by-line      | every file, every line                  | unchanged checklist                                              |
-| 1c cross-file tracer | module's exports × repo callers         | produced the two unique Criticals; mandatory                     |
-| 2 security           | threat model of the module              | needs the legacy severity heuristic below                        |
-| 3a/3b/3c quality     | module vs codebase                      | 3a's "does this exist already" found the two-splitter root cause |
-| 4 performance        | trace the hot path first                | require a named hot path + cost shape                            |
-| 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                    |
-| 6a/6b/6c personas    | high effort only                        | untested in the experiment                                       |
-| invariant a/b/c      | heavy files only                        | unchanged                                                        |
+| Role                 | Legacy re-anchor                        | Notes                                                              |
+| -------------------- | --------------------------------------- | ------------------------------------------------------------------ |
+| 1a line-by-line      | every file, every line                  | unchanged checklist                                                |
+| 1c cross-file tracer | module's exports × repo callers         | produced the unique Criticals in both rounds; mandatory            |
+| 2 security           | threat model first, then the checklist  | "name the adversary inputs" produced R2's trust-boundary Criticals |
+| 3a/3b/3c quality     | module vs codebase                      | 3a's "does this exist already" found the two-splitter root cause   |
+| 4 performance        | trace the hot path first                | require a named hot path + cost shape                              |
+| 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                      |
+| 6a attacker persona  | undirected                              | one undirected seat at every tier ≥ medium — see below             |
+| 6b/6c personas       | high effort only                        | untested in the experiments                                        |
+| invariant a/b/c      | heavy files only                        | unchanged                                                          |
+
+**Why one undirected seat survives at medium.** Round 1 dropped all three
+personas on cost. Round 2 nearly produced the counterexample: the naive
+arm's redirect-SSRF Critical was briefly a "the fan-out missed this"
+candidate before two fan-out agents landed it independently. A fixed
+dimension list has blind spots by construction; one undirected
+attacker-mindset agent is the cheap hedge (one agent, not three).
+
+**Event-coverage walk for event-driven modules (1c, conditional).** When
+the module is an event/lifecycle system, 1c's brief adds: enumerate the
+events the module defines, then every call-site path that should fire
+each one — including early-return, error, and abort paths in the
+_callers_. Round 2's two unique Criticals (a failure hook that never
+fires on API-error turn ends in headless mode, and on loop detection in
+ACP sessions) came from exactly this walk; both were adjacent-class
+siblings of a historical fix that had covered only one UI path.
 
 **Dropped:** Agent 0 (no issue), 1b (no deletions — its entire evidence
 source is `-` lines), 7 (nothing was merged; build/test state is the
@@ -138,25 +171,40 @@ disciplines keep precision without an author to consult:
    the final authority is the Critical. Legacy code is full of
    backstops; grading without identifying them inflates everything to
    Critical or deflates it to noise.
+3. **A documented limitation is not automatically a non-finding.** Round 2
+   split two agents on this: one filed a docstring-admitted v1 limitation
+   as Critical, another listed it under non-findings. The rule that
+   resolves it: the admitted limitation itself is not reported — but harm
+   the admission does _not_ cover (a leak window, a cross-session
+   consequence, a caller contract that silently depends on the missing
+   behavior) is reported on its own merits.
 
 ### Dedup and verification
 
 Measured overlap makes dedup mandatory: the same root cause arrives from
-up to three agents, at different abstractions (a splitter divergence, its
+up to four agents, at different abstractions (a splitter divergence, its
 security consequence, its missing test). Dedup must cluster by **root
 cause**, not by location — a naive path:line merge would have kept the
 experiment's three substitution findings separate. This is an LLM
 clustering step over the findings file, with each cluster keeping the
 strongest evidence (an end-to-end probe beats a unit probe beats a
-read-based claim).
+read-based claim). **Independent discovery is evidence, not noise:** a
+root cause hit by several agents from different dimensions is a
+high-confidence signal, and the cluster's report entry should say "found
+independently by N agents" — Round 2's most-confirmed findings (a
+redirect SSRF and a permission-merge flaw, 3-4 independent discoveries
+each) were also its most severe.
 
 Verification keeps the `/review` shape — sharded batches ruling on each
-finding's failure scenario against the real code — with one addition from
-the experiment: the verifier's strongest tool for legacy claims is a
-**runnable probe** (the decisive evidence in the experiment was
-`PermissionManager.evaluate()` returning `allow`), and the brief should
-say so explicitly, including the discipline that a probe must be shown to
-flip under the implied fix.
+finding's failure scenario against the real code — with two additions
+from the experiments: the verifier's strongest tool for legacy claims is
+a **runnable probe** (the decisive evidence in Round 1 was
+`PermissionManager.evaluate()` returning `allow`), including the
+discipline that a probe must be shown to flip under the implied fix; and
+**inter-agent disagreements are settled by execution, never by
+adjudicator judgment** — Round 2 had two (a whitelist-bypass claim one
+agent filed and another explicitly cleared; a severity split) and only a
+probe resolved the first. The verify brief must name this case.
 
 ### Output
 
@@ -176,11 +224,12 @@ flip under the implied fix.
 - **low** — inline read by the orchestrator itself, angle rotation as in
   `/review` low; unverified findings, capped. For "is this module worth a
   real audit".
-- **medium** (default) — the experiment's roster: 1a, 1c, 2, 3a/3b/3c, 4,
-  5 + verification. The measured configuration; this _is_ the evidence.
-- **high** — medium + personas (6a/6b/6c) + iterative reverse audit with
-  the two-consecutive-dry-rounds stop rule. Unmeasured; flagged as
-  extrapolation in the report header until replicated.
+- **medium** (default) — the replicated roster: 1a, 1c, 2, 3a/3b/3c, 4,
+  5, **6a** + verification. Rounds 1-2 measured the 8-dimension core;
+  6a is the single-agent blind-spot hedge justified above.
+- **high** — medium + the other two personas (6b/6c) + iterative reverse
+  audit with the two-consecutive-dry-rounds stop rule. Unmeasured;
+  flagged as extrapolation in the report header until replicated.
 
 The naive single-agent pass is **not** a tier: it measured strictly worse
 than every tier that includes the fan-out, and offering it would launder
@@ -204,10 +253,6 @@ an inferior audit under the same command name.
 
 ## Open questions
 
-- **Replication.** All conclusions rest on one module, one round. A second
-  module (different character — e.g. a state-machine-heavy subsystem, not
-  a parser) must reproduce the fan-out's margin before this ships as more
-  than an experiment.
 - **Module-specialized finders.** `/review`'s Agent 8 writes a
   domain-specific brief per diff; whether a per-module equivalent (cron
   schedulers, protocol state machines) earns its cost is untested.
@@ -219,8 +264,8 @@ an inferior audit under the same command name.
 - Unit: `plan-files` tiling/classification/topology gates; roster
   selection per tier; the dedup clusterer's merge behavior on synthetic
   overlapping findings.
-- Integration: the second-module replication run, with the same
-  independent-adjudication protocol as the first experiment (findings
-  accepted only on quoted code or a runnable probe).
+- ~~Integration: second-module replication~~ — **done** (hooks module,
+  2026-08-03; margin reproduced at ~7× against a pre-declared 3×
+  criterion, zero false positives both arms).
 - Dogfood: audit a module whose maintainers can confirm or reject the
   Criticals, as PR #6457's confirmed-defect set calibrated `/review`.
