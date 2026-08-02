@@ -384,19 +384,17 @@ async function deliverSentCompletion(
   if (initialDelivery === 'accepted') return;
 
   let restoredParent: BridgeSession | undefined;
-  // Materialize before restore so the first synchronous operation after the
-  // bridge registers the parent can reserve its prompt queue for relocation.
-  // That keeps a concurrently arriving prompt behind the cwd change.
-  const isolatedCwd = isolatedWorkspace
-    ? await isolatedWorkspace.materializeDirectory(parentSessionId)
-    : undefined;
-  let materializedDirectoryUnused = false;
   try {
+    // Materialize before restore so the first synchronous operation after the
+    // bridge registers the parent can reserve its prompt queue for relocation.
+    // That keeps a concurrently arriving prompt behind the cwd change.
+    const isolatedCwd = isolatedWorkspace
+      ? await isolatedWorkspace.materializeDirectory(parentSessionId)
+      : undefined;
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
     });
-    materializedDirectoryUnused = isolatedCwd !== undefined;
     if (isolatedCwd !== undefined) {
       if (
         restoredParent.hasActivePrompt === true &&
@@ -406,20 +404,13 @@ async function deliverSentCompletion(
           'Active restored parent is outside its isolated conversation directory.',
         );
       }
-      if (restoredParent.hasActivePrompt === true) {
-        materializedDirectoryUnused = false;
-      }
       if (restoredParent.hasActivePrompt !== true) {
-        // Once relocation begins, retain the directory if the bridge throws: a
-        // caller-facing timeout does not cancel the queued cwd change.
-        materializedDirectoryUnused = false;
         const changed = await bridge.changeSessionCwd(parentSessionId, {
           path: isolatedCwd,
           allowedRoots: [boundWorkspace],
           managedRelocation: 'live-conversation',
         });
         if (changed.newCwd !== isolatedCwd) {
-          materializedDirectoryUnused = true;
           throw new Error(
             'Restored parent workspace directory relocation was rejected.',
           );
@@ -502,11 +493,7 @@ async function deliverSentCompletion(
         recoveredParentClosed = false;
       }
     }
-    if (
-      isolatedWorkspace &&
-      isolatedCwd !== undefined &&
-      (recoveredParentClosed || materializedDirectoryUnused)
-    ) {
+    if (isolatedWorkspace && recoveredParentClosed) {
       await isolatedWorkspace
         .discardEmptyDirectory(parentSessionId)
         .catch(() => {});
