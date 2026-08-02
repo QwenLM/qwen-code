@@ -87,13 +87,34 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
  * downstream that explains an `inconclusive` has to pick between them, and the
  * prose `detail` is written for a human, not for that decision.
  */
-export type ProbeReason = 'no-output' | 'no-tests' | 'all-skipped';
+export type ProbeReason =
+  | 'no-output'
+  | 'not-in-results'
+  | 'no-tests'
+  | 'all-skipped';
 
-export interface ProbeResult {
+/**
+ * A union, not an optional field: every `inconclusive` MUST say which way, and
+ * the compiler is what enforces it. Left optional, a branch that forgot to tag
+ * itself fell through to a vague catch-all wording with nothing failing —
+ * measured, deleting one tag left all 116 tests green while every hold of that
+ * kind silently degraded. The one part of this file that has to be right is the
+ * part a runtime fallback was quietly covering for.
+ */
+export type ProbeResult =
+  | { file: string; verdict: 'gated' | 'inert'; detail: string }
+  | {
+      file: string;
+      verdict: 'inconclusive';
+      detail: string;
+      reason: ProbeReason;
+    };
+
+/** What the two explanation helpers read — narrower than `ProbeResult`, whose
+ *  union does not survive a `Pick`. */
+export interface ProbeOutcome {
   file: string;
   verdict: ProbeVerdict;
-  detail: string;
-  /** Set only when `verdict` is `inconclusive`. */
   reason?: ProbeReason;
 }
 
@@ -829,7 +850,7 @@ export function parseAddedLines(diffText: string): Map<string, number[]> {
  */
 export function collocatedProbe(
   file: string,
-  testPaths: string[],
+  testPaths: readonly string[],
 ): string | undefined {
   const stem = file.replace(/\.[^./]+$/, '');
   return testPaths.find((t) => {
@@ -838,22 +859,6 @@ export function collocatedProbe(
   });
 }
 
-/**
- * The whole sentence a mutant or hunk is held `inconclusive` with when its own
- * collocated test was not green in the unmutated baseline — the ONLY wording
- * either guard has, so what this returns is what the report says.
- *
- * It reads the reason off the baseline rather than asserting one. The two
- * reasons are different failures with different fixes, and the guards used to
- * name the wrong one flatly: measured on PR #8368, `AuthDialog.test.tsx`
- * compiled, collected 26 tests and failed exactly one, and all three mutants in
- * its source were held with "likely a compile or import error in the probe
- * tree" — sending a reader after an import problem that was never there.
- *
- * A probe with no baseline entry at all takes the collected-nothing wording:
- * the run said nothing about it, which is the same evidentiary hole and never
- * the claim that its tests failed.
- */
 /**
  * Should this candidate be held `inconclusive` because the test collocated with
  * the file it touches was not green in the unmutated baseline — and if so, with
@@ -871,9 +876,9 @@ export function heldForRedCollocatedTest(
   file: string,
   probes: readonly string[],
   greenProbes: readonly string[],
-  perFile: ReadonlyArray<Pick<ProbeResult, 'file' | 'verdict' | 'reason'>>,
+  perFile: readonly ProbeOutcome[],
 ): string | undefined {
-  const own = collocatedProbe(file, [...probes]);
+  const own = collocatedProbe(file, probes);
   if (!own || greenProbes.includes(own)) return undefined;
   return collocatedNotGreenDetail(kind, own, perFile);
 }
@@ -885,12 +890,19 @@ const REASON_PHRASE: Record<ProbeReason | 'unspecified', string> = {
   // error that is not there, while the runner itself is what fell over.
   'no-output':
     'the runner produced no parseable output there, so nothing at all is known about it',
+  // The run answered, and this file was not in the answer. A compile or import
+  // error looks like this — and so does a path that failed to match, which the
+  // boundary and case rules in `classifyProbeRun` exist because of. Naming one
+  // would be picking between two live possibilities.
+  'not-in-results':
+    'the run produced results there but none for it — which a compile or import error looks like, and so does a path that did not match',
   'no-tests':
     'it collected no tests there — the shape a compile or import error in the probe tree takes',
   'all-skipped': 'it collected tests there but executed none of them',
-  // An entry that is inconclusive without saying which way. Older artifacts and
-  // any future branch that forgets to tag itself land here, and the honest
-  // answer is the disjunction rather than a guess at one of its arms.
+  // UNREACHABLE through the pipeline: `ProbeResult` makes `reason` mandatory on
+  // every `inconclusive`, so this arm answers only a hand-built caller. Kept
+  // because the alternative is a sentence reading "undefined", and named
+  // honestly rather than counted as covered.
   unspecified:
     'it did not come back green there (a compile or import error, every test skipped, or no parseable output)',
 };
@@ -899,10 +911,28 @@ const REASON_PHRASE: Record<ProbeReason | 'unspecified', string> = {
  *  state, and is not evidence that its tests failed. */
 const NOT_REPORTED = 'the baseline did not report it';
 
+/**
+ * The whole sentence a mutant or hunk is held `inconclusive` with when its own
+ * collocated test was not green in the unmutated baseline — the ONLY wording
+ * either guard has, so what this returns is what the report says.
+ *
+ * It reads the reason off the baseline rather than asserting one. The ways a
+ * probe fails to be green are different failures with different fixes, and the
+ * guards used to name one of them flatly: measured on PR #8368,
+ * `AuthDialog.test.tsx` compiled, collected 26 tests and failed exactly one,
+ * and all three mutants in its source were held with "likely a compile or
+ * import error in the probe tree" — sending a reader after an import problem
+ * that was never there.
+ *
+ * A probe with no baseline entry at all is reported as not measured, which is a
+ * different claim from measured-and-empty and the one the run actually
+ * supports. It cannot arise in this pipeline — `classifyProbeRun` maps over
+ * exactly the probe list `own` is drawn from — so it is a default, not a case.
+ */
 export function collocatedNotGreenDetail(
   kind: 'mutant' | 'hunk',
   probe: string,
-  perFile: ReadonlyArray<Pick<ProbeResult, 'file' | 'verdict' | 'reason'>>,
+  perFile: readonly ProbeOutcome[],
 ): string {
   const entry = perFile.find((p) => p.file === probe);
   const reason =
@@ -1056,7 +1086,19 @@ export function classifyProbeRun(
     const failed = assertions.filter((a) => a.status === 'failed').length;
     const passed = assertions.filter((a) => a.status === 'passed').length;
 
-    if (!result || assertions.length === 0) {
+    if (!result) {
+      // The run produced results and this file is not among them. A compile or
+      // import error looks like this — and so does a path that did not match
+      // (the boundary and case rules above are why that is not hypothetical),
+      // and those are different problems. Say only what was observed.
+      return {
+        file,
+        verdict: 'inconclusive' as const,
+        reason: 'not-in-results' as const,
+        detail: `the run produced results but none for this file (run exit ${exitCode}) — a compile or import error looks like this, and so does a path that did not match; not evidence either way`,
+      };
+    }
+    if (assertions.length === 0) {
       return {
         file,
         verdict: 'inconclusive' as const,

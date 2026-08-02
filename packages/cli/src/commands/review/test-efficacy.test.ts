@@ -405,6 +405,90 @@ describe('safeRmWithin', () => {
 describe('classifyProbeRun', () => {
   const json = (o: unknown) => JSON.stringify(o);
   const only = <T>(got: T[]): T => got[0];
+  /** The tag, if the verdict is one that carries one. Narrowing is the point:
+   *  `ProbeResult` only offers `reason` on the `inconclusive` arm. */
+  const reasonOf = (r: ReturnType<typeof classifyProbeRun>[number]) =>
+    r.verdict === 'inconclusive' ? r.reason : undefined;
+
+  // The tags are what `collocatedNotGreenDetail` reads, and an untagged branch
+  // silently degrades every hold of that kind to a vague catch-all. Measured
+  // before these existed: deleting one tag left all 116 tests green.
+  it('tags a run that produced no parseable output as no-output', () => {
+    const got = classifyProbeRun(
+      1,
+      'boom',
+      ['packages/lib/src/a.test.ts'],
+      'x',
+    );
+    expect(only(got).verdict).toBe('inconclusive');
+    expect(reasonOf(only(got))).toBe('no-output');
+  });
+
+  it('tags a file absent from the results as not-in-results', () => {
+    // Distinct from collecting zero tests: the run answered and this file was
+    // not in the answer, which a path miss produces as readily as a compile
+    // error.
+    const got = classifyProbeRun(
+      1,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/other.test.ts',
+            assertionResults: [{ status: 'passed' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('not-in-results');
+    expect(only(got).detail).toContain('none for this file');
+  });
+
+  it('tags a file that collected nothing as no-tests', () => {
+    const got = classifyProbeRun(
+      1,
+      json({
+        testResults: [
+          { name: '/w/packages/lib/src/a.test.ts', assertionResults: [] },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('no-tests');
+  });
+
+  it('tags an all-skipped file as all-skipped', () => {
+    const got = classifyProbeRun(
+      0,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/a.test.ts',
+            assertionResults: [{ status: 'skipped' }, { status: 'skipped' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(reasonOf(only(got))).toBe('all-skipped');
+  });
+
+  it('leaves a decided verdict untagged', () => {
+    const got = classifyProbeRun(
+      0,
+      json({
+        testResults: [
+          {
+            name: '/w/packages/lib/src/a.test.ts',
+            assertionResults: [{ status: 'passed' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/a.test.ts'],
+    );
+    expect(only(got).verdict).toBe('inert');
+    expect('reason' in only(got)).toBe(false);
+  });
 
   it('calls a test that still passes without the change INERT', () => {
     // The finding. The source is reverted and the test is green anyway, so it
