@@ -77,17 +77,29 @@ import { isWorkspaceMember } from './lib/workspaces.js';
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
 /**
- * WHY a probe was `inconclusive`, as the classifier knew it at the time.
+ * WHY a probe was `inconclusive`, as the run knew it at the time.
  *
- * Three different things arrive at the same verdict and they are not
- * interchangeable: `no-output` is the runner failing to produce parseable JSON,
- * where nothing at all is known about collection; `no-tests` is a run that
- * produced results without this file, the shape a compile or import error takes;
- * `all-skipped` is a file that collected tests and executed none. Anything
- * downstream that explains an `inconclusive` has to pick between them, and the
- * prose `detail` is written for a human, not for that decision.
+ * Five different things arrive at the same verdict and they are not
+ * interchangeable:
+ *
+ * - `control-failed` — the suite ran and read green, but the positive control
+ *   proved the runner could not have gone red, so the reading is not evidence.
+ * - `not-run` — no probe suite was attempted for it (the worktree could not be
+ *   made, or the spawn itself threw). Nothing was measured at all.
+ * - `no-output` — the runner ran and produced nothing parseable, so whether it
+ *   collected anything is unknown.
+ * - `not-in-results` — the run produced results and this file was not among
+ *   them. A compile or import error looks like this, and so does a path that
+ *   failed to match.
+ * - `no-tests` — the file WAS in the results and collected zero assertions.
+ * - `all-skipped` — it collected tests and executed none of them.
+ *
+ * Anything downstream that explains an `inconclusive` has to pick between
+ * these, and the prose `detail` is written for a human, not for that decision.
  */
 export type ProbeReason =
+  | 'control-failed'
+  | 'not-run'
   | 'no-output'
   | 'not-in-results'
   | 'no-tests'
@@ -110,13 +122,20 @@ export type ProbeResult =
       reason: ProbeReason;
     };
 
-/** What the two explanation helpers read — narrower than `ProbeResult`, whose
- *  union does not survive a `Pick`. */
-export interface ProbeOutcome {
-  file: string;
-  verdict: ProbeVerdict;
-  reason?: ProbeReason;
-}
+/**
+ * `Omit` applied across each arm instead of to the union as a whole. A plain
+ * `Omit`/`Pick` collapses `ProbeResult` into one object type and makes `reason`
+ * optional again — which is how an `inert` entry could reach the explanation
+ * helper and come back described as "did not come back green", the opposite of
+ * what `inert` means. Distributing keeps the discrimination, so the helper
+ * cannot read `reason` without first narrowing on `verdict`.
+ */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/** What the two explanation helpers read: `ProbeResult` without its prose. */
+export type ProbeOutcome = DistributiveOmit<ProbeResult, 'detail'>;
 
 export interface FileEntry {
   path: string;
@@ -883,7 +902,13 @@ export function heldForRedCollocatedTest(
   return collocatedNotGreenDetail(kind, own, perFile);
 }
 
-const REASON_PHRASE: Record<ProbeReason | 'unspecified', string> = {
+const REASON_PHRASE: Record<ProbeReason, string> = {
+  // The suite ran and read green, but the control proved the runner could not
+  // have reported otherwise.
+  'control-failed':
+    'it read green there, but the positive control failed, so nothing could have turned that run red',
+  // Nothing was attempted: no worktree, or the spawn threw before a suite ran.
+  'not-run': 'no probe suite ran for it at all there',
   // Nothing is known about collection here — the runner never produced output
   // to read. Saying "collected no tests" would be the same invented cause this
   // function exists to stop, one layer down: a reader sent after a compile
@@ -899,12 +924,6 @@ const REASON_PHRASE: Record<ProbeReason | 'unspecified', string> = {
   'no-tests':
     'it collected no tests there — the shape a compile or import error in the probe tree takes',
   'all-skipped': 'it collected tests there but executed none of them',
-  // UNREACHABLE through the pipeline: `ProbeResult` makes `reason` mandatory on
-  // every `inconclusive`, so this arm answers only a hand-built caller. Kept
-  // because the alternative is a sentence reading "undefined", and named
-  // honestly rather than counted as covered.
-  unspecified:
-    'it did not come back green there (a compile or import error, every test skipped, or no parseable output)',
 };
 
 /** No entry at all — the baseline never reported this probe. Absent is its own
@@ -938,9 +957,14 @@ export function collocatedNotGreenDetail(
   const reason =
     entry === undefined
       ? NOT_REPORTED
-      : entry.verdict === 'gated'
-        ? 'it was RED there'
-        : REASON_PHRASE[entry.reason ?? 'unspecified'];
+      : entry.verdict === 'inconclusive'
+        ? REASON_PHRASE[entry.reason]
+        : entry.verdict === 'gated'
+          ? 'it was RED there'
+          : // `inert` IS green, so the sentence this function builds does not
+            // apply to it. Say that, rather than produce a fluent claim that
+            // contradicts the measurement — the caller is what is wrong here.
+            'the baseline reported it GREEN, so this explanation does not apply to it';
   const what = kind === 'mutant' ? 'the statement' : 'the hunk';
   return `this ${kind}'s collocated test ${probe} did not run green in the unmutated baseline — ${reason}, so the remaining probes passing cannot show ${what} is uncovered`;
 }
@@ -1878,11 +1902,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   }
 
-  const results: Array<{
-    file: string;
-    verdict: ProbeVerdict;
-    detail: string;
-  }> = [];
+  // `ProbeResult`, not a structural echo of it: this array is what `probed`
+  // serialises, so an entry pushed here without a reason is an untagged
+  // `inconclusive` in the artifact — the exact hole the union was introduced to
+  // close, reopened one level up. Typed this way, the two catch paths below do
+  // not compile until they say which way they failed.
+  const results: ProbeResult[] = [];
   let cleanupFailure: string | undefined;
   const mutantResults: MutantResult[] = [];
   let mutantsSkippedForBudget = 0;
@@ -2037,7 +2062,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         String(sweep?.stderr ?? ''),
       );
       for (const file of probes) {
-        results.push({ file, verdict: 'inconclusive' as const, detail });
+        results.push({
+          file,
+          verdict: 'inconclusive' as const,
+          reason: 'not-run' as const,
+          detail,
+        });
       }
       for (const c of candidates) {
         mutantResults.push({ ...c, verdict: 'inconclusive' as const, detail });
@@ -2290,6 +2320,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           ...probes.map((file) => ({
             file,
             verdict: 'inconclusive' as const,
+            reason: 'not-run' as const,
             detail,
           })),
         );
@@ -2342,10 +2373,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
     // The file-level revert probe's "inert" is the same survivor claim one
     // level up — a dead runner reports every reverted file green too.
-    for (const r of results) {
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
       if (r.verdict === 'inert') {
-        r.verdict = 'inconclusive';
-        r.detail = detail;
+        // Replaced rather than mutated in place: the union makes `reason`
+        // mandatory on the arm this becomes, and assigning `verdict` alone
+        // would leave the entry untagged — which is the whole failure the
+        // union exists to make impossible.
+        results[i] = {
+          file: r.file,
+          verdict: 'inconclusive',
+          reason: 'control-failed',
+          detail,
+        };
       }
     }
   }

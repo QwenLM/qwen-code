@@ -1405,6 +1405,9 @@ describe('collocatedNotGreenDetail', () => {
     {
       file: 'packages/cli/src/empty.test.ts',
       verdict: 'inconclusive' as const,
+      // The union requires it, which is the point: a fixture cannot stand for
+      // an untagged `inconclusive` because the code cannot produce one.
+      reason: 'no-tests' as const,
     },
   ];
 
@@ -1421,16 +1424,17 @@ describe('collocatedNotGreenDetail', () => {
     expect(detail).not.toContain('compile or import error');
   });
 
-  it('gives the disjunction for an inconclusive entry that names no reason', () => {
-    // An older artifact, or a future branch that forgets to tag itself: say
-    // what is not known instead of picking one of its arms.
+  it('refuses to explain a probe the baseline reported GREEN', () => {
+    // `inert` is what greenProbes is built from, so this sentence does not
+    // apply to it. The production caller cannot get here; the export can, and
+    // a fluent claim contradicting the measurement is worse than saying so.
     const detail = collocatedNotGreenDetail(
-      'hunk',
-      'packages/cli/src/empty.test.ts',
-      perFile,
+      'mutant',
+      'packages/cli/src/green.test.ts',
+      [{ file: 'packages/cli/src/green.test.ts', verdict: 'inert' as const }],
     );
-    expect(detail).toContain('did not come back green there');
-    expect(detail).toContain('no parseable output');
+    expect(detail).toContain('reported it GREEN');
+    expect(detail).toContain('does not apply');
   });
 
   it('says the baseline never reported a probe it has no entry for', () => {
@@ -1450,6 +1454,13 @@ describe('collocatedNotGreenDetail', () => {
     ['no-output', 'produced no parseable output', 'nothing at all is known'],
     ['no-tests', 'collected no tests there', 'compile or import error'],
     ['all-skipped', 'executed none of them', 'collected tests there'],
+    [
+      'not-in-results',
+      'produced results there but none for it',
+      'a path that did not match',
+    ],
+    ['not-run', 'no probe suite ran for it', 'at all there'],
+    ['control-failed', 'it read green there', 'positive control failed'],
   ])(
     'names %s as the reason rather than guessing one',
     (reason, phrase, alsoPhrase) => {
