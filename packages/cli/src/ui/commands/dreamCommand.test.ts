@@ -52,6 +52,7 @@ describe('dreamCommand', () => {
       type: 'submit_prompt',
       content: 'dream prompt',
       onComplete: expect.any(Function),
+      toolInvocationGuard: expect.any(Function),
     });
     expect(buildConsolidationPrompt).toHaveBeenCalledWith(
       expect.any(String),
@@ -81,7 +82,11 @@ describe('dreamCommand', () => {
 
     const result = await dreamCommand.action?.(context, '');
     expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      toolInvocationGuard: expect.any(Function),
+    });
     expect(result).not.toHaveProperty('onComplete');
   });
 
@@ -106,6 +111,10 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      toolInvocationGuard: expect.any(Function),
+    });
   });
 });

@@ -409,6 +409,35 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes a submit_prompt tool guard through to ACP consumers', async () => {
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with a per-turn tool guard',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run with a guard' }],
+        toolInvocationGuard,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.toolInvocationGuard).toBe(toolInvocationGuard);
+    }
+  });
+
   it('omits modelOverride when the command does not set one', async () => {
     const mockCommand = {
       name: 'custom',

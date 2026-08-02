@@ -3585,6 +3585,145 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
   });
 
+  it('keeps a slash-command tool guard for the full headless turn', async () => {
+    setupMetricsMock();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    const mockCommand = {
+      name: 'guarded',
+      description: 'a guarded prompt command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Guarded prompt' }],
+        toolInvocationGuard,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    const toolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-headless-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-headless',
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: toolRequest.callId,
+      responseParts: [{ text: 'tool result' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: toolRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          ...finishedEvents,
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded',
+      'prompt-guarded-headless',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      toolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+  });
+
+  it('does not leak a slash-command tool guard into notification drains', async () => {
+    setupMetricsMock();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-drain',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (callback) => {
+        callback?.('Task finished', 'task result', {
+          agentId: 'agent-1',
+          toolUseId: 'agent-tool-1',
+          status: 'completed',
+        });
+      },
+    );
+    const drainToolRequest: ToolCallRequestInfo = {
+      callId: 'unguarded-drain-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-drain',
+    };
+    const drainToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: drainToolRequest,
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: drainToolRequest.callId,
+      responseParts: [{ text: 'drain tool result' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-drain',
+      'prompt-guarded-drain',
+    );
+
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls.map((call) => ({
+        parts: call[0],
+        promptId: call[2],
+        type: call[3]?.type,
+      })),
+    ).toEqual([
+      {
+        parts: [{ text: 'Guarded prompt' }],
+        promptId: 'prompt-guarded-drain',
+        type: SendMessageType.UserQuery,
+      },
+      {
+        parts: [{ text: 'task result' }],
+        promptId: 'prompt-guarded-drain/automatic/2',
+        type: SendMessageType.Notification,
+      },
+      {
+        parts: [{ text: 'drain tool result' }],
+        promptId: 'prompt-guarded-drain/automatic/2',
+        type: SendMessageType.ToolResult,
+      },
+    ]);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      drainToolRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({ toolInvocationGuard: expect.anything() }),
+    );
+  });
+
   it('should handle command that requires confirmation by returning early', async () => {
     setupMetricsMock();
     const mockCommand = {

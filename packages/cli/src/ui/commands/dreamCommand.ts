@@ -5,7 +5,11 @@
  */
 
 import * as path from 'node:path';
-import { getAutoMemoryRoot, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createManualDreamToolInvocationGuard,
+  getAutoMemoryRoot,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -38,6 +42,8 @@ export const dreamCommand: SlashCommand = {
       const prompt = config
         .getMemoryManager()
         .buildConsolidationPrompt(memoryRoot, transcriptDir);
+      const toolInvocationGuard =
+        createManualDreamToolInvocationGuard(projectRoot);
 
       const recordDream = async () =>
         config
@@ -46,13 +52,14 @@ export const dreamCommand: SlashCommand = {
 
       if (context.executionMode === 'acp') {
         recordDream().catch(() => {});
-        return { type: 'submit_prompt', content: prompt };
+        return { type: 'submit_prompt', content: prompt, toolInvocationGuard };
       }
 
       return {
         type: 'submit_prompt',
         content: prompt,
         onComplete: recordDream,
+        toolInvocationGuard,
       };
     } catch (error) {
       return {

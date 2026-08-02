@@ -1306,6 +1306,7 @@ export const useSlashCommandProcessor = (
                     content,
                     onComplete: result.onComplete,
                     modelOverride: result.modelOverride,
+                    toolInvocationGuard: result.toolInvocationGuard,
                   };
                 }
                 case 'confirm_shell_commands': {

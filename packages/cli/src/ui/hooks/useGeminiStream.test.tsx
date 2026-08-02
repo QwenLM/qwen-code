@@ -25,6 +25,7 @@ import type {
   AnyToolInvocation,
   GoalTurnPermit,
   SteerInput,
+  ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -7665,6 +7666,166 @@ describe('useGeminiStream', () => {
         );
         expect(mockSendMessageStream).not.toHaveBeenCalled();
       });
+    });
+
+    it('scopes a submit_prompt tool guard to that user turn', async () => {
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      const guardedRequest: ToolCallRequestInfo = {
+        callId: 'guarded-call',
+        name: 'write_file',
+        args: { file_path: '/memory/pinned/a.md' },
+        isClientInitiated: false,
+        prompt_id: 'guarded-prompt',
+      };
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'dream prompt',
+        toolInvocationGuard,
+      });
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: guardedRequest,
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/dream');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [guardedRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
+      );
+
+      const retryRequest: ToolCallRequestInfo = {
+        callId: 'guarded-retry-call',
+        name: 'edit',
+        args: { file_path: '/memory/pinned/a.md' },
+        isClientInitiated: false,
+        prompt_id: 'guarded-prompt',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: retryRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'dream prompt',
+          SendMessageType.Retry,
+          'guarded-retry-prompt',
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [retryRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
+      );
+
+      const notificationContinuationRequest: ToolCallRequestInfo = {
+        callId: 'notification-continuation-call',
+        name: 'read_file',
+        args: { file_path: '/workspace/notification.md' },
+        isClientInitiated: false,
+        prompt_id: 'notification-prompt',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: notificationContinuationRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [{ text: 'background tool result' }],
+          SendMessageType.ToolResult,
+          'notification-prompt',
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [notificationContinuationRequest],
+        expect.any(AbortSignal),
+        undefined,
+      );
+
+      const notificationRetryRequest: ToolCallRequestInfo = {
+        callId: 'notification-retry-call',
+        name: 'read_file',
+        args: { file_path: '/workspace/retry.md' },
+        isClientInitiated: false,
+        prompt_id: 'notification-retry-prompt',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: notificationRetryRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'retry background turn',
+          SendMessageType.Retry,
+          'notification-retry-prompt',
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [notificationRetryRequest],
+        expect.any(AbortSignal),
+        undefined,
+      );
+
+      const ordinaryRequest: ToolCallRequestInfo = {
+        callId: 'ordinary-call',
+        name: 'read_file',
+        args: { file_path: '/workspace/README.md' },
+        isClientInitiated: false,
+        prompt_id: 'ordinary-prompt',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockHandleSlashCommand.mockResolvedValue(false);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: ordinaryRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('ordinary prompt');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [ordinaryRequest],
+        expect.any(AbortSignal),
+        undefined,
+      );
     });
 
     it('should stop processing and not call Gemini when a command is handled without a tool call', async () => {

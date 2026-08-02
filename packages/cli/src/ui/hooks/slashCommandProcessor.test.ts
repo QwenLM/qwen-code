@@ -1146,6 +1146,33 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should preserve a submit_prompt turn-scoped tool guard', async () => {
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      const command = createTestCommand({
+        name: 'guarded',
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'guarded prompt',
+          toolInvocationGuard,
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/guarded');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: 'guarded prompt',
+        toolInvocationGuard,
+      });
+    });
+
     it('should append UserPromptExpansion additional context to submit_prompt actions', async () => {
       mockFireUserPromptExpansionEvent.mockResolvedValue({
         getBlockingError: () => ({ blocked: false }),

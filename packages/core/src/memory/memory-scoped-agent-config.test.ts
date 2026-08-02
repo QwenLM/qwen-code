@@ -21,6 +21,7 @@ import {
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
+import { createManualDreamToolInvocationGuard } from './dreamAgentPlanner.js';
 
 describe('createMemoryScopedAgentConfig', () => {
   const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
@@ -475,6 +476,69 @@ describe('createMemoryScopedAgentConfig', () => {
         command: 'touch bad',
       }),
     ).resolves.toBe('deny');
+  });
+
+  it('gives a manual Dream turn the forked worker filesystem boundary', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    const pinnedFile = path.join(pinnedDir, 'architecture.md');
+    const pinnedAlias = path.join(memoryRoot, 'project', 'pinned-alias');
+    await fs.mkdir(pinnedDir, { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
+    await fs.symlink(pinnedDir, pinnedAlias);
+
+    const guard = createManualDreamToolInvocationGuard(projectRoot);
+    const signal = new AbortController().signal;
+    const evaluate = (toolName: string, args: Record<string, unknown>) =>
+      guard({
+        callId: `call-${toolName}`,
+        toolName,
+        args,
+        signal,
+      });
+
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(memoryRoot, 'project', 'ordinary.md'),
+      }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.EDIT, { file_path: pinnedFile }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(edit: pinned memory is read-only)',
+    });
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(pinnedAlias, 'new.md'),
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(write_file: pinned memory is read-only)',
+    });
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(getUserAutoMemoryRoot(), 'user', 'notes.md'),
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: expect.stringContaining('only within'),
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, { command: 'git status' }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.SHELL, { command: `rm ${pinnedFile}` }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.AGENT, { prompt: 'edit pinned memory' }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(agent: unavailable in this scoped turn)',
+    });
   });
 
   it('lets base deny rules override scoped allows', async () => {

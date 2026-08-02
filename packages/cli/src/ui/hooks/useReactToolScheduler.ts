@@ -19,6 +19,7 @@ import type {
   ToolCall,
   Status as CoreStatus,
   EditorType,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
@@ -45,6 +46,7 @@ export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
   modelOverride?: string,
+  toolInvocationGuard?: ToolInvocationGuard,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -223,9 +225,15 @@ export function useReactToolScheduler(
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
       modelOverride?: string,
+      toolInvocationGuard?: ToolInvocationGuard,
     ) => {
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal);
+        void scheduler.schedule(
+          request,
+          signal,
+          undefined,
+          toolInvocationGuard,
+        );
         return;
       }
       void (async () => {
@@ -235,7 +243,12 @@ export function useReactToolScheduler(
             .resolveForModel(modelOverride.slice(0, -1), {
               failClosed: true,
             });
-          await scheduler.schedule(request, signal, runtimeView);
+          await scheduler.schedule(
+            request,
+            signal,
+            runtimeView,
+            toolInvocationGuard,
+          );
         } catch (error) {
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
