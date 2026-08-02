@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveLogRoot } from './resolve-log-root.js';
+import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -33,6 +33,7 @@ const root = fs.mkdtempSync(
 try {
   testBootstrapBridgeConfiguration();
   testResolveLogRoot();
+  testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
   testVersionSynchronization(path.join(root, 'version'));
   console.log('Desktop release helper checks passed.');
@@ -105,18 +106,34 @@ function testResolveLogRoot() {
     smoke.includes(`const appId = '${tauriConfig.identifier}'`),
     'smoke appId must match tauri.conf.json identifier',
   );
+  const previousLogIndex = smoke.indexOf(
+    'let previousLog = fs.readFileSync(logPath',
+  );
+  const spawnIndex = smoke.indexOf('const child = spawn(executable');
+  assert.notEqual(previousLogIndex, -1, 'smoke must capture previousLog');
+  assert.notEqual(spawnIndex, -1, 'smoke must spawn the child');
   assert.ok(
-    smoke.indexOf('let previousLog = fs.readFileSync(logPath') <
-      smoke.indexOf('const child = spawn(executable'),
+    previousLogIndex < spawnIndex,
     'previousLog must be captured before the child is spawned',
   );
-  // Pin the stale-log protection: without these, reverting readNewLog()
-  // to inline reads or dropping the prefix slice passes every assertion
-  // while silently re-matching a previous run's readiness line.
-  assert.match(smoke, /if \(!contents\.startsWith\(previousLog\)\)/);
-  assert.match(smoke, /log was truncated, resetting baseline/);
-  assert.match(smoke, /return contents\.slice\(previousLog\.length\)/);
   assert.match(smoke, /const contents = readNewLog\(\)/);
+  assert.match(smoke, /sliceNewLog\(contents, previousLog\)/);
+  assert.match(smoke, /log was truncated, resetting baseline/);
+}
+
+function testSliceNewLog() {
+  assert.deepEqual(sliceNewLog('hello', ''), {
+    text: 'hello',
+    baseline: '',
+  });
+  assert.deepEqual(sliceNewLog('hello world', 'hello'), {
+    text: ' world',
+    baseline: 'hello',
+  });
+  assert.deepEqual(sliceNewLog('new', 'old'), {
+    text: 'new',
+    baseline: '',
+  });
 }
 
 function testUpdateManifest(directory) {

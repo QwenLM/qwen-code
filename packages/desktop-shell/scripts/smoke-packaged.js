@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveLogRoot } from './resolve-log-root.js';
+import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -117,14 +117,12 @@ function readNewLog() {
     encoding: 'utf8',
     flag: 'a+',
   });
-  if (!contents.startsWith(previousLog)) {
-    // The Tauri app truncates the log on every startup (main.rs:
-    // fs::write(&log_path, b"")).  Reset the baseline so the smoke keeps
-    // polling instead of aborting on the second run.
+  const result = sliceNewLog(contents, previousLog);
+  if (result.baseline !== previousLog) {
     console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
-    previousLog = '';
   }
-  return contents.slice(previousLog.length);
+  previousLog = result.baseline;
+  return result.text;
 }
 
 // The packaged smoke verifies the unauthenticated navigation boundary: the

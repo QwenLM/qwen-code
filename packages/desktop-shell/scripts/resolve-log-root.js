@@ -21,3 +21,10 @@ export function resolveLogRoot(
   }
   return path.join(isolatedState, appId, 'logs');
 }
+
+export function sliceNewLog(contents, previousLog) {
+  if (!contents.startsWith(previousLog)) {
+    return { text: contents, baseline: '' };
+  }
+  return { text: contents.slice(previousLog.length), baseline: previousLog };
+}
