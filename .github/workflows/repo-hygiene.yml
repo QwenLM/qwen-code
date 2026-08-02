@@ -782,7 +782,7 @@ jobs:
           git diff --name-only origin/main...HEAD \
             | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-autofix-contracts.sh'"
 
-          CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
+          CHANGED_PKGS="$(git diff --name-only -z origin/main...HEAD \
             | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/resolve-owning-packages.sh'")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping tests.'
