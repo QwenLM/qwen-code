@@ -577,7 +577,7 @@ jobs:
       - name: 'Ensure qwen CLI'
         id: 'ensure_qwen'
         run: |-
-          set -uo pipefail
+          set -euo pipefail
           # Resolve latest and upgrade when stale — the previous shape
           # short-circuited on any pre-installed qwen, so a stale image kept
           # its version forever and pinned the action's reinstall to it (the
@@ -588,7 +588,12 @@ jobs:
           # cover the transient npm crashes the shared runners produce (a
           # triage run died on exit 217 mid-install); the fallback covers the
           # registry being the thing that is broken.
-          want="$(npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version 2>/dev/null | tail -n 1 || true)"
+          want=''
+          for attempt in 1 2 3; do
+            want="$(npm view --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' version | tail -n 1 || true)"
+            if [ -n "$want" ]; then break; fi
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+          done
           have=''
           if command -v qwen >/dev/null 2>&1; then
             have="$(qwen --version 2>/dev/null || true)"
@@ -600,11 +605,11 @@ jobs:
           fi
           if [ -z "$want" ]; then
             if [ -n "$have" ]; then
-              echo "::warning::npm registry unreachable; triaging with installed qwen $have"
+              echo "::warning::npm registry query failed; triaging with installed qwen $have"
               echo "version=$have" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
-            echo '::error::qwen is not installed and the npm registry is unreachable'
+            echo '::error::qwen is not installed and the npm registry query failed'
             exit 1
           fi
           installed=''
@@ -614,7 +619,7 @@ jobs:
               break
             fi
             echo "::warning::qwen install attempt $attempt failed (wanted $want)"
-            sleep $((attempt * 10))
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 10)); fi
           done
           if [ -z "$installed" ]; then
             if [ -n "$have" ]; then
@@ -1171,7 +1176,7 @@ jobs:
               break
             fi
             echo "::warning::qwen install attempt $attempt failed"
-            sleep $((attempt * 10))
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 10)); fi
           done
           [ -n "$installed" ] || { echo '::error::installing @qwen-code/qwen-code@latest failed after 3 attempts'; exit 1; }
           qwen --version
@@ -2455,7 +2460,7 @@ jobs:
               break
             fi
             echo "::warning::qwen install attempt $attempt failed"
-            sleep $((attempt * 10))
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 10)); fi
           done
           [ -n "$installed" ] || { echo '::error::installing @qwen-code/qwen-code@latest failed after 3 attempts'; exit 1; }
           qwen --version
