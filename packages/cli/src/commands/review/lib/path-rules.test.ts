@@ -45,6 +45,10 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['.github/ISSUE_TEMPLATE/bug.yml', false],
     ['deploy/workflows/ci.yml', false],
     ['src/github/workflows/ci.yml', false],
+    ['src/main/java/com/x/Main.java', true],
+    ['Main.java', true],
+    ['src/main/kotlin/Main.kt', false],
+    ['docs/notes.java.md', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -112,18 +116,6 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(out).not.toContain('src/pay.ts');
   });
 
-  it.each([
-    ['src/main/java/com/x/Main.java', true],
-    ['Main.java', true],
-    ['src/main/kotlin/Main.kt', false],
-    ['src/pay.ts', false],
-    ['docs/notes.java.md', false],
-  ])('%s → Java rule applies: %s', (path, applies) => {
-    expect(pathRulesFor([path]).includes('Java / JVM performance')).toBe(
-      applies,
-    );
-  });
-
   it('stacks with the workflow rule when a diff touches both', () => {
     const out = pathRulesFor(['.github/workflows/ci.yml', 'src/Main.java']);
     expect(out).toContain('GitHub Actions workflows');
@@ -140,6 +132,19 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     // Static tier: compile and measure with javap; dynamic tier: PrintInlining.
     expect(out).toContain('javap');
     expect(out).toContain('PrintInlining');
+  });
+
+  it('cites the thresholds a maintainer will check, correctly', () => {
+    // A checklist whose thesis is "don't guess the numbers" loses all trust the
+    // moment it cites a wrong one. These three were wrong in the first draft
+    // (InlineSmallCode quoted as the pre-JDK-11 value, HugeMethodLimit called a
+    // product flag with a ≥ boundary, megamorphic stated as unconditional) and a
+    // review measured them against a live JVM. Pin the corrected forms.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('2500 on JDK 11+');
+    expect(out).toContain('DontCompileHugeMethods');
+    expect(out).toMatch(/> 8000/);
+    expect(out).toContain('TypeProfileMajorReceiverPercent');
   });
 
   it('refuses to estimate bytecode from source', () => {
@@ -173,5 +178,56 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     // Slow is a cost, not a wrongness — perf findings are Suggestions, and the
     // Criticals are reserved for the correctness traps.
     expect(out).toMatch(/Performance findings are \*\*Suggestions\*\*/);
+  });
+
+  it('prescribes a measurement that cannot mutate the shared tree', () => {
+    // The roster runs nine agents in ONE worktree concurrently, and a local
+    // review stands in the user's own checkout. "Compile the base revision the
+    // same way" reads as `git checkout`/`git stash` in that tree — corrupting
+    // files every other agent is reading. The procedure must be non-mutating
+    // (extract the base side with `git show`, build into a scratch dir), and it
+    // must say so, because an agent will do the natural thing unless told.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('git show');
+    expect(out).toMatch(/Never `git checkout`, `git stash`, or build in place/);
+    // And the build it does run is contributor-controlled, hence untrusted.
+    expect(out).toContain('untrusted code');
+  });
+
+  it('keeps the DoS escape hatch the workflow rule already needed', () => {
+    // The flat "perf is a Suggestion" rule misfires on unbounded cost reachable
+    // by an attacker — that is a security hole, not a nit. GITHUB_ACTIONS walked
+    // back its own flat rule with a blast-radius carve-out; this one carries the
+    // matching escape hatch from the start.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('cost is itself the wrongness');
+    expect(out).toContain('denial-of-service');
+  });
+
+  it('names the split fast-path exception precisely', () => {
+    // `split(".")` is single-character but "." is a regex metacharacter, so it
+    // does NOT take the fast path. The parenthetical must say so, or the rule
+    // teaches an agent to wave away a real per-call compile.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('metacharacter');
+  });
+
+  it('caps the triggering-path list in the heading', () => {
+    // A workflow matches one or two files; a large Java PR matches hundreds, and
+    // listing them all in the heading of every agent's brief is ~11 KB of a list
+    // the agent already has. Name the first ten and a count.
+    const many = Array.from(
+      { length: 12 },
+      (_, i) => `src/main/java/com/x/F${i}.java`,
+    );
+    const out = pathRulesFor(many);
+    expect(out).toContain('…and 2 more');
+    expect(out).toContain('src/main/java/com/x/F9.java');
+    expect(out).not.toContain('src/main/java/com/x/F10.java');
+    // At or under the cap, every path is still named.
+    const few = many.slice(0, 10);
+    const outFew = pathRulesFor(few);
+    expect(outFew).not.toContain('…and');
+    expect(outFew).toContain('src/main/java/com/x/F9.java');
   });
 });

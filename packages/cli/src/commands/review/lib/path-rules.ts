@@ -73,7 +73,7 @@ const JAVA: PathRule = {
   matches: (p) => /\.java$/i.test(p),
   checklist: `A Java change's most expensive regressions are decided by the JVM, not by anything a reader can see in the source: HotSpot chooses what to inline, what to scalar-replace, and what to compile at all — and a one-line change can flip each of those on a hot path. The general performance lens (N+1, repeated work, data structures) sees none of it.
 
-**You are reviewing this diff, not auditing this file.** A JVM-cost weakness the code already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a cheap path this diff **makes hot** (a new caller in a request loop, a call moved inside a loop).
+**You are reviewing this diff, not auditing this file.** A JVM-cost weakness the code already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a cheap path this diff **makes hot** (a new caller in a request loop, a call moved inside a loop). Test sources (\`src/test/**\`), \`package-info\`/\`module-info\`, and generated sources are out of scope for the hot-path items — nothing there is hot.
 
 **Correctness traps dressed as concurrency or performance code (Critical):**
 
@@ -83,7 +83,7 @@ const JAVA: PathRule = {
 
 **JVM-cost defects provable from the source (Suggestion — a cost, not a wrongness):**
 
-- **A regex compiled per call.** \`Pattern.compile(...)\` in a method body or loop, and the \`String\` conveniences that hide it — \`matches\`, \`replaceAll\`, \`replaceFirst\`, and \`split\` with a real regex (single-character splits take a fast path) — recompile the pattern on every invocation. On a per-request or per-record path that is real CPU. Fix: \`private static final Pattern\`.
+- **A regex compiled per call.** \`Pattern.compile(...)\` in a method body or loop, and the \`String\` conveniences that hide it — \`matches\`, \`replaceAll\`, \`replaceFirst\`, and \`split\` with a real regex (a single-character \`split\` takes a fast path only when the character is not a regex metacharacter — \`split(".")\` does not) — recompile the pattern on every invocation. On a per-request or per-record path that is real CPU. Fix: \`private static final Pattern\`.
 - **\`+=\` on a \`String\` inside a loop.** Each iteration rebuilds and copies the whole accumulated prefix; the loop is O(n²) in the final length. Fix: one \`StringBuilder\` outside the loop.
 - **Boxing on a hot path.** A \`Long\`/\`Integer\` loop accumulator, a \`Map<Long, …>\` over dense \`int\` keys, \`.boxed()\` in a counted stream: every box past the small-integer cache is an allocation plus a pointer chase per iteration. Fix: primitives, or the primitive streams/collections.
 - **A capturing lambda or method reference inside a hot loop.** A non-capturing lambda is a singleton; one that closes over a local allocates per iteration. If the diff moves a capturing lambda into a loop, hoist it or restructure it to capture nothing.
@@ -103,24 +103,40 @@ HotSpot inlines by the **bytecode size of the callee**, against these product de
 | ≤ 35 (\`MaxInlineSize\`) | even when cold |
 | ≤ 325 (\`FreqInlineSize\`) | only at a hot call site |
 | > 325 | never |
-| ≥ 8000 (\`HugeMethodLimit\`) | never even JIT-compiled |
+| > 8000 (\`HugeMethodLimit\`, a develop flag gated by the product \`DontCompileHugeMethods\`) | never even JIT-compiled |
 
-Two more ways a diff can flip it: an already-compiled callee whose **native** size passes \`InlineSmallCode\` (~1000, product) stops being inlined to protect the code cache, and a call site that gains a **third** receiver implementation goes megamorphic — vtable dispatch, no inlining at any size. So the diff-shapes that matter: a small method on a hot path the change **grows** (added validation, logging, a branch), a new layer in a hot call chain, a new implementation registered for an interface invoked in a hot loop. A cold method over 325 bytes is **not** a finding — inlining only matters where the call is hot.
+Two more ways a diff can flip it: an already-compiled callee whose **native** size passes \`InlineSmallCode\` (2500 on JDK 11+, 1000 on JDK 8) stops being inlined to protect the code cache, and a call site that gains a **third** receiver implementation goes megamorphic — vtable dispatch, and no inlining **unless one receiver still dominates the profile** (\`TypeProfileMajorReceiverPercent\`, 90% by default), in which case C2 inlines that receiver behind a guard with an uncommon trap for the rest. So the diff-shapes that matter: a small method on a hot path the change **grows** (added validation, logging, a branch), a new layer in a hot call chain, a new implementation registered for an interface invoked in a hot loop. A cold method over 325 bytes is **not** a finding — inlining only matters where the call is hot.
 
 **Measure it; do not estimate bytecode from source.** Two tiers, in order of cost:
 
-1. **Static — available whenever the project builds.** Compile (\`mvn -q -DskipTests compile\`, \`gradle classes\`, or \`javac\` the module), then \`javap -c -p <ClassName>\` and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — compile the base revision the same way and measure the same method on both sides; a method that was already over is pre-existing, not a finding.
+1. **Static — available whenever the project builds.** Extract the one class and \`javac\` it into a **scratch** output dir (\`javac -d /tmp/<scratch> …\`), then \`javap -c -p\` the class and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — get the base side **without touching the tree**: \`git show <merge-base>:<path> > /tmp/<scratch>/X.java\`, compile that too, and measure both; a method already over on the base side is pre-existing, not a finding. **Never \`git checkout\`, \`git stash\`, or build in place.** In a PR review the worktree is shared with agents running concurrently, and in a local review it is the user's own checkout — mutating it corrupts work you cannot see. A full \`mvn\`/\`gradle\` build also executes the branch's contributor-controlled build logic, so prefer \`javac\` on the extracted file over a project build, and treat any build you do run as untrusted code.
 2. **Dynamic — when the code is runnable.** Run the workload with \`-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining\` and grep for the method: \`callee is too large\` / \`hot method too big\` is the JVM itself declining to inline. JMH gives the before/after throughput; JITWatch visualizes the same decision logs.
 
 A finding that a method "can no longer be inlined" without one of these two tiers is a guess stated as fact. Report the **mechanism** instead, at \`Confidence: low\`: the threshold at risk, what the diff added to the method, and the measurement still to run. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
 
 **When the finding IS a grown hot method, the fix to suggest is hot/cold splitting — not reverting the change, and not \`@ForceInline\`** (which copies the callee's full body into every caller, bloating their bytecode and their own inline budgets). Move the cold paths — error handling, rare branches, defensive validation, the \`switch\` arms that almost never fire — into a small private helper, leaving the common path under the threshold; the helper, now called from one site, is itself inlinable. Name the bytecode range to extract and the size it leaves behind, the way the measurement names them: "extract bytecodes 212–311 (~100 bytes) into \`applyRounding\`, leaving \`parseAmount\` at ~238 bytes" is a finding an author can act on; "consider splitting the method" is not.
 
-**Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions**: slow is a cost, not incorrect behaviour — the Critical entries above are Critical because they are *wrong*.`,
+**Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions** — slow is a cost, not incorrect behaviour — **except where the cost is itself the wrongness**: unbounded allocation, quadratic work, or unbounded cache growth on attacker-reachable input is a denial-of-service hole, which the severity ladder grades Critical, not a Suggestion. Name the reachable input that triggers it; "this loop is slow" with no attacker-reachable trigger stays a Suggestion.`,
 };
 
 /** Every rule, in the order their checklists are appended. */
 export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
+
+/**
+ * The triggering paths named in a rule's heading — capped. A workflow rule
+ * matches one or two files; a Java rule matches every source file in a large
+ * PR, and listing hundreds of paths in the heading of every agent's brief is
+ * ~11 KB of a list the agent already has from its file table. Name the first
+ * few and a count; the checklist, not the path list, is what the heading is
+ * for.
+ */
+function describePaths(which: readonly string[]): string {
+  const CAP = 10;
+  if (which.length <= CAP) {
+    return which.join(', ');
+  }
+  return `${which.slice(0, CAP).join(', ')}, …and ${which.length - CAP} more`;
+}
 
 /**
  * The checklists that govern `paths`, as a brief section — or `''` when none do.
@@ -135,7 +151,7 @@ export function pathRulesFor(paths: readonly string[]): string {
   const parts = ['## Rules for the files in front of you', ''];
   for (const r of hit) {
     const which = paths.filter((p) => r.matches(p));
-    parts.push(`### ${r.title} — ${which.join(', ')}`, '', r.checklist, '');
+    parts.push(`### ${r.title} — ${describePaths(which)}`, '', r.checklist, '');
   }
   return parts.join('\n').trimEnd();
 }
