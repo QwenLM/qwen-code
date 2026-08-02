@@ -618,6 +618,28 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('does not invoke the audio bridge for a text-only prompt', async () => {
+    setupMetricsMock();
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'plain text question',
+      'prompt-text-only',
+    );
+
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'plain text question' }],
+      expect.any(AbortSignal),
+      'prompt-text-only',
+      { type: SendMessageType.UserQuery },
+    );
+  });
+
   it('routes cancellation that lands during audio bridging', async () => {
     setupMetricsMock();
     const { handleAtCommand } = await import(
