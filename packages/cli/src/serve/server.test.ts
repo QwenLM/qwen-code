@@ -20151,6 +20151,22 @@ describe('createServeApp', () => {
       expect(res.status).toBe(401);
     });
 
+    it('ignores daemon cookies entirely now that fragment auth replaced them', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const cookieOnly = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret');
+      expect(cookieOnly.status).toBe(401);
+
+      const cookieWithWrongBearer = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret')
+        .set('Authorization', 'Bearer wrong');
+      expect(cookieWithWrongBearer.status).toBe(401);
+    });
+
     it('accepts the right token', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)
