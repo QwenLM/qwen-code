@@ -11,6 +11,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { spawnSync, execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   runDrive,
   wrapScript,
@@ -64,7 +67,7 @@ describe('the sentinel', () => {
   it('carries the exit code on the same line it announces completion', () => {
     // Two facts read from one capture. A capture holding the marker but not the
     // code would report `completed` with an unknown result.
-    expect(wrapScript('true')).toContain(`${DRIVE_SENTINEL} rc=`);
+    expect(wrapScript('true', '/tmp/rc')).toContain(`${DRIVE_SENTINEL} rc=`);
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=0\n`)).toBe(0);
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=17\n`)).toBe(17);
   });
@@ -89,18 +92,19 @@ describe('the sentinel', () => {
     // `timed-out` with a null exit code — a run that answered in milliseconds
     // reported as one that never finished. A `set +e` assertion did not catch
     // it, because `set +e` has no bearing on `exit`; the trap does.
-    expect(wrapScript('exit 17')).toMatch(/^trap .* EXIT/);
+    expect(wrapScript('exit 17', '/tmp/rc')).toMatch(/^trap .* EXIT/);
   });
 });
 
 describe('the wrapper, driven for real', () => {
   // Four ways a script can leave, all of which a reviewer's drive script uses.
-  // These run real bash — the harness tests above cannot see a shell semantic.
+  // These run real bash — the harness tests above cannot see a shell semantic —
+  // and read the verdict from the sentinel FILE, the channel that has to
+  // survive a bounded log.
   const realExit = (script: string): number | null => {
-    const r = spawnSync('bash', ['-c', wrapScript(script)], {
-      encoding: 'utf8',
-    });
-    return sentinelExitCode(r.stdout ?? '');
+    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+    spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
+    return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
   };
 
   it('reports the code for every exit path', () => {
@@ -110,12 +114,42 @@ describe('the wrapper, driven for real', () => {
     expect(realExit('exit 0')).toBe(0);
   });
 
-  it('keeps the script output alongside the sentinel', () => {
-    const r = spawnSync('bash', ['-c', wrapScript('echo hello-there')], {
+  it('keeps the script output on stdout and the verdict in its own file', () => {
+    // Two channels on purpose. The log is bounded; the verdict must not be
+    // bounded with it, and the next test shows what happens when it is.
+    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+    const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
       encoding: 'utf8',
     });
     expect(r.stdout).toContain('hello-there');
-    expect(sentinelExitCode(r.stdout ?? '')).toBe(0);
+    expect(r.stdout).not.toContain(DRIVE_SENTINEL);
+    expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
+  });
+
+  it('capping the STREAM would FABRICATE an exit code — measured, not assumed', () => {
+    // Why the log is bounded by watching its size rather than by `head -c`.
+    // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
+    // and the EXIT trap then fires with `$?` from the last successful echo: a
+    // script whose final statement is `exit 5` reports rc=0. Not a lost
+    // verdict — a fabricated one, a failing run presented as a clean pass.
+    // Pinned so the shortcut is not reintroduced by someone who reasons about
+    // it instead of running it.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+    const rc = join(dir, 'drive.rc');
+    const sh = join(dir, 's.sh');
+    writeFileSync(
+      sh,
+      wrapScript(
+        'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
+        rc,
+      ),
+    );
+    spawnSync(
+      'bash',
+      ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
+      { encoding: 'utf8' },
+    );
+    expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0); // NOT 5
   });
 });
 
@@ -345,6 +379,41 @@ describe('the environment gate', () => {
     });
     expect(r.outcome).toBe('unavailable');
     expect(r.note).toContain('not a finding');
+  });
+});
+
+describe('the log cap', () => {
+  it('stops a too-loud drive as its OWN outcome, with no exit code', () => {
+    // A run this command had to stop is not a run that finished. Reporting an
+    // exit code here would be inventing one; reporting `timed-out` would blame
+    // the clock for a size problem.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+    const log = join(dir, 'drive.log');
+    let poll = 0;
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'tmux' && args[2] === 'new-session') {
+        // stand in for a drive that writes fast and never finishes
+        writeFileSync(log, 'x'.repeat(16 * 1024 * 1024));
+        return ok();
+      }
+      poll++;
+      return ok();
+    };
+    const r = runDrive({
+      script: 'noisy',
+      cwd: dir,
+      readyTimeout: 1,
+      timeout: 30,
+      server: 'loud',
+      exec,
+      logPath: log,
+    });
+    expect(r.outcome).toBe('overflowed');
+    expect(r.exitCode).toBeNull();
+    expect(r.observed).toBe(false);
+    expect(r.note).toContain('was stopped');
+    expect(poll).toBeLessThan(20); // stopped early, did not sit out the timeout
   });
 });
 

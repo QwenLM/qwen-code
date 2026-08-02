@@ -38,7 +38,14 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -51,6 +58,8 @@ export type DriveOutcome =
   | 'not-ready'
   /** Driven, but the sentinel never appeared before the deadline. */
   | 'timed-out'
+  /** Stopped because its output crossed the log cap — no verdict, by design. */
+  | 'overflowed'
   /** The harness itself could not run (no tmux, server would not start). */
   | 'unavailable';
 
@@ -100,6 +109,8 @@ export interface DriveArgs {
   server: string;
   /** Test seam — production shells out for real. */
   exec?: (cmd: string, args: string[], input?: string) => ExecResult;
+  /** Test seam — production derives it from `server`. */
+  logPath?: string;
 }
 
 export interface ExecResult {
@@ -132,6 +143,27 @@ export function shellQuote(v: string): string {
 
 /** Cap the captured pane the way build-test caps command output. */
 const CAPTURE_MAX = 200_000;
+
+/**
+ * Cap on the log FILE, not just on what gets reported from it.
+ *
+ * `trimCapture` bounds the string this command hands back; nothing bounded what
+ * the driven script wrote. Measured: a loop printing 200k lines left a 9.9 MB
+ * log on disk while the report stayed at 200 KB — and a drive script is
+ * whatever the reviewer wrote, so there is no upper bound at all. This repo has
+ * already paid for that once: `build-test`'s disk floors exist because an
+ * `npm ci` filled the disk 33 seconds in and then failed every agent scheduled
+ * after it.
+ *
+ * Enforced by WATCHING, not by piping through `head -c`. That was the first
+ * attempt and it is worse than the problem: `head` exits at the cap, the writer
+ * takes SIGPIPE mid-loop, and the EXIT trap then fires with `$?` from the last
+ * successful echo. Measured — a script whose last statement was `exit 5` came
+ * back `rc=0`. Not a lost verdict: a FABRICATED one, a failing run reported as
+ * a clean pass. A run this command had to stop is not a run that finished, so
+ * it gets its own outcome and no exit code at all.
+ */
+const LOG_MAX_BYTES = 8 * 1024 * 1024;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
 const POLL_MS = 250;
 
@@ -150,6 +182,15 @@ const POLL_MS = 250;
  * `Atomics.wait` blocks the thread for a real duration with no subprocess and
  * no platform surface at all.
  */
+/** Size of the log so far; 0 when it is not there yet. */
+function logBytes(p: string): number {
+  try {
+    return statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
+
 function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -186,9 +227,21 @@ export const DRIVE_SENTINEL = '__QWEN_REVIEW_DRIVE_DONE__';
  * milliseconds and told us its answer was reported as one that never finished.
  * The trap fires on every way out — falling off the end, an explicit `exit`,
  * or an abort under `set -e`.
+ *
+ * And it writes to its OWN file, not into the captured stream. The log is
+ * size-capped at the write end, and a cap on the stream is a cap on the
+ * sentinel too: measured, a script printing 200k lines then `exit 5` had its
+ * sentinel swallowed by the closed pipe and came back `timed-out` with a null
+ * code — the same wrong answer, reintroduced by the fix for a different
+ * problem. Two facts, two channels: the log may be trimmed, the verdict may
+ * not.
  */
-export function wrapScript(script: string, sentinel = DRIVE_SENTINEL): string {
-  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}"' EXIT\nset +e\n${script}\n`;
+export function wrapScript(
+  script: string,
+  sentinelPath: string,
+  sentinel = DRIVE_SENTINEL,
+): string {
+  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\n${script}\n`;
 }
 
 /** Parse the sentinel line back out of a capture. Null when it is not there. */
@@ -283,8 +336,10 @@ export function runDrive(args: DriveArgs): DriveReport {
   const dir = join(tmpdir(), `qwen-review-drive-${server}`);
   mkdirSync(dir, { recursive: true });
   const scriptPath = join(dir, 'drive.sh');
-  const logPath = join(dir, 'drive.log');
-  writeFileSync(scriptPath, wrapScript(args.script), 'utf8');
+  const logPath = args.logPath ?? join(dir, 'drive.log');
+  const sentinelPath = join(dir, 'drive.rc');
+  rmSync(sentinelPath, { force: true });
+  writeFileSync(scriptPath, wrapScript(args.script, sentinelPath), 'utf8');
 
   const droveFrom = Date.now();
   let output = '';
@@ -322,9 +377,15 @@ export function runDrive(args: DriveArgs): DriveReport {
     const deadline = droveFrom + args.timeout * 1000;
     for (;;) {
       output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
-      exitCode = sentinelExitCode(output);
+      exitCode = existsSync(sentinelPath)
+        ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
+        : null;
       if (exitCode !== null) {
         outcome = 'completed';
+        break;
+      }
+      if (logBytes(logPath) > LOG_MAX_BYTES) {
+        outcome = 'overflowed';
         break;
       }
       if (Date.now() >= deadline) break;
@@ -339,9 +400,11 @@ export function runDrive(args: DriveArgs): DriveReport {
   const { text, truncated } = trimCapture(output);
   const droveForMs = Date.now() - droveFrom;
   const note =
-    outcome === 'completed'
-      ? `drove for ${Math.round(droveForMs / 1000)}s and reached its sentinel with exit ${exitCode}${readyAfterMs === null ? '' : ` (ready after ${Math.round(readyAfterMs / 1000)}s)`}${truncated ? '; the capture was trimmed at the head, so early output is missing' : ''}`
-      : `the drive did not finish within ${args.timeout}s — the capture below is PARTIAL, and a partial capture is not evidence that the run produced nothing. Raise --timeout, or give the script a smaller job.`;
+    outcome === 'overflowed'
+      ? `the drive wrote more than ${Math.round(LOG_MAX_BYTES / 1024 / 1024)} MiB and was stopped — no exit code is reported because it never gave one, and a run this command had to stop is not evidence about the diff either way. Quieten the script, or have it manage its own output file.`
+      : outcome === 'completed'
+        ? `drove for ${Math.round(droveForMs / 1000)}s and reached its sentinel with exit ${exitCode}${readyAfterMs === null ? '' : ` (ready after ${Math.round(readyAfterMs / 1000)}s)`}${truncated ? '; the capture was trimmed at the head, so early output is missing' : ''}`
+        : `the drive did not finish within ${args.timeout}s — the capture below is PARTIAL, and a partial capture is not evidence that the run produced nothing. Raise --timeout, or give the script a smaller job.`;
 
   return {
     outcome,
