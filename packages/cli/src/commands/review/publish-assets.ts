@@ -195,26 +195,30 @@ function ensureBranch(repo: string, branch: string): void {
 }
 
 export function runPublishAssets(args: PublishAssetsArgs): void {
+  // Every refusal in this command speaks one language: a stderr line naming
+  // the reason, `{"published": false}` on stdout, exit 3. One helper, used by
+  // every gate — seven inline copies of the same three lines is how one site
+  // eventually forgets the exit code.
+  const refuse = (reason: string): void => {
+    writeStderrLine(`publish-assets: refused — ${reason}`);
+    writeStdoutLine(JSON.stringify({ published: false }));
+    process.exitCode = 3;
+  };
+
   // ── Gate 0: a PR identity that can name a branch ──────────────────────────
   // yargs `type: 'number'` happily passes NaN, 0, -1 and 3.5 through, and with
   // `--user-authorized` the authorization gate never re-parses the target — so
   // without this check a `--pr abc` run creates branch `pr-assets/NaN-review`.
   // Sibling discipline: `submit` guards the identical input the same way.
   if (!Number.isInteger(args.pr) || args.pr <= 0) {
-    writeStderrLine(
-      `publish-assets: --pr must be a positive integer, got ${String(args.pr)}.`,
-    );
-    writeStdoutLine(JSON.stringify({ published: false }));
-    process.exitCode = 3;
+    refuse(`--pr must be a positive integer, got ${String(args.pr)}.`);
     return;
   }
 
   // ── Gate 1: a designated destination ──────────────────────────────────────
   const repoResult = parseAssetsRepo(process.env['QWEN_REVIEW_ASSETS_REPO']);
   if ('error' in repoResult) {
-    writeStderrLine(repoResult.error);
-    writeStdoutLine(JSON.stringify({ published: false }));
-    process.exitCode = 3;
+    refuse(repoResult.error);
     return;
   }
   const repo = repoResult.repo;
@@ -235,14 +239,12 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     host: args.host,
   });
   if (!auth.ok) {
-    writeStderrLine(
-      `publish-assets: not authorised — ${auth.why}. Evidence images are ` +
-        'published only for a run that is authorised to post the review ' +
-        'itself; the findings and their local file paths remain in the ' +
-        'terminal output and the saved report.',
+    refuse(
+      `not authorised — ${auth.why}. Evidence images are published only for ` +
+        'a run that is authorised to post the review itself; the findings ' +
+        'and their local file paths remain in the terminal output and the ' +
+        'saved report.',
     );
-    writeStdoutLine(JSON.stringify({ published: false }));
-    process.exitCode = 3;
     return;
   }
 
@@ -262,13 +264,13 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
       // GH_HOST it would be an uncaught TypeError with a stack trace for an
       // input this command chose to read. Same answer either way, in the
       // refusal language: name the value and where it came from.
-      writeStderrLine(
-        `publish-assets: refused — ${
-          err instanceof Error ? err.message : String(err)
-        } (from ${args.host !== undefined ? '--host' : 'the GH_HOST environment variable'})`,
+      refuse(
+        `${err instanceof Error ? err.message : String(err)} (from ${
+          args.host !== undefined
+            ? '--host'
+            : 'the GH_HOST environment variable'
+        })`,
       );
-      writeStdoutLine(JSON.stringify({ published: false }));
-      process.exitCode = 3;
       return;
     }
   }
@@ -288,13 +290,11 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
         Array.isArray(artifact) ? artifact : artifact.findings,
       );
     } catch (err) {
-      writeStderrLine(
-        `publish-assets: refused — cannot use the findings artifact at ${JSON.stringify(args.findings)}: ${
+      refuse(
+        `cannot use the findings artifact at ${JSON.stringify(args.findings)}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      writeStdoutLine(JSON.stringify({ published: false }));
-      process.exitCode = 3;
       return;
     }
     for (const f of findings) {
@@ -316,9 +316,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
       writeStdoutLine(JSON.stringify({ published: false, count: 0 }));
       return;
     }
-    writeStderrLine('publish-assets: no files to publish.');
-    writeStdoutLine(JSON.stringify({ published: false }));
-    process.exitCode = 3;
+    refuse('no files to publish.');
     return;
   }
 
@@ -335,16 +333,6 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     remotePath: string;
     contentBase64: string;
   }
-  // A validation refusal is a REFUSAL, not a crash: the same exit-3 +
-  // `{"published": false}` contract every other gate in this command keeps
-  // (bad --pr, missing designation, unauthorised run, empty --files). A
-  // throw here would surface as yargs exit 1 with a stack trace and an empty
-  // stdout — a different failure language for the same kind of answer.
-  const refuse = (reason: string): void => {
-    writeStderrLine(`publish-assets: refused — ${reason}`);
-    writeStdoutLine(JSON.stringify({ published: false }));
-    process.exitCode = 3;
-  };
   interface Stat {
     file: string;
     abs: string;
