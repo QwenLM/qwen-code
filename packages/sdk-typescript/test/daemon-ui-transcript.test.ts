@@ -94,10 +94,15 @@ describe('daemon transcript rewind', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
-        { type: 'assistant.text.delta', text: 'partial answer' },
+        {
+          type: 'assistant.text.delta',
+          text: 'partial answer',
+          promptId: 'prompt-1',
+        },
         {
           type: 'assistant.done',
           reason: 'error',
+          promptId: 'prompt-1',
           sourceRecordIds: ['assistant-record'],
           branchRecordId: 'checkpoint-record',
         },
@@ -106,6 +111,61 @@ describe('daemon transcript rewind', () => {
     );
 
     expect(state.blocks[0]).not.toHaveProperty('branchRecordId');
+  });
+
+  it('does not merge text deltas with different promptIds', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'first ',
+          promptId: 'prompt-1',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'second',
+          promptId: 'prompt-2',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first ',
+      promptId: 'prompt-1',
+    });
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'second',
+      promptId: 'prompt-2',
+    });
+  });
+
+  it('merges text deltas when one side lacks a promptId', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'first ',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'second',
+          promptId: 'prompt-1',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first second',
+    });
   });
 
   it('does not attach replay branch metadata to a user block', () => {

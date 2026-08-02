@@ -292,7 +292,6 @@ export function resolveBranchPoints(
   }
 
   const checkpointByAssistantUuid = new Map<string, string>();
-  const duplicateAssistantUuids = new Set<string>();
   for (const {
     checkpoint,
     checkpointIndex,
@@ -318,10 +317,8 @@ export function resolveBranchPoints(
     );
     if (previousCheckpoint !== undefined) {
       points.delete(previousCheckpoint);
-      duplicateAssistantUuids.add(candidate.assistantRecordUuid);
       continue;
     }
-    if (duplicateAssistantUuids.has(candidate.assistantRecordUuid)) continue;
     points.set(checkpoint.uuid, {
       ...candidate,
       checkpointUuid: checkpoint.uuid,

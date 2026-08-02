@@ -742,7 +742,12 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
-  if (existing.promptId !== event.promptId) return false;
+  if (
+    existing.promptId !== undefined &&
+    event.promptId !== undefined &&
+    existing.promptId !== event.promptId
+  )
+    return false;
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }

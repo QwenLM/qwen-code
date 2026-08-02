@@ -2002,10 +2002,11 @@ export class SessionService {
     // JSONL as abandoned parentUuid branches; copying raw records would
     // resurrect them. The raw input is physically bounded first so side
     // artifacts after a historical checkpoint cannot leak into the fork.
-    const sourceRecords = includeActiveSideArtifactRecords(
+    const preFilterRecords = includeActiveSideArtifactRecords(
       boundedRecords,
       activeMessages,
-    ).filter(
+    );
+    const sourceRecords = preFilterRecords.filter(
       // A fork is a fresh top-level session with its own creation metadata.
       // Inheriting either record would falsely attribute the fork to the
       // source session's parent or creator.
@@ -2045,6 +2046,20 @@ export class SessionService {
     let prevUuid: string | null = sourceRecord?.uuid ?? null;
     const remappedArtifactIds = new Map<string, string>();
     const retainedUuids = new Set(sourceRecords.map((record) => record.uuid));
+    // Map filtered record UUIDs to their nearest retained predecessor so
+    // checkpoint boundaries that pointed at a filtered creation/title record
+    // are remapped rather than widened to the whole chain.
+    const nearestRetainedPredecessor = new Map<string, string | null>();
+    {
+      let lastRetained: string | null = null;
+      for (const record of preFilterRecords) {
+        if (retainedUuids.has(record.uuid)) {
+          lastRetained = record.uuid;
+        } else {
+          nearestRetainedPredecessor.set(record.uuid, lastRetained);
+        }
+      }
+    }
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
@@ -2058,13 +2073,13 @@ export class SessionService {
         if (record.subtype === 'branch_checkpoint') {
           const checkpoint = parseBranchCheckpointPayload(systemPayload);
           if (checkpoint) {
+            let boundary = checkpoint.startExclusiveRecordUuid;
+            if (boundary !== null && !retainedUuids.has(boundary)) {
+              boundary = nearestRetainedPredecessor.get(boundary) ?? null;
+            }
             systemPayload = {
               ...checkpoint,
-              startExclusiveRecordUuid:
-                checkpoint.startExclusiveRecordUuid !== null &&
-                retainedUuids.has(checkpoint.startExclusiveRecordUuid)
-                  ? checkpoint.startExclusiveRecordUuid
-                  : null,
+              startExclusiveRecordUuid: boundary,
             };
           }
         }
@@ -2141,6 +2156,7 @@ export class SessionService {
         },
       };
       forked.push(titleRecord);
+      prevUuid = titleRecord.uuid;
     }
 
     const validateTargetBranchPoint = () => {

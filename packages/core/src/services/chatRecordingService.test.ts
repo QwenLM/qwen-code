@@ -466,6 +466,28 @@ describe('ChatRecordingService', () => {
         );
       },
     );
+
+    it('rejects a concurrent recordBranchCheckpointTransaction', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'hi' }],
+      });
+
+      const first = chatRecordingService.recordBranchCheckpointTransaction({
+        startExclusiveRecordUuid: null,
+        stopReason: 'end_turn',
+      });
+
+      await expect(
+        chatRecordingService.recordBranchCheckpointTransaction({
+          startExclusiveRecordUuid: null,
+          stopReason: 'end_turn',
+        }),
+      ).rejects.toThrow('Transcript topology transaction already active');
+
+      await first;
+    });
   });
 
   describe('Goal records', () => {

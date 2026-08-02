@@ -5912,16 +5912,16 @@ export function App({
             isRecord(error.body) &&
             error.body['code'] === 'branch_point_invalid'
           ) {
+            if (!transcriptReloadSupported) {
+              pushToast('error', t('branch.staleUnsupported'));
+              return;
+            }
             let refreshed = false;
-            if (transcriptReloadSupported) {
-              try {
-                await sessionActions.reloadSession(
-                  new AbortController().signal,
-                );
-                refreshed = true;
-              } catch {
-                refreshed = false;
-              }
+            try {
+              await sessionActions.reloadSession(new AbortController().signal);
+              refreshed = true;
+            } catch {
+              refreshed = false;
             }
             pushToast(
               'error',

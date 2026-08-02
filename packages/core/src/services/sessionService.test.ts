@@ -3418,6 +3418,108 @@ describe('SessionService', () => {
       ).resolves.toMatchObject({ copiedCount: 3 });
     });
 
+    it('remaps a checkpoint boundary from a filtered custom_title to its predecessor', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111116';
+      const newId = '22222222-2222-2222-2222-222222222227';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${oldId}.jsonl`);
+      const records = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          provenance: 'real_user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'first question' }] },
+        },
+        {
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: oldId,
+          type: 'assistant',
+          provenance: 'assistant_output',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'first answer' }] },
+        },
+        {
+          uuid: 'title-1',
+          parentUuid: 'a1',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'custom_title',
+          timestamp: '2026-04-22T00:00:01.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: { customTitle: 'Renamed', titleSource: 'manual' },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'title-1',
+          sessionId: oldId,
+          type: 'user',
+          provenance: 'real_user',
+          timestamp: '2026-04-22T00:00:02.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'second question' }] },
+        },
+        {
+          uuid: 'a2',
+          parentUuid: 'u2',
+          sessionId: oldId,
+          type: 'assistant',
+          provenance: 'assistant_output',
+          timestamp: '2026-04-22T00:00:03.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'second answer' }] },
+        },
+        {
+          uuid: 'checkpoint-2',
+          parentUuid: 'a2',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'branch_checkpoint',
+          timestamp: '2026-04-22T00:00:03.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: {
+            v: 1,
+            startExclusiveRecordUuid: 'title-1',
+            assistantRecordUuid: 'a2',
+          },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-2',
+        source: { sourceType: 'side-task' },
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(written.some((r) => r.subtype === 'custom_title')).toBe(false);
+      const forkedCheckpoint = written.find((r) => r.uuid === 'checkpoint-2');
+      expect(forkedCheckpoint?.systemPayload).toMatchObject({
+        startExclusiveRecordUuid: 'a1',
+      });
+    });
+
     it('rejects a checkpoint that is no longer on the active chain', async () => {
       const oldId = '11111111-1111-1111-1111-111111111114';
       const newId = '22222222-2222-2222-2222-222222222225';
