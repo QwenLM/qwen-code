@@ -51,6 +51,7 @@ import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  hasDescriptorSenderPolicy,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
@@ -591,76 +592,87 @@ export function ChannelEditorDialog({
               {descriptor.fields.map(renderField)}
             </section>
 
-            <section className={styles.section}>
-              <h3 className={styles.sectionHeading}>
-                {t('channels.editor.section.access')}
-              </h3>
-              {descriptor.fields.some(
-                (f) => f.key === 'senderPolicy',
-              ) ? null : (
-                <>
-                  <RadioGroup
-                    className={styles.policyGrid}
-                    value={draft.senderPolicy}
-                    aria-invalid={Boolean(errors['senderPolicy'])}
-                    onValueChange={(value) =>
-                      setDraft((current) => ({
-                        ...current,
-                        senderPolicy:
-                          value === 'pairing' || value === 'open' ? value : '',
-                      }))
-                    }
-                  >
-                    {(['pairing', 'open'] as const).map((policy) => (
-                      <Label
-                        key={policy}
-                        className={styles.policyCard}
-                        data-selected={draft.senderPolicy === policy}
-                      >
-                        <RadioGroupItem value={policy} />
-                        <span className={styles.policyCopy}>
-                          <span className={styles.policyTitle}>
-                            {t(`channels.editor.policy.${policy}.title`)}
-                          </span>
-                          <span className={styles.policyDescription}>
-                            {t(`channels.editor.policy.${policy}.description`)}
-                          </span>
-                        </span>
-                      </Label>
-                    ))}
-                  </RadioGroup>
-                  {errors['senderPolicy'] ? (
-                    <p role="alert" className="text-xs text-destructive">
-                      {errors['senderPolicy']}
-                    </p>
-                  ) : null}
-                </>
-              )}
-              {(descriptor.fields.some((f) => f.key === 'senderPolicy')
+            {(() => {
+              const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
+              const effectivePolicy = descriptorPolicy
                 ? String(draft.values['senderPolicy'] ?? '')
-                : draft.senderPolicy) === 'pairing' ? (
-                instance?.config.senderPolicy === 'pairing' ? (
-                  <ChannelPairingRequests
-                    channelName={instance.name}
-                    listRequests={listPairingRequests}
-                    approveRequest={approvePairingRequest}
-                    listApprovals={listPairingApprovals}
-                    revokeApproval={revokePairingApproval}
-                    staticAllowedUsers={configuredAllowedUsers(instance)}
-                  />
-                ) : (
-                  <Alert>
-                    <KeyRoundIcon />
-                    <AlertTitle>
-                      {t('channels.editor.pairing.saveFirst.title')}
-                    </AlertTitle>
-                    <AlertDescription>
-                      {t('channels.editor.pairing.saveFirst.description')}
-                    </AlertDescription>
-                  </Alert>
-                )
-              ) : null}
-            </section>
+                : draft.senderPolicy;
+              const showRadioGroup = !descriptorPolicy;
+              const showPairing = effectivePolicy === 'pairing';
+              if (!showRadioGroup && !showPairing) return null;
+              return (
+                <section className={styles.section}>
+                  <h3 className={styles.sectionHeading}>
+                    {t('channels.editor.section.access')}
+                  </h3>
+                  {showRadioGroup ? (
+                    <>
+                      <RadioGroup
+                        className={styles.policyGrid}
+                        value={draft.senderPolicy}
+                        aria-invalid={Boolean(errors['senderPolicy'])}
+                        onValueChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            senderPolicy:
+                              value === 'pairing' || value === 'open'
+                                ? value
+                                : '',
+                          }))
+                        }
+                      >
+                        {(['pairing', 'open'] as const).map((policy) => (
+                          <Label
+                            key={policy}
+                            className={styles.policyCard}
+                            data-selected={draft.senderPolicy === policy}
+                          >
+                            <RadioGroupItem value={policy} />
+                            <span className={styles.policyCopy}>
+                              <span className={styles.policyTitle}>
+                                {t(`channels.editor.policy.${policy}.title`)}
+                              </span>
+                              <span className={styles.policyDescription}>
+                                {t(
+                                  `channels.editor.policy.${policy}.description`,
+                                )}
+                              </span>
+                            </span>
+                          </Label>
+                        ))}
+                      </RadioGroup>
+                      {errors['senderPolicy'] ? (
+                        <p role="alert" className="text-xs text-destructive">
+                          {errors['senderPolicy']}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {showPairing ? (
+                    instance?.config.senderPolicy === 'pairing' ? (
+                      <ChannelPairingRequests
+                        channelName={instance.name}
+                        listRequests={listPairingRequests}
+                        approveRequest={approvePairingRequest}
+                        listApprovals={listPairingApprovals}
+                        revokeApproval={revokePairingApproval}
+                        staticAllowedUsers={configuredAllowedUsers(instance)}
+                      />
+                    ) : (
+                      <Alert>
+                        <KeyRoundIcon />
+                        <AlertTitle>
+                          {t('channels.editor.pairing.saveFirst.title')}
+                        </AlertTitle>
+                        <AlertDescription>
+                          {t('channels.editor.pairing.saveFirst.description')}
+                        </AlertDescription>
+                      </Alert>
+                    )
+                  ) : null}
+                </section>
+              );
+            })()}
           </div>
           <DialogFooter className="mt-4">
             <Button

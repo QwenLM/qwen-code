@@ -38,6 +38,12 @@ export type ChannelEditorValidationErrors = Record<
   ChannelEditorValidationCode
 >;
 
+export function hasDescriptorSenderPolicy(
+  descriptor: DaemonChannelTypeDescriptor,
+): boolean {
+  return descriptor.fields.some((f) => f.key === 'senderPolicy');
+}
+
 function initialFieldValue(
   field: DaemonChannelConfigFieldDescriptor,
   instance?: DaemonChannelInstanceSnapshot,
@@ -80,9 +86,7 @@ export function createChannelEditorDraft(
     }
     values[field.key] = initialFieldValue(field, instance);
   }
-  const hasDescriptorPolicy = descriptor.fields.some(
-    (f) => f.key === 'senderPolicy',
-  );
+  const hasDescriptorPolicy = hasDescriptorSenderPolicy(descriptor);
   const configuredPolicy = instance?.config['senderPolicy'];
   return {
     name: instance?.name ?? '',
@@ -152,10 +156,7 @@ export function validateChannelEditorDraft(
       errors[field.key] = 'number';
     }
   }
-  if (
-    !draft.senderPolicy &&
-    !descriptor.fields.some((f) => f.key === 'senderPolicy')
-  ) {
+  if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
     errors['senderPolicy'] = 'policy';
   }
   return errors;
@@ -225,7 +226,7 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  if (!descriptor.fields.some((f) => f.key === 'senderPolicy')) {
+  if (!hasDescriptorSenderPolicy(descriptor)) {
     config['senderPolicy'] = draft.senderPolicy;
   }
   return { expectedRevision, config, secrets };
