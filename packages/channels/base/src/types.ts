@@ -384,7 +384,9 @@ export type ChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list'
+  | 'record';
 
 export interface ChannelConfigFieldDescriptor {
   key: string;
@@ -393,6 +395,7 @@ export interface ChannelConfigFieldDescriptor {
   required?: boolean;
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 
