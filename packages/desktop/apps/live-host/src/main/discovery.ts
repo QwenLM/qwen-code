@@ -112,8 +112,8 @@ export async function readDiscoveryFile(
   }
   if (!isRecord(value)) return { kind: 'invalid', reason: 'discovery_shape' };
 
-  const protocolVersion = value.protocolVersion;
-  const instanceNonce = value.instanceNonce;
+  const protocolVersion = value.protocolVersion ?? value.protocol;
+  const instanceNonce = value.instanceNonce ?? value.nonce;
   if (
     typeof value.url !== 'string' ||
     value.url.length > 4_096 ||

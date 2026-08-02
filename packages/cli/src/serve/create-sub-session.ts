@@ -19,9 +19,6 @@
  *                    A background event-stream subscription holds the concurrency
  *                    slot until the turn finishes (or `stop()` aborts it), so the
  *                    per-caller cap stays meaningful for fire-and-forget runs.
- *                    When the turn finishes, a completion notification is
- *                    delivered to the parent session for ALL sent-mode callers
- *                    (not only Live Voice), triggering an automatic follow-up turn.
  *  - `'first-turn'`— subscribe to the sub-session's event stream, accumulate its
  *                    `agent_message_chunk` text until `turn_complete`/`turn_error`
  *                    (correlated on `promptId`), and return it. `sendPrompt`'s
@@ -92,7 +89,6 @@ const SENT_MODE_DRAIN_TIMEOUT_MS = 30 * 60_000;
 const RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS = 30 * 60_000;
 
 const SENT_COMPLETION_DELIVERY_RETRY_MS = 100;
-const SENT_COMPLETION_DELIVERY_MAX_RETRY_MS = 30_000;
 
 /** Cap on returned first-turn text so a runaway sub-session can't flood the
  * caller's context. Excess is dropped with a truncation marker. */
@@ -322,15 +318,8 @@ async function awaitRecoveredParentNotification(
   return false;
 }
 
-async function waitForSentCompletionRetry(
-  signal: AbortSignal,
-  attempt: number,
-): Promise<void> {
+async function waitForSentCompletionRetry(signal: AbortSignal): Promise<void> {
   if (signal.aborted) throw signal.reason;
-  const delay = Math.min(
-    SENT_COMPLETION_DELIVERY_RETRY_MS * 2 ** attempt,
-    SENT_COMPLETION_DELIVERY_MAX_RETRY_MS,
-  );
   await new Promise<void>((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(timer);
@@ -339,7 +328,7 @@ async function waitForSentCompletionRetry(
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       resolve();
-    }, delay);
+    }, SENT_COMPLETION_DELIVERY_RETRY_MS);
     if (typeof timer.unref === 'function') timer.unref();
     signal.addEventListener('abort', onAbort, { once: true });
   });
@@ -353,7 +342,6 @@ async function awaitSentCompletionAcceptance(
   deadline: number,
 ): Promise<'accepted' | 'missing'> {
   let lastError: unknown;
-  let attempt = 0;
   while (!stopSignal.aborted) {
     try {
       const acknowledgement = await bridge.enqueueBackgroundNotification(
@@ -372,8 +360,7 @@ async function awaitSentCompletionAcceptance(
         lastError === undefined ? undefined : { cause: lastError },
       );
     }
-    await waitForSentCompletionRetry(stopSignal, attempt);
-    attempt += 1;
+    await waitForSentCompletionRetry(stopSignal);
   }
   throw stopSignal.reason;
 }

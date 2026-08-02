@@ -5966,8 +5966,6 @@ async function runQwenServeImpl(
       ): Promise<void> => {
         if (liveDiscoveryShuttingDown) return Promise.resolve();
         if (!resolveAcpHttpEnabled()) return Promise.resolve();
-        if (candidateApp.locals?.['liveVoiceEnabled'] !== true)
-          return Promise.resolve();
         liveDiscoveryEnabled = true;
         if (liveDiscoveryPublish) return liveDiscoveryPublish;
         const coordinator = candidateApp.locals?.['liveCoordinator'] as
