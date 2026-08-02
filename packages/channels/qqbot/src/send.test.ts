@@ -393,9 +393,10 @@ describe('purgeSingleScopeOrphans', () => {
     (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
 
-  it('removes only :__single__ orphan mappings, keeping normal ones', () => {
-    const removeSessionId = vi.fn((sid: string) =>
-      sid.startsWith('single-era-'),
+  it('removes only orphan mappings (single-scope + user-scope), keeping live ones', () => {
+    const removeSessionId = vi.fn(
+      (sid: string) =>
+        sid.startsWith('single-era-') || sid.startsWith('user-era-'),
     );
     const router = {
       getAll: () => [
@@ -404,16 +405,20 @@ describe('purgeSingleScopeOrphans', () => {
         // (entry.key === `${this.name}:__single__`) must NOT purge it — a
         // suffix match would silently reset the sibling channel's session.
         { key: 'other-bot:__single__', sessionId: 'sibling-live' },
+        // Live two-part keys under thread scope are never purged.
         { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
-        { key: 'test-bot:user-1:chat-1', sessionId: 'normal-2' },
+        // User-scope three-part key under thread scope: orphan (PR #8241).
+        { key: 'test-bot:user-1:chat-1', sessionId: 'user-era-1' },
       ],
       removeSessionId,
     };
     const ch = makeChannelWithRouter(router);
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
+    expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
   });
 
   it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
@@ -453,6 +458,97 @@ describe('purgeSingleScopeOrphans', () => {
     expect(discardSession).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+  });
+
+  it('purges user-scope 3-part keys under thread scope but keeps live two-part keys', () => {
+    const removeSessionId = vi.fn(() => true);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = {
+      getAll: () => [
+        // User-scope three-part key: unreachable under thread scope (the
+        // router re-keys those sessions as two-part) → orphan.
+        { key: 'test-bot:u1:c1', sessionId: 'user-scope-1' },
+        // Live thread-scope two-part key: never purged.
+        { key: 'test-bot:g1', sessionId: 'thread-scope-1' },
+        // Legacy single-scope orphan.
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
+    // The daemon-side user-scope session is discarded like the others.
+    expect(discardSession).toHaveBeenCalledWith('user-scope-1');
+  });
+
+  it('keeps user-scope 3-part keys when sessionScope is user (live routing state)', () => {
+    const removeSessionId = vi.fn();
+    const router = {
+      getAll: () => [{ key: 'test-bot:u1:c1', sessionId: 'live-user-session' }],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'user' });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it('is a safe no-op when bridge.discardSession rejects or throws', () => {
+    const discardSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('daemon error'))
+      .mockImplementationOnce(() => {
+        throw new Error('sync daemon error');
+      });
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:__single__', sessionId: 'single-era-2' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    // Neither an async rejection nor a synchronous throw aborts the purge.
+    expect(() => callPurge(ch)).not.toThrow();
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
   });
 
   it('is a safe no-op when the router throws during purge', () => {
