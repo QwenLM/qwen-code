@@ -28,7 +28,8 @@ export async function packageExtension({
       if (err.code === 'ENOENT') {
         reject(
           new Error(
-            'Packaging requires the POSIX zip utility. Install it with your system package manager (e.g. apt install zip).',
+            'Packaging failed. Ensure the POSIX zip utility is installed AND the source directory exists: ' +
+              source,
           ),
         );
       } else {

@@ -322,4 +322,186 @@ describe('side panel capability status assets', () => {
       ).toBe(true),
     );
   });
+
+  it('treats a non-JSON 200 health response as unreachable', async () => {
+    document.body.innerHTML = `
+      <iframe id="ui" class="hidden"></iframe>
+      <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
+      <code id="cmd"></code><button id="cmd-row"></button>
+      <button id="copy"></button><span id="copy-label"></span>
+      <div id="capability-warning" class="hidden"></div>
+    `;
+    vi.stubGlobal('chrome', {
+      runtime: { id: 'test-extension' },
+      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+    });
+    vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON');
+        },
+      })),
+    );
+    vi.stubGlobal('setInterval', () => 1);
+
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+    Function(script)();
+
+    await vi.waitFor(() =>
+      expect(document.getElementById('welcome-title')?.textContent).toBe(
+        'Start qwen serve',
+      ),
+    );
+  });
+
+  it('retains the previous MCP snapshot across a transient probe failure', async () => {
+    document.body.innerHTML = `
+      <iframe id="ui" class="hidden"></iframe>
+      <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
+      <code id="cmd"></code><button id="cmd-row"></button>
+      <button id="copy"></button><span id="copy-label"></span>
+      <div id="capability-warning" class="hidden"></div>
+    `;
+    vi.stubGlobal('chrome', {
+      runtime: { id: 'test-extension' },
+      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+    });
+    vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
+
+    let mcpOk = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/capabilities')) {
+          return {
+            ok: true,
+            json: async () => ({
+              features: [
+                'allow_origin',
+                'cdp_tunnel_over_ws',
+                'browser_automation_mcp',
+              ],
+            }),
+          };
+        }
+        if (url.endsWith('/workspace/mcp')) {
+          return {
+            ok: mcpOk,
+            json: async () => (mcpOk ? { servers: [] } : { error: 'down' }),
+          };
+        }
+        return { ok: true, json: async () => ({ status: 'ok' }) };
+      }),
+    );
+    let poll: (() => void | Promise<void>) | undefined;
+    vi.stubGlobal('setInterval', (handler: () => void | Promise<void>) => {
+      poll = handler;
+      return 1;
+    });
+
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+    Function(script)();
+
+    await vi.waitFor(() =>
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'Browser tools are configured but the adapter is not connected.',
+      ),
+    );
+
+    mcpOk = false;
+    // Drive past the next MCP re-probe tick (MCP_POLL_EVERY = 5).
+    for (let i = 0; i < 6; i++) await poll?.();
+    expect(document.getElementById('capability-warning')?.textContent).toBe(
+      'Browser tools are configured but the adapter is not connected.',
+    );
+  });
+
+  it('resets the MCP cache when the daemon URL changes', async () => {
+    document.body.innerHTML = `
+      <iframe id="ui" class="hidden"></iframe>
+      <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
+      <code id="cmd"></code><button id="cmd-row"></button>
+      <button id="copy"></button><span id="copy-label"></span>
+      <div id="capability-warning" class="hidden"></div>
+    `;
+    let storedBaseUrl = 'http://127.0.0.1:4170';
+    vi.stubGlobal('chrome', {
+      runtime: { id: 'test-extension' },
+      storage: {
+        local: {
+          get: vi.fn().mockImplementation(async () => ({
+            'qwen.daemon': { baseUrl: storedBaseUrl },
+          })),
+        },
+      },
+    });
+    vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/capabilities')) {
+          return {
+            ok: true,
+            json: async () => ({
+              features: [
+                'allow_origin',
+                'cdp_tunnel_over_ws',
+                'browser_automation_mcp',
+              ],
+            }),
+          };
+        }
+        if (url.endsWith('/workspace/mcp')) {
+          // The first URL returns a valid snapshot; the second fails.
+          const ok = url.startsWith('http://127.0.0.1:4170');
+          return {
+            ok,
+            json: async () => (ok ? { servers: [] } : { error: 'down' }),
+          };
+        }
+        return { ok: true, json: async () => ({ status: 'ok' }) };
+      }),
+    );
+    let poll: (() => void | Promise<void>) | undefined;
+    vi.stubGlobal('setInterval', (handler: () => void | Promise<void>) => {
+      poll = handler;
+      return 1;
+    });
+
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+    Function(script)();
+
+    await vi.waitFor(() =>
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'Browser tools are configured but the adapter is not connected.',
+      ),
+    );
+
+    storedBaseUrl = 'http://127.0.0.1:5999';
+    // The URL change resets the cache; the new URL's MCP probe fails, so the
+    // banner must flip to automation-unavailable rather than reuse the stale
+    // snapshot from the old URL.
+    await vi.waitFor(async () => {
+      await poll?.();
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'Browser tools status could not be verified.',
+      );
+    });
+  });
 });

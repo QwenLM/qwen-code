@@ -57,6 +57,20 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
+  it('reports configured when the MCP snapshot argument is omitted', () => {
+    expect(
+      deriveCapabilityStatus(true, [
+        'allow_origin',
+        'cdp_tunnel_over_ws',
+        'browser_automation_mcp',
+      ]),
+    ).toEqual({
+      state: 'automation-configured',
+      shellReady: true,
+      warning: 'Browser tools status is unknown until a chat session starts.',
+    });
+  });
+
   it('warns when runtime MCP status cannot be read', () => {
     expect(
       deriveCapabilityStatus(

@@ -6,6 +6,7 @@
 
 // @vitest-environment node
 
+import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -17,10 +18,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  readZipEntries,
   scanArtifactRoots,
   scanEsbuildMetafile,
   scanZipArtifact,
 } from './artifact-scan.js';
+
+const zipAvailable = () =>
+  spawnSync('zip', ['--version'], { stdio: 'ignore' }).status === 0;
 
 describe('scanArtifactRoots', () => {
   it('accepts a generated payload without external adapter signatures', async () => {
@@ -110,4 +115,29 @@ describe('scanArtifactRoots', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(!zipAvailable())(
+    'rejects symlinks inside a zip archive',
+    async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-zipsym-'));
+      try {
+        const source = path.join(root, 'source');
+        mkdirSync(source);
+        writeFileSync(path.join(source, 'real.js'), 'console.log("real");');
+        symlinkSync(path.join(source, 'real.js'), path.join(source, 'link.js'));
+
+        const archive = path.join(root, 'test.zip');
+        const result = spawnSync('zip', ['-ry', archive, '.'], {
+          cwd: source,
+        });
+        expect(result.status).toBe(0);
+
+        await expect(readZipEntries(archive)).rejects.toThrow(
+          'Symbolic links are not allowed in release artifacts',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
