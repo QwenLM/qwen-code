@@ -20,6 +20,7 @@ import {
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -38,6 +39,9 @@ type SkillToolWithProtectedMethods = SkillTool & {
 
 // Mock dependencies
 vi.mock('../skills/skill-manager.js');
+vi.mock('../hooks/registerSkillHooks.js', () => ({
+  registerSkillHooks: vi.fn().mockReturnValue(1),
+}));
 vi.mock('../skills/skill-curator.js', () => ({
   recordAutoSkillUsage: vi.fn().mockResolvedValue(false),
 }));
@@ -95,6 +99,8 @@ describe('SkillTool', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
@@ -520,6 +526,82 @@ describe('SkillTool', () => {
 
       const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
       expect(result).toMatch(/gated by path-based activation/);
+    });
+  });
+
+  describe('skill hooks trust gating', () => {
+    const hookedSkill: SkillConfig = {
+      name: 'hooked',
+      description: 'Skill with hooks',
+      level: 'project',
+      filePath: '/project/.qwen/skills/hooked/SKILL.md',
+      body: 'Body.',
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: './check.sh' }],
+          },
+        ],
+      } as unknown as SkillConfig['hooks'],
+    };
+
+    beforeEach(() => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        hookedSkill,
+      );
+      vi.mocked(registerSkillHooks).mockClear();
+    });
+
+    it('does not register hooks for a project-level skill in an untrusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+      // The skill itself still loads — only the hooks are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('registers hooks for a project-level skill in a trusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('registers hooks for a user-level skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
   });
 

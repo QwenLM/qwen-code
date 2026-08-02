@@ -531,27 +531,37 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         skillName: skill.name,
       });
       if (skill.hooks) {
-        const hookSystem = this.config.getHookSystem();
-        const sessionId = this.config.getSessionId();
-        debugLogger.debug('Hook system and session:', {
-          hasHookSystem: !!hookSystem,
-          sessionId,
-        });
-        if (hookSystem && sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const hookCount = registerSkillHooks(
-            sessionHooksManager,
-            sessionId,
-            skill,
+        if (skill.level === 'project' && !this.config.isTrustedFolder()) {
+          // Project skills are discovered regardless of folder trust
+          // (their instructions only influence the model), but their
+          // hooks are repo-supplied code execution — the same gate
+          // Config.getProjectHooks() applies to settings-file hooks.
+          debugLogger.warn(
+            `Skill "${this.params.skill}" declares hooks but the folder is not trusted; ignoring skill hooks.`,
           );
-          if (hookCount > 0) {
-            debugLogger.info(
-              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+        } else {
+          const hookSystem = this.config.getHookSystem();
+          const sessionId = this.config.getSessionId();
+          debugLogger.debug('Hook system and session:', {
+            hasHookSystem: !!hookSystem,
+            sessionId,
+          });
+          if (hookSystem && sessionId) {
+            const sessionHooksManager = hookSystem.getSessionHooksManager();
+            const hookCount = registerSkillHooks(
+              sessionHooksManager,
+              sessionId,
+              skill,
             );
-          } else {
-            debugLogger.warn(
-              `No hooks registered from skill "${this.params.skill}"`,
-            );
+            if (hookCount > 0) {
+              debugLogger.info(
+                `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+              );
+            } else {
+              debugLogger.warn(
+                `No hooks registered from skill "${this.params.skill}"`,
+              );
+            }
           }
         }
       } else {
