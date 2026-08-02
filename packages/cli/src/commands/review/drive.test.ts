@@ -10,12 +10,13 @@
 // know the command had finished, 87% cleaned up by hand.
 
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import {
   runDrive,
   wrapScript,
   sentinelExitCode,
   trimCapture,
+  shellQuote,
   DRIVE_SENTINEL,
   type ExecResult,
 } from './drive.js';
@@ -171,6 +172,77 @@ describe('readiness', () => {
     expect(r.exitCode).toBeNull();
     expect(r.note).toContain('nothing was driven');
     expect(h.log.some((l) => l[2] === 'new-session')).toBe(false);
+  });
+});
+
+describe('the server name', () => {
+  it('refuses a name that would escape the temp dir', () => {
+    // Measured: `--server '../../PWNED'` put drive.sh and its log at the
+    // FILESYSTEM ROOT, because join(tmpdir(), 'qwen-review-drive-' + server)
+    // normalises the `..` away.
+    const h = harness({});
+    const r = runDrive({
+      script: 'true',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 1,
+      server: '../../PWNED',
+      exec: h.exec,
+    });
+    expect(r.outcome).toBe('unavailable');
+    expect(r.note).toContain('not a name this command will own');
+    // and nothing was started, so nothing needs cleaning up
+    expect(h.log.some((l) => l.includes('new-session'))).toBe(false);
+  });
+
+  it('refuses a name that would split the shell line tmux runs', () => {
+    const h = harness({});
+    const r = runDrive({
+      script: 'true',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 1,
+      server: 'a; touch /tmp/x; b',
+      exec: h.exec,
+    });
+    expect(r.outcome).toBe('unavailable');
+    expect(h.log.some((l) => l.includes('new-session'))).toBe(false);
+  });
+
+  it('accepts the shapes a caller actually needs', () => {
+    for (const name of ['qr-1234', 'pr8349', 'ok-name_1.2', 'A']) {
+      const h = harness({});
+      const r = runDrive({
+        script: 'true',
+        cwd: '/tmp',
+        readyTimeout: 1,
+        timeout: 0,
+        server: name,
+        exec: h.exec,
+      });
+      expect(r.outcome).not.toBe('unavailable');
+    }
+  });
+
+  it('quotes the paths anyway — the charset and the quoting are two guards', () => {
+    // Redundant on purpose: whoever widens the charset should not also have to
+    // notice the shell line. Asserted by ROUND TRIP through real bash rather
+    // than against a hand-written expected string: hand-escaping this through
+    // a test file is how the first attempt came to emit `'''` where POSIX
+    // wants `'\''`, which bash answers with `unexpected EOF`.
+    for (const v of [
+      '/tmp/plain',
+      '/tmp/a b',
+      "/tmp/it's",
+      "/tmp/'",
+      '/tmp/a;b',
+      '/tmp/$X`id`',
+    ]) {
+      const back = execFileSync('bash', ['-c', `printf %s ${shellQuote(v)}`], {
+        encoding: 'utf8',
+      });
+      expect(back).toBe(v);
+    }
   });
 });
 

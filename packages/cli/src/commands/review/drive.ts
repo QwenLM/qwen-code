@@ -108,6 +108,28 @@ export interface ExecResult {
   stderr: string;
 }
 
+/**
+ * A tmux server name this command is willing to own.
+ *
+ * It is used twice — as a path segment under the temp dir, and inside the shell
+ * line tmux runs — and it was safe in neither. Measured: `--server
+ * '../../PWNED'` put `drive.sh` and its log at the FILESYSTEM ROOT, because
+ * `join(tmpdir(), 'qwen-review-drive-' + server)` normalises the `..` away; and
+ * a name holding `;` splits the `bash <script> > <log>` line into further
+ * commands. The value is operator-supplied today, but this command exists to be
+ * called from a review that builds its arguments programmatically — a name
+ * derived from a branch or a PR title is one small step away, and neither of
+ * those is ours to trust. The paths below are quoted as well: a charset this
+ * narrow makes quoting redundant, and redundant is the point — the next person
+ * to widen the charset should not also have to notice the shell line.
+ */
+const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Single-quote a path for `bash -lc`, closing over any embedded quote. */
+export function shellQuote(v: string): string {
+  return `'${v.split("'").join(`'\\''`)}'`;
+}
+
 /** Cap the captured pane the way build-test caps command output. */
 const CAPTURE_MAX = 200_000;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
@@ -178,6 +200,19 @@ export function trimCapture(s: string): { text: string; truncated: boolean } {
 export function runDrive(args: DriveArgs): DriveReport {
   const exec = args.exec ?? run;
   const server = args.server;
+  if (!SERVER_NAME_RE.test(server)) {
+    return {
+      outcome: 'unavailable',
+      observed: false,
+      exitCode: null,
+      readyAfterMs: null,
+      droveForMs: 0,
+      output: '',
+      truncated: false,
+      killedStale: false,
+      note: `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
+    };
+  }
   const tmux = (...a: string[]) => exec('tmux', ['-L', server, ...a]);
 
   if (exec('tmux', ['-V']).status !== 0) {
@@ -250,7 +285,7 @@ export function runDrive(args: DriveArgs): DriveReport {
       args.cwd,
       'bash',
       '-lc',
-      `bash ${scriptPath} > ${logPath} 2>&1`,
+      `bash ${shellQuote(scriptPath)} > ${shellQuote(logPath)} 2>&1`,
     );
     if (create.status !== 0) {
       return {
