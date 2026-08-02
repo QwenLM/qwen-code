@@ -1169,6 +1169,35 @@ describe('ToolSearchTool', () => {
     );
   });
 
+  it('preserves diagnostics for already-declared tools in an oversized mixed selection', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'always_loaded',
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'oversized_deferred',
+        description: 'x'.repeat(2000),
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:always_loaded,oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain(
+      'Already declared and directly callable: always_loaded',
+    );
+    expect(registry.isDeferredToolRevealed('oversized_deferred')).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
+  });
+
   it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {
     // ensureTool throwing mid-iteration would otherwise propagate out of
     // the for loop with previous tools already revealed but never
@@ -1357,10 +1386,12 @@ describe('ToolRegistry.clearRevealedDeferredTools', () => {
     const tool = new MockTool({ name: 'cron_create', shouldDefer: true });
     registry.registerTool(tool);
 
+    registry.revealDeferredTool('cron_create');
     registry.markProxySchemaPresented({
       name: 'cron_create',
       schemaFingerprint: getFunctionSchemaFingerprint(tool.schema),
     });
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
     expect(registry.hasPresentedProxySchema('cron_create')).toBe(true);
 
     registry.clearRevealedDeferredTools();

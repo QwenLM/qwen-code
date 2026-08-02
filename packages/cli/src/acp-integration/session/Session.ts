@@ -4692,6 +4692,13 @@ export class Session implements SessionContext {
   ): void {
     if (!message) return;
 
+    // Preserved messages cross the same active-history boundary as messages
+    // accepted by sendMessageStream. Commit any ToolSearch presentation staged
+    // on the message before adding it to history so a later deferred call does
+    // not fail closed after cancellation, prompt supersession, or guard
+    // exhaustion.
+    this.commitDeferredToolPresentationsForDeliveredMessage(message);
+
     if (preserveFullMessage) {
       this.#getCurrentChat().addHistory(message);
       return;

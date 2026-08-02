@@ -274,6 +274,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const loadedSchemas: FunctionDeclaration[] = [];
     const missing: string[] = [];
     const blocked: string[] = [];
+    const directlyDeclared: string[] = [];
     const deferredToolPresentations: DeferredToolPresentation[] = [];
 
     // Case-insensitive lookup across all known names (instance names + factory
@@ -335,6 +336,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
           name: canonical,
           schemaFingerprint: getFunctionSchemaFingerprint(schema),
         });
+      } else {
+        directlyDeclared.push(canonical);
       }
       loadedSchemas.push(schema);
     }
@@ -374,6 +377,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const oversizedFallback = await this.revealOversizedSchemasDirectly(
       llmContent,
       deferredToolPresentations,
+      directlyDeclared,
       missing,
       truncated,
     );
@@ -407,6 +411,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
   private async revealOversizedSchemasDirectly(
     llmContent: string,
     presentations: readonly DeferredToolPresentation[],
+    directlyDeclared: readonly string[],
     missing: readonly string[],
     truncated: readonly string[],
   ): Promise<ToolResult | undefined> {
@@ -450,6 +455,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
 
     let directDeclarationMessage = `The requested deferred schemas exceeded the inline output budget, so these tools were declared directly instead: ${names.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`;
+    if (directlyDeclared.length > 0) {
+      directDeclarationMessage += `\n\nAlready declared and directly callable: ${directlyDeclared.join(', ')}`;
+    }
     if (missing.length > 0) {
       directDeclarationMessage += `\n\nNot found: ${missing.join(', ')}`;
     }

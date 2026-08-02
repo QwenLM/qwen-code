@@ -23491,6 +23491,14 @@ describe('Session', () => {
       'preserves combined continuation tool responses when $label',
       async ({ cancel }) => {
         rebuildSessionWithGuard();
+        const commitPreservedPresentations = vi.spyOn(
+          session as unknown as {
+            commitDeferredToolPresentationsForDeliveredMessage: (
+              message: Content,
+            ) => void;
+          },
+          'commitDeferredToolPresentationsForDeliveredMessage',
+        );
         const execute = installPendingTodoTool();
         const toolResult = {
           llmContent: JSON.stringify(pendingTodos),
@@ -23594,6 +23602,17 @@ describe('Session', () => {
             }),
           ],
         });
+        expect(commitPreservedPresentations).toHaveBeenCalledWith(
+          expect.objectContaining({
+            parts: [
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'combined-tool-before-supersession',
+                }),
+              }),
+            ],
+          }),
+        );
         expect(firstResult).toEqual({ stopReason: 'cancelled' });
       },
     );
