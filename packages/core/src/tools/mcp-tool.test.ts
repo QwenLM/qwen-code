@@ -1498,7 +1498,7 @@ describe('DiscoveredMCPTool', () => {
     const idempotentAnnotations = { idempotentHint: true } as const;
     const readOnlyAnnotations = { readOnlyHint: true } as const;
     const unsafeReplayErrorMessage =
-      'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call was not declared safe to replay. Do not retry automatically; verify the outcome before trying again.';
+      'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
 
     it('should attempt reconnect and retry on connection error', async () => {
       const params = { param: 'test' };
@@ -1571,6 +1571,96 @@ describe('DiscoveredMCPTool', () => {
       expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
+
+    it.each<{
+      name: string;
+      trust: boolean;
+      trustedFolderAfterReconnect: boolean;
+      annotations: McpToolAnnotations | undefined;
+    }>([
+      {
+        name: 'loses its annotations',
+        trust: true,
+        trustedFolderAfterReconnect: true,
+        annotations: undefined,
+      },
+      {
+        name: 'is no longer trusted',
+        trust: false,
+        trustedFolderAfterReconnect: true,
+        annotations: idempotentAnnotations,
+      },
+      {
+        name: 'is now in an untrusted workspace',
+        trust: true,
+        trustedFolderAfterReconnect: false,
+        annotations: idempotentAnnotations,
+      },
+    ])(
+      'should not replay when the re-discovered tool $name',
+      async (testCase) => {
+        const initialClient: McpDirectClient = {
+          callTool: vi
+            .fn()
+            .mockRejectedValueOnce(new Error('Connection closed')),
+        };
+        const retryClient: McpDirectClient = {
+          callTool: vi.fn().mockResolvedValueOnce({
+            content: [{ type: 'text', text: 'Unexpected replay' }],
+          }),
+        };
+        const rediscoveredTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          testCase.trust,
+          undefined,
+          undefined,
+          retryClient,
+          undefined,
+          undefined,
+          testCase.annotations,
+        );
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const ensureTool = vi.fn().mockResolvedValue(rediscoveredTool);
+        const isTrustedFolder = vi
+          .fn()
+          .mockReturnValueOnce(true)
+          .mockReturnValue(testCase.trustedFolderAfterReconnect);
+        const mockConfig = {
+          isTrustedFolder,
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        };
+        const originalTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          mockConfig as any,
+          initialClient,
+          undefined,
+          undefined,
+          idempotentAnnotations,
+        );
+
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await expect(
+          originalTool
+            .build({ param: 'test' })
+            .execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
+
+        expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+        expect(ensureTool).toHaveBeenCalledTimes(1);
+        expect(retryClient.callTool).not.toHaveBeenCalled();
+      },
+    );
 
     it('should reconnect consistent read-only calls through the callable fallback', async () => {
       const initialCallable = {

@@ -144,7 +144,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 > {
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
-    'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call was not declared safe to replay. Do not retry automatically; verify the outcome before trying again.';
+    'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -286,16 +286,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.displayName,
           newTool.name,
           newTool.permissionAliases,
-          this.trust,
+          newTool.trust,
           this.params,
           this.cliConfig,
           newTool['mcpClient'],
           this.mcpTimeout,
           this.mcpToolIdleTimeoutMs,
-          this.annotations,
+          newTool.annotations,
           newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
+        if (!newInvocation.canSafelyReplay()) {
+          throw new Error(
+            DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE,
+          );
+        }
         return newInvocation.execute(signal, updateOutput);
       }
     } else if (
