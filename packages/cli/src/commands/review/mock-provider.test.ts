@@ -19,6 +19,7 @@ import {
   chunksFor,
   completionFor,
   messagesText,
+  replyProblem,
   type Responder,
 } from './mock-provider.js';
 
@@ -239,6 +240,56 @@ describe('the record', () => {
     expect(res.status).toBe(500);
     await stop?.();
     expect(readFileSync(log, 'utf8')).toContain('responder blew up');
+  });
+});
+
+describe("the responder is the caller's module, and is treated as one", () => {
+  it('answers 500 for every malformed reply instead of HANGING', async () => {
+    // Measured before this check existed: `undefined`, `null`, a bare string,
+    // a non-numeric `status`, and circular tool args each left the request
+    // with no response at all. That is the worst shape the failure could take
+    // — the product under test waits, `drive` reports `timed-out`, and a bug
+    // in the harness has been presented as the behaviour of the diff.
+    const bad: Array<[string, () => unknown]> = [
+      ['undefined', () => undefined],
+      ['null', () => null],
+      ['a bare string', () => 'just a string'],
+      ['an object with no known key', () => ({ foo: 1 })],
+      ['an empty object', () => ({})],
+      ['an empty tool name', () => ({ tool: '' })],
+      [
+        'circular tool args',
+        () => {
+          const a: Record<string, unknown> = {};
+          a['self'] = a;
+          return { tool: 't', args: a };
+        },
+      ],
+      ['a non-HTTP status', () => ({ status: 999 })],
+      ['a non-numeric status', () => ({ status: 'oops' })],
+    ];
+    const results: Array<[string, number]> = [];
+    for (const [name, fn] of bad) {
+      const { report } = await serve(fn as never);
+      const res = await post(report.baseUrl, { stream: true, messages: [] });
+      results.push([name, res.status]);
+      expect(await res.text()).toContain('responder returned');
+      await stop?.();
+      stop = null;
+    }
+    // Compared as a whole so a failure names WHICH shape regressed.
+    expect(results).toEqual(bad.map(([name]) => [name, 500]));
+  });
+
+  it('names the problem precisely enough to fix the responder', () => {
+    expect(replyProblem(undefined)).toContain('undefined');
+    expect(replyProblem({ tool: '' })).toContain('tool name');
+    expect(replyProblem({ status: 999 })).toContain('non-HTTP status');
+    expect(replyProblem({ text: 42 })).toContain('non-string text');
+    // ...and passes what it should
+    expect(replyProblem({ text: 'x' })).toBeNull();
+    expect(replyProblem({ tool: 't' })).toBeNull();
+    expect(replyProblem({ status: 429 })).toBeNull();
   });
 });
 

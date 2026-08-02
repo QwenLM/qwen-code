@@ -130,6 +130,50 @@ const BODY_MAX_BYTES = 4 * 1024 * 1024;
 /** How much of a request's text the record keeps. The evidence is the SHAPE. */
 const RECORD_TEXT_MAX = 8 * 1024;
 
+/**
+ * Is this something the responder is allowed to have returned?
+ *
+ * The responder is the caller's module, and a caller's module is exactly the
+ * kind of thing that returns `undefined` from a branch nobody took. Measured,
+ * before this existed: `undefined`, `null`, a bare string, a `status` that was
+ * not a number, and `args` holding a circular reference each left the request
+ * **hanging** — no response at all. That is the worst shape it could take here:
+ * the product under test waits, `drive` eventually reports `timed-out`, and a
+ * bug in the harness has been presented as the behaviour of the diff.
+ *
+ * An empty `{}` was worse in its own way — a 200 with an empty completion,
+ * indistinguishable from a model that legitimately said nothing.
+ */
+export function replyProblem(r: unknown): string | null {
+  if (r === null || typeof r !== 'object')
+    return `responder returned ${r === undefined ? 'undefined' : JSON.stringify(r)}; it must return {text} | {tool, args?} | {status, body?}`;
+  const o = r as Record<string, unknown>;
+  if ('status' in o) {
+    const st = o['status'];
+    return typeof st === 'number' &&
+      Number.isInteger(st) &&
+      st >= 100 &&
+      st <= 599
+      ? null
+      : `responder returned a non-HTTP status ${JSON.stringify(st)}`;
+  }
+  if ('tool' in o) {
+    if (typeof o['tool'] !== 'string' || o['tool'] === '')
+      return `responder returned an empty or non-string tool name ${JSON.stringify(o['tool'])}`;
+    try {
+      JSON.stringify(o['args'] ?? {});
+    } catch {
+      return 'responder returned tool args that cannot be serialised (a circular reference?)';
+    }
+    return null;
+  }
+  if ('text' in o)
+    return typeof o['text'] === 'string'
+      ? null
+      : `responder returned a non-string text ${JSON.stringify(o['text'])}`;
+  return `responder returned an object with none of text/tool/status: ${JSON.stringify(o).slice(0, 80)}`;
+}
+
 /** Trim a recorded field, saying so, so a diff of two logs stays honest. */
 function forRecord(v: string): string {
   return v.length <= RECORD_TEXT_MAX
@@ -332,6 +376,8 @@ export async function startMockProvider(
         let reply: MockReply;
         try {
           reply = await respond(mreq);
+          const problem = replyProblem(reply);
+          if (problem) throw new Error(problem);
         } catch (err) {
           // A responder that throws is the caller's bug, and hiding it behind a
           // 200 would make the drive look like a product failure.
