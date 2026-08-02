@@ -151,6 +151,18 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(out).toContain('Confidence: low');
   });
 
+  it('names hot/cold splitting as the fix, and rules out @ForceInline', () => {
+    // A/B-measured: without the checklist the performance agent missed an
+    // 80→338-byte threshold crossing entirely; with it, the agent proposed
+    // extracting a named bytecode range into a helper. The fix shape is the
+    // part the model does not supply on its own — pin it, and pin the
+    // anti-pattern it must not suggest (@ForceInline bloats every caller).
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('hot/cold splitting');
+    expect(out).toContain('@ForceInline');
+    expect(out).toMatch(/bytecode range to extract/);
+  });
+
   it('keeps the severity and scoping discipline of the skill', () => {
     const out = pathRulesFor(['src/Main.java']);
     expect(out).toContain('reviewing this diff, not auditing this file');

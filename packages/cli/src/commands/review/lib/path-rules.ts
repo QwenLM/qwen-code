@@ -114,6 +114,8 @@ Two more ways a diff can flip it: an already-compiled callee whose **native** si
 
 A finding that a method "can no longer be inlined" without one of these two tiers is a guess stated as fact. Report the **mechanism** instead, at \`Confidence: low\`: the threshold at risk, what the diff added to the method, and the measurement still to run. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
 
+**When the finding IS a grown hot method, the fix to suggest is hot/cold splitting — not reverting the change, and not \`@ForceInline\`** (which copies the callee's full body into every caller, bloating their bytecode and their own inline budgets). Move the cold paths — error handling, rare branches, defensive validation, the \`switch\` arms that almost never fire — into a small private helper, leaving the common path under the threshold; the helper, now called from one site, is itself inlinable. Name the bytecode range to extract and the size it leaves behind, the way the measurement names them: "extract bytecodes 212–311 (~100 bytes) into \`applyRounding\`, leaving \`parseAmount\` at ~238 bytes" is a finding an author can act on; "consider splitting the method" is not.
+
 **Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions**: slow is a cost, not incorrect behaviour — the Critical entries above are Critical because they are *wrong*.`,
 };
 
