@@ -79,16 +79,16 @@ export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 /**
  * WHY a probe was `inconclusive`, as the run knew it at the time.
  *
- * Five different things arrive at the same verdict and they are not
+ * Seven different things arrive at the same verdict and they are not
  * interchangeable:
  *
  * - `control-failed` — the suite ran and read green, but the positive control
  *   proved the runner could not have gone red, so the reading is not evidence.
- * - `not-run` — no probe suite was attempted for it: the worktree could not be
- *   made, or the checkout failed. Nothing was measured at all.
+ * - `not-run` — no suite ran for it: the tree could not be prepared, or the
+ *   runner could not be started at all. Nothing was measured.
  * - `runner-died` — a suite WAS started and did not survive: killed at the
- *   timeout, or the spawn itself failed. It may have executed most of its
- *   tests, so "nothing ran" is a claim about it that nothing checked.
+ *   deadline, or by a signal. It may have executed most of its tests, so
+ *   "nothing ran" is a claim about it that nothing checked.
  * - `no-output` — the runner ran and produced nothing parseable, so whether it
  *   collected anything is unknown.
  * - `not-in-results` — the run produced results and this file was not among
@@ -899,27 +899,45 @@ export function heldForRedCollocatedTest(
   file: string,
   probes: readonly string[],
   greenProbes: readonly string[],
-  perFile: readonly ProbeOutcome[],
+  baselinePerFile: readonly ProbeOutcome[],
 ): string | undefined {
   const own = collocatedProbe(file, probes);
   if (!own || greenProbes.includes(own)) return undefined;
-  return collocatedNotGreenDetail(kind, own, perFile);
+  return collocatedNotGreenDetail(kind, own, baselinePerFile);
 }
 
 /**
- * Which `inconclusive` a throw out of the probe setup-and-run is.
+ * Did this spawn result start a suite and lose it, or never start one?
  *
- * That catch covers three failures and they are not the same fact. The
- * checkout and the tree removal fail before anything runs. The runner throws
- * when it was KILLED — the per-run timeout fires SIGTERM, and a suite killed at
- * the deadline may have executed most of its tests, so "no probe suite ran" is
- * a claim about it that nothing checked. Matched on the runner's own message
- * prefixes, which are the only thing distinguishing the three at this point.
+ * Read off the result's STRUCTURE, not its message. The first version of this
+ * matched `/^runner (killed|spawn failed)/` against the thrown text and was
+ * inoperative: `spawnSync` reports a timeout as `error` (`ETIMEDOUT`, with
+ * `signal` also set) and `runProbeSuite` throws `r.error` before it ever
+ * composes a "runner killed by" sentence, so the real messages are
+ * `spawnSync … ETIMEDOUT` and `spawnSync … ENOENT` and neither matched. The
+ * tag it exists to produce was therefore never produced, and the test that
+ * covered it asserted strings the code does not emit.
+ *
+ * A deadline kill may have executed most of the suite; a runner that could not
+ * be started ran nothing. That is the distinction a reader acts on.
  */
-export function probeFailureReason(message: string): ProbeReason {
-  return /^runner (killed|spawn failed)/.test(message)
-    ? 'runner-died'
-    : 'not-run';
+export function runnerFailureReason(r: {
+  error?: (Error & { code?: string }) | undefined;
+  signal?: NodeJS.Signals | null;
+}): ProbeReason {
+  return r.signal || r.error?.code === 'ETIMEDOUT' ? 'runner-died' : 'not-run';
+}
+
+/** A probe run that threw, carrying WHY rather than leaving it to be parsed
+ *  back out of the message. */
+export class ProbeRunFailure extends Error {
+  constructor(
+    message: string,
+    readonly reason: ProbeReason,
+  ) {
+    super(message);
+    this.name = 'ProbeRunFailure';
+  }
 }
 
 /** The reasons `classifyProbeRun` can produce — the only ones a baseline entry
@@ -1467,10 +1485,18 @@ function runProbeSuite(
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
   // parseable JSON", which
   // blames the runner's output for a run that produced none.
-  if (r.error) throw r.error;
+  // `r.error` first, as before: when both are set — ENOBUFS on a run that was
+  // also killed — the error names the actual failure and the signal only says
+  // it did not finish. Reversing them buried `ENOBUFS` under "killed by
+  // SIGTERM", which is a less useful sentence about the same event. The reason
+  // tag is derived from the whole result either way, so it does not depend on
+  // which message wins.
+  if (r.error)
+    throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
   if (r.signal) {
-    throw new Error(
+    throw new ProbeRunFailure(
       `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
+      runnerFailureReason(r),
     );
   }
   return {
@@ -2355,7 +2381,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // findings, which needed no probe at all) still reaches the caller.
         const message = e instanceof Error ? e.message : String(e);
         const detail = `probe could not run: ${message}`;
-        const reason = probeFailureReason(message);
+        const reason =
+          e instanceof ProbeRunFailure ? e.reason : ('not-run' as const);
         results.push(
           ...probes.map((file) => ({
             file,

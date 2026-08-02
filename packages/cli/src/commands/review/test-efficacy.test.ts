@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
   splitDiffIntoHunks,
@@ -20,7 +21,7 @@ import {
   hasCollocatedNewTest,
   collocatedProbe,
   collocatedNotGreenDetail,
-  probeFailureReason,
+  runnerFailureReason,
   type ProbeReason,
   heldForRedCollocatedTest,
   fitsAnotherMutantRun,
@@ -1401,23 +1402,32 @@ describe('collocatedProbe', () => {
   });
 });
 
-describe('probeFailureReason', () => {
-  it.each([
-    // Verbatim from runProbeSuite's own throw sites.
-    ['runner killed by SIGTERM (probe timed out after 300s)', 'runner-died'],
-    ['runner killed by SIGKILL', 'runner-died'],
-    ['runner spawn failed: ENOENT', 'runner-died'],
-  ])('calls %s a suite that did not survive', (message, expected) => {
-    expect(probeFailureReason(message)).toBe(expected);
+describe('runnerFailureReason', () => {
+  // Driven through the real spawnSync rather than hand-written strings: the
+  // version this replaced matched a message the code never emits, and a
+  // fabricated fixture is exactly what let that pass.
+  it('calls a suite killed at the deadline one that did not survive', () => {
+    const r = spawnSync(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 5000)'],
+      { timeout: 300, encoding: 'utf8' },
+    );
+    // What node actually reports, and why the old message match failed:
+    // `error` is set on a timeout, so the throw never reaches a
+    // "runner killed by" sentence.
+    expect(r.error?.message).toContain('ETIMEDOUT');
+    expect(runnerFailureReason(r)).toBe('runner-died');
   });
 
-  it.each([
-    ['git checkout base failed: fatal: invalid reference', 'not-run'],
-    ['EACCES: permission denied, rmdir', 'not-run'],
-  ])('calls %s a suite that never started', (message, expected) => {
-    // A suite killed at the deadline ran; a checkout that failed did not, and
-    // the distinction is the whole reason the tag exists.
-    expect(probeFailureReason(message)).toBe(expected);
+  it('calls a runner that could not start one that never ran', () => {
+    const r = spawnSync('/nonexistent/vitest-bin', [], { encoding: 'utf8' });
+    expect(r.error?.message).toContain('ENOENT');
+    expect(r.signal).toBeNull();
+    expect(runnerFailureReason(r)).toBe('not-run');
+  });
+
+  it('calls a plain failure before any spawn one that never ran', () => {
+    expect(runnerFailureReason({})).toBe('not-run');
   });
 });
 
