@@ -40,9 +40,18 @@ function testPackagedSmokeWindowsLogPath() {
   );
   assert.match(
     smoke,
-    /process\.platform === 'win32'\s*\? path\.join\(process\.env\.LOCALAPPDATA \?\? isolatedState, appId, 'logs'\)/,
+    /process\.platform === 'win32'\s*\? path\.join\(localAppData, appId, 'logs'\)/,
+  );
+  assert.match(
+    smoke,
+    /process\.platform === 'win32' && !localAppData[\s\S]*LOCALAPPDATA is required to locate Windows desktop logs/,
   );
   assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
+  assert.match(smoke, /const previousLog = fs\.readFileSync\(logPath/);
+  assert.match(
+    smoke,
+    /contents\.startsWith\(previousLog\)\s*\?\s*contents\.slice\(previousLog\.length\)/,
+  );
 }
 
 function testBootstrapBridgeConfiguration() {

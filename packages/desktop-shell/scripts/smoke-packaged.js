@@ -16,6 +16,10 @@ if (!executable)
 if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
   throw new Error(`Packaged executable is missing: ${executable}`);
 }
+const localAppData = process.env.LOCALAPPDATA;
+if (process.platform === 'win32' && !localAppData) {
+  throw new Error('LOCALAPPDATA is required to locate Windows desktop logs.');
+}
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-smoke-'));
 const isolatedHome = path.join(workspace, 'home');
@@ -27,7 +31,7 @@ const logRoot =
   process.platform === 'darwin'
     ? path.join(isolatedHome, 'Library', 'Logs', appId)
     : process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA ?? isolatedState, appId, 'logs')
+      ? path.join(localAppData, appId, 'logs')
       : path.join(isolatedState, appId, 'logs');
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
