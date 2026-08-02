@@ -8,7 +8,16 @@
  */
 
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
+
+const BLOCKED_TRANSITION_IPV6_ADDRESSES = new BlockList();
+for (const [address, prefix] of [
+  ['64:ff9b:1::', 48],
+  ['2001::', 23],
+  ['2002::', 16],
+] as const) {
+  BLOCKED_TRANSITION_IPV6_ADDRESSES.addSubnet(address, prefix, 'ipv6');
+}
 
 export type VoiceHostLookup = (
   hostname: string,
@@ -113,9 +122,19 @@ function readWellKnownNat64Ipv6(host: string): string | undefined {
     : readIpv4HexPair(groups[0]!, groups[1]!);
 }
 
+function isBlockedTransitionIpv6Address(host: string): boolean {
+  return (
+    isIP(host) === 6 &&
+    BLOCKED_TRANSITION_IPV6_ADDRESSES.check(host, 'ipv6')
+  );
+}
+
 /** IP-literal private-network check; hostname resolution is handled separately. */
 export function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeIpAddress(hostname);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
   if (isLoopbackHost(host)) {
     return false;
   }
@@ -165,6 +184,9 @@ export function isPrivateNetworkIp(hostname: string): boolean {
 
 function isAlwaysBlockedVoiceAddress(address: string): boolean {
   const host = normalizeIpAddress(address);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
   if (isLoopbackHost(host)) return true;
   if (host.includes(':')) {
     const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);

@@ -10,7 +10,7 @@ Voice transcription rejects non-loopback HTTP endpoints and endpoints that resol
 
 ## Design
 
-Add `security.allowedInsecureVoiceBaseUrls`, an empty-by-default list of complete base URLs. Every entry must include an explicit `http://` or `https://` scheme and the full provider path. A configured voice provider receives the exception only when its normalized base URL exactly matches a list entry, including scheme, host, port, and path; URL serialization and trailing slashes are normalized, but missing schemes or path segments such as `/v1` are not inferred. Wildcards and hostname suffix matching are not supported.
+Add `security.allowedInsecureVoiceBaseUrls`, an empty-by-default list of complete base URLs. Every entry must include an explicit `http://` or `https://` scheme and the full provider path. A configured voice provider receives the exception only when its normalized base URL exactly matches a list entry, including scheme, host, port, and path; URL serialization and trailing slashes are normalized, but missing schemes or path segments such as `/v1` are not inferred for custom or regional gateways. The pre-existing `/v1` inference is preserved only for official DashScope compatible-mode endpoints. Wildcards and hostname suffix matching are not supported.
 
 The setting is trusted configuration. User, System, and SystemDefaults scopes may provide it; Workspace values are ignored and reported as a settings warning. This prevents a cloned repository from granting itself access to an insecure or private endpoint.
 
@@ -44,5 +44,6 @@ Desktop now treats a provider whose ID exactly matches the selected voice model 
 - Ignore and warn about Workspace-scoped entries.
 - Continue rejecting link-local and cloud metadata addresses, including AWS IMDS IPv6, after an exact match.
 - Decode IPv4-mapped, IPv4-compatible, and well-known-prefix NAT64 IPv6 literals consistently so trusted private addresses are accepted while embedded loopback and metadata addresses remain blocked.
+- Reject local-use NAT64, IETF protocol-assignment/Teredo, and 6to4 transition prefixes on both trusted and default-deny paths.
 - Match Desktop credentials to one unambiguous provider with the selected voice model ID.
 - Exercise both CLI and Desktop resolution and DNS guard paths.

@@ -643,6 +643,12 @@ describe('voice-transcriber', () => {
       '64:ff9b:0:0:0:0:a9fe:a9fe',
       '0064:ff9b::a9fe:a9fe',
       '64:ff9b::169.254.169.254',
+      '64:ff9b:1::a9fe:a9fe',
+      '64:ff9b:1:1::1',
+      '2002:a9fe:a9fe::1',
+      '2002:8000::1',
+      '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+      '2001:100::1',
       'fd00:0ec2:0000:0000:0000:0000:0000:0254',
     ]) {
       await expect(
@@ -715,6 +721,12 @@ describe('voice-transcriber', () => {
       'http://[64:ff9b::6464:64c8]/v1',
       'http://[64:ff9b::]/v1',
       'http://[64:ff9b::1]/v1',
+      'http://[64:ff9b:1::a9fe:a9fe]/v1',
+      'http://[64:ff9b:1:1::1]/v1',
+      'http://[2002:a9fe:a9fe::1]/v1',
+      'http://[2002:8000::1]/v1',
+      'http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1',
+      'http://[2001:100::1]/v1',
       'http://[fd00:ec2::254]/v1',
       'http://[fd00:0ec2:0000:0000:0000:0000:0000:0254]/v1',
       'http://[fe80::1]/v1',
@@ -852,17 +864,28 @@ describe('voice-transcriber', () => {
       '64:ff9b:0:0:0:0:a00:8',
       '0064:ff9b::a00:8',
       '64:ff9b::10.0.0.8',
+      '64:ff9b:1::a00:8',
+      '64:ff9b:1:1::1',
+      '2002:a00:8::1',
+      '2002:8000::1',
+      '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+      '2001:100::1',
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(config, async () => ({ address })),
       ).rejects.toThrow(/private-network address/);
     }
 
-    await expect(
-      assertVoiceBaseUrlNetworkAllowed(config, async () => ({
-        address: '64:ff9b::5db8:d822',
-      })),
-    ).resolves.toBeUndefined();
+    for (const address of [
+      '64:ff9b::5db8:d822',
+      '64:ff9b:2::1',
+      '2001:200::1',
+      '2003::1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(config, async () => ({ address })),
+      ).resolves.toBeUndefined();
+    }
   });
 
   it('rejects private-network IP literal voice URLs during network checks', async () => {
@@ -955,24 +978,28 @@ describe('voice-transcriber', () => {
     expect(lookupHost).not.toHaveBeenCalled();
   });
 
-  it('strips userinfo from voice base URLs', () => {
-    const config = createConfig([
-      {
-        id: 'qwen3-asr-flash',
-        label: 'Qwen ASR',
-        authType: AuthType.USE_OPENAI,
-        baseUrl:
-          'https://user:secret@dashscope.aliyuncs.com/compatible-mode/v1',
-      },
-    ]);
+  it('rejects voice base URLs with embedded credentials', () => {
+    for (const baseUrl of [
+      'https://user:secret@dashscope.aliyuncs.com/compatible-mode/v1',
+      'https://dashscope.aliyuncs.com@evil.com/compatible-mode/v1',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]);
 
-    expect(
-      resolveVoiceTranscriptionConfig({
-        config,
-        settings: createSettings({}, 'sk-primary'),
-        voiceModel: 'qwen3-asr-flash',
-      }).baseUrl,
-    ).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings({}, 'sk-primary'),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow('must not contain embedded credentials');
+    }
   });
 
   it('keeps terse speech that happens to use a few keyterms', () => {

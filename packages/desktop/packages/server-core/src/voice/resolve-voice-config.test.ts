@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { homedir } from 'node:os'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   getQwenConfigDir,
@@ -183,6 +184,33 @@ describe('resolveDesktopVoiceConfig', () => {
     })
 
     expect(config.baseUrl).toBe(baseUrl)
+  })
+
+  it('preserves /v1 inference for an exact official DashScope provider', async () => {
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { DASHSCOPE_API_KEY: 'settings-key' },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl:
+                      'https://dashscope.aliyuncs.com/compatible-mode',
+                    envKey: 'DASHSCOPE_API_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config.baseUrl).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    )
   })
 
   it('uses an exactly allowlisted private provider from qwen settings', async () => {
@@ -671,6 +699,55 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(readPaths).toEqual(
       new Set(['/managed/defaults.json', '/managed/settings.json']),
     )
+  })
+
+  it('parses JSONC and resolves env placeholders in managed settings', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qwen-voice-settings-'))
+    const systemSettingsPath = join(root, 'settings.json')
+    const systemDefaultsPath = join(root, 'system-defaults.json')
+    const originalQwenHome = process.env.QWEN_HOME
+    process.env.QWEN_HOME = join(root, 'qwen-home')
+
+    try {
+      await writeFile(
+        systemSettingsPath,
+        `{
+          // Managed settings use the same JSONC syntax as the CLI.
+          "env": { "PRIVATE_ASR_KEY": "\${INJECTED_KEY}" },
+          "modelProviders": {
+            "openai": [{
+              "id": "qwen3-asr-flash",
+              "baseUrl": "\${INJECTED_URL}",
+              "envKey": "PRIVATE_ASR_KEY"
+            }]
+          },
+          "security": {
+            "allowedInsecureVoiceBaseUrls": ["$INJECTED_URL"]
+          }
+        }`,
+      )
+
+      const config = await resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        systemSettingsPath,
+        systemDefaultsPath,
+        env: {
+          INJECTED_KEY: 'settings-key',
+          INJECTED_URL: 'http://voice.managed.internal.example/v1',
+        },
+      })
+
+      expect(config).toEqual({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'http://voice.managed.internal.example/v1',
+        apiKey: 'settings-key',
+        allowInsecureBaseUrl: true,
+      })
+    } finally {
+      if (originalQwenHome === undefined) delete process.env.QWEN_HOME
+      else process.env.QWEN_HOME = originalQwenHome
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('honors a SystemDefaults allowlist when higher scopes do not override it', async () => {

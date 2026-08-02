@@ -6,7 +6,7 @@
 
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -24,6 +24,14 @@ const MIN_KEYTERM_ECHO_TOKENS = 8;
 const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
+const BLOCKED_TRANSITION_IPV6_ADDRESSES = new BlockList();
+for (const [address, prefix] of [
+  ['64:ff9b:1::', 48],
+  ['2001::', 23],
+  ['2002::', 16],
+] as const) {
+  BLOCKED_TRANSITION_IPV6_ADDRESSES.addSubnet(address, prefix, 'ipv6');
+}
 
 export { resolveVoiceTransport };
 export type { VoiceTransport } from './voice-model.js';
@@ -119,8 +127,11 @@ function normalizeBaseUrl(baseUrl: string, modelName: string): string {
   } catch {
     throw new Error(`Voice model '${modelName}' has an invalid baseUrl.`);
   }
-  url.username = '';
-  url.password = '';
+  if (url.username || url.password) {
+    throw new Error(
+      `Voice model '${modelName}' baseUrl must not contain embedded credentials.`,
+    );
+  }
   return trimTrailingSlashes(url.toString());
 }
 
@@ -253,10 +264,19 @@ function readWellKnownNat64Ipv6(host: string): string | undefined {
     : readIpv4HexPair(groups[0]!, groups[1]!);
 }
 
+function isBlockedTransitionIpv6Address(host: string): boolean {
+  return (
+    isIP(host) === 6 && BLOCKED_TRANSITION_IPV6_ADDRESSES.check(host, 'ipv6')
+  );
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeIpAddress(hostname);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
   if (isLoopbackHost(host)) {
     return false;
   }
@@ -302,6 +322,9 @@ function isPrivateNetworkIp(hostname: string): boolean {
 
 function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
   const host = normalizeIpAddress(hostname);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
   if (isLoopbackHost(host)) {
     return true;
   }

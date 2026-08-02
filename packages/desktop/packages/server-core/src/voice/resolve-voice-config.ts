@@ -17,6 +17,8 @@
 import { homedir, platform, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import { readFile } from 'node:fs/promises';
+import stripJsonComments from 'strip-json-comments';
+import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
 import { isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
 
@@ -24,6 +26,7 @@ const DEFAULT_DASHSCOPE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const NO_CREDENTIALS_ERROR =
   'Voice dictation needs Qwen credentials. Sign in to Qwen Code (or set a DashScope API key), then try again.';
+const voiceConfigLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_CONFIG');
 
 interface ResolvedCredentials {
   baseUrl: string;
@@ -102,19 +105,20 @@ export function getQwenConfigDir(): string {
 }
 
 async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
-  try {
-    return JSON.parse(
-      await readFile(join(getQwenConfigDir(), file), 'utf-8'),
-    ) as T;
-  } catch {
-    return undefined;
-  }
+  return readJsonFileFromDisk(join(getQwenConfigDir(), file));
 }
 
 async function readJsonFileFromDisk<T>(file: string): Promise<T | undefined> {
   try {
-    return JSON.parse(await readFile(file, 'utf-8')) as T;
-  } catch {
+    const content = await readFile(file, 'utf-8');
+    return JSON.parse(stripJsonComments(content)) as T;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      voiceConfigLogger.warn(
+        `[voice] Failed to parse trusted settings file ${file}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     return undefined;
   }
 }
@@ -194,6 +198,33 @@ interface QwenSettings {
   security?: {
     allowedInsecureVoiceBaseUrls?: string[];
   };
+}
+
+function resolveSettingsEnvVars<T>(value: T, env: NodeJS.ProcessEnv): T {
+  const resolveValue = (input: unknown): unknown => {
+    if (typeof input === 'string') {
+      return input.replace(
+        /\$(?:(\w+)|{([^}]+)})/g,
+        (placeholder, plainName: string | undefined, bracedName: string | undefined) => {
+          const name = plainName ?? bracedName;
+          return name && typeof env[name] === 'string'
+            ? env[name]
+            : placeholder;
+        },
+      );
+    }
+    if (Array.isArray(input)) {
+      return input.map(resolveValue);
+    }
+    if (input && typeof input === 'object') {
+      return Object.fromEntries(
+        Object.entries(input).map(([key, nested]) => [key, resolveValue(nested)]),
+      );
+    }
+    return input;
+  };
+
+  return resolveValue(value) as T;
 }
 
 function mergeTrustedQwenSettings(
@@ -297,10 +328,16 @@ function fromQwenSettings(
         `Voice model '${voiceModel}' does not define a baseUrl.`,
       );
     }
-    const baseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
-    if (!baseUrl) {
+    const normalizedBaseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
+    if (!normalizedBaseUrl) {
       throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
     }
+    // Preserve the legacy /v1 inference only for the official DashScope
+    // compatible-mode endpoint. Custom and regional gateway paths remain
+    // authoritative and are never rewritten.
+    const baseUrl = isDashscopeCompatible(normalizedBaseUrl)
+      ? normalizeBaseUrl(normalizedBaseUrl)
+      : normalizedBaseUrl;
     const envKey = provider.envKey?.trim();
     if (!envKey) {
       throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
@@ -380,11 +417,24 @@ export async function resolveDesktopVoiceConfig(
       systemSettingsPath,
       resolvedDeps.platform,
     );
-  const [systemDefaults, userSettings, systemSettings] = await Promise.all([
+  const [rawSystemDefaults, rawUserSettings, rawSystemSettings] =
+    await Promise.all([
     resolvedDeps.readSystemJson<QwenSettings>(systemDefaultsPath),
     resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
     resolvedDeps.readSystemJson<QwenSettings>(systemSettingsPath),
-  ]);
+    ]);
+  const systemDefaults = resolveSettingsEnvVars(
+    rawSystemDefaults,
+    resolvedDeps.env,
+  );
+  const userSettings = resolveSettingsEnvVars(
+    rawUserSettings,
+    resolvedDeps.env,
+  );
+  const systemSettings = resolveSettingsEnvVars(
+    rawSystemSettings,
+    resolvedDeps.env,
+  );
   const qwenSettings = mergeTrustedQwenSettings(
     systemDefaults,
     userSettings,
