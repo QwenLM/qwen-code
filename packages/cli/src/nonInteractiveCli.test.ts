@@ -518,6 +518,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       { type: SendMessageType.UserQuery },
     );
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
@@ -571,6 +572,53 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Converted 1 audio file(s)'),
+    );
+  });
+
+  it('forwards headless audio without a notice when the bridge skips', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ audio: true }),
+    });
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'skipped',
+      parts: headlessAudioParts,
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'listen @recording.wav',
+      'prompt-audio-skipped',
+    );
+
+    expect(runAudioBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockSettings,
+      parts: headlessAudioParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      headlessAudioParts,
+      expect.any(AbortSignal),
+      'prompt-audio-skipped',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('Audio bridge'),
     );
   });
 

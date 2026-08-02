@@ -4492,6 +4492,7 @@ describe('Session', () => {
       expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
         true,
       );
+      expect(agentMessageChunks()).not.toContain('Audio bridge');
     });
 
     it('replaces ACP audio with a fallback when no voice model is configured', async () => {

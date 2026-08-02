@@ -792,6 +792,49 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('forwards audio without a bridge notice when conversion is skipped', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const parts = [{ text: 'listen' }, audioPart];
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: parts,
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'skipped',
+      parts,
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({ audio: true })),
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual(parts);
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Audio bridge'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it('does not bridge audio when an inline model override is active', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
