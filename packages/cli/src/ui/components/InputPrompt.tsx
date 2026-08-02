@@ -1218,12 +1218,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Handle double ESC for clearing input.
         // When the agent is actively responding AND the input buffer is
         // empty, defer to AppContainer's broadcast ESC handler so it takes
-        // its cancel-work branch (KeypressContext broadcasts to all handlers
-        // regardless of this return value; returning false here simply avoids
-        // BaseTextInput's default ESC wiping the buffer, which would have
-        // already been empty anyway). Gate on empty buffer to prevent
-        // BaseTextInput's default ESC from silently wiping typed input
-        // without the double-press confirmation. #8201.
+        // its cancel-work branch. KeypressContext broadcasts to all handlers
+        // regardless of this return value; returning false lets BaseTextInput
+        // fall through to its own ESC handler (which clears the buffer), but
+        // the buffer.text === '' gate makes that clear a no-op. Do NOT relax
+        // this gate: returning false with non-empty text would let
+        // BaseTextInput wipe it without the double-press confirmation. #8201.
         if (
           uiState.streamingState === StreamingState.Responding &&
           buffer.text === ''
