@@ -129,9 +129,48 @@ describe('runBuildTest', () => {
       timeout: 5,
       install: false,
     });
-    expect(rep.toolchain).toBe('unsupported');
-    expect(rep.ok).toBe(true);
-    expect(rep.build).toEqual([]);
+    expect(rep).toEqual({
+      toolchain: 'unsupported',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      ok: true,
+      timedOut: [],
+      note:
+        'No npm package here to scope (no workspaces, and the root has no build/test ' +
+        'script). Fall back to the build/test precedence in your brief — installing ' +
+        'dependencies first — and give each command a deadline it can actually meet.',
+    });
+  });
+
+  it('keeps the complete generic unsupported report when no adapter applies', () => {
+    writePlan(['src/a.java']);
+
+    expect(
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 5,
+        install: false,
+      }),
+    ).toEqual({
+      toolchain: 'unsupported',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      ok: true,
+      timedOut: [],
+      note:
+        'No npm package here to scope (no workspaces, and the root has no build/test ' +
+        'script). Fall back to the build/test precedence in your brief — installing ' +
+        'dependencies first — and give each command a deadline it can actually meet.',
+    });
   });
 
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
