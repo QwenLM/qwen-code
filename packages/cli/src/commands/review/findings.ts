@@ -367,13 +367,20 @@ export function validateFindings(raw: unknown): Finding[] {
  * so `src/a.test.ts` cannot be satisfied by `vendor/other-src/a.test.ts`.
  */
 function namesPath(text: string, probe: string): boolean {
+  const isNameChar = (c: string | undefined) =>
+    c !== undefined && /[A-Za-z0-9._-]/.test(c);
   let from = 0;
   for (;;) {
     const at = text.indexOf(probe, from);
     if (at < 0) return false;
-    const before = at === 0 ? '' : text[at - 1];
-    if (at === 0 || before === '/' || !/[A-Za-z0-9._-]/.test(before))
+    // BOTH ends. The leading check alone cannot see a probe matching inside a
+    // longer name: `src/a.test.ts` would be satisfied by `src/a.test.tsx`.
+    if (
+      !isNameChar(at === 0 ? undefined : text[at - 1]) &&
+      !isNameChar(text[at + probe.length])
+    ) {
       return true;
+    }
     from = at + 1;
   }
 }
@@ -681,8 +688,27 @@ export const findingsCommand: CommandModule = {
     }
     let held: Array<{ id: string; file: string }> = [];
     if (testDelta !== undefined) {
-      const shared = sharedFailingFilesOf(readJson(testDelta, 'test-delta'));
-      ({ findings, held } = holdCriticalsFailingOnBase(findings, shared));
+      // A measurement that will not read is a measurement, absent — and an
+      // absent measurement holds nothing back. It must not take the review
+      // down with it either: the findings are the deliverable, this is a
+      // cross-check on them. `readJson` throws on a missing file and on
+      // invalid JSON, so the loud-but-fatal path is caught here and the
+      // shape-level tolerance in `sharedFailingFilesOf` covers the rest.
+      // Never silent, though — a hold that did not happen because the file was
+      // unreadable is exactly what a reader needs told.
+      let measurement: unknown;
+      try {
+        measurement = readJson(testDelta, 'test-delta');
+      } catch (err) {
+        measurement = undefined;
+        writeStderrLine(
+          `findings: no holds applied — ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      ({ findings, held } = holdCriticalsFailingOnBase(
+        findings,
+        sharedFailingFilesOf(measurement),
+      ));
     }
     const report = buildReport(findings);
 

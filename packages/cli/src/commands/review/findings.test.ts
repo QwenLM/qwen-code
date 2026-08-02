@@ -504,6 +504,35 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].failureScenario).toContain('failed there too');
   });
 
+  it.each([
+    ['a path that does not exist', undefined],
+    ['a file that is not valid JSON', '{ "shared": ['],
+  ])('still writes the findings when --test-delta is %s', (_name, contents) => {
+    // Through the command, because that is where the guarantee lives: the
+    // helper tolerates a wrong SHAPE, but the read itself throws on these
+    // two, and a cross-check that cannot read its input must not take the
+    // findings down with it.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const delta = join(dir, 'missing/test-delta.json');
+    if (contents !== undefined) {
+      writeFileSync(join(dir, 'bad.json'), contents);
+    }
+    writeFileSync(input, JSON.stringify([{ ...base, severity: 'Critical' }]));
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        testDelta: contents === undefined ? delta : join(dir, 'bad.json'),
+        print: false,
+      }),
+    ).not.toThrow();
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    expect(report.counts.total).toBe(1);
+    // Unheld: an absent measurement contradicts nothing.
+    expect(report.findings[0].severity).toBe('Critical');
+  });
+
   it('leaves severities alone when --test-delta is not passed', () => {
     const report = run([{ ...base, severity: 'Critical' }]);
     expect(report.findings[0].severity).toBe('Critical');
@@ -611,6 +640,23 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(findings[0].severity).toBe('Suggestion');
     expect(findings[0].failureScenario).toBe(critical.failureScenario);
     expect(held).toEqual([]);
+  });
+
+  it('requires a boundary after the match, not only before it', () => {
+    // `src/a.test.ts` sits inside `src/a.test.tsx`, and the leading check
+    // cannot see it: both are preceded by `/`.
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx is red',
+          locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx' }],
+        },
+      ],
+      ['src/ui/auth/AuthDialog.test.ts'],
+    );
+    expect(findings[0].severity).toBe('Critical');
   });
 
   it('requires a path boundary, so a longer directory name is not a match', () => {
