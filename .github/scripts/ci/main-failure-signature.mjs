@@ -134,7 +134,6 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
   const cases = [];
   const environments = [];
   const reasons = [];
-  const environments = [];
   for (const job of jobs) {
     const environment = parseE2eJobName(job.name);
     if (!environment) {
@@ -151,7 +150,6 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       reasons.push(`no exact Vitest failure found in job: ${job.name}`);
       continue;
     }
-    environments.push(environment);
     for (const id of failedTests) {
       const parsed = parseVitestTestId(id);
       if (!parsed) {
