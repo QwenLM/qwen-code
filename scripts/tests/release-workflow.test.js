@@ -23,13 +23,20 @@ describe('release workflow', () => {
         "              needs.prepare.outputs.npm_tag == 'latest' }}",
     );
     expect(workflow).toContain("-f 'event_type=npm-published'");
+    expect(workflow).toContain(
+      '-f "client_payload[version]=${RELEASE_VERSION}"',
+    );
   });
 
   it('keeps a dispatch failure from failing an already-published release', () => {
     // The packages are published before this step runs, so it must not fail
     // the release; but the failure must still surface (as an error, not a
     // warning) so the fleet can be reconciled via a manual re-run.
-    expect(workflow).toContain('continue-on-error: true');
+    expect(workflow).toContain(
+      'continue-on-error: true\n' +
+        '        env:\n' +
+        "          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'",
+    );
     expect(workflow).toContain('echo "::error::npm-published dispatch failed;');
   });
 });
