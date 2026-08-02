@@ -417,7 +417,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     });
     let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
     let idleTimeoutWon = false;
-    let parentAbortWon = false;
 
     // Combine the external signal with our idle timeout controller
     const combinedSignal = AbortSignal.any([
@@ -491,7 +490,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         parentAbortRace.promise,
       ]);
       if (isParentAbortOutcome(outcome)) {
-        parentAbortWon = true;
         throw outcome.reason;
       }
       const callToolResult = outcome;
@@ -522,7 +520,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (idleTimeoutWon || (!parentAbortWon && isMcpRequestTimeout(error))) {
+      if (idleTimeoutWon || isMcpRequestTimeout(error)) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
@@ -556,7 +554,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
     ];
     const parentAbortRace = createParentAbortRace(signal);
-    let parentAbortWon = false;
 
     // Race MCP tool call with abort signal to respect cancellation
     try {
@@ -566,7 +563,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         parentAbortRace.promise,
       ]);
       if (isParentAbortOutcome(outcome)) {
-        parentAbortWon = true;
         throw outcome.reason;
       }
       const rawResponseParts = outcome;
@@ -587,7 +583,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (!parentAbortWon && isMcpRequestTimeout(error)) {
+      if (isMcpRequestTimeout(error)) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,

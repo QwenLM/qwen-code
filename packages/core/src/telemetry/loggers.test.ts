@@ -1248,6 +1248,9 @@ describe('loggers', () => {
       mockMetrics.recordToolCallMetrics.mockImplementationOnce(() => {
         throw new Error('legacy metric sink failed');
       });
+      mockMetrics.recordToolExecutionMetrics.mockImplementationOnce(() => {
+        throw new Error('execution metric sink failed');
+      });
       const config = {
         ...mockConfig,
         getChatRecordingService: () => ({

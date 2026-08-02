@@ -15482,6 +15482,17 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+          // The stop must produce an observable error result
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-1',
+              status: 'error',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+            }),
+          );
         });
       });
 
@@ -16573,7 +16584,13 @@ describe('Session', () => {
         isToolEnabled,
       });
       const execute = vi.fn();
-      const build = vi.fn();
+      const build = vi.fn().mockReturnValue({
+        params: {},
+        execute,
+        getDefaultPermission: vi.fn(),
+        getDescription: vi.fn().mockReturnValue('enablement_tool'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
       mockToolRegistry.getTool.mockReturnValue({
         name: 'enablement_tool',
         kind: core.Kind.Read,

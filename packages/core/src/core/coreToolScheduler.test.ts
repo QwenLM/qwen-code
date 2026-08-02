@@ -1861,8 +1861,16 @@ describe('CoreToolScheduler', () => {
     const execute = vi.fn(async (): Promise<ToolResult> => {
       throw new Error('execution blew up');
     });
+    const healthyExecute = vi.fn().mockResolvedValue({
+      llmContent: 'healthy',
+      returnDisplay: 'healthy',
+    });
     const toolsByName = new Map<string, MockTool>([
       ['read_file', new MockTool({ name: 'read_file', execute })],
+      [
+        'healthy_tool',
+        new MockTool({ name: 'healthy_tool', execute: healthyExecute }),
+      ],
     ]);
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({ toolsByName });
@@ -1877,20 +1885,35 @@ describe('CoreToolScheduler', () => {
             isClientInitiated: false,
             prompt_id: 'prompt-throws',
           },
+          {
+            callId: 'healthy-1',
+            name: 'healthy_tool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-throws',
+          },
         ],
         new AbortController().signal,
       ),
     ).resolves.toBeUndefined();
 
-    const completedCall = (
-      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
-    )[0];
-    expect(completedCall.status).toBe('error');
-    if (completedCall.status === 'error') {
-      expect(completedCall.response.executionStatus).toBe('error');
-      expect(completedCall.response.error?.message).toContain(
-        'execution blew up',
-      );
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const failedCall = completedCalls.find(
+      (c) => c.request.callId === 'throws-1',
+    );
+    expect(failedCall?.status).toBe('error');
+    if (failedCall?.status === 'error') {
+      expect(failedCall.response.executionStatus).toBe('error');
+      expect(failedCall.response.error?.message).toContain('execution blew up');
+    }
+    expect(healthyExecute).toHaveBeenCalledOnce();
+    const healthyCall = completedCalls.find(
+      (c) => c.request.callId === 'healthy-1',
+    );
+    expect(healthyCall?.status).toBe('success');
+    if (healthyCall?.status === 'success') {
+      expect(healthyCall.response.executionStatus).toBe('success');
     }
   });
 
@@ -10499,6 +10522,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
     mockTelemetrySdkState.initialized = false;
+    modifyWithEditorOverride.value = undefined;
   });
 
   function getLastToolSpan(): ToolSpanRecord {
@@ -11181,6 +11205,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
 
     expect(execute).toHaveBeenCalledOnce();
+    expect(onToolCallsUpdate).toHaveBeenCalled();
     const completedCall = onAllToolCallsComplete.mock
       .calls[0][0][0] as CompletedToolCall;
     expect(completedCall.status).toBe('success');
