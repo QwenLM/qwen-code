@@ -185,6 +185,38 @@ describe('loadSandboxConfig sandbox command selection', () => {
     );
   });
 
+  it('names the first broken runtime when every installed runtime fails', async () => {
+    // Pins that the error reports docker (tried first), not podman (tried
+    // last). Flip `firstFailure ??=` to `=` and it would name podman with the
+    // suite otherwise green, sending the user to debug the wrong daemon.
+    installed('docker', 'podman');
+    probes({ docker: daemonDown(), podman: daemonDown() });
+
+    const error = await loadSandboxConfig({}, { sandbox: true }).catch(
+      (e: Error) => e,
+    );
+    const message = (error as Error).message;
+
+    expect(message).toContain("'docker'");
+    expect(message).not.toContain("'podman'");
+  });
+
+  it('treats a failure of only control characters as broken, not usable', async () => {
+    // The runtime exits non-zero but its output is nothing but escape/control
+    // bytes, which strip to ''. That empty string must not read as "no
+    // failure" — otherwise the broken runtime is selected, reintroducing the
+    // presence-vs-liveness bug through the sanitizer.
+    installed('docker', 'podman');
+    probes({
+      docker: { status: 1, stdout: '', stderr: '\x1b[0m\x07\n' },
+      podman: healthy(),
+    });
+
+    const config = await loadSandboxConfig({}, { sandbox: true });
+
+    expect(config?.command).toBe('podman');
+  });
+
   it('strips ANSI and control characters from the runtime failure', async () => {
     // The runtime's stderr is interpolated into a FatalSandboxError that
     // reaches the terminal, so its escape and control bytes must not survive.

@@ -99,10 +99,11 @@ function runSandboxProbe(
       .find((line) => line.length > 0);
     // The runtime's own output reaches a FatalSandboxError message, so strip
     // ANSI/control characters from that untrusted string before it hits the
-    // terminal.
-    return firstLine
-      ? stripAnsiAndControl(firstLine)
-      : `'${command} version' exited with ${result.status}`;
+    // terminal. Check for emptiness AFTER stripping: a line that is only
+    // control characters strips to '', which is falsy — return that and the
+    // caller reads the broken runtime as usable, the very bug this guards.
+    const stripped = firstLine ? stripAnsiAndControl(firstLine).trim() : '';
+    return stripped || `'${command} version' exited with ${result.status}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -177,7 +178,7 @@ function getSandboxCommand(
   // probed and the first one that actually runs wins.
   let firstFailure: { command: string; detail: string } | undefined;
   for (const candidate of candidates) {
-    if (candidate !== 'sandbox-exec' && !commandExists.sync(candidate)) {
+    if (!commandExists.sync(candidate)) {
       continue;
     }
     const failure = probeSandboxCommand(candidate);
@@ -203,7 +204,7 @@ function getSandboxCommand(
     if (firstFailure) {
       throw new FatalSandboxError(
         `${enabledLabel} and '${firstFailure.command}' is installed but cannot run: ` +
-          `${firstFailure.detail}; start it, install another runtime, or ${specifyHint}`,
+          `${firstFailure.detail}; start it, try another installed runtime, or ${specifyHint}`,
       );
     }
     throw new FatalSandboxError(
