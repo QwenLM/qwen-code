@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 import yargs from 'yargs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   parseArgsCommand,
   parseReviewArgs,
@@ -13,7 +23,15 @@ import {
   type ParsedReviewArgs,
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  DIGEST_FILE,
+  reviewSourceRoots,
+  reviewSourcesDigest,
+} from './lib/stale-bundle.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
 // verdict to `--out`; both are intercepted so the wiring tests below can run
@@ -42,6 +60,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
 
 describe('tokenizeArgs', () => {
@@ -561,5 +580,81 @@ describe('parseArgsCommand wiring', () => {
         runNested(['review', 'parse-args', '--', '--effort low']),
       ).rejects.toThrow(/--stdin/);
     });
+  });
+});
+
+describe('parse-args warns when the bundle is not built from these sources', () => {
+  // A real tree, not a mocked one: what is under test is the derivation from
+  // `process.argv[1]` to the stamp and the roots, and mocking those reads
+  // would test the mock. `node:fs` is mocked for this file, so the real
+  // functions are pulled in explicitly.
+  let fsReal: typeof import('node:fs');
+  let repo: string;
+  let argv1: string;
+
+  beforeAll(async () => {
+    fsReal = (await vi.importActual('node:fs')) as typeof import('node:fs');
+  });
+
+  beforeEach(() => {
+    repo = fsReal.mkdtempSync(join(tmpdir(), 'parse-args-stale-'));
+    fsReal.mkdirSync(join(repo, 'dist'), { recursive: true });
+    argv1 = join(repo, 'dist', 'cli.js');
+    fsReal.writeFileSync(argv1, 'bundle');
+    const reviewDir = join(
+      repo,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'review',
+    );
+    fsReal.mkdirSync(reviewDir, { recursive: true });
+    fsReal.writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
+    vi.mocked(writeStderrLineSafe).mockClear();
+    vi.mocked(writeStdoutLine).mockClear();
+  });
+  afterEach(() => fsReal.rmSync(repo, { recursive: true, force: true }));
+
+  const stamp = (digest: string) =>
+    fsReal.writeFileSync(join(repo, 'dist', DIGEST_FILE), digest);
+  const run = () => {
+    const original = process.argv[1];
+    process.argv[1] = argv1;
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+  };
+
+  it('warns when the stamp does not match the sources', () => {
+    stamp('a digest from some other tree');
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+  });
+
+  it('says nothing when the stamp matches', () => {
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('says nothing when there is no stamp at all', () => {
+    // An installed package, or a bundle from before the build wrote one.
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('still parses the arguments', () => {
+    // The warning is a diagnostic; the command\'s job is unaffected by it.
+    stamp('mismatched');
+    run();
+    expect(writeStdoutLine).toHaveBeenCalled();
   });
 });

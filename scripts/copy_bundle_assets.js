@@ -30,11 +30,21 @@ const BUNDLED_SKILL_TEST_FILE_RE =
   /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?(?:\.map)?$/;
 
 /**
- * Write `dist/review-sources.sha256`, the digest of every review source this
- * bundle was built from. Kept in step with `stale-bundle.ts`, which re-derives
- * it the same way — the two must fold the same files in the same order, so the
- * shared shape lives in that module's exports and this only supplies the root.
+ * The digest of every review source this bundle was built from.
+ *
+ * Kept in step with `stale-bundle.ts`, which re-derives it the same way — and
+ * duplicated rather than shared, because this script runs before the package
+ * it would import has been built. `scripts/tests/review-source-digest.test.ts`
+ * is what holds the two equal; nothing here is imported from there.
+ *
+ * Test files are excluded on both sides: esbuild follows imports from the CLI
+ * entry, no test is reachable that way, and a warning fired by an edit that
+ * cannot change a byte of the bundle is the false positive this check exists
+ * not to produce.
  */
+// Mirrors NOT_BUNDLED_RE in stale-bundle.ts; the parity test keeps them equal.
+const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
 export function reviewSourceDigestForBuild(root) {
   const cliCommands = join(root, 'packages', 'cli', 'src', 'commands');
   const roots = [
@@ -48,13 +58,13 @@ export function reviewSourceDigestForBuild(root) {
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (err) {
-      if (err.code === 'ENOTDIR') files.push(dir);
+      if (err.code === 'ENOTDIR' && !NOT_BUNDLED_RE.test(dir)) files.push(dir);
       return;
     }
     for (const e of entries) {
       const full = join(dir, e.name);
       if (e.isDirectory()) walk(full);
-      else if (e.isFile()) files.push(full);
+      else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) files.push(full);
     }
   };
   for (const r of roots) walk(r);

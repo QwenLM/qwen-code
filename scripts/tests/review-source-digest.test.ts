@@ -13,17 +13,31 @@
 // `scripts/`.
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { reviewSourceDigestForBuild } from '../copy_bundle_assets.js';
 import {
+  DIGEST_FILE,
   reviewSourceRoots,
   reviewSourcesDigest,
 } from '../../packages/cli/src/commands/review/lib/stale-bundle.js';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
+
+/** The literal `copy_bundle_assets.js` writes. Read from the built artifact
+ *  below rather than copied by hand, so this cannot agree by coincidence. */
+const STAMP_FILENAME_IN_BUILD = readFileSync(
+  join(repoRoot, 'scripts', 'copy_bundle_assets.js'),
+  'utf8',
+).match(/writeFileSync\(\s*join\(distDir, '([^']+)'\)/)?.[1];
 
 describe('the build stamp and the staleness check agree', () => {
   it('hashes this repository to the same digest', () => {
@@ -33,6 +47,14 @@ describe('the build stamp and the staleness check agree', () => {
     );
     expect(fromCheck).toBeDefined();
     expect(reviewSourceDigestForBuild(repoRoot).digest).toBe(fromCheck);
+  });
+
+  it('writes and reads the same filename', () => {
+    // The build stamps a literal and the check reads `DIGEST_FILE`. A
+    // one-sided rename leaves the read throwing, the comparison unmeasured,
+    // and the warning silently never firing again — with the digest parity
+    // above still green, because it never touches the name.
+    expect(DIGEST_FILE).toBe(STAMP_FILENAME_IN_BUILD);
   });
 
   it('counts the same files', () => {
@@ -63,6 +85,13 @@ describe('the build stamp and the staleness check agree', () => {
         '# skill',
       );
 
+      expect(reviewSourceDigestForBuild(root).digest).toBe(
+        reviewSourcesDigest(root, reviewSourceRoots(root)),
+      );
+      expect(reviewSourceDigestForBuild(root).count).toBe(4);
+
+      // ...and a test file moves neither.
+      writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );

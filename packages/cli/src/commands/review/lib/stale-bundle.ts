@@ -43,6 +43,16 @@ import { join, relative, sep } from 'node:path';
 /** Where the build stamps the digest of the sources it bundled. */
 export const DIGEST_FILE = 'review-sources.sha256';
 
+/**
+ * Files the bundle does not contain, and which therefore cannot make it stale.
+ *
+ * esbuild follows imports from the CLI entry, and no test is reachable that
+ * way — so folding tests into the digest would fire the warning for an edit
+ * that cannot change a single byte of the bundle. That is the false positive
+ * this module already rejected once, in the timestamp version.
+ */
+export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
 export interface BundleStaleness {
   /** `true` only when both digests are known and differ. */
   stale: boolean;
@@ -122,13 +132,18 @@ function* sourceFilesUnder(root: string): Generator<string> {
   } catch (err) {
     // A file, not a directory: `readdir` reports ENOTDIR and the path itself
     // is the source. Anything else — absent, unreadable — is nothing to walk.
-    if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') yield root;
+    if (
+      (err as NodeJS.ErrnoException).code === 'ENOTDIR' &&
+      !NOT_BUNDLED_RE.test(root)
+    ) {
+      yield root;
+    }
     return;
   }
   for (const e of entries) {
     const full = join(root, e.name);
     if (e.isDirectory()) yield* sourceFilesUnder(full);
-    else if (e.isFile()) yield full;
+    else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) yield full;
   }
 }
 
@@ -159,16 +174,14 @@ export function reviewSourceRoots(repoRoot: string): string[] {
  * the line is that the run they are about to trust may not be running their
  * code — so it says what runs from the bundle and what to do about it.
  */
-export function staleBundleWarning(
-  s: BundleStaleness,
-  rebuildCommand = 'npm run build:packages && npm run bundle',
-): string | undefined {
+export function staleBundleWarning(s: BundleStaleness): string | undefined {
   if (!s.stale) return undefined;
   return (
     `review: the bundle these commands run from was NOT built from the review sources in this tree. ` +
     `Every \`qwen review …\` step below runs the BUILT bundle, not the working tree, ` +
     `so a review command changed since that build will not take effect and this run ` +
-    `will measure the old behaviour without saying so. Rebuild with \`${rebuildCommand}\` ` +
+    `will measure the old behaviour without saying so. Rebuild with ` +
+    `\`npm run build:packages && npm run bundle\` ` +
     `and start again, or read every result below as being about the older build.`
   );
 }

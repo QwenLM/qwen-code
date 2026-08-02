@@ -19,7 +19,10 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   DIGEST_FILE,
   bundleStaleness,
@@ -495,13 +498,23 @@ export const parseArgsCommand: CommandModule = {
         // wrote one. Nothing to compare against, and it self-heals on the
         // next rebuild.
       }
+      // Only hashed when there is a stamp to compare it against: without one
+      // — an installed package, a bundle from before the build wrote one —
+      // `bundleStaleness` returns at its first guard, and reading a hundred
+      // files for a value it never inspects is work on the path that always
+      // short-circuits.
       const warning = staleBundleWarning(
         bundleStaleness(
           stamped,
-          reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot)),
+          stamped
+            ? reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot))
+            : undefined,
         ),
       );
-      if (warning) writeStderrLine(warning);
+      // `…Safe`, the convention for diagnostics in this subsystem: stderr
+      // piped to `head` raises EPIPE, and a warning that kills the review it
+      // is warning about would be worse than the staleness it reports.
+      if (warning) writeStderrLineSafe(warning);
     }
 
     const parsed = parseReviewArgs(rawStr);

@@ -124,6 +124,24 @@ describe('reviewSourcesDigest', () => {
     );
   });
 
+  it('ignores test files, which the bundle never contains', () => {
+    // esbuild follows imports from the CLI entry and no test is reachable that
+    // way, so an edit to one cannot change a byte of the bundle. Folding them
+    // in would warn about a build that is exactly correct.
+    writeFileSync(join(dir, 'drive.ts'), 'x');
+    const before = reviewSourcesDigest(root, [dir]);
+    writeFileSync(join(dir, 'drive.test.ts'), 'a test');
+    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    writeFileSync(join(dir, 'drive.spec.tsx'), 'another');
+    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+  });
+
+  it('ignores a test file passed as a root in its own right', () => {
+    const lone = join(root, 'review.test.ts');
+    writeFileSync(lone, 'x');
+    expect(reviewSourcesDigest(root, [lone])).toBeUndefined();
+  });
+
   it('yields nothing when there are no sources to hash', () => {
     expect(reviewSourcesDigest(root, [join(root, 'nope')])).toBeUndefined();
   });
@@ -172,12 +190,15 @@ describe('staleBundleWarning', () => {
 
 describe('reviewSourceRoots', () => {
   it('covers the directory, the registration file beside it, and the skill', () => {
+    // Built with the platform's `join`, so the expectation is too — a literal
+    // with forward slashes passes on Linux and fails every element on the
+    // Windows leg of the merge queue, which the PR event never runs.
     expect(reviewSourceRoots('/w')).toEqual([
-      '/w/packages/cli/src/commands/review',
+      join('/w', 'packages', 'cli', 'src', 'commands', 'review'),
       // A subcommand added without a rebuild is a change here and nowhere
       // under `review/`.
-      '/w/packages/cli/src/commands/review.ts',
-      '/w/packages/core/src/skills/bundled/review',
+      join('/w', 'packages', 'cli', 'src', 'commands', 'review.ts'),
+      join('/w', 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
     ]);
   });
 });
