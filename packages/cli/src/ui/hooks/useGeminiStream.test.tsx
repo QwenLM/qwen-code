@@ -1005,6 +1005,75 @@ describe('useGeminiStream', () => {
     ]);
   });
 
+  it('feeds audio-converted parts into the vision bridge for mixed audio+image prompts', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart, imagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'listen' }, { text: 'machine transcript' }, imagePart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [
+        { text: 'listen' },
+        { text: 'machine transcript' },
+        { text: 'vision output' },
+      ],
+      transcript: 'vision output',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [{ text: 'listen' }, audioPart, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    // The vision bridge must receive the audio-converted parts, not the
+    // original prompt parts: feeding it the pre-conversion list would drop the
+    // transcript and forward raw audio to a text-only model.
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'listen' }, { text: 'machine transcript' }, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('machine transcript');
+    expect(sent).toContain('vision output');
+    expect(sent).not.toContain('audio/wav');
+    expect(sent).not.toContain('inlineData');
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
