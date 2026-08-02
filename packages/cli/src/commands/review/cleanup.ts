@@ -421,7 +421,6 @@ export function runCleanup(target: string): void {
     // its only removal — not just a crash sweep. Same shared path helper, same
     // reason: the suffix must not drift between creator and sweeper.
     report('base worktree', baseWorktreePath(wt));
-
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
     // not a git worktree, so `releaseWorktree` above does not touch it. A builder
     // killed mid-build leaves it behind (its `finally` rmSync never runs), and every

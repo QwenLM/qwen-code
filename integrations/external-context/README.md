@@ -174,12 +174,16 @@ shapes are removed from the submitted text, but this is not DLP.
 Do not link or enable the external-context Extension Manifest and do not
 install `examples/managed-mcp.json` in the auto-recall process; either action
 would add the on-demand MCP surface and permit duplicate retrieval. The
-shared configuration loader and MCP entry point intentionally understand v2
-for forward compatibility, so the schema version does not enforce this
-deployment separation. The profile supports only a fresh interactive TTY
-session. The managed system settings explicitly disable speculative execution
-because accepted speculation can bypass the normal `UserPromptSubmit` path. It
-does not support
+shared configuration loader accepts v1 and v2, but the MCP process entry point
+requires v1 and the Hook requires v2. Supplying the same v2 configuration to
+the MCP therefore fails startup. The managed Auto Profile must still omit the
+extension and MCP configuration because a separately configured v1 MCP process
+would permit duplicate retrieval. In v2, `autoRecall.timeoutMs` is the only
+request timeout the Hook reads; the top-level `timeoutMs` remains for schema
+compatibility and has no current runtime consumer. The profile supports only a
+fresh interactive TTY session. The managed system settings explicitly disable
+speculative execution because accepted speculation can bypass the normal
+`UserPromptSubmit` path. It does not support
 `-p`, stream-json, ACP, `serve`, YOLO, `--continue`, `--resume`, arbitrary
 launcher arguments, or switching repositories in one process. Mid-turn
 steering messages do not fire `UserPromptSubmit` and therefore do not trigger
@@ -191,7 +195,9 @@ fails open as `{}` after the Node entry point starts. Failure to spawn the
 pinned Node process and a Qwen outer command timeout retain Qwen's blocking
 command-Hook semantics. The Provider timeout defaults to 1500ms and is capped
 at 5000ms; the internal Hook wall-clock budget is 6500ms and the managed Qwen
-command timeout is 8000ms.
+command timeout is 8000ms. Each Hook invocation destroys its own proxy
+dispatcher after the attempted retrieval so stalled proxy connections cannot
+retain the child process; the long-running MCP process keeps its dispatcher.
 
 Retrieved results are sent to the model provider as user-layer additional
 context. The managed profile disables Qwen chat recording, native memory,

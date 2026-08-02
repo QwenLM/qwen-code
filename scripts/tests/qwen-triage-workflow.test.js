@@ -219,6 +219,16 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
+  it('pins the action reinstall to the version the job already runs', () => {
+    expect(workflow).toContain("id: 'ensure_qwen'");
+    expect(workflow).toContain(
+      'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
+    );
+  });
+
   it('passes triage output through env before bash reads it', () => {
     const checkStep = step('Check triage response');
 
