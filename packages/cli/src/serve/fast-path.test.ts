@@ -685,6 +685,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
+      ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -746,6 +747,19 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --memory-budget-mb on the fast path in both spellings', () => {
+    for (const argv of [
+      ['serve', '--memory-budget-mb', '8192'],
+      ['serve', '--memory-budget-mb=8192'],
+    ]) {
+      const parsed = parseServeFastPathArgs(argv);
+      expect(parsed).toMatchObject({
+        kind: 'serve',
+        options: { memoryBudgetMb: 8192 },
+      });
+    }
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {
@@ -816,6 +830,10 @@ describe('serve fast path argument parsing', () => {
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
       'qwen serve: --rate-limit-prompt must be a positive integer.',
     ],
+    [
+      ['serve', '--memory-budget-mb', '512'],
+      'qwen serve: --memory-budget-mb must be an integer in [1024, 1048576].',
+    ],
   ])(
     'validates %s before bootstrapping settings and environment',
     async (argv, message) => {
@@ -838,6 +856,32 @@ describe('serve fast path argument parsing', () => {
       expect(stderrWrites.join('')).toContain(message);
     },
   );
+
+  it.each([
+    [['serve', '--memory-budget-mb', '8192'], 'valid --memory-budget-mb'],
+    [['serve'], 'absent --memory-budget-mb'],
+  ])('accepts %s without a range error', async (argv, _label) => {
+    const qwenHome = useTempQwenHome();
+    writeFileSync(join(qwenHome, 'settings.json'), '{');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('unexpected process.exit');
+    }) as typeof process.exit);
+
+    // Bootstrap fails (broken settings.json), but validation must pass
+    // first — a spurious range error would exit(1) before reaching it.
+    const result = await tryRunServeFastPath(argv);
+
+    expect(result).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'must be an integer in [1024, 1048576]',
+    );
+  });
 
   it('does not enable rate limiting just because tuning flags are present', () => {
     const parsed = parseServeFastPathArgs([

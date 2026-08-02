@@ -18,6 +18,7 @@
 node_modules
 bower_components
 package-lock.json
+!packages/desktop-shell/package-lock.json
 
 # Editors
 .idea

@@ -36,7 +36,6 @@ import {
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptCursorCodec,
-  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -235,7 +234,7 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
-  it('rejects a single aggregate record over the page byte budget', async () => {
+  it('returns a single aggregate record that exceeds the page byte budget', async () => {
     const first = record('u1', null, 'first');
     const second = record('u1', null, 'second fragment');
     await writeRecords([first, second, record('a1', 'u1', 'reply')]);
@@ -243,17 +242,17 @@ describe('SessionTranscriptReader', () => {
       Buffer.byteLength(JSON.stringify(first)) +
       Buffer.byteLength(JSON.stringify(second));
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      {
         limit: 1,
         maxBytes: aggregateBytes - 1,
-      }),
-    ).rejects.toMatchObject({
-      name: 'SessionTranscriptPageTooLargeError',
-      sessionId,
-      pageBytes: aggregateBytes,
-      maxBytes: aggregateBytes - 1,
-    } satisfies Partial<SessionTranscriptPageTooLargeError>);
+      },
+    );
+
+    // An indivisible record rides over budget rather than dead-ending the page.
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(page.hasMore).toBe(true);
   });
 
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
@@ -682,7 +681,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.hasMore).toBe(false);
   });
 
-  it('rejects a backward turn that exceeds maxBytes after alignment', async () => {
+  it('returns a backward turn that exceeds maxBytes after alignment', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
       ...record('t1', 'a-tool', 'tool result'),
@@ -697,13 +696,23 @@ describe('SessionTranscriptReader', () => {
       record('u2', 'a-final', 'next prompt'),
     ]);
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      {
         beforeRecordId: 'u2',
         limit: 2,
         maxBytes: Buffer.byteLength(JSON.stringify(finalAnswer)),
-      }),
-    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+      },
+    );
+
+    // The turn cannot be split across pages, so it rides over budget whole.
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a-final',
+    ]);
+    expect(page.hasMore).toBe(false);
   });
 
   it('rejects a backward boundary outside the active chain', async () => {
@@ -1096,12 +1105,15 @@ describe('SessionTranscriptReader', () => {
       `${gluedLine}\n${JSON.stringify(record('a1', 'u1', 'reply'))}\n`,
     );
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
-        limit: 1,
-        maxBytes: Buffer.byteLength(gluedLine) * 2 - 1,
-      }),
-    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { limit: 2, maxBytes: Buffer.byteLength(gluedLine) * 2 },
+    );
+
+    // Conservative per-fragment counting spends the whole budget on the glued
+    // aggregate, so the next record must wait for the following page.
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(page.hasMore).toBe(true);
   });
 
   it('skips non-ChatRecord JSON lines while indexing', async () => {

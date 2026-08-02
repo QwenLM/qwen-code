@@ -541,7 +541,6 @@ function recordSegmentBytes(index: TranscriptIndex, uuid: string): number {
 
 function selectPageUuids(
   index: TranscriptIndex,
-  sessionId: string,
   position: number,
   limit: number,
   maxBytes: number | undefined,
@@ -553,10 +552,9 @@ function selectPageUuids(
   let selectedBytes = 0;
   for (const uuid of candidates) {
     const bytes = recordSegmentBytes(index, uuid);
-    if (selected.length === 0 && bytes > maxBytes) {
-      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
-    }
-    if (selectedBytes + bytes > maxBytes) break;
+    // A single aggregate record may itself exceed the budget; it cannot be
+    // split, so always take at least one record or pagination dead-ends.
+    if (selected.length > 0 && selectedBytes + bytes > maxBytes) break;
     selected.push(uuid);
     selectedBytes += bytes;
   }
@@ -570,7 +568,6 @@ function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
 
 function selectBackwardPageUuids(
   index: TranscriptIndex,
-  sessionId: string,
   position: number,
   limit: number,
   maxBytes: number | undefined,
@@ -591,14 +588,15 @@ function selectBackwardPageUuids(
   for (let i = position - 1; i >= start; i--) {
     const uuid = index.activeUuids[i]!;
     const bytes = recordSegmentBytes(index, uuid);
+    // A turn cannot be split across pages; always take at least one record
+    // so an oversized turn cannot dead-end backward pagination.
     if (
-      selectedStart === position &&
+      selectedStart < position &&
       maxBytes !== undefined &&
-      bytes > maxBytes
+      selectedBytes + bytes > maxBytes
     ) {
-      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+      break;
     }
-    if (maxBytes !== undefined && selectedBytes + bytes > maxBytes) break;
     selectedStart = i;
     selectedBytes += bytes;
   }
@@ -611,7 +609,6 @@ function selectBackwardPageUuids(
       break;
     }
   }
-  let expandedSelection = false;
   if (alignedToReplayBoundary && selectedStart > 0) {
     let previousTurnStart = selectedStart - 1;
     while (
@@ -622,7 +619,6 @@ function selectBackwardPageUuids(
     }
     if (previousTurnStart < 0) {
       selectedStart = 0;
-      expandedSelection = true;
     }
   } else if (!alignedToReplayBoundary) {
     while (
@@ -630,19 +626,6 @@ function selectBackwardPageUuids(
       !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
     ) {
       selectedStart--;
-    }
-    expandedSelection = true;
-  }
-  if (expandedSelection && maxBytes !== undefined) {
-    const alignedBytes = index.activeUuids
-      .slice(selectedStart, position)
-      .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
-    if (alignedBytes > maxBytes) {
-      throw new SessionTranscriptPageTooLargeError(
-        sessionId,
-        alignedBytes,
-        maxBytes,
-      );
     }
   }
 
@@ -1234,11 +1217,10 @@ export class SessionTranscriptReader {
     }
     const backwardPage =
       direction === 'backward'
-        ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
+        ? selectBackwardPageUuids(index, position, limit, maxBytes)
         : undefined;
     const pageUuids =
-      backwardPage?.uuids ??
-      selectPageUuids(index, sessionId, position, limit, maxBytes);
+      backwardPage?.uuids ?? selectPageUuids(index, position, limit, maxBytes);
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
