@@ -132,6 +132,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
   if (workflowName !== 'E2E Tests') return null;
 
   const cases = [];
+  const environments = [];
   const reasons = [];
   const environments = [];
   for (const job of jobs) {
@@ -140,6 +141,7 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
       reasons.push(`unsupported failed job: ${job.name || '(unnamed)'}`);
       continue;
     }
+    environments.push(environment);
     if (typeof job.log !== 'string') {
       reasons.push(`missing log for failed job: ${job.name}`);
       continue;
@@ -494,9 +496,7 @@ function publicMachineMarkers(body) {
     'g',
   );
   const markers = [
-    ...new Set(
-      [...text.matchAll(testMarkerPattern)].map((match) => match[0]),
-    ),
+    ...new Set([...text.matchAll(testMarkerPattern)].map((match) => match[0])),
   ];
   const signaturePattern = new RegExp(
     `^<!-- ${SIGNATURE_MARKER_PREFIX}[0-9a-f]{12} -->$`,
