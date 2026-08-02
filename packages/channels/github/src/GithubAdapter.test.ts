@@ -3139,6 +3139,36 @@ describe('GithubChannel', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
+    it('removes a recovered task whose reply has a suppressed audit record', async () => {
+      writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(join(auditPath, '..'), { recursive: true });
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({
+          outcome: 'suppressed',
+          repository: 'owner/repo',
+          threadId: 'issue:42',
+          sourceMessageId: '1001',
+        })}\n`,
+        'utf-8',
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        pollOnce: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      await privateChannel.pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('removes a reply-pending task when a posted pending delivery is reconciled', async () => {
       writeInboundTasks([
         makeInboundTaskRecord({
