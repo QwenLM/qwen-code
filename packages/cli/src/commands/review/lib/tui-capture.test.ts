@@ -65,6 +65,28 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(plan.kill).toEqual(['-L', 'srv', 'kill-server']);
   });
 
+  it('sends each key as ONE token behind `--` — no joining, no flag-eating', () => {
+    // Without `--`, tmux consumes a dash-leading token as a send-keys flag:
+    // measured, `send-keys -t cap -l` exits 0 and types NOTHING — silent
+    // evidence corruption. `--` makes every token a key, verbatim.
+    expect(plan.sendKeys('C-c')).toEqual([
+      '-L',
+      'srv',
+      'send-keys',
+      '-t',
+      'cap',
+      '--',
+      'C-c',
+    ]);
+    expect(plan.sendKeys('-l')[plan.sendKeys('-l').length - 1]).toBe('-l');
+  });
+
+  it('starts the command behind `--` so a dash-leading command is not getopt fodder', () => {
+    const i = plan.start.indexOf('--');
+    expect(i).toBeGreaterThan(-1);
+    expect(plan.start[i + 1]).toBe('node cli.js');
+  });
+
   it('starts detached at the requested geometry and cwd', () => {
     expect(plan.start).toContain('-d');
     const x = plan.start.indexOf('-x');

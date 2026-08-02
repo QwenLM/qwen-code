@@ -95,6 +95,7 @@ export function tmuxPlan(opts: {
   start: string[];
   capture: string[];
   kill: string[];
+  sendKeys: (key: string) => string[];
 } {
   const scope = ['-L', opts.server];
   return {
@@ -110,6 +111,11 @@ export function tmuxPlan(opts: {
       String(opts.rows),
       '-c',
       opts.cwd,
+      // `--` ends option parsing: a command that happens to start with `-`
+      // must reach the shell, not tmux's getopt (measured: without it,
+      // send-keys silently ate `-l` as its literal flag — exit 0, nothing
+      // typed — the worst kind of evidence corruption).
+      '--',
       opts.command,
     ],
     // -p print, -e escapes, -N trailing spaces. Deliberately NOT -J: joining
@@ -124,6 +130,19 @@ export function tmuxPlan(opts: {
     // and killing it reaps every process the capture started — no orphaned
     // TUI keeps running after the review.
     kill: [...scope, 'kill-server'],
+    // One send-keys per token, verbatim — quoting-by-joining is how a key
+    // sequence silently becomes a different key sequence. `--` for the same
+    // reason as start: a dash-leading key token (`-l`) is otherwise consumed
+    // as a send-keys flag, silently. In the plan so the shape is pinned like
+    // the others: it was the one argv built ad hoc.
+    sendKeys: (key: string) => [
+      ...scope,
+      'send-keys',
+      '-t',
+      opts.session,
+      '--',
+      key,
+    ],
   };
 }
 

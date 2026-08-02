@@ -35,8 +35,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       cwd: dir,
       cols: 80,
       rows: 24,
-      settleMs: 800,
-      until: undefined,
+      settleMs: 0,
+      // Settle on CONTENT, not a fixed delay: under CI load a fixed delay
+      // races the shell's startup, captures a blank pane, and the ladder
+      // assertions turn flaky (measured once: empty .ans → freeze bounds
+      // error → 'png' expectation failed).
+      until: 'WORLD',
       keys: undefined,
       out: join(dir, 'cap'),
       timeoutMs: 10_000,
@@ -71,6 +75,31 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       `for s in $(ls /tmp/tmux-$(id -u)/qwen-review-capture-${process.pid}-* 2>/dev/null); do echo "$s"; done`,
     ]);
     expect((probe.stdout ?? Buffer.from('')).toString().trim()).toBe('');
+  });
+
+  it('kills the processes the capture started — not just the socket file', () => {
+    // The socket probe above can't distinguish "server reaped" from "we
+    // unlinked the socket of a live server": the cleanup path removes the
+    // socket itself. This probe asks the question that matters — is the
+    // process the capture launched actually dead?
+    const pidFile = join(dir, 'shell.pid');
+    run({
+      command: `echo $$ > "${pidFile}"; printf "PIDDED\\n"; sleep 30`,
+      until: 'PIDDED',
+    });
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+    // kill-server delivers the reap asynchronously; give it a beat.
+    let alive = true;
+    for (let i = 0; i < 40 && alive; i++) {
+      try {
+        process.kill(pid, 0);
+        spawnSync('sleep', ['0.05']);
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
   });
 
   it('settles by regex when --until matches, and says so', () => {
@@ -113,5 +142,40 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   it('refuses an empty command', () => {
     run({ command: '   ' });
     expect(process.exitCode).toBe(3);
+  });
+
+  it('refuses an invalid --until regex before anything starts', () => {
+    run({ until: '[' });
+    expect(process.exitCode).toBe(3);
+    // Refused up front: no capture artifacts, and no server was ever started
+    // (the socket dir carries no entry for this pid — nothing to race).
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+  });
+
+  it('records a fixed-delay settle honestly when no --until is given', () => {
+    run({ until: undefined, settleMs: 600 });
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.settledBy).toBe('fixed-delay');
+  });
+
+  it('sends dash-leading keys as keys, not as send-keys flags', () => {
+    runCaptureTui({
+      command: 'cat',
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 0,
+      until: '-lDONE',
+      keys: ['-l', 'DONE', 'Enter'],
+      out: join(dir, 'dash'),
+      timeoutMs: 10_000,
+    } as never);
+    // Without `--` in the plan, tmux eats `-l` as its literal flag (exit 0,
+    // nothing typed) and the pane would read "DONE" — the corruption is
+    // silent, which is exactly why this pins the rendered text.
+    const manifest = JSON.parse(readFileSync(join(dir, 'dash.json'), 'utf8'));
+    expect(manifest.settledBy).toBe('until-match');
+    expect(readFileSync(join(dir, 'dash.ans'), 'utf8')).toContain('-lDONE');
   });
 });

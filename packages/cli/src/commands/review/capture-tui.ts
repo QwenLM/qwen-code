@@ -32,7 +32,6 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   DEFAULT_COLS,
@@ -61,7 +60,7 @@ function which(bin: string): boolean {
   return r.status === 0;
 }
 
-function tmux(server: string, argv: string[]): string {
+function tmux(argv: string[]): string {
   return execFileSync('tmux', argv, {
     encoding: 'utf8',
     // A pane of text is small; a runaway TUI writing a scrollback is not our
@@ -99,6 +98,20 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     refuse('--command must not be empty.');
     return;
   }
+  // Validate the regex BEFORE any process starts: an invalid pattern is a
+  // caller mistake and gets the refusal contract, not a stack trace thrown
+  // from inside a running capture.
+  let untilRe: RegExp | undefined;
+  if (args.until !== undefined) {
+    try {
+      untilRe = new RegExp(args.until);
+    } catch (e) {
+      refuse(
+        `--until is not a valid regex: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
+  }
 
   const outBase = resolve(args.out);
   mkdirSync(dirname(outBase), { recursive: true });
@@ -120,47 +133,64 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   try {
-    tmux(server, plan.start);
+    tmux(plan.start);
     for (const key of args.keys ?? []) {
-      // One send-keys per token, verbatim: quoting-by-joining is how a key
-      // sequence silently becomes a different key sequence.
-      tmux(server, ['-L', server, 'send-keys', '-t', session, key]);
+      tmux(plan.sendKeys(key));
     }
-    if (args.until) {
+    if (untilRe) {
       // Poll the pane for the settle marker; on timeout, capture anyway and
-      // SAY SO — a late frame is degraded evidence, not no evidence.
-      const re = new RegExp(args.until);
+      // SAY SO — a late frame is degraded evidence, not no evidence. The
+      // frame that MATCHED is the one written: a re-capture after the match
+      // could be a later, different frame, and then the manifest's
+      // `until-match` would describe evidence that no longer shows the match.
       const deadline = Date.now() + args.timeoutMs;
       settledBy = 'timeout';
       for (;;) {
-        const text = tmux(server, plan.capture);
-        if (re.test(text)) {
+        const text = tmux(plan.capture);
+        if (untilRe.test(text)) {
           settledBy = 'until-match';
+          ansText = text;
           break;
         }
-        if (Date.now() >= deadline) break;
+        if (Date.now() >= deadline) {
+          ansText = text;
+          break;
+        }
         sleepSync(250);
       }
     } else {
       sleepSync(args.settleMs);
+      ansText = tmux(plan.capture);
     }
-    ansText = tmux(server, plan.capture);
+  } catch (e) {
+    // tmux failing mid-run (ancient tmux without a flag we use, a command
+    // tmux itself refuses, a server that died under us) is an environment
+    // that could not produce evidence — the refusal contract, not a stack
+    // trace. The finally below still reaps whatever did start.
+    const err = e as Error & { stderr?: string };
+    const detail =
+      (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
+      (err.message ?? String(e)).split('\n')[0];
+    refuse(`tmux failed mid-capture: ${detail}`);
+    return;
   } finally {
     // Always, even when start/capture threw: the private server holds every
     // process this capture launched, and an orphaned TUI outliving the
     // review is the mess this command exists to make impossible.
     try {
-      tmux(server, plan.kill);
+      tmux(plan.kill);
     } catch {
       // A kill failing because the server already died is the goal state.
     }
     // tmux does not always unlink the socket of a killed server; a review
-    // that captures often would litter /tmp/tmux-<uid>/ with dead sockets.
+    // that captures often would litter the socket dir with dead sockets.
+    // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
+    // does NOT consult TMPDIR, so neither do we.
     try {
       const uid = process.getuid?.();
       if (uid !== undefined) {
-        rmSync(join(tmpdir(), `tmux-${uid}`, server), { force: true });
-        rmSync(`/tmp/tmux-${uid}/${server}`, { force: true });
+        const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
+        rmSync(join(base, `tmux-${uid}`, server), { force: true });
       }
     } catch {
       // Litter is cosmetic; never let cleanup mask the capture's own result.
@@ -173,7 +203,13 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
   // workflows, and the text evidence must already be on disk when it does.
   let png: string | null = null;
   let degradedBecause: string | undefined;
-  if (!which('freeze')) {
+  if (ansText === '') {
+    // A zero-byte capture (the pane raced to nothing) has no pixels to
+    // render — freeze on empty input fails with a misleading bounds error,
+    // and an empty image would be evidence-shaped noise anyway.
+    degradedBecause =
+      'pane captured empty — nothing to render, no image produced';
+  } else if (!which('freeze')) {
     degradedBecause =
       'freeze is not installed — .ans text captured, no image rendered';
   } else {
