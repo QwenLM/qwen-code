@@ -251,8 +251,15 @@ describe('qwen-triage tmux workflow', () => {
     expect(ensure).toContain('triaging with installed qwen');
     // The two hard-fail paths must keep failing the job — pin the exit code,
     // not just the message: a softened `exit 0` would otherwise ship undetected.
-    expect(ensure).toContain('::error::');
-    expect(ensure).toContain('exit 1');
+    // Anchor each message to its own `exit 1`; the step has two hard-fail
+    // sites, so an unanchored `toContain('exit 1')` stays green when either
+    // one is softened while the other still fails the job.
+    expect(ensure).toMatch(
+      /::error::qwen is not installed and the npm registry query failed'\n\s*exit 1/,
+    );
+    expect(ensure).toMatch(
+      /::error::qwen is not installed and installing \$want failed after 3 attempts"\n\s*exit 1/,
+    );
   });
 
   it('passes triage output through env before bash reads it', () => {
