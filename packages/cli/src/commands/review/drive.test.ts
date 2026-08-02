@@ -154,6 +154,38 @@ describe('readiness', () => {
     expect(r.readyAfterMs).not.toBeNull();
   });
 
+  it('polls at a bounded RATE — the wait cannot depend on the platform', () => {
+    // The first version shelled out to `sleep 0.25`. Fractional operands are a
+    // GNU/BSD extension, so where POSIX rules `sleep` fails, returns instantly,
+    // and this loop goes tight. Measured through this very seam before the fix:
+    // 8.2 MILLION readiness probes in one second — which does not just spin a
+    // CPU, it hammers the daemon the probe is waiting for and then reports that
+    // it never came up. A false negative built by the harness.
+    let probes = 0;
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'bash') {
+        probes++;
+        return fail();
+      }
+      return ok();
+    };
+    const t0 = Date.now();
+    runDrive({
+      script: 'true',
+      cwd: '/tmp',
+      ready: 'curl -sf localhost:1/health',
+      readyTimeout: 1,
+      timeout: 1,
+      server: 'rate',
+      exec,
+    });
+    const perSecond = probes / Math.max(0.2, (Date.now() - t0) / 1000);
+    // Generous ceiling: the point is orders of magnitude, not a tuned figure.
+    expect(perSecond).toBeLessThan(50);
+    expect(probes).toBeGreaterThan(0);
+  });
+
   it('refuses to drive when readiness never arrives, and attributes nothing', () => {
     // `not-ready` is a third outcome, not a failure of the diff: nothing ran,
     // so nothing observed is evidence either way.

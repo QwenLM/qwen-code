@@ -135,6 +135,25 @@ const CAPTURE_MAX = 200_000;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
 const POLL_MS = 250;
 
+/**
+ * Wait, without asking the platform for a fractional `sleep`.
+ *
+ * The first version shelled out to `sleep 0.25`. Fractional operands are a
+ * GNU/BSD extension — POSIX specifies an integer — so on a system without it
+ * `sleep` fails, returns instantly, and the poll below becomes a tight loop.
+ * Measured through the exec seam: **8.2 MILLION readiness probes in one
+ * second**. That does not merely spin a CPU; it hammers the very daemon the
+ * probe is waiting for, at millions of requests a second, and then reports that
+ * it never became ready — a false negative manufactured by the harness, which
+ * is the exact failure this command was written to remove.
+ *
+ * `Atomics.wait` blocks the thread for a real duration with no subprocess and
+ * no platform surface at all.
+ */
+function waitMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function run(cmd: string, args: string[], input?: string): ExecResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
@@ -257,7 +276,7 @@ export function runDrive(args: DriveArgs): DriveReport {
           note: `readiness probe never succeeded within ${args.readyTimeout}s (\`${args.ready}\`) — nothing was driven, so nothing here is evidence about the diff. A slower machine needs a larger --ready-timeout; a probe that can never pass needs a different probe.`,
         };
       }
-      exec('sleep', [String(POLL_MS / 1000)]);
+      waitMs(POLL_MS);
     }
   }
 
@@ -309,7 +328,7 @@ export function runDrive(args: DriveArgs): DriveReport {
         break;
       }
       if (Date.now() >= deadline) break;
-      exec('sleep', [String(POLL_MS / 1000)]);
+      waitMs(POLL_MS);
     }
   } finally {
     // Unconditional. The 87% that clean up by hand are the 87% that remembered;
