@@ -212,6 +212,49 @@ describe('what it refuses to answer', () => {
 });
 
 describe('the bounds', () => {
+  it('numbers only the requests the RESPONDER saw — across every skip path', async () => {
+    // Two passes to find them all. Round 1 stopped `/v1/models` from taking a
+    // number; a mixed run in round 5 showed the other two ways it still could,
+    // as `[1, 2, 2, 3, 4, 5]`: the models call REUSED the previous request's
+    // number, and a refused `/v1/embeddings` incremented past it. A responder
+    // keyed on its Nth call reads a sequence like that and fires late.
+    const seen: number[] = [];
+    const { report, log } = await serve((r) => {
+      seen.push(r.n);
+      return { text: 'x' };
+    });
+    const J = (b: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(b),
+    });
+    await fetch(
+      `${report.baseUrl}/messages`,
+      J({ stream: false, messages: [] }),
+    );
+    await fetch(`${report.baseUrl}/models`);
+    await fetch(
+      `${report.baseUrl}/chat/completions`,
+      J({ stream: false, messages: [] }),
+    );
+    await fetch(`${report.baseUrl}/embeddings`, J({ x: 1 }));
+    await fetch(`${report.baseUrl}/chat/completions`, { method: 'GET' });
+    await fetch(
+      `${report.baseUrl}/messages`,
+      J({ stream: false, messages: [] }),
+    );
+    await stop?.();
+    stop = null;
+    expect(seen).toEqual([1, 2, 3]);
+    // ...and the record says `null` for the three it never saw, rather than a
+    // number that would read as "the responder handled this".
+    const recs = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(recs.map((r) => r.n)).toEqual([1, null, 2, null, null, 3]);
+  });
+
   it('numbers only the requests the RESPONDER saw', async () => {
     // `/v1/models` is answered without consulting the responder, so it must
     // not take a number. Counting it produced `[1, 3]` for two calls, and a

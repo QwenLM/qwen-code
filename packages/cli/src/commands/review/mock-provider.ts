@@ -101,14 +101,28 @@ export interface MockRequest {
   /**
    * 1-based count of the requests the RESPONDER was asked about — a responder
    * that answers the Nth call needs this, and it needs it to be its own N.
-   * `/v1/models` is served without consulting the responder, so it does not
-   * take a number: counting it produced the sequence `[1, 3]` for two calls,
-   * and a responder keyed on the third call would have fired on the second.
+   * `null` in a record for anything the responder was never asked about.
+   *
+   * Everything the responder does not see is excluded, and finding them took
+   * two passes: `/v1/models` first (counting it gave `[1, 3]` for two calls),
+   * then, in a mixed run, a models call REUSING the previous number and a
+   * refused request incrementing past it — `[1, 2, 2, 3, 4, 5]`. A responder
+   * keyed on its Nth call reads a sequence like that and fires on the wrong
+   * request.
    */
-  n: number;
+  n: number | null;
 }
 
-export type Responder = (req: MockRequest) => MockReply | Promise<MockReply>;
+/**
+ * What the responder is handed. `n` is never null here — the responder is only
+ * ever called for a request that spent one, which is the invariant the type
+ * states rather than leaves to a comment.
+ */
+export type RespondedRequest = MockRequest & { n: number };
+
+export type Responder = (
+  req: RespondedRequest,
+) => MockReply | Promise<MockReply>;
 
 export interface MockProviderReport {
   /** The port the OS gave us — never one this command or its caller chose. */
@@ -516,12 +530,25 @@ export async function startMockProvider(
         }
         const path = req.url ?? '/';
         const isModels = path.startsWith('/v1/models');
+        // A number is spent only when the responder is actually asked. Round 1
+        // stopped `/v1/models` from taking one; round 5 found the other two
+        // ways it still could. Measured across one mixed run: `[1, 2, 2, 3, 4,
+        // 5]` — the models call REUSED the previous request's number (it has
+        // none of its own), and a refused `/v1/embeddings` incremented to 5. A
+        // responder keyed on its Nth call reads that sequence and fires late.
+        const chat =
+          path.includes('/chat/completions') || path.includes('/v1/messages');
+        const willAsk =
+          !isModels &&
+          chat &&
+          (req.method ?? 'GET') === 'POST' &&
+          body !== null;
         // The wire is decided by the path the product dialled, not by a flag:
         // whichever endpoint it chose is the one it can parse back.
         const wire: MockWire = path.includes('/v1/messages')
           ? 'anthropic'
           : 'openai';
-        if (!isModels) n += 1;
+        if (willAsk) n += 1;
         const mreq: MockRequest = {
           method: req.method ?? 'GET',
           path,
@@ -529,7 +556,9 @@ export async function startMockProvider(
           wire,
           text: wire === 'anthropic' ? anthropicText(body) : messagesText(body),
           stream: body?.['stream'] === true,
-          n,
+          // Null for anything the responder was never asked about, so the
+          // record cannot be read as "the responder saw this".
+          n: willAsk ? n : null,
         };
 
         // Only the two chat endpoints, and only by POST with a JSON body.
@@ -540,8 +569,6 @@ export async function startMockProvider(
         // the very defect the review is looking for, which is worse than any
         // answer it could give.
         if (!isModels) {
-          const chat =
-            path.includes('/chat/completions') || path.includes('/v1/messages');
           const why = !chat
             ? `this mock serves /v1/chat/completions and /v1/messages only; ${path} is not one of them`
             : mreq.method !== 'POST'
@@ -571,7 +598,7 @@ export async function startMockProvider(
 
         let reply: MockReply;
         try {
-          reply = await respond(mreq);
+          reply = await respond(mreq as RespondedRequest);
           const problem = replyProblem(reply);
           if (problem) throw new Error(problem);
         } catch (err) {
