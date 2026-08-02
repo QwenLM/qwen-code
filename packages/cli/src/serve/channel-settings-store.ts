@@ -230,7 +230,13 @@ function assertDescriptorValue(
       Number.isFinite(value)) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
-      field.options?.some((option) => option.value === value) === true);
+      field.options?.some((option) => option.value === value) === true) ||
+    (field.kind === 'string-list' &&
+      Array.isArray(value) &&
+      value.every((item) => typeof item === 'string')) ||
+    (field.kind === 'record' &&
+      isRecord(value) &&
+      Object.values(value).every((v) => typeof v === 'string'));
   if (!valid) {
     throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
   }

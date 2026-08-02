@@ -265,7 +265,8 @@ export function selectForkHistory(
  * When the last model message has function calls, we must include matching
  * function responses in a user message (Gemini API requirement). The
  * directive is embedded in this same user message to avoid consecutive
- * user messages.
+ * user messages. Each replayed functionCall's `args` are redacted so a fork
+ * launched alongside siblings does not inherit the siblings' directives.
  *
  * When there are no function calls, we return [] — the parent history
  * already ends with a model text message and the directive will be sent
@@ -290,10 +291,28 @@ export function buildForkedMessages(
     return [];
   }
 
-  // Clone the assistant message to avoid mutating the original
+  // Clone the assistant message to avoid mutating the original, redacting the
+  // `args` of every functionCall. When a model launches several forks in one
+  // response, this message holds one functionCall per sibling fork, each with
+  // that sibling's directive in `args.prompt` — replaying them verbatim leaks
+  // every sibling's directive into this fork's history. Only `id` and `name`
+  // are needed to pair the placeholder responses built below; the fork's own
+  // directive is delivered separately via buildChildMessage. Empty args
+  // serialize identically to absent args (JSON.stringify(args || {})).
   const fullAssistantMessage: Content = {
     role: assistantMessage.role,
-    parts: [...(assistantMessage.parts || [])],
+    parts: (assistantMessage.parts || []).map((part) =>
+      part.functionCall
+        ? {
+            ...part,
+            functionCall: {
+              id: part.functionCall.id,
+              name: part.functionCall.name,
+              args: {},
+            },
+          }
+        : part,
+    ),
   };
 
   // Build tool_result blocks for every tool_use, all with identical placeholder text.

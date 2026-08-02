@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -3699,6 +3699,78 @@ describe('AgentTool', () => {
           ],
         }),
       );
+    });
+
+    it("does not seed a fork with its siblings' directives", async () => {
+      // When the model launches several forks in one response, the last model
+      // message holds one functionCall per sibling, each carrying that
+      // sibling's directive in `args.prompt`. Replaying it verbatim would leak
+      // every sibling directive into this fork's seed history. Pin the
+      // end-to-end path: the seed must not contain a sibling's directive.
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'launch two forks' }],
+      };
+      const forkLaunch = {
+        role: 'model' as const,
+        parts: [
+          { text: 'Launching two forks.' },
+          {
+            functionCall: {
+              id: 'call-a',
+              name: 'agent',
+              args: { subagent_type: 'fork', prompt: 'do the thing' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call-b',
+              name: 'agent',
+              args: {
+                subagent_type: 'fork',
+                prompt: 'SIBLING_SECRET_DIRECTIVE',
+              },
+            },
+          },
+        ],
+      };
+      const getHistoryShallow = vi
+        .fn()
+        .mockReturnValue([startup, firstUser, forkLaunch]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow,
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: 'all',
+      });
+
+      await invocation.execute();
+
+      const promptConfig = vi.mocked(AgentHeadless.create).mock
+        .calls[0]?.[2] as { initialMessages?: Content[] } | undefined;
+      const initialMessages = promptConfig?.initialMessages ?? [];
+      // The sibling's directive must appear nowhere in the fork's seed history.
+      expect(JSON.stringify(initialMessages)).not.toContain(
+        'SIBLING_SECRET_DIRECTIVE',
+      );
+      // The seed still ends on a model message so the task_prompt can follow.
+      expect(initialMessages.at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: 'Understood. Executing directive now.' }],
+      });
     });
 
     it('falls back to uncurated getHistory() when getHistoryForForkWindow is unavailable', async () => {
