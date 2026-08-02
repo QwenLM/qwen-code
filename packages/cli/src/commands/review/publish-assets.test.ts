@@ -297,3 +297,55 @@ describe('publish-assets', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 });
+
+describe('publish-assets — empty is two different things', () => {
+  let dir: string;
+  let argsFile: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-empty-'));
+    argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, '8346 --comment\n');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    stdoutSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    process.exitCode = undefined;
+  });
+
+  it('a findings artifact with no assetFiles is an ordinary no-op, exit 0', () => {
+    // An orchestrator may call publish-assets unconditionally on every posting
+    // run; a review whose findings carry no images must not manufacture a
+    // failure for the FIX loop to "repair".
+    const findingsIn = join(dir, 'findings.json');
+    writeFileSync(
+      findingsIn,
+      JSON.stringify([
+        {
+          id: 'f1',
+          severity: 'Suggestion',
+          summary: 'text-only finding',
+          failureScenario: 'cost: none',
+          file: 'a.ts',
+        },
+      ]),
+    );
+    runPublishAssets({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: undefined,
+      findings: findingsIn,
+      findingsOut: undefined,
+      out: join(dir, 'manifest.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    } as never);
+    expect(process.exitCode).toBeUndefined();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false, count: 0 }),
+    );
+  });
+});

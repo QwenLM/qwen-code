@@ -198,6 +198,19 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   }
   const unique = [...new Set(fileList)];
   if (unique.length === 0) {
+    // Two different empties. `--files` with nothing named is a caller error —
+    // refuse (exit 3) so a wired-up pipeline notices. `--findings` whose
+    // artifact simply carries no evidence is the ORDINARY case for most
+    // reviews — a no-op, exit 0, so an orchestrator may call this
+    // unconditionally on every posting run without manufacturing a failure to
+    // repair.
+    if (args.findings) {
+      writeStderrLine(
+        'publish-assets: no finding carries assetFiles — nothing to publish.',
+      );
+      writeStdoutLine(JSON.stringify({ published: false, count: 0 }));
+      return;
+    }
     writeStderrLine('publish-assets: no files to publish.');
     writeStdoutLine(JSON.stringify({ published: false }));
     process.exitCode = 3;

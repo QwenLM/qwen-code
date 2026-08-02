@@ -972,6 +972,9 @@ Findings carry their evidence as local paths in the artifact's `assetFiles` fiel
   --findings-out .qwen/tmp/qwen-review-{target}-findings.json \
   --out .qwen/tmp/qwen-review-{target}-assets-manifest.json
 # GitHub Enterprise: add --host <host>, same as the other subcommands.
+# URL-target reviews: also pass --reviewed-repo <owner>/<repo> (the repo the PR
+# lives in) — it strengthens the authorisation binding from PR-number-only to
+# the full target the user named.
 ```
 
 Then reference each finding's `assets` URLs in its inline comment body as `![evidence](<url>)`, after the failure scenario and before the model footer (in a bilingual comment, the image goes in the English half only — one embed, not two).
