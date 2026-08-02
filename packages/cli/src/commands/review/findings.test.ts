@@ -810,6 +810,24 @@ describe('holdCriticalsFailingOnBase', () => {
     expect(fixed.held).toEqual(plain.held);
   });
 
+  it('does not stack a second explanation when a later round re-files it', () => {
+    // The round ledger can carry a held finding forward and re-file it as
+    // Critical. The measurement has not changed, and two identical paragraphs
+    // under one finding read as two measurements. `heldByMeasurement`
+    // round-trips through --input, which is what makes this decidable.
+    const once = holdCriticalsFailingOnBase([critical], shared).findings[0];
+    const twice = holdCriticalsFailingOnBase(
+      [{ ...once, severity: 'Critical' as const }],
+      shared,
+    ).findings[0];
+    const count = (s: string) =>
+      (s.match(/Held back from Critical by measurement:/g) ?? []).length;
+    expect(count(once.failureScenario)).toBe(1);
+    expect(count(twice.failureScenario)).toBe(1);
+    // ...and it is still held.
+    expect(twice.severity).toBe('Suggestion');
+  });
+
   it('records the hold as a field, not only as prose', () => {
     // A later round reads the artifact. A hold discoverable only by
     // substring-matching the scenario is a hold the round ledger cannot see.

@@ -457,6 +457,14 @@ export function holdCriticalsFailingOnBase(
     const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
     if (!hit) return f;
     held.push({ id: f.id, file: hit });
+    // Already held for this file and re-filed as Critical by a later round —
+    // lower it again, but do not append the paragraph a second time. The
+    // measurement has not changed, and two identical explanations under one
+    // finding read as two measurements. `heldByMeasurement` round-trips
+    // through `--input`, so this state is exactly what it is for.
+    if (f.heldByMeasurement?.file === hit) {
+      return { ...f, severity: 'Suggestion' as Severity };
+    }
     return {
       ...f,
       severity: 'Suggestion' as Severity,
@@ -480,7 +488,7 @@ const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
  * `src/utils/errors.test.ts` from the `packages/cli` command is qualified back
  * to `packages/cli/src/utils/errors.test.ts`.
  *
- * The qualification is the part that matters. Six test paths in this repo exist
+ * The qualification is the part that matters. Five test paths in this repo exist
  * under BOTH `packages/cli/src` and `packages/core/src` (`utils/errors.test.ts`
  * among them), so a bare suffix cannot tell them apart: a Critical about core's
  * copy would be held by cli's copy being red — demoting a real finding on a
