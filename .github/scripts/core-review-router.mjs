@@ -26,6 +26,8 @@ export const MAINTAINERS = [
   'yiliang114',
   'LaZzyMan',
 ];
+// NOTE: this list is canonical. Keep the YAML `if:` skip-list in sync
+// (it cannot read script output); the sync is validated by a test.
 
 const CORE_PREFIX = 'packages/core/';
 
