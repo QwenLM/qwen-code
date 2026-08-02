@@ -656,6 +656,34 @@ export function ModelDialog({
                   )
                 : '';
 
+  const closeWithoutSelection = useCallback(() => {
+    if (
+      !isFastModelMode &&
+      !isVoiceModelMode &&
+      !isVisionModelMode &&
+      !isCompactionModelMode &&
+      !isImageModelMode
+    ) {
+      uiState?.historyManager.addItem(
+        {
+          type: 'info',
+          text: t('Kept model as {{model}}', { model: preferredModelId }),
+        },
+        Date.now(),
+      );
+    }
+    onClose();
+  }, [
+    isCompactionModelMode,
+    isFastModelMode,
+    isImageModelMode,
+    isVisionModelMode,
+    isVoiceModelMode,
+    onClose,
+    preferredModelId,
+    uiState,
+  ]);
+
   useKeypress(
     (key) => {
       if (
@@ -667,7 +695,7 @@ export function ModelDialog({
             isCompactionModelMode ||
             isImageModelMode))
       ) {
-        onClose();
+        closeWithoutSelection();
       }
     },
     { isActive: true },

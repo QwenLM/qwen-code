@@ -1254,8 +1254,8 @@ describe('<ModelDialog />', () => {
     expect(typeof childOnHighlight).toBe('function');
   });
 
-  it('calls onClose prop when "escape" key is pressed', () => {
-    const { props } = renderComponent();
+  it('reports the unchanged model when "escape" closes the primary picker', () => {
+    const { props, mockHistoryManager } = renderComponent();
 
     expect(mockedUseKeypress).toHaveBeenCalled();
 
@@ -1272,6 +1272,13 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: `Kept model as ${DEFAULT_QWEN_MODEL}`,
+      },
+      expect.any(Number),
+    );
     expect(props.onClose).toHaveBeenCalledTimes(1);
 
     keyPressHandler({
@@ -1282,6 +1289,26 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report the primary model when closing an auxiliary picker', () => {
+    const { props, mockHistoryManager } = renderComponent({
+      isFastModelMode: true,
+    });
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 

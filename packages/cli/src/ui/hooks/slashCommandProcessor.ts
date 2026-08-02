@@ -119,7 +119,43 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
   'history',
 ]);
+const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
+  'auth',
+  'diff',
+  'editor',
+  'help',
+  'settings',
+  'status',
+  'theme',
+]);
+const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
+  'effort',
+  'stats',
+  'statusline',
+]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+
+function shouldHideSlashCommandInvocation(
+  command: SlashCommand | undefined,
+  canonicalPath: string[],
+  args: string,
+): boolean {
+  if (command?.kind !== CommandKind.BUILT_IN) {
+    return false;
+  }
+
+  const root = canonicalPath[0] ?? '';
+  if (SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(root)) {
+    return true;
+  }
+
+  const path = canonicalPath.join(' ');
+  if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
+    return args.trim() === '';
+  }
+
+  return false;
+}
 
 function getSkillCommandName(command: SlashCommand): string {
   return command.skillDetail?.name ?? command.name;
@@ -838,6 +874,12 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      const {
+        commandToExecute,
+        args,
+        canonicalPath: resolvedCommandPath,
+      } = parseSlashCommand(trimmed, commands);
+
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
@@ -859,7 +901,15 @@ export const useSlashCommandProcessor = (
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
       let invocationSentToModel = false;
-      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+      if (
+        !isBtwCommand(trimmed) &&
+        !shouldHideSlashCommandInvocation(
+          commandToExecute,
+          resolvedCommandPath,
+          args,
+        ) &&
+        invocationItemId === undefined
+      ) {
         invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
@@ -868,11 +918,6 @@ export const useSlashCommandProcessor = (
 
       let hasError = false;
       let delegatedToRecursiveInvocation = false;
-      const {
-        commandToExecute,
-        args,
-        canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
 
       const subcommand =
         resolvedCommandPath.length > 1
