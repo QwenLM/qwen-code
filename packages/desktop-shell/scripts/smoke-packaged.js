@@ -31,7 +31,7 @@ const logRoot =
   process.platform === 'darwin'
     ? path.join(isolatedHome, 'Library', 'Logs', appId)
     : process.platform === 'win32'
-      ? path.join(localAppData, appId, 'logs')
+      ? path.join(localAppData, appId, 'logs') // known-folder API, not env var
       : path.join(isolatedState, appId, 'logs');
 const logPath = path.join(logRoot, 'desktop-runtime.log');
 fs.mkdirSync(logRoot, { recursive: true });
@@ -118,9 +118,12 @@ function readNewLog() {
     encoding: 'utf8',
     flag: 'a+',
   });
-  return contents.startsWith(previousLog)
-    ? contents.slice(previousLog.length)
-    : contents;
+  if (!contents.startsWith(previousLog)) {
+    throw new Error(
+      'Desktop runtime log was truncated or rotated during the smoke.',
+    );
+  }
+  return contents.slice(previousLog.length);
 }
 
 // The packaged smoke verifies the unauthenticated navigation boundary: the

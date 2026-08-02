@@ -53,9 +53,17 @@ function testPackagedSmokeWindowsLogPath() {
       smoke.indexOf('const child = spawn(executable'),
     'previousLog must be captured before the child is spawned',
   );
+  assert.match(smoke, /if \(!contents\.startsWith\(previousLog\)\)/);
+  assert.match(smoke, /truncated or rotated during the smoke/);
+  const config = JSON.parse(
+    fs.readFileSync(
+      path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+      'utf8',
+    ),
+  );
   assert.match(
     smoke,
-    /contents\.startsWith\(previousLog\)\s*\?\s*contents\.slice\(previousLog\.length\)\s*:\s*contents/,
+    new RegExp(`const appId = '${config.identifier.replaceAll('.', '\\.')}'`),
   );
 }
 
