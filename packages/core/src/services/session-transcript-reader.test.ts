@@ -600,6 +600,39 @@ describe('SessionTranscriptReader', () => {
     expect(vi.mocked(fs.open)).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a branch point whose checkpoint falls on a later page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      user,
+      assistant,
+      checkpoint,
+      record('u2', 'checkpoint-1', 'next prompt'),
+      record('a2', 'u2', 'next answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+  });
+
   it('preserves tool completion semantics in the indexed branch catalog', async () => {
     const toolCall: ChatRecord = {
       ...record('a-tool', 'u1', ''),

@@ -3550,6 +3550,12 @@ describe('SessionService', () => {
       expect(forkedCheckpoint?.systemPayload).toMatchObject({
         startExclusiveRecordUuid: 'a1',
       });
+      const nestedId = '33333333-3333-3333-3333-333333333338';
+      await expect(
+        service.forkSession(newId, nestedId, {
+          atRecordId: 'checkpoint-2',
+        }),
+      ).resolves.toBeDefined();
     });
 
     it('rejects a checkpoint that is no longer on the active chain', async () => {
@@ -4114,6 +4120,45 @@ describe('SessionService', () => {
           .readdirSync(realPath.join(realTmpDir, 'file-history'))
           .some((name) => name.includes(newId)),
       ).toBe(false);
+    });
+
+    it('publishes a backup through the copy fallback when hard links are unavailable', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313136';
+      const newId = '41414141-4141-4141-4141-414141414146';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-cross-device']);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-cross-device'),
+        'cross device content',
+      );
+      const realLinkSync = fs.linkSync;
+      const linkSpy = vi.spyOn(fs, 'linkSync').mockImplementation(((
+        source: fs.PathLike,
+        target: fs.PathLike,
+      ) => {
+        if (String(source).endsWith('backup-cross-device')) {
+          const error = new Error('cross-device link') as NodeJS.ErrnoException;
+          error.code = 'EXDEV';
+          throw error;
+        }
+        return realLinkSync(source, target);
+      }) as typeof fs.linkSync);
+
+      try {
+        await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
+      } finally {
+        linkSpy.mockRestore();
+      }
+
+      expect(
+        fs.readFileSync(
+          realPath.join(targetBackupDir, 'backup-cross-device'),
+          'utf8',
+        ),
+      ).toBe('cross device content');
     });
 
     it('removes copied file-history backups when deleting a fork', async () => {

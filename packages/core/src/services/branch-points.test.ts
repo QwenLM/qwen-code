@@ -106,6 +106,41 @@ describe('branch points', () => {
     ).toBeUndefined();
   });
 
+  it('accepts a parallel tool batch closed within a single turn', () => {
+    const records = [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a-tools', 'u1', 'assistant', [
+        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        { functionCall: { id: 'call-2', name: 'grep_search', args: {} } },
+      ]),
+      record('tool', 'a-tools', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+        {
+          functionResponse: {
+            id: 'call-2',
+            name: 'grep_search',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+      record('a-final', 'tool', 'assistant', [{ text: 'done' }]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: 'a-final',
+      })?.assistantRecordUuid,
+    ).toBe('a-final');
+  });
+
   it('rejects mismatched and ambiguous tool responses', () => {
     const mismatchedId = [
       record('u1', null, 'user', [{ text: 'question' }]),

@@ -7317,6 +7317,78 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('drops a branch point with a malformed checkpoint uuid', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'end_turn',
+            _meta: {
+              'qwen.branchPoint': {
+                assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+                checkpointUuid: 'not-a-uuid',
+              },
+            },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'bad checkpoint' }],
+      });
+
+      await vi.waitFor(() => {
+        const complete = events.find((event) => event.type === 'turn_complete');
+        expect(complete).toBeDefined();
+        expect(complete?.data).not.toHaveProperty('branchPoint');
+      });
+      await bridge.shutdown();
+    });
+
+    it('drops a branch point when the turn does not end cleanly', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'max_tokens',
+            _meta: {
+              'qwen.branchPoint': {
+                assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+                checkpointUuid: '22222222-2222-4222-8222-222222222222',
+              },
+            },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'not end turn' }],
+      });
+
+      await vi.waitFor(() => {
+        const complete = events.find((event) => event.type === 'turn_complete');
+        expect(complete).toBeDefined();
+        expect(complete?.data).not.toHaveProperty('branchPoint');
+      });
+      await bridge.shutdown();
+    });
+
     it('tracks a single prompt without publishing a pending_prompt_added event', async () => {
       const events: BridgeEvent[] = [];
       const handle = makeChannel({

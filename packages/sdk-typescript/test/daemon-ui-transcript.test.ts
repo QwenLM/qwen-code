@@ -212,9 +212,14 @@ describe('daemon transcript rewind', () => {
   });
 
   it('drops malformed or non-completed branch point metadata', () => {
-    for (const [stopReason, checkpointUuid] of [
-      ['end_turn', 'not-a-uuid'],
-      ['error', '22222222-2222-4222-8222-222222222222'],
+    for (const [stopReason, assistantRecordUuid, checkpointUuid] of [
+      ['end_turn', '11111111-1111-4111-8111-111111111111', 'not-a-uuid'],
+      [
+        'error',
+        '11111111-1111-4111-8111-111111111111',
+        '22222222-2222-4222-8222-222222222222',
+      ],
+      ['end_turn', 'not-a-uuid', '22222222-2222-4222-8222-222222222222'],
     ] as const) {
       expect(
         matchTurnEvent(
@@ -224,7 +229,7 @@ describe('daemon transcript rewind', () => {
               promptId: 'prompt-1',
               stopReason,
               branchPoint: {
-                assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+                assistantRecordUuid,
                 checkpointUuid,
               },
             },
