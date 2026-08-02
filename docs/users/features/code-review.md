@@ -225,6 +225,8 @@ A finding is skipped when its fix would change intended behavior, would need cha
 
 Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findings.json` before anything else consumes them — the terminal report, the saved Markdown report, and the PR review JSON all read that one artifact instead of re-typing the list. Each finding carries a unique `id` (what outcomes and resolved anchors join on), `severity`, `confidence`, `source`, `summary`, a `shortSummary` capped at 60 characters for list rendering, `failureScenario`, and one or more `locations` — a pattern-aggregated finding keeps **one location per occurrence**, so each still gets its own inline comment.
 
+**A Critical the base tree already failed is held back, not filed.** When a test command failed and the merge base could be built, `test-delta` records which failing files also fail without the pull request. Canonicalization reads that measurement back: a Critical whose own text names one of those files is lowered to a Suggestion, keeps its evidence, gains the measurement that demoted it and a `heldByMeasurement` field, and the demotion is announced. A test that was already red is not a test this pull request turns red — and if it now fails for a _new_ reason, say which test, quote both sides, and file it at Critical again: a finding that already carries the measurement and is raised anyway is left where you put it.
+
 The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
 
 ## Evidence Images in PR Comments

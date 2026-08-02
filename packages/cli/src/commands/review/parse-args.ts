@@ -19,7 +19,12 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  bundleStaleness,
+  reviewSourceRoots,
+  staleBundleWarning,
+} from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -471,6 +476,19 @@ export const parseArgsCommand: CommandModule = {
     const rawStr = stdin
       ? readFileSync(0, 'utf8').replace(/\r?\n$/, '')
       : (raw ?? '');
+    // Before anything is parsed: every step after this one runs the BUILT
+    // bundle, so a review command edited since that build does not take effect
+    // and the run measures the old behaviour without saying so. This is the
+    // first command of every review, which makes it the only place the notice
+    // reaches a reader before they act on a result.
+    const bundle = process.argv[1];
+    if (bundle) {
+      const warning = staleBundleWarning(
+        bundleStaleness(bundle, reviewSourceRoots(bundle)),
+      );
+      if (warning) writeStderrLine(warning);
+    }
+
     const parsed = parseReviewArgs(rawStr);
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
