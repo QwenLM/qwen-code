@@ -191,7 +191,7 @@ export function extractTestPlanSection(
 
 /** Runners whose presence makes a backticked span a command, not prose. */
 const RUNNER_RE =
-  /^(npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\b/;
+  /^(npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest|mvn|\.\/mvnw)\b/;
 
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
@@ -432,6 +432,8 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // segment forms like `Tests  2 failed | 3 skipped | 40 passed (45)` —
     // vitest separates with ` | `, jest with `, `.
     const re = /^\s*Tests:?\s+(?:\d+\s+\w+\s*[,|]\s*)*(\d+)\s+passed/gim;
+    const mavenRe =
+      /^\[maven-test-report\]\s+.+?:\s+tests=(\d+),\s+failures=(\d+),\s+errors=(\d+),\s+skipped=(\d+)$/gim;
     // Strip ANSI SGR sequences first. A real runner writes its summary through
     // a color-enabled pipe, so the kept text reads
     // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
@@ -443,6 +445,10 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     let m: RegExpExecArray | null;
     while ((m = re.exec(text))) {
       total += Number(m[1]);
+      saw = true;
+    }
+    while ((m = mavenRe.exec(text))) {
+      total += Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]);
       saw = true;
     }
     if (saw) counts.push(total);
@@ -574,6 +580,23 @@ export function npmScriptOf(command: string): string | null {
   return alias ? alias[1] : null;
 }
 
+function mavenLifecycle(command: string): string | null {
+  if (!/^(?:mvn|\.\/mvnw)\b/.test(command.trim())) return null;
+  return (
+    /(?:^|\s)(clean|validate|compile|test-compile|test|package|verify|install)(?=\s|$)/.exec(
+      command,
+    )?.[1] ?? null
+  );
+}
+
+function bareMavenLifecycle(command: string): string | null {
+  return (
+    /^(?:mvn|\.\/mvnw)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
+      command.trim(),
+    )?.[1] ?? null
+  );
+}
+
 function ruleCommand(
   text: string,
   worktree: string,
@@ -588,11 +611,13 @@ function ruleCommand(
     const command = c.command.trim();
     const claimed = text.trim();
     // A workspace-scoped run (`npm run build --workspace=...`) still settles
-    // the plan's bare command, so match it plus any extra flags — not only an
-    // exact string. The space guard keeps `build` from matching `build:all`.
+    // the plan's bare command. Maven scopes before the lifecycle
+    // (`./mvnw -pl core -am -amd test`), so compare lifecycle phases there.
     return (
       command === claimed ||
-      (command.startsWith(claimed) && command[claimed.length] === ' ')
+      (command.startsWith(claimed) && command[claimed.length] === ' ') ||
+      (bareMavenLifecycle(claimed) !== null &&
+        mavenLifecycle(command) === bareMavenLifecycle(claimed))
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -619,6 +644,15 @@ function ruleCommand(
           observed: `exit ${ran.exitCode}`,
           note: 'this review ran it and it failed',
         };
+  }
+
+  if (mavenLifecycle(text)) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note: 'this Maven command was not run by this review',
+    };
   }
 
   const script = npmScriptOf(text);

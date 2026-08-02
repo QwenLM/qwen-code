@@ -224,6 +224,20 @@ describe('runBaseTree', () => {
     ).toBe(false);
   });
 
+  it('is available after a successful Maven build-only run', () => {
+    const mavenBuild = {
+      ok: true,
+      toolchain: 'maven',
+      build: [{ command: './mvnw test-compile', exitCode: 0 }],
+      note: 'built',
+    } as unknown as BuildTestReport;
+
+    const r = run({}, () => mavenBuild);
+
+    expect(r.available).toBe(true);
+    expect(r.build).toBe(mavenBuild);
+  });
+
   it('is NOT available when npm scoped nothing to compile', () => {
     // A docs-only diff (or a package with no build script) runs zero build commands
     // and returns ok: true with an empty build[]; that is not a built tree.
