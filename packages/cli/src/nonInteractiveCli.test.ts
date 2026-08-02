@@ -25,6 +25,7 @@ import {
   uiTelemetryService,
   FatalInputError,
   ApprovalMode,
+  AuthType,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
   LoopType,
@@ -522,6 +523,10 @@ describe('runNonInteractive', () => {
 
   it('converts headless audio before sending it to a text-only model', async () => {
     setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
+    mockSettings.merged.voiceModel = 'qwen3-asr-flash';
     const { handleAtCommand } = await import(
       './ui/hooks/atCommandProcessor.js'
     );
@@ -554,6 +559,9 @@ describe('runNonInteractive', () => {
       parts: headlessAudioParts,
       signal: expect.any(AbortSignal),
     });
+    expect(handleAtCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveUnsupportedAudioForBridge: true }),
+    );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'machine transcript' }],
       expect.any(AbortSignal),
@@ -563,6 +571,83 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Converted 1 audio file(s)'),
     );
+  });
+
+  it('does not bridge audio when a slash prompt selects another model', async () => {
+    setupMetricsMock();
+    const mockCommand = {
+      name: 'audio-model',
+      description: 'submit audio to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: headlessAudioParts,
+        modelOverride: 'audio-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }]);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/audio-model',
+      'prompt-audio-model',
+    );
+
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      headlessAudioParts,
+      expect.any(AbortSignal),
+      'prompt-audio-model',
+      {
+        type: SendMessageType.UserQuery,
+        modelOverride: 'audio-model',
+      },
+    );
+  });
+
+  it('stops before sending when cancellation lands during audio bridging', async () => {
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockImplementation(async ({ signal }) => {
+      Object.defineProperty(signal, 'aborted', { value: true });
+      return {
+        status: 'failed',
+        parts: [{ text: 'transcription was cancelled' }],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+        error: 'transcription was cancelled',
+      };
+    });
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'listen @recording.wav',
+      'prompt-audio-cancelled',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('registers and clears the stream-json workflow approval channel', async () => {

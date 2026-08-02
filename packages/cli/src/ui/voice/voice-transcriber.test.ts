@@ -884,6 +884,51 @@ describe('voice-transcriber', () => {
     expect(userMsg.content[0].input_audio.format).toBe('webm');
   });
 
+  it.each([
+    ['audio/x-wav', 'wav'],
+    ['audio/mpeg', 'mp3'],
+    ['audio/x-mpeg', 'mp3'],
+    ['audio/x-m4a', 'm4a'],
+    ['audio/x-aac', 'aac'],
+    ['audio/x-flac', 'flac'],
+    ['audio/x-ogg', 'ogg'],
+  ])(
+    'maps %s to the supported input_audio format %s',
+    async (mimeType, format) => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+      });
+
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Custom ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://asr.example/v1',
+            },
+          ]),
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      );
+
+      const [, init] = fetchFn.mock.calls[0];
+      const body = JSON.parse(init.body as string);
+      const userMsg = body.messages.find(
+        (message: { role: string }) => message.role === 'user',
+      );
+      expect(userMsg.content[0].input_audio.format).toBe(format);
+    },
+  );
+
   it('falls back to wav for octet-stream audio uploads', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

@@ -344,6 +344,9 @@ describe('useGeminiStream', () => {
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
     mockRunAudioBridge.mockReset();
+    Object.assign(mockLoadedSettings, {
+      merged: { preferredEditor: 'vscode' },
+    });
     mockCleanupReviewWorktreeLeases.mockReset();
     mockUseDualOutput.mockReset().mockReturnValue(null);
   });
@@ -758,6 +761,10 @@ describe('useGeminiStream', () => {
       egressCount: 1,
       modelId: 'qwen3-asr-flash',
     });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
     const { result, mockSendMessageStream } = renderTestHook();
 
     await act(async () => {
@@ -770,6 +777,9 @@ describe('useGeminiStream', () => {
       parts: [{ text: 'listen' }, audioPart],
       signal: expect.any(AbortSignal),
     });
+    expect(handleAtCommandSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveUnsupportedAudioForBridge: true }),
+    );
     expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
       { text: 'machine transcript' },
     ]);
@@ -777,6 +787,101 @@ describe('useGeminiStream', () => {
       expect.objectContaining({
         type: MessageType.INFO,
         text: expect.stringContaining('Converted 1 audio file(s)'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('does not bridge audio when an inline model override is active', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'listen' }, audioPart],
+      expect.any(AbortSignal),
+      expect.any(String),
+      expect.objectContaining({ modelOverride: 'audio-model' }),
+    );
+  });
+
+  it('does not send bridge output when cancellation lands during conversion', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockImplementation(async ({ signal }) => {
+      Object.defineProperty(signal, 'aborted', { value: true });
+      return {
+        status: 'ok',
+        parts: [{ text: 'discarded transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      };
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('shows an error when every audio conversion fails', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'audio unavailable' }],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+      error: 'transcription was unavailable',
+    });
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('no transcript was produced'),
       }),
       expect.any(Number),
     );
@@ -3267,6 +3372,7 @@ describe('useGeminiStream', () => {
         config: mockConfig,
         onDebugMessage: mockOnDebugMessage,
         signal: expect.any(AbortSignal),
+        preserveUnsupportedAudioForBridge: false,
       }),
     );
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(

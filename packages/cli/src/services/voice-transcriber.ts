@@ -517,6 +517,7 @@ export function sanitizeVoiceErrorMessage(
 }
 
 const AUDIO_FORMAT_ALIASES: Record<string, string> = {
+  mpeg: 'mp3',
   'x-wav': 'wav',
   'x-m4a': 'm4a',
   'x-aac': 'aac',

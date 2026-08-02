@@ -86,6 +86,16 @@ describe('audio bridge service', () => {
       'after',
     ]);
     expect(result.parts[1]?.text).toContain('review the latest diff');
+    expect(transcribeVoiceAudio).toHaveBeenCalledWith(
+      {
+        data: new Uint8Array([82, 73, 70, 70]),
+        mimeType: 'audio/wav',
+      },
+      expect.objectContaining({
+        abortSignal: expect.any(AbortSignal),
+        onEgress: expect.any(Function),
+      }),
+    );
     expect(formatAudioBridgeNotice(result)).toContain(
       'Your audio was sent to that model',
     );
@@ -171,6 +181,9 @@ describe('audio bridge service', () => {
 
     expect(transcribeVoiceAudio).toHaveBeenCalledTimes(1);
     expect(result.egressCount).toBe(1);
+    expect(result.error).toBe('transcription was cancelled');
+    expect(result.parts[0]?.text).toContain('transcription was cancelled');
+    expect(result.parts[0]?.text).not.toContain('discarded transcript');
     expect(result.parts.some((part) => part.inlineData)).toBe(false);
     expect(result.parts.map((part) => part.text)).toContain('between');
   });
@@ -273,6 +286,93 @@ describe('audio bridge service', () => {
     expect(formatAudioBridgeNotice(result)).toBe(
       'Converted 1 of 2 audio file(s) to text via qwen3-asr-flash. 2 audio file(s) were sent to that model.',
     );
+  });
+
+  it('replaces an empty transcript with an unavailable marker', async () => {
+    transcribeVoiceAudio.mockResolvedValue('   ');
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      convertedCount: 0,
+      error: 'the voice model returned no transcript',
+    });
+    expect(result.parts[0]?.text).toContain(
+      'the voice model returned no transcript',
+    );
+  });
+
+  it('truncates oversized transcripts before forwarding them', async () => {
+    transcribeVoiceAudio.mockResolvedValue('x'.repeat(10_001));
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.parts[0]?.text).toContain(`${'x'.repeat(10_000)}…`);
+    expect(result.parts[0]?.text).not.toContain('x'.repeat(10_001));
+  });
+
+  it('uses the fallback reason when formatting an unavailable notice', () => {
+    expect(
+      formatAudioBridgeNotice({
+        status: 'failed',
+        parts: [],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+      }),
+    ).toBe(
+      'Audio bridge could not transcribe 1 audio file(s): transcription was unavailable.',
+    );
+  });
+
+  it('reports cancellation when transcription throws after abort', async () => {
+    const controller = new AbortController();
+    transcribeVoiceAudio.mockImplementation(async () => {
+      controller.abort();
+      throw new Error('AbortError');
+    });
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      convertedCount: 0,
+      error: 'transcription was cancelled',
+    });
+    expect(result.parts[0]?.text).toContain('transcription was cancelled');
+  });
+
+  it('keeps the first failure reason when later audio fails differently', async () => {
+    const bigData = 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3));
+    transcribeVoiceAudio.mockRejectedValue(new Error('ASR unavailable'));
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio(bigData), audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result.error).toBe('audio too large');
+    expect(result.parts[0]?.text).toContain('audio too large');
+    expect(result.parts[1]?.text).toContain('transcription was unavailable');
   });
 
   it('reports the first concrete failure reason, not a count', async () => {
