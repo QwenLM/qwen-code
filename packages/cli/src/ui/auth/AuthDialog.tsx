@@ -138,7 +138,7 @@ interface AuthDialogProps {
   availableTerminalHeight?: number;
 }
 
-function getMaxItemsToShow(
+export function getMaxItemsToShow(
   dialogHeight: number,
   itemCount: number,
   fixedRows: number,

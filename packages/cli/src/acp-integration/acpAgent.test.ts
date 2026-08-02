@@ -328,11 +328,36 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
   getDefaultModelIds: vi.fn(
-    (provider: { models?: Array<{ id: string }> }) =>
-      provider.models?.map((model) => model.id) ?? [],
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl
+            .find((option) => option.url === baseUrl)
+            ?.models?.map((model) => model.id)
+        : undefined) ??
+      provider.models?.map((model) => model.id) ??
+      [],
   ),
   resolveProviderModels: vi.fn(
-    (provider: { models?: Array<{ id: string }> }) => provider.models,
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl.find((option) => option.url === baseUrl)?.models
+        : undefined) ?? provider.models,
   ),
   resolveBaseUrl: vi.fn(
     (
@@ -10334,6 +10359,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           providers: expect.arrayContaining([
             expect.objectContaining({
               id: 'kimi',
+              defaultModelIds: ['k3-256k'],
+              models: [{ id: 'k3-256k' }],
               baseUrl: [
                 expect.objectContaining({
                   id: 'coding-plan',

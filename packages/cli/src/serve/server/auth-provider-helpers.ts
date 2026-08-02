@@ -50,9 +50,11 @@ function buildAuthProviderDescriptor(
   const defaultBaseUrl = resolveBaseUrl(provider);
   const models = resolveProviderModels(provider, defaultBaseUrl);
   const envKey =
-    typeof provider.envKey === 'function'
-      ? provider.envKey(provider.protocol, defaultBaseUrl)
-      : provider.envKey;
+    typeof provider.envKey === 'string'
+      ? provider.envKey
+      : provider.baseUrl !== undefined
+        ? provider.envKey(provider.protocol, defaultBaseUrl)
+        : undefined;
   const baseUrl = Array.isArray(provider.baseUrl)
     ? provider.baseUrl.map((option) => ({
         ...option,

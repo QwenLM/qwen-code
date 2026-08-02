@@ -30,6 +30,12 @@ import type {
   QwenProviderConnectResult,
   QwenProviderSummary,
 } from '../../../shared/types';
+import {
+  defaultBaseUrl,
+  initialModelIds,
+  modelIdsAfterBaseUrlChange,
+  parseModelIds,
+} from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
 
@@ -52,65 +58,8 @@ function isProviderGroup(value: string | undefined): value is ProviderGroup {
   return value === 'alibaba' || value === 'third-party' || value === 'custom';
 }
 
-function parseModelIds(value: string): string[] {
-  return Array.from(
-    new Set(
-      value
-        .split(/[\n,]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function defaultProtocol(provider: QwenProviderSummary): string {
   return provider.protocolOptions[0] || provider.protocol;
-}
-
-function defaultBaseUrl(provider: QwenProviderSummary): string {
-  if (typeof provider.baseUrl === 'string') return provider.baseUrl;
-  if (Array.isArray(provider.baseUrl)) return provider.baseUrl[0]?.url ?? '';
-  return provider.baseUrlPlaceholder ?? '';
-}
-
-function defaultModelIds(
-  provider: QwenProviderSummary,
-  baseUrl: string,
-): string[] {
-  if (Array.isArray(provider.baseUrl)) {
-    const option = provider.baseUrl.find((item) => item.url === baseUrl);
-    if (option?.models) return option.models.map((model) => model.id);
-  }
-  return provider.defaultModelIds;
-}
-
-function initialModelIds(
-  provider: QwenProviderSummary,
-  baseUrl: string,
-): string[] {
-  const existingModelIds = provider.existingConfig?.modelIds ?? [];
-  return existingModelIds.length > 0
-    ? existingModelIds
-    : defaultModelIds(provider, baseUrl);
-}
-
-function modelIdsAfterBaseUrlChange(
-  provider: QwenProviderSummary,
-  baseUrl: string,
-  currentModelIds: string,
-): string[] {
-  const builtInIds = new Set([
-    ...provider.models.map((model) => model.id),
-    ...(Array.isArray(provider.baseUrl)
-      ? provider.baseUrl.flatMap(
-          (option) => option.models?.map((model) => model.id) ?? [],
-        )
-      : []),
-  ]);
-  const customIds = parseModelIds(currentModelIds).filter(
-    (id) => !builtInIds.has(id),
-  );
-  return [...defaultModelIds(provider, baseUrl), ...customIds];
 }
 
 function AnimatedSection({
@@ -473,14 +422,16 @@ export function ProviderConnectForm({
                 value={baseUrl}
                 onValueChange={(value) => {
                   setBaseUrl(value);
-                  setApiKey('');
-                  setModelIdsText(
-                    modelIdsAfterBaseUrlChange(
-                      selectedProvider,
-                      value,
-                      modelIdsText,
-                    ).join(', '),
-                  );
+                  if (value !== baseUrl) {
+                    setApiKey('');
+                    setModelIdsText(
+                      modelIdsAfterBaseUrlChange(
+                        selectedProvider,
+                        value,
+                        modelIdsText,
+                      ).join(', '),
+                    );
+                  }
                 }}
                 disabled={submitting}
               >

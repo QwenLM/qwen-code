@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   useWorkspaceActions,
-  type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
+  type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderDescriptor,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import styles from './AuthMessage.module.css';
+import {
+  baseUrlOptionModelIds,
+  normalizeModelIds,
+  selectedBaseUrlEnvKey,
+  selectedBaseUrlModelIds,
+} from './auth-provider-state';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
@@ -60,63 +66,6 @@ function defaultBaseUrl(protocol: string): string {
   return 'https://api.openai.com/v1';
 }
 
-function modelIds(provider: DaemonAuthProviderDescriptor | null): string {
-  return (
-    provider?.models
-      ?.map(
-        (model: NonNullable<DaemonAuthProviderDescriptor['models']>[number]) =>
-          model.id,
-      )
-      .join(', ') ?? ''
-  );
-}
-
-function baseUrlOptionModelIds(
-  option: DaemonAuthProviderBaseUrlOption,
-  provider: DaemonAuthProviderDescriptor,
-  currentModelIds = '',
-): string {
-  const builtInIds = new Set([
-    ...(provider.models?.map((model) => model.id) ?? []),
-    ...(Array.isArray(provider.baseUrl)
-      ? provider.baseUrl.flatMap(
-          (item) => item.models?.map((model) => model.id) ?? [],
-        )
-      : []),
-  ]);
-  const defaults =
-    option.models?.map((model) => model.id) ??
-    provider.models?.map((model) => model.id) ??
-    [];
-  const customIds = normalizeModelIds(currentModelIds).filter(
-    (id) => !builtInIds.has(id),
-  );
-  return [...new Set([...defaults, ...customIds])].join(', ');
-}
-
-function selectedBaseUrlModelIds(
-  provider: DaemonAuthProviderDescriptor,
-  baseUrl: string,
-): string {
-  if (Array.isArray(provider.baseUrl)) {
-    const option = provider.baseUrl.find((item) => item.url === baseUrl);
-    if (option) return baseUrlOptionModelIds(option, provider);
-  }
-  return modelIds(provider);
-}
-
-function selectedBaseUrlEnvKey(
-  provider: DaemonAuthProviderDescriptor,
-  baseUrl: string,
-  protocol: string,
-): string {
-  if (Array.isArray(provider.baseUrl)) {
-    const option = provider.baseUrl.find((item) => item.url === baseUrl);
-    if (option?.envKey) return option.envKey;
-  }
-  return provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
-}
-
 function titleForStep(
   step: AuthStep,
   provider: DaemonAuthProviderDescriptor,
@@ -139,17 +88,6 @@ function maskApiKey(
   if (!trimmed) return t ? t('auth.notSet') : '(not set)';
   if (trimmed.length <= 6) return '***';
   return `${trimmed.slice(0, 3)}...${trimmed.slice(-4)}`;
-}
-
-function normalizeModelIds(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0),
-    ),
-  ];
 }
 
 export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
@@ -252,7 +190,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       }
       setApiKey('');
       if (!Array.isArray(nextProvider.baseUrl)) {
-        setModels(modelIds(nextProvider));
+        setModels(selectedBaseUrlModelIds(nextProvider, ''));
       }
       setThinking(false);
       setModality(false);
@@ -484,8 +422,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       const selected = provider.baseUrl[optionIndex];
       if (selected) {
         setBaseUrl(selected.url);
-        setApiKey('');
-        setModels(baseUrlOptionModelIds(selected, provider, models));
+        if (selected.url !== baseUrl) {
+          setApiKey('');
+          setModels(baseUrlOptionModelIds(selected, provider, models));
+        }
       }
       goNext();
       return;
@@ -511,6 +451,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     view,
     activateAdvancedOption,
     advancedOptionValues,
+    baseUrl,
   ]);
 
   const activateAtIndex = useCallback(
@@ -560,8 +501,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         const selected = provider.baseUrl[index];
         if (selected) {
           setBaseUrl(selected.url);
-          setApiKey('');
-          setModels(baseUrlOptionModelIds(selected, provider, models));
+          if (selected.url !== baseUrl) {
+            setApiKey('');
+            setModels(baseUrlOptionModelIds(selected, provider, models));
+          }
         }
         goNext();
         return;
@@ -578,6 +521,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       models,
       activateAdvancedOption,
       advancedOptionValues,
+      baseUrl,
       provider,
       providers,
       save,

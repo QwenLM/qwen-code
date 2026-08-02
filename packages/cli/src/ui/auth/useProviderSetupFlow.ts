@@ -223,7 +223,7 @@ export function useProviderSetupFlow(
     (selectedUrl: string) => {
       setBaseUrl(selectedUrl);
       setBaseUrlError(null);
-      if (provider) {
+      if (provider && selectedUrl !== baseUrl) {
         const builtInIds = new Set(
           provider.models?.map((model) => model.id) ?? [],
         );
@@ -243,7 +243,7 @@ export function useProviderSetupFlow(
       }
       goNext();
     },
-    [existingProviderEnv, goNext, modelIds, protocol, provider],
+    [baseUrl, existingProviderEnv, goNext, modelIds, protocol, provider],
   );
 
   const submitBaseUrl = useCallback((): boolean => {

@@ -40,4 +40,14 @@ describe('buildAuthProviderCatalog', () => {
     ]);
     expect(options[2]?.models).toEqual(options[1]?.models);
   });
+
+  it('does not synthesize an environment key before a custom endpoint is entered', () => {
+    const catalog = buildAuthProviderCatalog('/workspace');
+    const custom = catalog.providers.find(
+      (provider) => provider.id === 'custom-openai-compatible',
+    );
+
+    expect(custom?.baseUrl).toBeUndefined();
+    expect(custom?.envKey).toBeUndefined();
+  });
 });

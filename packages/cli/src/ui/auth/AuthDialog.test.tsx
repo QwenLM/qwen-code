@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthDialog } from './AuthDialog.js';
+import { AuthDialog, getMaxItemsToShow } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -160,6 +160,13 @@ const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const WAIT_FOR_TIMEOUT = 5000;
+
+describe('getMaxItemsToShow', () => {
+  it('uses pagination only when the available height cannot fit every item', () => {
+    expect(getMaxItemsToShow(24, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(18, 6, 7)).toBe(2);
+  });
+});
 
 const expectSelectedOption = (frame: string | undefined, label: string) => {
   expect(frame).toMatch(

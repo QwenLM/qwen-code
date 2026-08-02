@@ -63,4 +63,39 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('second-model, custom-model');
     expect(result.current.state.apiKey).toBe('sk-second');
   });
+
+  it('preserves edited models and API key when reselecting the current endpoint', () => {
+    const url = 'https://first.example/v1';
+    const provider: ProviderConfig = {
+      id: 'endpoint-provider',
+      label: 'Endpoint Provider',
+      description: 'Provider with endpoint-specific defaults',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url,
+          models: [{ id: 'first-model' }],
+        },
+      ],
+      envKey: () => 'FIRST_API_KEY',
+      models: [{ id: 'first-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Endpoint',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider);
+      result.current.changeApiKey('typed-key');
+      result.current.changeModelIds('first-model, typed-model');
+    });
+    act(() => {
+      result.current.selectBaseUrl(url);
+    });
+
+    expect(result.current.state.apiKey).toBe('typed-key');
+    expect(result.current.state.modelIds).toBe('first-model, typed-model');
+  });
 });
