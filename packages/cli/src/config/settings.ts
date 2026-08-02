@@ -30,7 +30,7 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { setNestedPropertySafe } from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
@@ -320,6 +320,14 @@ function getModelProvidersOverrideWarnings(
   ];
 }
 
+// Security settings that must never be honored from Workspace scope; they
+// are stripped during the merge (see stripWorkspaceHookSecurityOverrides)
+// and getSettingsWarnings reports them.
+const WORKSPACE_STRIPPED_SECURITY_FIELDS = [
+  'allowPrivateNetworkHooks',
+  'allowedHttpHookUrls',
+] as const;
+
 /**
  * Collects warnings for ignored legacy and unknown settings keys,
  * as well as migration warnings.
@@ -358,26 +366,18 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks and security.allowedHttpHookUrls are
-  // stripped from Workspace scope during the merge; warn so the user knows
-  // their workspace setting has no effect.
+  // WORKSPACE_STRIPPED_SECURITY_FIELDS are stripped from Workspace scope
+  // during the merge; warn so the user knows their workspace setting has no
+  // effect.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
-  }
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowedHttpHookUrls !== undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowedHttpHookUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
+  if (workspaceFile.rawJson !== undefined) {
+    for (const field of WORKSPACE_STRIPPED_SECURITY_FIELDS) {
+      if (workspaceFile.originalSettings.security?.[field] !== undefined) {
+        warningSet.add(
+          `Warning: security.${field} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+        );
+      }
+    }
   }
 
   return [...warningSet];
@@ -414,23 +414,23 @@ function tagMcpServerScope(
  * scope — otherwise a malicious repository could self-grant the bypass
  * (point hooks at link-local or private infrastructure) or widen the
  * whitelist to exfiltrate hook payloads past the user's configured
- * boundary. Strip both from workspace settings before merging.
+ * boundary. Strip them all from workspace settings before merging.
  * Returns a shallow copy — never mutates input.
  */
 function stripWorkspaceHookSecurityOverrides(settings: Settings): Settings {
-  const { allowPrivateNetworkHooks, allowedHttpHookUrls } =
-    settings.security ?? {};
+  const security = settings.security;
   if (
-    allowPrivateNetworkHooks === undefined &&
-    allowedHttpHookUrls === undefined
+    !security ||
+    WORKSPACE_STRIPPED_SECURITY_FIELDS.every(
+      (field) => security[field] === undefined,
+    )
   ) {
     return settings;
   }
-  const {
-    allowPrivateNetworkHooks: _strippedFlag,
-    allowedHttpHookUrls: _strippedUrls,
-    ...restSecurity
-  } = settings.security!;
+  const restSecurity = { ...security };
+  for (const field of WORKSPACE_STRIPPED_SECURITY_FIELDS) {
+    delete restSecurity[field];
+  }
   return { ...settings, security: restSecurity };
 }
 

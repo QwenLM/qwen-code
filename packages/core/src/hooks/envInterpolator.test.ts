@@ -73,6 +73,7 @@ describe('envInterpolator', () => {
 
     it('should block internal secrets regardless of casing', () => {
       process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['qwen_server_token'] = 'daemon-secret';
       const result = interpolateEnvVars('token=$qwen_server_token', [
         'qwen_server_token',
       ]);
