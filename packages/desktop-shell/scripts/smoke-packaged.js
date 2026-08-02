@@ -38,10 +38,13 @@ let previousLog = fs.readFileSync(logPath, {
   encoding: 'utf8',
   flag: 'a+',
 });
-// The packaged app truncates its own log on startup, so the first baseline
-// reset is expected; only warn on a subsequent reset (a live concurrent
-// instance writing the same machine-global log).
-let baselineResets = 0;
+// The packaged app truncates its own log on startup, so the first truncation
+// after this snapshot is expected; only warn on a later one (a live concurrent
+// instance writing the same machine-global log). sliceNewLog's baseline
+// collapses to '' after that first reset, so detect later truncations against
+// the last full read instead.
+let lastFullLog = previousLog;
+let startupTruncationPending = previousLog !== '';
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -120,9 +123,13 @@ function readNewLog() {
     flag: 'a+',
   });
   const result = sliceNewLog(contents, previousLog);
-  if (result.baseline !== previousLog && ++baselineResets > 1) {
-    console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
+  if (!contents.startsWith(lastFullLog)) {
+    if (!startupTruncationPending) {
+      console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
+    }
+    startupTruncationPending = false;
   }
+  lastFullLog = contents;
   previousLog = result.baseline;
   return result.text;
 }

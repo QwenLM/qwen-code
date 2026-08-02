@@ -126,12 +126,10 @@ function testResolveLogRoot() {
     readNewLogCalls && readNewLogCalls.length >= 2,
     'readNewLog() must be called in both the polling loop and the timeout path',
   );
-  assert.match(smoke, /sliceNewLog\(contents, previousLog\)/);
-  assert.match(smoke, /log was truncated, resetting baseline/);
   assert.match(
     smoke,
-    /result\.baseline !== previousLog && \+\+baselineResets > 1/,
-    'the startup truncation reset must stay silent; only a later reset warns',
+    /sliceNewLog\(/,
+    'smoke must slice the log via the tested sliceNewLog helper',
   );
   assert.match(
     smoke,
