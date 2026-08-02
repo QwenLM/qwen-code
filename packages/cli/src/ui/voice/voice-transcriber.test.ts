@@ -571,6 +571,11 @@ describe('voice-transcriber', () => {
         address: '10.23.45.67',
       })),
     ).resolves.toBeUndefined();
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(resolved, async () => ({
+        address: '64:ff9b::a17:2d43',
+      })),
+    ).resolves.toBeUndefined();
   });
 
   it('requires allowlist entries to include an explicit scheme and full path', () => {
@@ -630,6 +635,14 @@ describe('voice-transcriber', () => {
       '100.100.100.200',
       '::ffff:7f00:1',
       '::ffff:a9fe:a9fe',
+      '64:ff9b::7f00:1',
+      '64:ff9b::a9fe:a9fe',
+      '64:ff9b::6464:64c8',
+      '64:ff9b::',
+      '64:ff9b::1',
+      '64:ff9b:0:0:0:0:a9fe:a9fe',
+      '0064:ff9b::a9fe:a9fe',
+      '64:ff9b::169.254.169.254',
       'fd00:0ec2:0000:0000:0000:0000:0000:0254',
     ]) {
       await expect(
@@ -697,6 +710,11 @@ describe('voice-transcriber', () => {
       'http://[::]/v1',
       'http://[::ffff:127.0.0.1]/v1',
       'http://[::ffff:7f00:1]/v1',
+      'http://[64:ff9b::7f00:1]/v1',
+      'http://[64:ff9b::a9fe:a9fe]/v1',
+      'http://[64:ff9b::6464:64c8]/v1',
+      'http://[64:ff9b::]/v1',
+      'http://[64:ff9b::1]/v1',
       'http://[fd00:ec2::254]/v1',
       'http://[fd00:0ec2:0000:0000:0000:0000:0000:0254]/v1',
       'http://[fe80::1]/v1',
@@ -829,11 +847,22 @@ describe('voice-transcriber', () => {
       '0:0:0:0:0:0:0:1',
       '0:0:0:0:0:0:a9fe:a9fe',
       '0:0:0:0:0:ffff:a9fe:a9fe',
+      '::ffff:a17:2d43',
+      '64:ff9b::a00:8',
+      '64:ff9b:0:0:0:0:a00:8',
+      '0064:ff9b::a00:8',
+      '64:ff9b::10.0.0.8',
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(config, async () => ({ address })),
       ).rejects.toThrow(/private-network address/);
     }
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(config, async () => ({
+        address: '64:ff9b::5db8:d822',
+      })),
+    ).resolves.toBeUndefined();
   });
 
   it('rejects private-network IP literal voice URLs during network checks', async () => {

@@ -223,9 +223,34 @@ function readIpv4MappedIpv6(host: string): string | undefined {
   if (!hex) {
     return undefined;
   }
-  const high = Number.parseInt(hex[1]!, 16);
-  const low = Number.parseInt(hex[2]!, 16);
+  return readIpv4HexPair(hex[1]!, hex[2]!);
+}
+
+function readIpv4HexPair(highHex: string, lowHex: string): string {
+  const high = Number.parseInt(highHex, 16);
+  const low = Number.parseInt(lowHex, 16);
   return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+}
+
+function readWellKnownNat64Ipv6(host: string): string | undefined {
+  const prefix = '64:ff9b::';
+  if (!host.startsWith(prefix)) {
+    return undefined;
+  }
+  const suffix = host.slice(prefix.length);
+  if (!suffix) {
+    return '0.0.0.0';
+  }
+  const groups = suffix.split(':');
+  if (
+    groups.length > 2 ||
+    groups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))
+  ) {
+    return undefined;
+  }
+  return groups.length === 1
+    ? readIpv4HexPair('0', groups[0]!)
+    : readIpv4HexPair(groups[0]!, groups[1]!);
 }
 
 // Blocks IP-literal private networks only. Hostname DNS resolution and
@@ -246,6 +271,10 @@ function isPrivateNetworkIp(hostname: string): boolean {
   const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
   if (normalizedIpv4Compatible) {
     return isPrivateNetworkIp(normalizedIpv4Compatible);
+  }
+  const nat64 = readWellKnownNat64Ipv6(host);
+  if (nat64) {
+    return isPrivateNetworkIp(nat64);
   }
   if (host.startsWith('::ffff:')) {
     return true;
@@ -287,6 +316,10 @@ function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
   const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
   if (normalizedIpv4Compatible) {
     return isAlwaysBlockedVoiceAddress(normalizedIpv4Compatible);
+  }
+  const nat64 = readWellKnownNat64Ipv6(host);
+  if (nat64) {
+    return isAlwaysBlockedVoiceAddress(nat64);
   }
   if (host.startsWith('::ffff:')) {
     return true;

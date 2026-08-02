@@ -160,6 +160,31 @@ describe('resolveDesktopVoiceConfig', () => {
     ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
   })
 
+  it('does not infer missing path segments for an exact model provider', async () => {
+    const baseUrl = 'https://voice.example.com/compatible-mode'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { PRIVATE_ASR_KEY: 'settings-key' },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl,
+                    envKey: 'PRIVATE_ASR_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config.baseUrl).toBe(baseUrl)
+  })
+
   it('uses an exactly allowlisted private provider from qwen settings', async () => {
     const baseUrl = 'http://voice.region-a.internal.example/v1'
     const config = await resolveDesktopVoiceConfig({
@@ -340,9 +365,10 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe(baseUrl)
   })
 
-  it('reports the normalized URL when an environment endpoint omits /v1', async () => {
-    const configuredBaseUrl = 'http://10.0.0.8'
-    const normalizedBaseUrl = `${configuredBaseUrl}/v1`
+  it('reports the complete normalized URL including query and fragment', async () => {
+    const configuredBaseUrl = 'http://10.0.0.8?api-version=2#voice'
+    const normalizedBaseUrl =
+      'http://10.0.0.8/v1?api-version=2#voice'
     const readQwenJson = async <T,>(file: string) =>
       (file === 'settings.json'
         ? {
@@ -574,6 +600,77 @@ describe('resolveDesktopVoiceConfig', () => {
       apiKey: 'system-key',
       allowInsecureBaseUrl: true,
     })
+  })
+
+  it('derives System and SystemDefaults paths for every supported platform', async () => {
+    const cases: Array<{
+      currentPlatform: NodeJS.Platform
+      expectedPaths: string[]
+    }> = [
+      {
+        currentPlatform: 'darwin',
+        expectedPaths: [
+          '/Library/Application Support/QwenCode/system-defaults.json',
+          '/Library/Application Support/QwenCode/settings.json',
+        ],
+      },
+      {
+        currentPlatform: 'win32',
+        expectedPaths: [
+          'C:\\ProgramData\\qwen-code\\system-defaults.json',
+          'C:\\ProgramData\\qwen-code\\settings.json',
+        ],
+      },
+      {
+        currentPlatform: 'linux',
+        expectedPaths: [
+          '/etc/qwen-code/system-defaults.json',
+          '/etc/qwen-code/settings.json',
+        ],
+      },
+    ]
+
+    for (const { currentPlatform, expectedPaths } of cases) {
+      const readPaths = new Set<string>()
+      await resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        platform: currentPlatform,
+        env: {
+          OPENAI_API_KEY: 'env-key',
+          OPENAI_BASE_URL: 'https://voice.example.com/v1',
+        },
+        readQwenJson: async () => undefined,
+        readSystemJson: async <T,>(file: string) => {
+          readPaths.add(file)
+          return undefined as T | undefined
+        },
+      })
+
+      expect(readPaths).toEqual(new Set(expectedPaths))
+    }
+  })
+
+  it('honors explicit System and SystemDefaults path overrides', async () => {
+    const readPaths = new Set<string>()
+    await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      platform: 'win32',
+      env: {
+        OPENAI_API_KEY: 'env-key',
+        OPENAI_BASE_URL: 'https://voice.example.com/v1',
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: '/managed/settings.json',
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: '/managed/defaults.json',
+      },
+      readQwenJson: async () => undefined,
+      readSystemJson: async <T,>(file: string) => {
+        readPaths.add(file)
+        return undefined as T | undefined
+      },
+    })
+
+    expect(readPaths).toEqual(
+      new Set(['/managed/defaults.json', '/managed/settings.json']),
+    )
   })
 
   it('honors a SystemDefaults allowlist when higher scopes do not override it', async () => {

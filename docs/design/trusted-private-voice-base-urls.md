@@ -43,6 +43,6 @@ Desktop now treats a provider whose ID exactly matches the selected voice model 
 - Reject non-HTTP(S) URL schemes even when exactly listed.
 - Ignore and warn about Workspace-scoped entries.
 - Continue rejecting link-local and cloud metadata addresses, including AWS IMDS IPv6, after an exact match.
-- Decode IPv4-mapped IPv6 literals consistently so trusted private addresses are accepted while mapped loopback and metadata addresses remain blocked.
+- Decode IPv4-mapped, IPv4-compatible, and well-known-prefix NAT64 IPv6 literals consistently so trusted private addresses are accepted while embedded loopback and metadata addresses remain blocked.
 - Match Desktop credentials to one unambiguous provider with the selected voice model ID.
 - Exercise both CLI and Desktop resolution and DNS guard paths.

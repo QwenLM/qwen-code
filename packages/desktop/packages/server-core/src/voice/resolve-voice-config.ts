@@ -15,7 +15,7 @@
  */
 
 import { homedir, platform, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
@@ -38,6 +38,7 @@ interface ResolveDesktopVoiceConfigDeps {
   getVoiceModel?: () => string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -122,13 +123,16 @@ async function readNoJson<T>(): Promise<T | undefined> {
   return undefined;
 }
 
-function getSystemSettingsPath(env: NodeJS.ProcessEnv): string {
+function getSystemSettingsPath(
+  env: NodeJS.ProcessEnv,
+  currentPlatform: NodeJS.Platform,
+): string {
   const override = env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
   if (override) return override;
-  if (platform() === 'darwin') {
+  if (currentPlatform === 'darwin') {
     return '/Library/Application Support/QwenCode/settings.json';
   }
-  if (platform() === 'win32') {
+  if (currentPlatform === 'win32') {
     return 'C:\\ProgramData\\qwen-code\\settings.json';
   }
   return '/etc/qwen-code/settings.json';
@@ -137,11 +141,13 @@ function getSystemSettingsPath(env: NodeJS.ProcessEnv): string {
 function getSystemDefaultsPath(
   env: NodeJS.ProcessEnv,
   systemSettingsPath: string,
+  currentPlatform: NodeJS.Platform,
 ): string {
-  return (
-    env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] ||
-    join(dirname(systemSettingsPath), 'system-defaults.json')
-  );
+  const override = env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+  if (override) return override;
+  return currentPlatform === 'win32'
+    ? win32.join(win32.dirname(systemSettingsPath), 'system-defaults.json')
+    : join(dirname(systemSettingsPath), 'system-defaults.json');
 }
 
 async function getStoredVoiceModel(): Promise<string> {
@@ -359,15 +365,21 @@ export async function resolveDesktopVoiceConfig(
       (deps.readQwenJson ? readNoJson : readJsonFileFromDisk),
     env: deps.env ?? process.env,
     now: deps.now ?? Date.now,
+    platform: deps.platform ?? platform(),
   };
   const voiceModel = deps.getVoiceModel
     ? deps.getVoiceModel()
     : await getStoredVoiceModel();
   const systemSettingsPath =
-    deps.systemSettingsPath ?? getSystemSettingsPath(resolvedDeps.env);
+    deps.systemSettingsPath ??
+    getSystemSettingsPath(resolvedDeps.env, resolvedDeps.platform);
   const systemDefaultsPath =
     deps.systemDefaultsPath ??
-    getSystemDefaultsPath(resolvedDeps.env, systemSettingsPath);
+    getSystemDefaultsPath(
+      resolvedDeps.env,
+      systemSettingsPath,
+      resolvedDeps.platform,
+    );
   const [systemDefaults, userSettings, systemSettings] = await Promise.all([
     resolvedDeps.readSystemJson<QwenSettings>(systemDefaultsPath),
     resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
@@ -398,12 +410,8 @@ export async function resolveDesktopVoiceConfig(
     !isLoopbackHost(parsed.hostname) &&
     !allowInsecureBaseUrl
   ) {
-    const normalizedBaseUrl = `${parsed.origin}${parsed.pathname}`.replace(
-      /\/$/,
-      '',
-    );
     throw new Error(
-      `Voice endpoint must use an https baseUrl, or its exact complete normalized URL (${normalizedBaseUrl}) must be listed in security.allowedInsecureVoiceBaseUrls.`,
+      `Voice endpoint must use an https baseUrl, or its exact complete normalized URL (${creds.baseUrl}) must be listed in security.allowedInsecureVoiceBaseUrls.`,
     );
   }
   return {

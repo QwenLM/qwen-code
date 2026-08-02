@@ -74,10 +74,15 @@ describe('net-guard host classification', () => {
     expect(isPrivateNetworkIp('::a9fe:a9fe')).toBe(true)
     expect(isPrivateNetworkIp('0:0:0:0:0:0:a00:1')).toBe(true)
     expect(isPrivateNetworkIp('0:0:0:0:0:ffff:a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('64:ff9b::a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('64:ff9b:0:0:0:0:a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('0064:ff9b::a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('64:ff9b::10.0.0.1')).toBe(true)
     expect(isPrivateNetworkIp('::5db8')).toBe(true)
     expect(isPrivateNetworkIp('8.8.8.8')).toBe(false)
     expect(isPrivateNetworkIp('::5db8:d822')).toBe(false)
     expect(isPrivateNetworkIp('::ffff:5db8:d822')).toBe(false)
+    expect(isPrivateNetworkIp('64:ff9b::5db8:d822')).toBe(false)
     expect(isPrivateNetworkIp('127.0.0.1')).toBe(false) // loopback, not private
   })
 })
@@ -241,6 +246,11 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '0:0:0:0:0:0:0:1',
       '0:0:0:0:0:0:a9fe:a9fe',
       '0:0:0:0:0:ffff:a9fe:a9fe',
+      '::ffff:a17:2d43',
+      '64:ff9b::a00:8',
+      '64:ff9b:0:0:0:0:a00:8',
+      '0064:ff9b::a00:8',
+      '64:ff9b::10.0.0.8',
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(
@@ -296,6 +306,15 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
         true,
       ),
     ).resolves.toBeUndefined()
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'http://voice.internal.example/v1',
+        'm',
+        async () => [{ address: '64:ff9b::a00:9' }],
+        true,
+      ),
+    ).resolves.toBeUndefined()
   })
 
   it('keeps metadata and link-local addresses blocked when trusted', async () => {
@@ -310,6 +329,11 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '[::ffff:7f00:1]',
       '[::ffff:a9fe:a9fe]',
       '[::a9fe:a9fe]',
+      '[64:ff9b::7f00:1]',
+      '[64:ff9b::a9fe:a9fe]',
+      '[64:ff9b::6464:64c8]',
+      '[64:ff9b::]',
+      '[64:ff9b::1]',
       '[fd00:ec2::254]',
       '[fd00:0ec2:0000:0000:0000:0000:0000:0254]',
       '[fe80::1]',
@@ -341,6 +365,14 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '::ffff:a9fe:a9fe',
       '::a9fe:a9fe',
       '::6464:64c8',
+      '64:ff9b::7f00:1',
+      '64:ff9b::a9fe:a9fe',
+      '64:ff9b::6464:64c8',
+      '64:ff9b::',
+      '64:ff9b::1',
+      '64:ff9b:0:0:0:0:a9fe:a9fe',
+      '0064:ff9b::a9fe:a9fe',
+      '64:ff9b::169.254.169.254',
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(
