@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -458,6 +458,81 @@ describe('findings (command boundary)', () => {
     });
     return JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
   }
+
+  /** Run the handler and return everything it wrote to stderr. */
+  function runCapturingStderr(argv: Record<string, unknown>): string {
+    let out = '';
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: string | Uint8Array) => {
+        out +=
+          typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+        return true;
+      });
+    try {
+      (findingsCommand.handler as (a: unknown) => void)(argv);
+    } finally {
+      spy.mockRestore();
+    }
+    return out;
+  }
+
+  it('announces every hold, naming the finding and the measured file', () => {
+    // A severity this command lowered is a change to what the review says. Left
+    // unannounced it reads as the reviewer's own judgement, which is the one
+    // thing the measurement is not.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const delta = join(dir, 'test-delta.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'R1-3',
+          severity: 'Critical',
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx goes red on this change.',
+        },
+      ]),
+    );
+    writeFileSync(
+      delta,
+      JSON.stringify({
+        entries: [
+          {
+            command: 'npm test --workspace="packages/cli"',
+            netNew: [],
+            shared: ['src/ui/auth/AuthDialog.test.tsx'],
+          },
+        ],
+      }),
+    );
+    const stderr = runCapturingStderr({
+      input,
+      out,
+      testDelta: delta,
+      print: false,
+    });
+    expect(stderr).toContain('R1-3');
+    expect(stderr).toContain('packages/cli/src/ui/auth/AuthDialog.test.tsx');
+    expect(stderr).toContain('held back from Critical');
+  });
+
+  it('says nothing about holds or unreadable measurements without the flag', () => {
+    // Distinguishes "the guard did not run" from "the guard ran and its read
+    // failed": both leave severities untouched, and only stderr tells them
+    // apart.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([{ ...base, severity: 'Critical' }]));
+    const stderr = runCapturingStderr({
+      input,
+      out: join(dir, 'findings.json'),
+      print: false,
+    });
+    expect(stderr).not.toContain('held back');
+    expect(stderr).not.toContain('no holds applied');
+  });
 
   it('holds a Critical back when --test-delta measured its test as failing on base', () => {
     // Through the handler, not the helper: the option has to be parsed, the
