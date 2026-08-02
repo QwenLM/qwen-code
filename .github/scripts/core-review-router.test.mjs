@@ -6,10 +6,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { classify, MAINTAINERS } from './core-review-router.mjs';
+import { classify } from './core-review-router.mjs';
 
 describe('classify', () => {
   it('returns no reviewers when no core files changed', () => {
@@ -312,22 +311,5 @@ describe('classify', () => {
       'LaZzyMan',
     ]);
     assert.ok(Array.isArray(out.reviewers));
-  });
-
-  it('YAML skip-list matches MAINTAINERS', () => {
-    const yaml = readFileSync(
-      fileURLToPath(
-        new URL('../workflows/core-review-router.yml', import.meta.url),
-      ),
-      'utf8',
-    );
-    const match = yaml.match(/fromJSON\('(\[.*?\])'\)/);
-    assert.ok(match, 'fromJSON list not found in workflow YAML');
-    const yamlList = JSON.parse(match[1]);
-    assert.deepEqual(
-      yamlList,
-      MAINTAINERS,
-      'YAML skip-list drifted from MAINTAINERS in core-review-router.mjs',
-    );
   });
 });

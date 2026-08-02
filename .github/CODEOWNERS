@@ -8,9 +8,6 @@
 # The CODEOWNERS entry below is retained so the repository
 # ruleset's require_code_owner_review gate stays enforced;
 # the workflow trims the auto-assigned set to 1–2 reviewers.
-# Maintainer PRs to core are not trimmed by the workflow;
-# CODEOWNERS still auto-assigns all non-author maintainers.
-# Curate the reviewer set manually if fewer are desired.
 
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu

@@ -13,8 +13,7 @@ jobs:
   route:
     if: |-
       github.repository == 'QwenLM/qwen-code' &&
-      !github.event.pull_request.draft &&
-      !contains(fromJSON('["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'), github.event.pull_request.user.login)
+      !github.event.pull_request.draft
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
