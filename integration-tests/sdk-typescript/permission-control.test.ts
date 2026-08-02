@@ -28,7 +28,7 @@ import {
 import {
   SDKTestHelper,
   createSharedTestOptions,
-  findAllToolResultBlocks,
+  findErrorToolResultBlocks,
   hasSuccessfulToolResults,
   hasErrorToolResults,
   findSystemMessage,
@@ -463,6 +463,9 @@ describe('Permission Control (E2E)', () => {
           cwd: testDir,
           permissionMode: 'yolo',
           coreTools: ['write_file'],
+          // Load-bearing though yolo never calls it: if setPermissionMode('plan')
+          // regressed to 'default', no callback means auto-deny and this test
+          // passes for the wrong reason. Allowing makes that regression fail.
           canUseTool: async (_toolName, input) => ({
             behavior: 'allow',
             updatedInput: input,
@@ -532,6 +535,8 @@ describe('Permission Control (E2E)', () => {
 
         expect(secondResponseReceived).toBe(true);
         expect(hasErrorToolResults(messages)).toBe(true);
+        const errorResults = findErrorToolResultBlocks(messages);
+        expect(errorResults[0].content.toLowerCase()).toContain('plan mode');
         expect(helper.fileExists(fileName)).toBe(false);
       } finally {
         await q.close();
@@ -831,9 +836,7 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
-            const errorResults = findAllToolResultBlocks(messages).filter(
-              (r) => r.isError,
-            );
+            const errorResults = findErrorToolResultBlocks(messages);
             expect(errorResults[0].content.toLowerCase()).toContain('denied');
             expect(helper.fileExists(fileName)).toBe(false);
           } finally {
@@ -1023,9 +1026,7 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
-            const errorResults = findAllToolResultBlocks(messages).filter(
-              (r) => r.isError,
-            );
+            const errorResults = findErrorToolResultBlocks(messages);
             expect(errorResults[0].content.toLowerCase()).toContain(
               'plan mode',
             );
@@ -1088,9 +1089,7 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
-            const errorResults = findAllToolResultBlocks(messages).filter(
-              (r) => r.isError,
-            );
+            const errorResults = findErrorToolResultBlocks(messages);
             expect(errorResults[0].content.toLowerCase()).toContain(
               'plan mode',
             );
@@ -1134,9 +1133,7 @@ describe('Permission Control (E2E)', () => {
             }
 
             expect(hasErrorToolResults(messages)).toBe(true);
-            const errorResults = findAllToolResultBlocks(messages).filter(
-              (r) => r.isError,
-            );
+            const errorResults = findErrorToolResultBlocks(messages);
             expect(errorResults[0].content.toLowerCase()).toContain(
               'plan mode',
             );

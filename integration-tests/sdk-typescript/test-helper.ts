@@ -649,13 +649,6 @@ export function findAllToolResultBlocks(
 }
 
 /**
- * Check if any tool results exist in messages
- */
-export function hasAnyToolResults(messages: SDKMessage[]): boolean {
-  return findAllToolResultBlocks(messages).length > 0;
-}
-
-/**
  * Check if any successful (non-error) tool results exist
  */
 export function hasSuccessfulToolResults(messages: SDKMessage[]): boolean {
@@ -667,6 +660,15 @@ export function hasSuccessfulToolResults(messages: SDKMessage[]): boolean {
  */
 export function hasErrorToolResults(messages: SDKMessage[]): boolean {
   return findAllToolResultBlocks(messages).some((r) => r.isError);
+}
+
+/**
+ * Find all error tool result blocks from messages
+ */
+export function findErrorToolResultBlocks(
+  messages: SDKMessage[],
+): Array<{ toolUseId: string; content: string; isError: boolean }> {
+  return findAllToolResultBlocks(messages).filter((r) => r.isError);
 }
 
 // ============================================================================
