@@ -395,6 +395,13 @@ export function runDrive(args: DriveArgs): DriveReport {
     // Unconditional. The 87% that clean up by hand are the 87% that remembered;
     // a leaked server is the next run's wrong observation.
     tmux('kill-server');
+    // ...and the working directory goes with it, once its contents have been
+    // read into the report. The default server name carries the pid, so every
+    // invocation would otherwise leave its own directory behind: measured, six
+    // runs left five. `output` is already in memory by here, so nothing the
+    // caller needs is in this tree. A caller who passed `--log-path` owns that
+    // file and keeps it.
+    if (!args.logPath) rmSync(dir, { recursive: true, force: true });
   }
 
   const { text, truncated } = trimCapture(output);

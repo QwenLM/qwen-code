@@ -351,6 +351,50 @@ describe('cleanup', () => {
   });
 });
 
+describe('the working directory', () => {
+  it('is removed after the report is built, output intact', () => {
+    // The default server name carries the pid, so every invocation would
+    // otherwise leave its own tree behind — measured, six runs left five. The
+    // report is already in memory by the time this runs, so nothing the caller
+    // needs is in there.
+    const probe = mkdtempSync(join(tmpdir(), 'drv-'));
+    const log = join(probe, 'seen.log');
+    writeFileSync(log, 'the output\n');
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      return ok();
+    };
+    const r = runDrive({
+      script: 'true',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 0,
+      server: 'wd1',
+      exec,
+      logPath: log,
+    });
+    expect(r.output).toContain('the output');
+    // A caller-supplied log is the caller's to keep.
+    expect(existsSync(log)).toBe(true);
+  });
+
+  it('keeps a caller-supplied log path but never its own scratch tree', () => {
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      return ok();
+    };
+    runDrive({
+      script: 'true',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 0,
+      server: 'wd2',
+      exec,
+    });
+    expect(existsSync(join(tmpdir(), 'qwen-review-drive-wd2'))).toBe(false);
+  });
+});
+
 describe('the environment gate', () => {
   it('reports `unavailable`, not a finding, when tmux is missing', () => {
     const h = harness({ tmuxAvailable: false });
