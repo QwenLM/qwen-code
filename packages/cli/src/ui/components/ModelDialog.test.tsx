@@ -1293,20 +1293,42 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('does not close the primary picker on "left"', () => {
+    const { props, mockHistoryManager } = renderComponent();
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'left',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it.each([
-    [{ isFastModelMode: true }],
-    [{ isVoiceModelMode: true }],
-    [{ isVisionModelMode: true }],
-    [{ isCompactionModelMode: true }],
-    [{ isImageModelMode: true }],
+    [{ isFastModelMode: true }, 'escape'],
+    [{ isVoiceModelMode: true }, 'escape'],
+    [{ isVisionModelMode: true }, 'escape'],
+    [{ isCompactionModelMode: true }, 'escape'],
+    [{ isImageModelMode: true }, 'escape'],
+    [{ isFastModelMode: true }, 'left'],
+    [{ isVoiceModelMode: true }, 'left'],
+    [{ isVisionModelMode: true }, 'left'],
+    [{ isCompactionModelMode: true }, 'left'],
+    [{ isImageModelMode: true }, 'left'],
   ])(
-    'does not report the primary model when closing an auxiliary picker (%j)',
-    (modeProps) => {
+    'does not report the primary model when closing an auxiliary picker (%j, %s)',
+    (modeProps, keyName) => {
       const { props, mockHistoryManager } = renderComponent(modeProps);
 
       const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
       keyPressHandler({
-        name: 'escape',
+        name: keyName,
         ctrl: false,
         meta: false,
         shift: false,
