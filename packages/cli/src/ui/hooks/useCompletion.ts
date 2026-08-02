@@ -49,6 +49,8 @@ export interface UseCompletionReturn {
   activeCategory: SuggestionCategory | 'all';
   /** Tabs available for the current suggestion set (always includes 'all'). */
   availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
   /** Cycle the active category tab; resets active/scroll index. */
   switchCategory: (direction: 1 | -1) => void;
 }
@@ -121,6 +123,21 @@ export function useCompletion(
         : prev,
     );
   }, [suggestions.length]);
+
+  const selectCategory = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      if (
+        category === activeCategory ||
+        !availableCategories.includes(category)
+      ) {
+        return;
+      }
+      setActiveCategory(category);
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
+    },
+    [activeCategory, availableCategories],
+  );
 
   const switchCategory = useCallback(
     (direction: 1 | -1) => {
@@ -251,6 +268,7 @@ export function useCompletion(
     navigateDown,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   };
 }

@@ -157,6 +157,10 @@ describe('InputPrompt suggestion mouse routing', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
+      activeCategory: 'all',
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory: vi.fn(),
+      selectCategory: vi.fn(),
     } as unknown as UseCommandCompletionReturn;
     vi.mocked(useCommandCompletion).mockReturnValue(mockCommandCompletion);
 
@@ -216,6 +220,27 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(captured.props).not.toBeNull();
     expect(typeof captured.props!['onSelectIndex']).toBe('function');
     expect(typeof captured.props!['onHoverIndex']).toBe('function');
+    unmount();
+  });
+
+  it('routes an exact category selection to the default completion source', () => {
+    const selectCategory = vi.fn();
+    (
+      mockCommandCompletion as UseCommandCompletionReturn & {
+        selectCategory: typeof selectCategory;
+      }
+    ).selectCategory = selectCategory;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    expect(captured.props).not.toBeNull();
+
+    act(() => {
+      (captured.props!['onSelectCategory'] as (category: 'session') => void)(
+        'session',
+      );
+    });
+
+    expect(selectCategory).toHaveBeenCalledWith('session');
     unmount();
   });
 
