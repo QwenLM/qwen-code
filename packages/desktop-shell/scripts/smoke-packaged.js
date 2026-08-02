@@ -38,6 +38,10 @@ let previousLog = fs.readFileSync(logPath, {
   encoding: 'utf8',
   flag: 'a+',
 });
+// The packaged app truncates its own log on startup, so the first baseline
+// reset is expected; only warn on a subsequent reset (a live concurrent
+// instance writing the same machine-global log).
+let baselineResets = 0;
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -107,9 +111,7 @@ async function waitForReady() {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   const contents = readNewLog();
-  throw new Error(
-    `Timed out waiting for packaged desktop runtime.\nLog: ${logPath}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
-  );
+  throw smokeError('Timed out waiting for packaged desktop runtime.', contents);
 }
 
 function readNewLog() {
@@ -118,7 +120,7 @@ function readNewLog() {
     flag: 'a+',
   });
   const result = sliceNewLog(contents, previousLog);
-  if (result.baseline !== previousLog) {
+  if (result.baseline !== previousLog && ++baselineResets > 1) {
     console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
   }
   previousLog = result.baseline;
@@ -177,7 +179,7 @@ async function verifyPackagedShell(baseUrl, contents) {
 
 function smokeError(message, contents) {
   return new Error(
-    `${message}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
+    `${message}\nLog: ${logPath}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
   );
 }
 

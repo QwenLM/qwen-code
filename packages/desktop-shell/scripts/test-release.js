@@ -128,6 +128,16 @@ function testResolveLogRoot() {
   );
   assert.match(smoke, /sliceNewLog\(contents, previousLog\)/);
   assert.match(smoke, /log was truncated, resetting baseline/);
+  assert.match(
+    smoke,
+    /result\.baseline !== previousLog && \+\+baselineResets > 1/,
+    'the startup truncation reset must stay silent; only a later reset warns',
+  );
+  assert.match(
+    smoke,
+    /function smokeError[\s\S]*?Log: \$\{logPath\}/,
+    'smokeError must embed the log path like the timeout error does',
+  );
 }
 
 function testSliceNewLog() {
