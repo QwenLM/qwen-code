@@ -223,6 +223,25 @@ describe('maven toolchain adapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('runs the root reactor for source fixtures with documentation extensions', () => {
+    writeProject('.');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['src/test/resources/expected.txt'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.affected).toEqual(['.']);
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+  });
+
   it('prefers the wrapper, runs from root, narrows modules, and forwards timeout', () => {
     writeReactor();
     writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
@@ -345,6 +364,48 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
+  it.each([
+    ['/bin/sh: ./mvnw: Permission denied', true, 126],
+    ['sh: 1: mvn: not found', false, 127],
+    ['java.io.IOException: No space left on device', false, 1],
+  ])(
+    'classifies unchanged Maven startup failures as infrastructure',
+    (output, wrapper, exitCode) => {
+      writeReactor();
+      if (wrapper) writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['core/src/Main.java'],
+        timeout: 5,
+        install: false,
+        exec: (command) => result(command, { exitCode, output }),
+      });
+
+      expect(report.note).toContain('infrastructure evidence');
+    },
+  );
+
+  it('does not treat an inner permission error as a wrapper startup failure', () => {
+    writeReactor();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: 'Failed to write target/generated.txt: Permission denied',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
   it('keeps dependency resolution classified as infrastructure after fresh reports', () => {
     writeReactor();
 
@@ -370,6 +431,57 @@ describe('maven toolchain adapter', () => {
 
     expect(report.test[0]?.output).toContain('[maven-test-report]');
     expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('keeps fresh failing tests as source evidence despite infrastructure words', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="example.CoreTest" name="fails"><failure/></testcase></testsuite>',
+        );
+        return result(command, {
+          exitCode: 1,
+          output: 'java.net.ConnectException: Connection refused',
+        });
+      },
+    });
+
+    expect(report.test[0]?.output).toContain('[maven-test-failure]');
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('skips malformed report directories without aborting Maven', () => {
+    writeReactor();
+    const reportPath = join(root, 'core', 'target', 'surefire-reports');
+    mkdirSync(join(root, 'core', 'target'), { recursive: true });
+    writeFileSync(reportPath, 'not a directory');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.output).not.toContain('[maven-test-report]');
   });
 
   it('ignores stale XML and appends fresh module-qualified Surefire and Failsafe summaries', () => {

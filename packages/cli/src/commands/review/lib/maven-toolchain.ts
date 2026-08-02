@@ -5,6 +5,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
@@ -162,7 +163,7 @@ function isDocumentationPath(path: string): boolean {
     path === 'README' ||
     /^README(?:\.|$)/i.test(path) ||
     /^docs?\//i.test(path) ||
-    /\.(?:md|mdx|adoc|rst|txt)$/i.test(path)
+    (!path.startsWith('src/') && /\.(?:md|mdx|adoc|rst|txt)$/i.test(path))
   );
 }
 
@@ -246,8 +247,13 @@ function reportPaths(root: string, reactor: MavenReactor): string[] {
   for (const projectDir of reactor.projectDirs) {
     for (const reportDir of REPORT_DIRS) {
       const dir = join(root, projectDir, 'target', reportDir);
-      if (!existsSync(dir)) continue;
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
         if (entry.isFile() && entry.name.endsWith('.xml')) {
           paths.push(join(dir, entry.name));
         }
@@ -387,8 +393,14 @@ function mavenReport(
 }
 
 function isInfrastructureFailure(output: string): boolean {
-  return /(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d)|(?:mvn|java): command not found|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime)/i.test(
+  return /(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d)|(?:mvn|java): (?:command )?not found|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime)/i.test(
     output,
+  );
+}
+
+function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
+  return summaries.some(
+    (summary) => summary.failures > 0 || summary.errors > 0,
   );
 }
 
@@ -465,7 +477,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
-  } else if (!ok && isInfrastructureFailure(result.output)) {
+  } else if (
+    !ok &&
+    !hasFreshTestFailure(summaries) &&
+    (isInfrastructureFailure(result.output) ||
+      (executable === './mvnw' &&
+        !args.changedFiles.includes('mvnw') &&
+        result.exitCode === 126 &&
+        /(?:^|\n).*\.\/mvnw:\s*Permission denied(?:\n|$)/i.test(result.output)))
+  ) {
     report.note =
       `\`${result.command}\` failed while acquiring or starting Maven, Java, plugins, or dependencies. ` +
       'This is infrastructure evidence, not a source finding.';

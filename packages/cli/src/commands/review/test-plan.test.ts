@@ -862,6 +862,89 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
+    it('reads the Maven lifecycle after a lifecycle-named module selector', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl validate -am -amd test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: 'There are test failures.',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const test = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      expect(verdictOf(test.claims, './mvnw test')).toBe('contradicted');
+
+      const validate = run('## Test Plan\n\nRan `./mvnw validate`', [], bt);
+      expect(verdictOf(validate.claims, './mvnw validate')).toBe('unchecked');
+    });
+
+    it('recognizes Maven wrapper command spellings', () => {
+      for (const command of [
+        'mvn test',
+        'mvnw test',
+        'mvnw.cmd test',
+        './mvnw test',
+        './mvnw.cmd test',
+        '.\\mvnw test',
+        '.\\mvnw.cmd test',
+      ]) {
+        const claims = extractClaims(`## Test Plan\n\nRan \`${command}\``);
+        expect(claims.some((claim) => claim.text === command)).toBe(true);
+      }
+    });
+
+    it('matches bare Maven wrapper spellings to a scoped lifecycle run', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      for (const command of [
+        'mvnw test',
+        'mvnw.cmd test',
+        '.\\mvnw.cmd test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        expect(verdictOf(r.claims, command)).toBe('reproduces');
+      }
+    });
+
+    it('reports a matching Maven timeout as an attempted run', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+            exitCode: null,
+            seconds: 120,
+            timedOut: true,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('timed out');
+      expect(claim?.note).not.toContain('not run');
+    });
+
     it('leaves an unobserved Maven command unchecked with Maven wording', () => {
       const r = run('## Test Plan\n\nRan `mvn -q verify`');
       const claim = r.claims.find((c) => c.text === 'mvn -q verify');

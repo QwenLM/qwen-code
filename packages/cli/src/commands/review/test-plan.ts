@@ -191,7 +191,10 @@ export function extractTestPlanSection(
 
 /** Runners whose presence makes a backticked span a command, not prose. */
 const RUNNER_RE =
-  /^(npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest|mvn|\.\/mvnw)\b/;
+  /^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\b|^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
+
+const MAVEN_RUNNER_RE =
+  /^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
 
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
@@ -581,18 +584,21 @@ export function npmScriptOf(command: string): string | null {
 }
 
 function mavenLifecycle(command: string): string | null {
-  if (!/^(?:mvn|\.\/mvnw)\b/.test(command.trim())) return null;
+  const trimmed = command.trim();
+  if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
   return (
-    /(?:^|\s)(clean|validate|compile|test-compile|test|package|verify|install)(?=\s|$)/.exec(
-      command,
+    /(?:^|\s)(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
+      trimmed,
     )?.[1] ?? null
   );
 }
 
 function bareMavenLifecycle(command: string): string | null {
+  const trimmed = command.trim();
+  if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
   return (
-    /^(?:mvn|\.\/mvnw)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
-      command.trim(),
+    /^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
+      trimmed,
     )?.[1] ?? null
   );
 }
@@ -646,7 +652,20 @@ function ruleCommand(
         };
   }
 
-  if (mavenLifecycle(text)) {
+  const claimedMavenLifecycle = mavenLifecycle(text);
+  if (
+    claimedMavenLifecycle !== null &&
+    matches.some((command) => command.timedOut)
+  ) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note: 'this Maven command was run by this review but timed out',
+    };
+  }
+
+  if (claimedMavenLifecycle !== null) {
     return {
       kind: 'command',
       text,

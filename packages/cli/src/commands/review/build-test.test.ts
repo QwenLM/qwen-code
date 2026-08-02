@@ -14,6 +14,8 @@ import {
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
+import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
+import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import type { WorkspacePackage } from './lib/workspaces.js';
 
 const statfsSyncMock = vi.hoisted(() => vi.fn());
@@ -117,6 +119,7 @@ describe('runBuildTest', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -193,6 +196,66 @@ describe('runBuildTest', () => {
     expect(rep.test).toEqual([]);
     expect(rep.note).toContain('Both npm and Maven apply');
     expect(rep.note).toContain('will not guess');
+  });
+
+  it('delegates npm repositories and supplies the production executor by default', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    writePlan(['src/a.ts']);
+    const sentinel = { toolchain: 'npm' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(npmToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(runSpy).toHaveBeenCalledWith({
+      root,
+      changedFiles: ['src/a.ts'],
+      timeout: 5,
+      install: false,
+      buildOnly: undefined,
+      exec: expect.any(Function),
+    });
+  });
+
+  it('delegates Maven-only repositories through the facade', () => {
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(runSpy).toHaveBeenCalledWith({
+      root,
+      changedFiles: ['src/Main.java'],
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
   });
 
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {

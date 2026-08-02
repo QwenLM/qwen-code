@@ -1860,7 +1860,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // send the reader to fix a prompt that is correct.
     const p = buildRoleBrief(PR_PLAN, '7');
     expect(p).not.toContain(PLAN.diffPathAbsolute);
-    expect(p).toContain('npm run build');
+    expect(p).toContain('`toolchain: "maven"`');
+    expect(p).toContain('Do not run `test-delta` for Maven in this release');
     expect(p).toContain('Source: [build]');
   });
 
