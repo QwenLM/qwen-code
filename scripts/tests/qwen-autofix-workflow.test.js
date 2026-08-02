@@ -2206,7 +2206,7 @@ describe('qwen-autofix workflow', () => {
       'Failed to confirm Autofix PR closure; preserving the branch for recovery.',
     );
     expect(publishPrStep).toContain('preserve_claim()');
-    expect(publishPrStep.match(/^\s+preserve_claim$/gm)).toHaveLength(8);
+    expect(publishPrStep.match(/^\s+preserve_claim$/gm)).toHaveLength(9);
     expect(
       publishPrStep.indexOf(
         '\n          preserve_claim\n          git push --no-verify',
@@ -2259,7 +2259,7 @@ describe('qwen-autofix workflow', () => {
     expect(createPrIndex).toBeGreaterThan(publicationBodyIndex);
     const actorCheckIndex = publishPrStep.indexOf('gh api user');
     const finalPrePushCheckIndex = publishPrStep.indexOf(
-      '\n          check_live_issue\n          preserve_claim\n          git push --no-verify',
+      '\n          set +e\n          check_live_issue\n          pre_push_status=$?\n          set -e',
     );
     expect(actorCheckIndex).toBeGreaterThan(-1);
     expect(finalPrePushCheckIndex).toBeGreaterThan(actorCheckIndex);
@@ -6916,9 +6916,10 @@ printf '%s\\n' "\${status}"
     expect(pushAndReportStep).toContain(
       'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
-    // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
-    // AND both no-secret verification checkouts (convention: every host
-    // checkout of an agent-writable branch severs hooks).
+    // Seven sites now: both PAT pushes, the PAT-bearing prepare checkout,
+    // both no-secret verification checkouts, the targeted E2E checkout,
+    // and the publish-job checkout (convention: every host checkout of an
+    // agent-writable branch severs hooks).
     expect(
       `${workflow}\n${reviewVerificationRunner}`.split(
         'git config core.hooksPath /dev/null',

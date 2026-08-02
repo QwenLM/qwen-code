@@ -2031,7 +2031,18 @@ jobs:
           fi
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          set +e
           check_live_issue
+          pre_push_status=$?
+          set -e
+          if [[ "${pre_push_status}" == '1' ]]; then
+            echo '::error::Autofix issue state changed before branch publication.'
+            exit 1
+          elif [[ "${pre_push_status}" != '0' ]]; then
+            preserve_claim
+            echo '::error::Could not confirm Autofix issue state before branch publication; preserving the claim for recovery.'
+            exit 1
+          fi
           preserve_claim
           git push --no-verify \
             --force-with-lease="refs/heads/${BRANCH}:" \

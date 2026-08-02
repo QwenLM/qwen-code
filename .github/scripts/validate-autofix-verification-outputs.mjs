@@ -3,6 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 
@@ -196,4 +197,4 @@ function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main();
