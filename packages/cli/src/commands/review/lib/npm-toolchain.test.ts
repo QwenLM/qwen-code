@@ -52,6 +52,18 @@ describe('npm toolchain adapter', () => {
     expect(npmToolchainAdapter.applies(root)).toBe(false);
   });
 
+  it('fails closed when more than one adapter applies', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: { build: 'exit 0' } }),
+    );
+    const other = { applies: () => true, run: npmToolchainAdapter.run };
+
+    expect(
+      selectToolchainAdapter(root, [npmToolchainAdapter, other]),
+    ).toBeNull();
+  });
+
   it('returns the unchanged report shape for a supported single-root package', () => {
     writeFileSync(
       join(root, 'package.json'),

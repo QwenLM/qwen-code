@@ -184,14 +184,153 @@ npm run build
 npm run typecheck
 ```
 
+## P1: Maven multi-module verification
+
+P1 is driven by active use in `alibaba/fastjson2` and `alibaba/druid`, not by a
+hypothetical future language plugin. Both are root Maven reactors with checked-in
+wrappers, shared core modules, downstream extension or starter modules, nested or
+profile-activated modules, and broad CI matrices. Maven support is complete only
+when it produces useful deterministic evidence for those repository shapes.
+
+### Reference constraints
+
+Fastjson2 and Druid establish these requirements:
+
+- Always run a checked-in `./mvnw` from the resolved reactor root. Druid's older
+  wrapper depends on the process cwd and fails when invoked by absolute path from
+  another repository.
+- Module directory and artifactId are not interchangeable. Druid's `core`
+  directory produces artifactId `druid`; report paths use module directories,
+  while Maven remains responsible for resolving the selected reactor projects.
+- Core changes must exercise Maven's upstream and downstream reactor expansion.
+  The selected command therefore uses both `-am` and `-amd`; P1 does not claim
+  this is a recursively computed dependency-graph closure.
+- Root `pom.xml`, `.mvn/**`, `mvnw`, and `mvnw.cmd` affect the whole reactor and
+  disable module narrowing.
+- Profile modules must not be treated as unconditionally active. P1 discovers
+  module ownership from POM aggregation paths, but Maven is the authority on
+  whether a selected project belongs to the active reactor under the current
+  JDK and profiles. A rejected selector fails closed and is never reported as a
+  successful partial verification.
+- External smoke runs must not use `clean`. Existing Surefire/Failsafe reports
+  may be stale, so only XML files created or updated by the current invocation
+  are evidence.
+
+### Adapter selection
+
+P1 still uses root-level `applies(root)` detection and requires exactly one
+applicable adapter. A root where both npm and Maven apply fails closed to
+`toolchain: "unsupported"`, even when the current diff appears to touch only one
+side. P1 does not yet model nested toolchain roots or changed-file ownership
+across toolchains.
+
+This is intentionally conservative. P1 does not aggregate multiple toolchains,
+and refusing an ambiguous mixed root is safer than silently validating only the
+frontend or only the Java half.
+
+### Reactor and module ownership
+
+P1 intentionally does not implement Maven dependency resolution in TypeScript.
+It reads only the aggregation structure needed to map paths to module directories:
+
+1. Start at the root `pom.xml`.
+2. Read literal direct children of the root `<project>/<modules>` element,
+   ignoring comments and profile/plugin `<module>` elements, and rejecting
+   unresolved property expressions or paths that escape the reactor root.
+3. Recurse through child aggregator POMs using the same direct-child rule.
+4. Assign each changed path to the deepest containing module directory.
+5. Fail closed when a changed path belongs to a Maven project that is outside
+   the parsed root reactor, such as a standalone or profile-inactive module.
+6. Use repository-relative module paths as the `-pl` selectors.
+
+This is not an effective-POM model. Parent inheritance, dependencies, optional
+edges, dependency management, and reactor ordering remain Maven's job through
+`-am -amd`. If aggregation cannot be read unambiguously, the adapter returns a
+structured unsupported handoff rather than an incomplete green result.
+
+### Commands
+
+P1 performs one lifecycle invocation per verification target to avoid paying for
+the reactor twice:
+
+- Normal verification: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am -amd] test`.
+- Build-only base preparation: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am -amd] test-compile`.
+- When no checked-in wrapper exists, use `mvn` with the same arguments.
+
+The command always runs with the reactor root as cwd. P1 does not inject project
+profiles or `clean`; project rules and CI remain responsible for broader JDK,
+OS, profile, integration-test, and packaging matrices.
+
+### Report semantics
+
+`BuildTestReport.toolchain` widens to `"npm" | "maven" | "unsupported"`.
+Existing fields are generalized without changing their JSON shape:
+
+- `affected`: changed Maven module directories, or `.` for a reactor-wide
+  change.
+- `buildSet`: selectors handed to Maven. It does not pretend to enumerate every
+  project Maven adds through `-am/-amd`.
+- `widenedWith`: remains npm-specific and is empty for Maven.
+- `install`: remains null for Maven because dependency resolution occurs inside
+  the lifecycle command.
+- `build`: contains the Maven `test-compile` command in build-only mode.
+- `test`: contains the Maven `test` command in normal mode.
+- `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
+
+Dependency/plugin resolution failures, unavailable wrapper/runtime, and timeout
+are infrastructure outcomes. Compiler and test failures remain deterministic
+build/test evidence. Classification uses both command output and whether the
+current invocation produced fresh Surefire/Failsafe reports; a repository
+resolution failure with no fresh reports is never filed as a source defect.
+
+### Test reports
+
+Before invoking Maven, record existing Surefire/Failsafe XML paths and mtimes.
+After it returns, parse only reports created or updated after the invocation
+started. P1 uses a small, purpose-built parser for the root `<testsuite>`
+attributes and `<testcase>` failure/error children; it does not add a general XML
+runtime dependency to the CLI package.
+
+Normalized Maven evidence must retain module-relative identity so two modules
+with the same test class cannot be conflated. Fresh report summaries are appended
+to the bounded command output for Agent 7 and test-plan consumption; raw stale
+reports are ignored.
+
+### Downstream integration
+
+P1 updates the existing consumers that otherwise reject or misread Maven:
+
+- `base-tree` accepts a successful, non-empty Maven build-only result.
+- Agent 7 has an explicit Maven branch, describes modules rather than npm
+  workspaces, and treats wrapper/dependency acquisition failures as
+  infrastructure.
+- `test-plan` recognizes Maven/Surefire test counts and actual Maven command
+  execution.
+- Maven test failures do not enter the npm-only `test-delta` rerun path in P1.
+  Agent 7 discloses that base A/B attribution was not performed rather than
+  asking an npm grammar to rerun Maven.
+- Deterministic Maven findings continue using `Source: [build]` and
+  `Source: [test]`; `compose-review` needs no toolchain-specific change.
+
+Full Maven-aware base test-delta and failure demotion are deferred until their
+identity schema can explicitly carry module and report provenance. P1 must not
+infer Java test ownership from npm `--workspace` conventions.
+
+### P1 scope boundaries
+
+P1 does not implement:
+
+- Gradle;
+- JaCoCo or changed-line coverage;
+- Maven mutation testing;
+- arbitrary user-selected profiles;
+- automatic JDK/OS matrix execution;
+- multi-toolchain result aggregation;
+- Maven-aware base-side test-delta.
+
+The automated test plan is in `.qwen/e2e-tests/review-maven-toolchain.md`.
+
 ## Future phases
-
-### Maven
-
-A Maven adapter should prefer `mvnw`, discover reactor modules from effective
-POM structure, select changed modules, use `-pl ... -am`, and parse Surefire and
-Failsafe XML. Download, timeout, and unavailable-wrapper failures remain
-infrastructure outcomes.
 
 ### Gradle
 

@@ -24,5 +24,6 @@ export function selectToolchainAdapter(
   root: string,
   adapters: readonly ReviewToolchainAdapter[],
 ): ReviewToolchainAdapter | null {
-  return adapters.find((adapter) => adapter.applies(root)) ?? null;
+  const applicable = adapters.filter((adapter) => adapter.applies(root));
+  return applicable.length === 1 ? applicable[0] : null;
 }

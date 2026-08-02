@@ -167,10 +167,32 @@ describe('runBuildTest', () => {
       ok: true,
       timedOut: [],
       note:
-        'No npm package here to scope (no workspaces, and the root has no build/test ' +
-        'script). Fall back to the build/test precedence in your brief — installing ' +
-        'dependencies first — and give each command a deadline it can actually meet.',
+        'No supported npm or Maven project here to scope. Fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — ' +
+        'and give each command a deadline it can actually meet.',
     });
+  });
+
+  it('fails closed when npm and Maven both apply at the root', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain('Both npm and Maven apply');
+    expect(rep.note).toContain('will not guess');
   });
 
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {

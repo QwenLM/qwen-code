@@ -389,6 +389,17 @@ describe('observedTestCounts', () => {
     ).toEqual([12]);
   });
 
+  it('reads fresh Maven report summaries and counts passed tests', () => {
+    expect(
+      observedTestCounts(
+        report([
+          '[maven-test-report] core/target/surefire-reports/TEST-A.xml: tests=12, failures=1, errors=2, skipped=3\n' +
+            '[maven-test-report] app/target/failsafe-reports/TEST-B.xml: tests=8, failures=0, errors=0, skipped=1',
+        ]),
+      ),
+    ).toEqual([13]);
+  });
+
   it('reads a summary interleaved with ANSI color codes', () => {
     // What a real color-enabled pipe delivers — the codes sit BETWEEN tokens,
     // so a token-level regex without the strip finds nothing. From a live
@@ -829,6 +840,56 @@ describe('runTestPlan', () => {
     it('does not rule on a non-npm runner', () => {
       const r = run('## Test Plan\n\nRan `make check`');
       expect(verdictOf(r.claims, 'make check')).toBe('unchecked');
+    });
+
+    it("matches this review's scoped Maven lifecycle command", () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: 'There are test failures.',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
+    it('leaves an unobserved Maven command unchecked with Maven wording', () => {
+      const r = run('## Test Plan\n\nRan `mvn -q verify`');
+      const claim = r.claims.find((c) => c.text === 'mvn -q verify');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('Maven command was not run');
+    });
+
+    it('does not match Maven claims with different profiles or project scopes', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      for (const command of ['./mvnw -Pjdk25 test', './mvnw -pl app test']) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        const claim = r.claims.find((c) => c.text === command);
+        expect(claim?.verdict).toBe('unchecked');
+        expect(claim?.note).toContain('Maven command was not run');
+      }
     });
 
     it('rules a bare command contradicted when ANY scoped run failed', () => {

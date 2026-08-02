@@ -42,6 +42,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import { selectToolchainAdapter } from './lib/toolchain.js';
 
@@ -57,9 +58,9 @@ export interface CommandResult {
 }
 
 export interface BuildTestReport {
-  /** `npm` when the workspace scoping applied; `unsupported` otherwise. */
-  toolchain: 'npm' | 'unsupported';
-  /** Workspace dirs the diff changed. */
+  /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
+  toolchain: 'npm' | 'maven' | 'unsupported';
+  /** Workspace or Maven module dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
@@ -260,8 +261,10 @@ function changedFilesFrom(planPath: string): string[] {
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
-  const adapter = selectToolchainAdapter(root, [npmToolchainAdapter]);
+  const adapters = [npmToolchainAdapter, mavenToolchainAdapter];
+  const adapter = selectToolchainAdapter(root, adapters);
   if (!adapter) {
+    const applicable = adapters.filter((candidate) => candidate.applies(root));
     return {
       toolchain: 'unsupported',
       affected: [],
@@ -273,9 +276,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        'No npm package here to scope (no workspaces, and the root has no build/test ' +
-        'script). Fall back to the build/test precedence in your brief — installing ' +
-        'dependencies first — and give each command a deadline it can actually meet.',
+        applicable.length > 1
+          ? 'Both npm and Maven apply at the repository root. build-test will not ' +
+            'guess which toolchain owns this diff; run the project-specific checks ' +
+            'with explicit deadlines.'
+          : 'No supported npm or Maven project here to scope. Fall back to the ' +
+            'build/test precedence in your brief — installing dependencies first — ' +
+            'and give each command a deadline it can actually meet.',
     };
   }
   return adapter.run({
