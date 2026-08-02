@@ -700,10 +700,8 @@ export function subSessionConcurrencyCapsFromSettings(serve: {
     typeof value === 'number' && Number.isInteger(value) && value >= 1
       ? value
       : undefined;
-  const maxConcurrentPerCaller = asCap(
-    serve?.maxConcurrentSubSessionsPerCaller,
-  );
-  const maxConcurrentTotal = asCap(serve?.maxConcurrentSubSessionsTotal);
+  const maxConcurrentPerCaller = asCap(serve.maxConcurrentSubSessionsPerCaller);
+  const maxConcurrentTotal = asCap(serve.maxConcurrentSubSessionsTotal);
   return {
     ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
     ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
