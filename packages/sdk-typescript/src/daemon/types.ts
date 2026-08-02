@@ -2995,7 +2995,9 @@ export type DaemonChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list'
+  | 'record';
 
 export interface DaemonChannelConfigFieldDescriptor {
   key: string;
@@ -3004,6 +3006,7 @@ export interface DaemonChannelConfigFieldDescriptor {
   required?: boolean;
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 
