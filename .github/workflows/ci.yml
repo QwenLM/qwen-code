@@ -879,6 +879,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: 'read'
+      pull-requests: 'read'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -886,22 +887,41 @@ jobs:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
 
-      # Fail open: any uncertainty (non-PR event, fetch failure) runs the job.
+      # Fail open: any uncertainty (non-PR event, API failure) runs the job.
+      #
+      # Ask GitHub which files the PR changed, the same call the CI profile
+      # classifier makes above. The two-tree `git diff BASE HEAD` this replaced
+      # is not the PR's diff: it reports everything the base gained since the
+      # branch point as a change on the PR's side. #8132 added
+      # packages/desktop-shell, so every branch older than it saw 78 phantom
+      # desktop-shell paths, ran this job, and failed in a checkout of
+      # refs/pull/N/head that has no such directory.
       - name: 'Detect desktop-shell changes'
         id: 'filter'
         env:
-          EVENT_NAME: '${{ github.event_name }}'
-          BASE_REF: '${{ github.base_ref }}'
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
         run: |-
           changed=true
-          if [[ "${EVENT_NAME}" == "pull_request" && -n "${BASE_REF}" ]]; then
-            if git fetch --depth=1 origin "${BASE_REF}" >/dev/null 2>&1; then
-              if git diff --name-only FETCH_HEAD HEAD | grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml)'; then
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            # `previous_filename` too: renaming a file out of the crate changes
+            # it, and only the old path says so.
+            if files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)')"; then
+              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml)' <<<"${files}"; then
                 changed=true
               else
                 changed=false
               fi
+            else
+              echo "::warning::Unable to list the PR's changed files; compiling the crate."
             fi
+          fi
+          # Whatever the filter decided, a tree without the crate cannot have
+          # regressed it, and cargo has no manifest to run against — the job
+          # would report a missing working directory as a failure of the PR.
+          if [[ "${changed}" == "true" && ! -f packages/desktop-shell/src-tauri/Cargo.toml ]]; then
+            echo "::notice::packages/desktop-shell/src-tauri is absent from this head; nothing to compile."
+            changed=false
           fi
           echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
           echo "desktop-shell changed: ${changed}"
