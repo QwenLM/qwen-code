@@ -954,11 +954,12 @@ const REASON_PHRASE: Record<ProbeReason, string> = {
   // have reported otherwise.
   'control-failed':
     'it read green there, but the positive control failed, so nothing could have turned that run red',
-  // Nothing was attempted: no worktree, or the checkout failed.
+  // Nothing ran: no worktree, the checkout failed, or the runner could not be
+  // started at all — a spawn that fails with ENOENT never gets to a test.
   'not-run': 'no probe suite ran for it at all there',
   // Started and did not survive. How much of it ran before that is unknown.
   'runner-died':
-    'the probe suite was started there and did not survive (a timeout kill, or a spawn that failed)',
+    'the probe suite was started there and did not survive (killed at the deadline, or by a signal)',
   // Nothing is known about collection here — the runner never produced output
   // to read. Saying "collected no tests" would be the same invented cause this
   // function exists to stop, one layer down: a reader sent after a compile
@@ -1969,8 +1970,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // `ProbeResult`, not a structural echo of it: this array is what `probed`
   // serialises, so an entry pushed here without a reason is an untagged
   // `inconclusive` in the artifact — the exact hole the union was introduced to
-  // close, reopened one level up. Typed this way, the two catch paths below do
-  // not compile until they say which way they failed.
+  // close, reopened one level up. Typed this way, neither catch below nor the
+  // control-failed re-class compiles until it says which way it failed.
   const results: ProbeResult[] = [];
   let cleanupFailure: string | undefined;
   const mutantResults: MutantResult[] = [];
