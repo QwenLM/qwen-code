@@ -432,6 +432,48 @@ describe('modelCommand', () => {
     });
   });
 
+  it('rejects --project with an inline prompt using the inline-specific message', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --project qwen-max explain this code',
+        name: 'model',
+        args: '--project qwen-max explain this code',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: {
+          ...createMockSettings(setValue),
+          isTrusted: true,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--project qwen-max explain this code',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Cannot combine --project with an inline prompt. Run '/model --project qwen-max' first, then send your prompt.",
+    });
+  });
+
   it('rejects an inline prompt when the model id is not available', async () => {
     const switchModel = vi.fn();
     mockContext = createMockCommandContext({

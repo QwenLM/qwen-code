@@ -930,15 +930,6 @@ export const modelCommand: SlashCommand = {
 
     const isImageModelCommand =
       args === '--image' || args.startsWith('--image ');
-    if (scopeOverride && !persistDefault && !isImageModelCommand) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Use --default with --project or --global when persisting the main model.',
-        ),
-      };
-    }
 
     if (isImageModelCommand) {
       const modelName = args.replace('--image', '').trim();
@@ -1078,6 +1069,15 @@ export const modelCommand: SlashCommand = {
       firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
     const inlinePrompt =
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
+    if (scopeOverride && !persistDefault && !inlinePrompt) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Use --default with --project or --global when persisting the main model.',
+        ),
+      };
+    }
     if (modelName) {
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
