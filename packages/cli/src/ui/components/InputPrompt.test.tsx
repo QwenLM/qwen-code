@@ -1686,6 +1686,44 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('keeps references for copied images that fail partial promotion', async () => {
+      const imagePaths = [
+        'C:\\Photos\\Copied Image.png',
+        'C:\\Photos\\Missing Image.png',
+      ];
+      const expectedSources = imagePaths.map((imagePath) =>
+        path.isAbsolute(imagePath)
+          ? imagePath
+          : path.resolve(props.config.getTargetDir(), imagePath),
+      );
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        imagePaths,
+      );
+      mockFsStat
+        .mockResolvedValueOnce({ isFile: () => true })
+        .mockRejectedValueOnce(new Error('file not found'));
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+
+      await waitFor(() => {
+        expect(mockFsCopyFile).toHaveBeenCalledWith(
+          expectedSources[0],
+          expect.stringMatching(/clipboard-\d+-0\.png$/),
+        );
+      });
+      expect(mockFsStat).toHaveBeenNthCalledWith(2, expectedSources[1]);
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        clipboardUtils.formatClipboardFileReference(imagePaths[1]),
+        { paste: false },
+      );
+      unmount();
+    });
+
     it('keeps mixed copied files as references without promoting images', async () => {
       const clipboardFiles = ['C:\\Photos\\image.png', 'C:\\Docs\\notes.txt'];
       const expectedReferences = clipboardFiles

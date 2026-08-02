@@ -1103,8 +1103,11 @@ describe('KeypressContext - Kitty Protocol', () => {
             expect.objectContaining({
               paste: true,
               pasteImage: false,
-              sequence:
-                '@C:/Users/mochi/My\\ Notes/notes.txt\n@//server/share/My\\ Report.txt',
+              clipboardFiles: [
+                '@C:/Users/mochi/My\\ Notes/notes.txt',
+                '@//server/share/My\\ Report.txt',
+              ],
+              sequence: '',
             }),
           );
         });

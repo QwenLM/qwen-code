@@ -132,6 +132,7 @@ export interface Key {
   kittyProtocol?: boolean;
   pasteImage?: boolean;
   clipboardImageUnavailable?: boolean;
+  clipboardFiles?: string[];
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -798,7 +799,11 @@ export function KeypressProvider({
         paste: true,
         pasteImage: hasImage,
         clipboardImageUnavailable,
-        sequence: clipboardFiles.map(formatClipboardFileReference).join('\n'),
+        clipboardFiles:
+          clipboardFiles.length > 0
+            ? clipboardFiles.map(formatClipboardFileReference)
+            : undefined,
+        sequence: '',
       });
     };
 
