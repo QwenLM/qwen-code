@@ -822,6 +822,29 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.status).toBe('cancelled');
   });
 
+  it('enforces dispatch state transition guards across the full cycle', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_guards'));
+    expect(entry.status).toBe('running');
+
+    // Rejection: running -> paused (skipping pausing) is rejected
+    r.onDispatchStateChange('wf_guards', 'paused');
+    expect(entry.status).toBe('running');
+
+    // Valid cycle: running -> pausing -> paused -> running
+    r.onDispatchStateChange('wf_guards', 'pausing');
+    expect(entry.status).toBe('pausing');
+    r.onDispatchStateChange('wf_guards', 'paused');
+    expect(entry.status).toBe('paused');
+
+    // Rejection: paused -> pausing (backwards) is rejected
+    r.onDispatchStateChange('wf_guards', 'pausing');
+    expect(entry.status).toBe('paused');
+
+    r.onDispatchStateChange('wf_guards', 'running');
+    expect(entry.status).toBe('running');
+  });
+
   it('caps agentsCompleted at agentsDispatched on double completion', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_overcount', { isBackgrounded: true }));

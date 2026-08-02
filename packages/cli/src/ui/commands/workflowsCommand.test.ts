@@ -136,6 +136,23 @@ describe('workflowsCommand', () => {
     expect(result.content).toContain('cooperative');
   });
 
+  it('omits the Active section header when there are zero active runs', async () => {
+    listMock.mockReturnValue([
+      entry({
+        runId: 'wf_done',
+        status: 'completed',
+        endTime: 1_700_000_010_000,
+      }),
+    ]);
+
+    const result = await workflowsCommand.action!(context, '');
+
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).toContain('Workflow runs (1 total · 0 active)');
+    expect(result.content).not.toContain('Active');
+    expect(result.content).toContain('Recent');
+  });
+
   it('omits the interactive tip in non_interactive / acp modes', async () => {
     const ctx = createMockCommandContext({
       services: {
@@ -226,19 +243,22 @@ describe('workflowsCommand', () => {
   );
 
   it.each([
-    ['pausing', 'still pausing'],
-    ['completed', 'cannot be paused or resumed'],
-  ] as const)('rejects p for a %s workflow', async (status, message) => {
-    getMock.mockReturnValue(entry({ runId: 'wf_target', status }));
+    ['pausing', 'still pausing', 'warning'],
+    ['completed', 'cannot be paused or resumed', 'error'],
+  ] as const)(
+    'rejects p for a %s workflow',
+    async (status, message, messageType) => {
+      getMock.mockReturnValue(entry({ runId: 'wf_target', status }));
 
-    const result = await workflowsCommand.action!(context, 'p wf_target');
+      const result = await workflowsCommand.action!(context, 'p wf_target');
 
-    expect(pauseMock).not.toHaveBeenCalled();
-    expect(resumeMock).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ type: 'message' });
-    if (!result || result.type !== 'message') throw new Error('no result');
-    expect(result.content).toContain(message);
-  });
+      expect(pauseMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ type: 'message', messageType });
+      if (!result || result.type !== 'message') throw new Error('no result');
+      expect(result.content).toContain(message);
+    },
+  );
 
   it('rejects p for unknown or malformed targets without reading snapshots', async () => {
     const unknown = await workflowsCommand.action!(context, 'p wf_missing');
@@ -255,6 +275,16 @@ describe('workflowsCommand', () => {
     });
     expect(pauseMock).not.toHaveBeenCalled();
     expect(resumeMock).not.toHaveBeenCalled();
+  });
+
+  it('proceeds past the usage guard for a well-formed p <runId> command', async () => {
+    getMock.mockReturnValue(entry({ runId: 'wf_guard', status: 'running' }));
+
+    const result = await workflowsCommand.action!(context, 'p wf_guard');
+
+    if (!result || result.type !== 'message') throw new Error('no result');
+    expect(result.content).not.toContain('Usage:');
+    expect(pauseMock).toHaveBeenCalledWith('wf_guard');
   });
 
   it.each(['non_interactive', 'acp'] as const)(

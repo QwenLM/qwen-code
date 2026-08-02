@@ -8,6 +8,31 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 describe('WorkflowDispatchScheduler', () => {
+  it.each([0, -1, 1.5, NaN])(
+    'rejects a non-positive-integer limit (%s)',
+    (limit) => {
+      expect(() => new WorkflowDispatchScheduler(limit)).toThrow(
+        /positive integer/,
+      );
+    },
+  );
+
+  it('enforces the concurrency window across multiple slots', async () => {
+    const scheduler = new WorkflowDispatchScheduler(3);
+    let active = 0;
+    let peak = 0;
+    const thunks = Array.from({ length: 12 }, () =>
+      scheduler.run(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        active--;
+      }),
+    );
+    await Promise.all(thunks);
+    expect(peak).toBe(3);
+  });
+
   it('settles an idle pause immediately and only resumes from paused', () => {
     const states: string[] = [];
     const scheduler = new WorkflowDispatchScheduler(1, undefined, (snapshot) =>
@@ -111,5 +136,34 @@ describe('WorkflowDispatchScheduler', () => {
       queued: 0,
       inFlight: 0,
     });
+  });
+
+  it('aborts queued dispatches while an in-flight thunk never settles', async () => {
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    void scheduler.run(() => new Promise<never>(() => {}));
+    const queuedDispatch = scheduler.run(async () => 'queued');
+    await vi.waitFor(() => expect(scheduler.snapshot().inFlight).toBe(1));
+    expect(scheduler.snapshot().queued).toBe(1);
+
+    controller.abort();
+
+    await expect(queuedDispatch).rejects.toMatchObject({ name: 'AbortError' });
+    expect(scheduler.snapshot().queued).toBe(0);
+  });
+
+  it('rejects run() immediately after pause + abort', async () => {
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    const thunk = vi.fn(async () => 'should not run');
+    await expect(scheduler.run(thunk)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(thunk).not.toHaveBeenCalled();
   });
 });

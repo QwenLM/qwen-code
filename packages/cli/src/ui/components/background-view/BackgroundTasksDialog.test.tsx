@@ -397,6 +397,19 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('detail');
   });
 
+  it('keeps detail mode when the same entry re-renders with a non-terminal status change', () => {
+    const running = entry({ agentId: 'a', status: 'running' });
+    const h = setup([running]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    // Same entryId, status changed but still active — detail must be retained.
+    h.setEntries([{ ...running, status: 'pausing' }]);
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+  });
+
   it('foreground cancel requires two `x` presses to confirm (one-press is a no-op)', () => {
     // Foreground entries block the parent's tool-call: cancelling one ends
     // the current turn with a partial result for that subagent. The dialog

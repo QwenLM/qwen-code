@@ -1137,8 +1137,12 @@ describe('WorkflowOrchestrator', () => {
     void run.then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less cached resolve
+    // (which settles in ~4 microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
+    expect(dispatchCalls).toBe(0);
     scheduler.resume();
     const outcome = await run;
     expect(dispatchCalls).toBe(0); // fully cached
