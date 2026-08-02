@@ -62,6 +62,15 @@ describe('envInterpolator', () => {
       expect(result).toBe('');
     });
 
+    it('should never interpolate Qwen-internal secrets, even when whitelisted', () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      const result = interpolateEnvVars('token=$QWEN_SERVER_TOKEN', [
+        'QWEN_SERVER_TOKEN',
+      ]);
+      expect(result).toBe('token=');
+      expect(result).not.toContain('daemon-secret');
+    });
+
     it('should handle empty whitelist', () => {
       const result = interpolateEnvVars('$MY_TOKEN', []);
       expect(result).toBe('');

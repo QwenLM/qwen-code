@@ -4,10 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { INTERNAL_SECRET_ENV_VARS } from '@qwen-code/qwen-code-core';
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
  * If the environment variable is not defined, the original placeholder is preserved.
+ *
+ * Qwen-internal secrets (INTERNAL_SECRET_ENV_VARS — daemon tokens, private
+ * capabilities) are never resolved from `process.env`: settings files can
+ * come from a repository, and a resolved value is baked into hook commands,
+ * URLs, or MCP configs before child-env sanitization ever applies. Leaving
+ * the placeholder unresolved is safe — spawned children get a sanitized
+ * environment without those variables.
  *
  * @param value - The string that may contain environment variable placeholders
  * @returns The string with environment variables resolved
@@ -26,6 +35,9 @@ export function resolveEnvVarsInString(
     const varName = varName1 || varName2;
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
+    }
+    if (INTERNAL_SECRET_ENV_VARS.includes(varName)) {
+      return match;
     }
     if (process && process.env && typeof process.env[varName] === 'string') {
       return process.env[varName]!;

