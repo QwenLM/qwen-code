@@ -43,6 +43,7 @@ describe('reviewCommand', () => {
       'parse-args',
       'fetch-pr',
       'capture-local',
+      'capture-tui',
       'plan-diff',
       'pr-context',
       'comment-status',

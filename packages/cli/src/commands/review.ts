@@ -14,6 +14,7 @@ import { composeReviewCommand } from './review/compose-review.js';
 import { findingsCommand } from './review/findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
+import { captureTuiCommand } from './review/capture-tui.js';
 import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
 import { commentStatusCommand } from './review/comment-status.js';
@@ -46,6 +47,7 @@ export const reviewCommand: CommandModule = {
       .command(parseArgsCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
+      .command(captureTuiCommand)
       .command(planDiffCommand)
       .command(prContextCommand)
       .command(commentStatusCommand)
@@ -70,7 +72,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, capture-tui, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

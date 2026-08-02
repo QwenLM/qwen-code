@@ -604,6 +604,23 @@ until [ -s <plan dir>/mock.json ]; do sleep 0.1; done  # its port is in that rep
 
 For anything that is not one of those two wires — the project's own HTTP service, an MCP server, an OAuth endpoint — stand it up yourself and let \`drive\` own the lifecycle.
 
+**When the claim is about what the terminal RENDERS, capture it — do not describe it.** A layout claim — "the panel clips at 80 columns", "the status line overlaps the prompt", "the colors are unreadable on dark themes" — is a claim about pixels, and reading the layout code only reproduces the author's own mental terminal, which is where rendering verdicts go wrong. Run the thing and capture what rendered:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review capture-tui \\
+  --command "<the worktree's built entry, or the fixture that drives it>" \\
+  --cols <the width the claim names> --until "<a pane marker that means 'settled'>" \\
+  --out <the plan report's directory>/qwen-review-capture-<finding-id>
+\`\`\`
+
+It drives the command in a **private tmux server** (it cannot see, resize or kill the user's own sessions — the isolation is structural, and it reaps everything it started), writes \`<out>.ans\` (the pane bytes, always), renders \`<out>.png\` when \`freeze\` is available, and records which it managed in \`<out>.json\`. Three rules make the capture evidence:
+
+- **Capture at the width the claim names, and at a control width.** "Clips at 80 columns" is confirmed by a pair — clipped at 80, intact at 120 — not by one image; a single capture cannot distinguish "clips at 80" from "clips everywhere", and those are different findings.
+- **The evidence rung is part of the verdict.** A \`png\` is rendering evidence: attach it to the finding via \`assetFiles\` (Step 7's \`publish-assets\` embeds it in the posted comment when the run is authorised; unpublished, the local path still reaches the terminal report). An \`ans-only\` capture proves the bytes but not the pixels — quote the relevant lines and say the pixel claim is unverified. A refused capture (no tmux) leaves the claim at its reading-based confidence floor; say what a capture would have measured, so the reader knows what the tooling would have bought.
+- **Attach only what this verification launched.** The command's isolation makes capturing the user's own terminal impossible through it; do not go around it with bare tmux or OS-level screenshots — a capture of anything but the review's own processes is the leak the private server exists to prevent.
+
+A finding a capture settled cites the manifest and carries the image in \`assetFiles\`; like a probe, the observation is the verdict — "the 80-column capture shows the panel's right border at column 83" quotes pixels, not a reading.
+
 **When the claim is about GITHUB's behaviour, neither tree can settle it — only GitHub can.** A claim like "this encoding renders identically and can never ping", "GitHub strips this tag", "this markdown shape closes the fold" is about the comment pipeline's parser, sanitizer allowlist and notification path, none of which exist in this environment — a local markdown library is a model of GitHub, and judging a sanitizer claim against a model of the authority is exactly the parser-divergence failure under review. Measured live: an \`@\` → \`&#64;\` defusal read as sound in every local trace, and GitHub's real renderer registered the mention and fired the notification. So:
 
 - **If the environment variable \`QWEN_REVIEW_SCRATCH_REPO\` is set** (an \`owner/repo\` the user designated for disposable test posts), you may adjudicate on the real renderer: post the payload as an issue comment there — \`gh api repos/$QWEN_REVIEW_SCRATCH_REPO/issues/<n>/comments -f body=@<file>\` against an issue you created there for this purpose — read it back with \`-H "Accept: application/vnd.github.html+json"\`, and rule on the returned HTML (and, for mention claims, the timeline events). The observation is the verdict; quote it. This is the ONLY write destination other than \`submit\`'s that any part of this review may touch, it is user-designated, and nothing about the PR under review, its code, or its authors may appear in what you post there — post the minimal payload shape, not the report.
