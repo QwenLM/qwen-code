@@ -6,11 +6,13 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   AgentEventEmitter,
   AgentEventType,
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
+import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -677,6 +679,25 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.notified).toBe(false);
   });
 
+  it('rejects a duplicate run id until its owner handle is released', () => {
+    const r = new WorkflowRunRegistry();
+    const runId = 'wf_collision';
+    r.register(reg(runId));
+
+    expect(() => r.register(reg(runId))).toThrow(/already active/);
+
+    const handle = {
+      runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.cancel(runId, 2_000);
+    expect(() => r.register(reg(runId))).toThrow(/already active/);
+
+    r.releaseHandle(runId, handle);
+    expect(r.register(reg(runId)).status).toBe('running');
+  });
+
   it('register synthesizes description from meta.name when omitted', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(
@@ -844,6 +865,113 @@ describe('WorkflowRunRegistry', () => {
     r.register(reg('wf_cancelled'));
     r.cancel('wf_cancelled', 3_000);
     expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps terminal bell and background model completion channels independent', () => {
+    const r = new WorkflowRunRegistry();
+    const bell = vi.fn();
+    const completion = vi.fn();
+    r.setNotificationCallback(bell);
+    r.setCompletionCallback(completion);
+    expect(r.hasCompletionCallback()).toBe(true);
+
+    const result = 'safe <value> & </task-notification>';
+    const entry = r.register(
+      reg('wf_background', {
+        isBackgrounded: true,
+        script: 'secret script',
+        description: '\u001b[31mwf\u001b[0m',
+      }),
+    );
+    r.complete(entry.runId, result, 1_000);
+    r.complete(entry.runId, 'duplicate', 1_001);
+    r.fail(entry.runId, 'duplicate failure', 1_002);
+
+    expect(bell).toHaveBeenCalledOnce();
+    expect(bell).toHaveBeenCalledWith(entry);
+    expect(completion).toHaveBeenCalledOnce();
+    const [displayText, modelText, meta] = completion.mock.calls[0];
+    expect(displayText).toBe('Background workflow "wf" completed.');
+    expect(modelText).toContain('<kind>workflow</kind>');
+    expect(modelText).toContain('<task-id>wf_background</task-id>');
+    expect(modelText).toContain('<status>completed</status>');
+    expect(modelText).toContain(
+      'safe &lt;value&gt; &amp; &lt;/task-notification&gt;',
+    );
+    expect(modelText.match(/<\/task-notification>/g)).toHaveLength(1);
+    expect(modelText).not.toContain('secret script');
+    expect(modelText).not.toContain('\u001b');
+    expect(meta).toEqual({
+      runId: 'wf_background',
+      status: 'completed',
+      todoWorkChainId: undefined,
+    });
+
+    r.register(reg('wf_foreground'));
+    r.complete('wf_foreground', 'foreground', 2_000);
+    expect(bell).toHaveBeenCalledTimes(2);
+    expect(completion).toHaveBeenCalledOnce();
+
+    r.register(reg('wf_cancelled', { isBackgrounded: true }));
+    r.cancel('wf_cancelled', 3_000);
+    expect(bell).toHaveBeenCalledTimes(2);
+    expect(completion).toHaveBeenCalledOnce();
+
+    r.register(reg('wf_shutdown', { isBackgrounded: true }));
+    r.abortAll();
+    expect(bell).toHaveBeenCalledTimes(2);
+    expect(completion).toHaveBeenCalledOnce();
+
+    r.setCompletionCallback(undefined);
+    expect(r.hasCompletionCallback()).toBe(false);
+  });
+
+  it('emits one safe background failure completion and isolates callback errors', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNotificationCallback(() => {
+      throw new Error('bell subscriber failed');
+    });
+    const completion = vi.fn((_displayText: string, _modelText: string) => {
+      throw new Error('completion subscriber failed');
+    });
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_bad_background', { isBackgrounded: true }));
+
+    expect(() =>
+      r.fail('wf_bad_background', 'boom <unsafe>', 1_000),
+    ).not.toThrow();
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][1]).toContain(
+      '<result>Error: boom &lt;unsafe&gt;</result>',
+    );
+  });
+
+  it('degrades non-JSON background results without breaking settlement', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    r.register(reg('wf_circular', { isBackgrounded: true }));
+
+    expect(() => r.complete('wf_circular', circular, 1_000)).not.toThrow();
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][1]).toContain(
+      'workflow returned a non-JSON-serializable value of type object',
+    );
+  });
+
+  it('captures the owning todo work chain for completion routing', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = todoWorkChainContext.run('workflow-chain', () =>
+      r.register(reg('wf_chain', { isBackgrounded: true })),
+    );
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.todoWorkChainId).toBe('workflow-chain');
+    expect(completion.mock.calls[0][2].todoWorkChainId).toBe('workflow-chain');
   });
 
   it('errors thrown by the notification callback do not break the call site', () => {

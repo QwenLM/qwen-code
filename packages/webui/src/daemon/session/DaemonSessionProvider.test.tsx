@@ -45,6 +45,7 @@ import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
   sessionId: string;
@@ -66,6 +67,7 @@ interface MockSession {
     signal?: AbortSignal,
   ) => Promise<NonBlockingPromptAccepted>;
   removePendingPrompt: (promptId: string) => Promise<{ removed: boolean }>;
+  removeMidTurnMessage: (messageId: string) => Promise<{ removed: boolean }>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
@@ -131,6 +133,11 @@ interface MockClient {
     promptId: string,
     opts?: { clientId?: string },
   ) => Promise<{ removed: boolean }>;
+  removeMidTurnMessage: (
+    sessionId: string,
+    messageId: string,
+    opts?: { clientId?: string },
+  ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
     req: { name?: string },
@@ -172,6 +179,7 @@ const sdkMocks = vi.hoisted(() => {
   const deleteWorkspaceAgent = vi.fn();
   const getPendingPrompts = vi.fn();
   const removePendingPrompt = vi.fn();
+  const removeMidTurnMessage = vi.fn();
   const branchSession = vi.fn();
   const getSessionTranscriptPage = vi.fn();
 
@@ -205,6 +213,7 @@ const sdkMocks = vi.hoisted(() => {
     deleteWorkspaceAgent = deleteWorkspaceAgent;
     getPendingPrompts = getPendingPrompts;
     removePendingPrompt = removePendingPrompt;
+    removeMidTurnMessage = removeMidTurnMessage;
     branchSession = branchSession;
     getSessionTranscriptPage = getSessionTranscriptPage;
     dispose = vi.fn();
@@ -246,6 +255,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools,
     getPendingPrompts,
     removePendingPrompt,
+    removeMidTurnMessage,
     branchSession,
     getSessionTranscriptPage,
     reset() {
@@ -345,6 +355,8 @@ const sdkMocks = vi.hoisted(() => {
       getPendingPrompts.mockResolvedValue({ pendingPrompts: [] });
       removePendingPrompt.mockReset();
       removePendingPrompt.mockResolvedValue({ removed: true });
+      removeMidTurnMessage.mockReset();
+      removeMidTurnMessage.mockResolvedValue({ removed: true });
       branchSession.mockReset();
       branchSession.mockResolvedValue({
         sessionId: 'branch-session',
@@ -1822,6 +1834,83 @@ describe('DaemonSessionProvider', () => {
       'session-old',
       'pending-old',
     );
+  });
+
+  it('routes mid-turn message removal through the matching session owner', async () => {
+    const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removeMidTurnMessage,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removeMidTurnMessage('mid-current'),
+    ).resolves.toEqual({ removed: true });
+    await expect(
+      providerActions.removeMidTurnMessage('mid-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(removeMidTurnMessage).toHaveBeenCalledWith('mid-current');
+    // The cross-session branch must forward our clientId: the bridge removes a
+    // mid-turn message only on an exact originator match, so a removal issued
+    // without one could never match the id stamped at enqueue.
+    expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
+      'session-old',
+      'mid-old',
+      { clientId: 'client-current' },
+    );
+  });
+
+  it('forwards the persisted client id of the target session on cross-session removal', async () => {
+    window.sessionStorage.clear();
+    const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removeMidTurnMessage,
+    });
+    sdkMocks.sessions.push(session);
+    // The message was queued under session-old's OWN client id; the bridge
+    // removes only on an exact originator match, so after switching to
+    // session-current the removal must forward session-old's persisted id —
+    // forwarding the current session's id would resolve to a foreign originator
+    // and the bridge would reject a valid removal.
+    persistStableClientId('client-old', 'session-old');
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removeMidTurnMessage('mid-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
+      'session-old',
+      'mid-old',
+      { clientId: 'client-old' },
+    );
+    window.sessionStorage.clear();
   });
 
   it('rejects stale-session pending prompt refreshes', async () => {
@@ -9549,6 +9638,76 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
+  it('retries a latched pagination failure when loadMore is forced', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (id: number, text: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': `record-${id}` },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-retried-history-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(2, 'recent prompt')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockRejectedValueOnce(new DaemonHttpError(403, undefined, 'Forbidden'))
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(1, 'older prompt')],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await expect(history?.loadMore()).rejects.toThrow('Forbidden');
+      await flushPromises();
+    });
+    expect(history?.paginationError).toBe(true);
+    expect(history?.hasMore).toBe(false);
+
+    await act(async () => {
+      await history?.loadMore({ force: true });
+      await flushPromises();
+    });
+
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(history?.paginationError).toBe(false);
+    expect(history?.hasMore).toBe(false);
+  });
+
   it('skips malformed older-page events and advances by record boundary', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -10003,6 +10162,8 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       })),
     removePendingPrompt:
       opts.removePendingPrompt ?? vi.fn(async () => ({ removed: true })),
+    removeMidTurnMessage:
+      opts.removeMidTurnMessage ?? vi.fn(async () => ({ removed: true })),
     cancel: opts.cancel ?? vi.fn(async () => {}),
     setModel:
       opts.setModel ??

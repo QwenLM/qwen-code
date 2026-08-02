@@ -17,6 +17,7 @@ const {
   createSubSessionLauncher,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
 } = await import('./create-sub-session.js');
 
 type FakeEvent = { type: string; data: unknown };
@@ -304,6 +305,34 @@ describe('sub-session launcher', () => {
     expect(fake.spawns).toHaveLength(MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER);
   });
 
+  it('honors a custom per-caller cap from launcher options', async () => {
+    const fake = makeFakeBridge({ blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      firstTurnTimeoutMs: 80, // held runs settle via timeout so the test ends
+      maxConcurrentPerCaller: 2,
+    });
+
+    const promises = [];
+    for (let i = 0; i < 3; i++) {
+      promises.push(
+        launcher.launch({
+          prompt: `p${i}`,
+          completion: 'first-turn',
+          callerSessionId: 'same-caller',
+        }),
+      );
+    }
+    const settled = await Promise.allSettled(promises);
+    const rejected = settled.filter((s) => s.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toContain(
+      'cap 2',
+    );
+    expect(fake.spawns).toHaveLength(2);
+  });
+
   it('rejects when the bridge is unavailable', async () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => undefined,
@@ -532,9 +561,59 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it('honors a custom workspace-wide cap from launcher options', async () => {
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      maxConcurrentTotal: 3,
+    });
+    for (let i = 0; i < 3; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: `rotated-${i}`, // a fresh bucket every time
+      });
+    }
+    await expect(
+      launcher.launch({
+        prompt: 'overflow',
+        completion: 'sent',
+        callerSessionId: 'rotated-fresh',
+      }),
+    ).rejects.toThrow(/cap 3/);
+    expect(fake.spawns).toHaveLength(3);
+    launcher.stop();
+  });
+
+  it('clamps the total cap to the tracked-id set size', async () => {
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      maxConcurrentTotal: MAX_TRACKED_SPAWNED_SESSIONS + 100,
+    });
+    for (let i = 0; i < MAX_TRACKED_SPAWNED_SESSIONS; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: `c-${i}`,
+      });
+    }
+    await expect(
+      launcher.launch({
+        prompt: 'overflow',
+        completion: 'sent',
+        callerSessionId: 'c-overflow',
+      }),
+    ).rejects.toThrow(`cap ${MAX_TRACKED_SPAWNED_SESSIONS}`);
+    launcher.stop();
+  });
+
   it('refuses to spawn from a session it already spawned (depth-1 gate)', async () => {
     // Every daemon session wires a spawner, sub-sessions included, and each
-    // gets its own cap-sized bucket. Without this gate one prompt fans out 5ⁿ.
+    // gets its own cap-sized bucket. Without this gate one prompt fans out
+    // capⁿ.
     const fake = makeFakeBridge({ events: (pid) => [turnComplete(pid)] });
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,

@@ -338,6 +338,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_mid_turn_message_mutation',
   'session_cancel',
   'session_events',
   'session_artifacts',
@@ -573,7 +574,12 @@ interface FakeBridgeOpts {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
-  ) => { accepted: boolean };
+  ) => { accepted: boolean; messageId?: string };
+  removeMidTurnImpl?: (
+    sessionId: string,
+    messageId: string,
+    context?: BridgeClientRequestContext,
+  ) => { removed: boolean };
   getPendingPromptsImpl?: (sessionId: string) => ReadonlyArray<{
     promptId: string;
     text: string;
@@ -862,6 +868,11 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
   }>;
+  removeMidTurnCalls: Array<{
+    sessionId: string;
+    messageId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -1048,7 +1059,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
   const enqueueMidTurnImpl =
-    opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
+    opts.enqueueMidTurnImpl ??
+    (() => ({ accepted: true, messageId: 'mid-default' }));
+  const removeMidTurnCalls: FakeBridge['removeMidTurnCalls'] = [];
+  const removeMidTurnImpl =
+    opts.removeMidTurnImpl ?? (() => ({ removed: true }));
   const getPendingPromptsCalls: string[] = [];
   const getPendingPromptsImpl = opts.getPendingPromptsImpl ?? (() => []);
   const removePendingPromptCalls: Array<{
@@ -1616,6 +1631,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     changeSessionCwdCalls,
     setSessionWorktreeCalls,
     enqueueMidTurnCalls,
+    removeMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
@@ -1993,6 +2009,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context);
+    },
+    removeMidTurnMessage(sessionId, messageId, context) {
+      removeMidTurnCalls.push({
+        sessionId,
+        messageId,
+        ...(context ? { context } : {}),
+      });
+      return removeMidTurnImpl(sessionId, messageId, context);
     },
     getPendingPrompts(sessionId) {
       getPendingPromptsCalls.push(sessionId);
@@ -8196,7 +8220,10 @@ describe('createServeApp', () => {
         'client-9',
       );
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ accepted: true });
+      expect(res.body).toEqual({
+        accepted: true,
+        messageId: 'mid-default',
+      });
       // Trimmed before enqueue, and the client id is forwarded for the bridge's
       // ownership check + originator stamping.
       expect(bridge.enqueueMidTurnCalls).toEqual([
@@ -8285,6 +8312,52 @@ describe('createServeApp', () => {
       );
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('DELETE /session/:id/mid-turn-messages/:messageId', () => {
+    it('removes the message and forwards client identity', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .delete('/session/s-1/mid-turn-messages/mid-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-9');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ removed: true });
+      expect(bridge.removeMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          messageId: 'mid-1',
+          context: { clientId: 'client-9' },
+        },
+      ]);
+    });
+
+    it('returns removed:false when the message already left the queue', async () => {
+      const bridge = fakeBridge({
+        removeMidTurnImpl: () => ({ removed: false }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .delete('/session/s-1/mid-turn-messages/mid-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ removed: false });
     });
   });
 
@@ -20060,6 +20133,22 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer wrong');
       expect(res.status).toBe(401);
+    });
+
+    it('ignores daemon cookies entirely now that fragment auth replaced them', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const cookieOnly = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret');
+      expect(cookieOnly.status).toBe(401);
+
+      const cookieWithWrongBearer = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret')
+        .set('Authorization', 'Bearer wrong');
+      expect(cookieWithWrongBearer.status).toBe(401);
     });
 
     it('accepts the right token', async () => {

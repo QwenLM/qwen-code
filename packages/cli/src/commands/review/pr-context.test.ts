@@ -23,6 +23,8 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
+  latestOwnLedger,
+  renderLedgerSection,
 } from './pr-context.js';
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
@@ -181,13 +183,18 @@ describe('fullCommentBody', () => {
 });
 
 describe('isReviewWorthShowing', () => {
-  const FOOTER = '_— qwen3.7-max via Qwen Code /review_';
+  const LEGACY_FOOTER = '_— qwen3.7-max via Qwen Code /review_';
+  const VERSIONED_FOOTER =
+    '_— qwen3.8-max-preview via Qwen Code /review (v0.21.2)_';
 
-  it('filters the exact canonical LGTM template, with or without the footer', () => {
+  it('filters the exact canonical LGTM template, with or without either footer', () => {
     expect(isReviewWorthShowing('No issues found. LGTM! ✅')).toBe(false);
-    expect(isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${FOOTER}`)).toBe(
-      false,
-    );
+    expect(
+      isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${LEGACY_FOOTER}`),
+    ).toBe(false);
+    expect(
+      isReviewWorthShowing(`No issues found. LGTM! ✅\n\n${VERSIONED_FOOTER}`),
+    ).toBe(false);
     expect(isReviewWorthShowing('')).toBe(false);
     expect(isReviewWorthShowing(undefined)).toBe(false);
   });
@@ -986,5 +993,185 @@ describe('prContextCommand builder', () => {
     } as unknown as Argv;
     ((prContextCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
     expect(opts).toContain('host');
+  });
+});
+
+describe('latestOwnLedger', () => {
+  const marker = (round: number) =>
+    `LGTM <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"a.ts","title":"t"}]} -->`;
+  const review = (login: string, at: string, body: string) => ({
+    id: 1,
+    user: { login },
+    submitted_at: at,
+    body,
+  });
+
+  it('takes the LATEST marker from the reviewing account only', () => {
+    const ledger = latestOwnLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        review('bot', '2026-01-03T00:00:00Z', marker(3)),
+        review('bot', '2026-01-02T00:00:00Z', marker(2)),
+        // Another account's marker is data about THEIR review — ignored.
+        review('stranger', '2026-01-09T00:00:00Z', marker(9)),
+      ],
+      'bot',
+    );
+    expect(ledger?.round).toBe(3);
+  });
+
+  it('breaks a submitted_at tie on the review id, not on array order', () => {
+    // Two rounds posted in the same second (or with the timestamp missing) are
+    // ordered only by id. Keeping the earlier one hands the next round the
+    // older work list — the one failure the whole recovery exists to prevent.
+    const at = '2026-01-01T00:00:00Z';
+    const ledger = latestOwnLedger(
+      [
+        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
+        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
+      ],
+      'bot',
+    );
+    expect(ledger?.round).toBe(4);
+  });
+
+  it('yields nothing with no login, no marker, or a malformed one', () => {
+    expect(
+      latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
+    ).toBeNull();
+    expect(
+      latestOwnLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
+    ).toBeNull();
+    expect(
+      latestOwnLedger(
+        [review('bot', '2026-01-01', '<!-- qwen-review-ledger nope -->')],
+        'bot',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('renderLedgerSection', () => {
+  /** Live cell separators, counted the way markdown reads them. */
+  const liveSeparators = (row: string) => {
+    let n = 0;
+    for (let i = 0; i < row.length; i++) {
+      if (row[i] === '\\') {
+        i++;
+        continue;
+      }
+      if (row[i] === '|') n++;
+    }
+    return n;
+  };
+
+  it('escapes the BACKSLASH before the pipe, so neither can forge a row', () => {
+    // `\\|` in a title became `\\\\|`, which markdown reads as an escaped
+    // backslash followed by a LIVE separator — the forged row the escaping
+    // exists to prevent, produced by the escaping.
+    for (const title of ['plain', 'a | b', 'back\\| slash', 'trail\\']) {
+      const row = renderLedgerSection({
+        v: 1,
+        round: 1,
+        findings: [{ id: 'R1-1', sev: 'C', file: 'a.ts', line: 2, title }],
+      })
+        .split('\n')
+        .find((l) => l.startsWith('| R1-1'))!;
+      expect(liveSeparators(row)).toBe(5);
+    }
+  });
+
+  it('says so when the ledger is PARTIAL, and stays silent when it is not', () => {
+    // The size cap can drop entries. A truncated list rendered under "every
+    // entry below is owed a ruling" reads as complete, and the next round
+    // retires what it cannot see.
+    const partial = renderLedgerSection({
+      v: 1,
+      round: 3,
+      findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+      dropped: 7,
+    });
+    expect(partial).toContain('PARTIAL');
+    expect(partial).toContain('7 further finding(s)');
+    expect(partial).toMatch(/Absence below is not evidence/);
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 3,
+        findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('PARTIAL');
+  });
+
+  it('renders a work-list table that names the ruling owed per entry', () => {
+    const md = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [
+        { id: 'R2-1', sev: 'C', file: 'src/a.ts', line: 7, title: 'leak' },
+        { id: 'R2-2', sev: 'S', file: 'src/b.ts', title: 'gap' },
+      ],
+    });
+    expect(md).toContain('## Previous /review round (machine ledger)');
+    expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
+    expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
+    expect(md).toContain('owed a this-round ruling');
+  });
+});
+
+describe('ledger marker vs the canonical-LGTM filter', () => {
+  it('a marker-carrying canonical LGTM is still filtered out', () => {
+    // CANONICAL_LGTM_RE is ^…$-anchored: a trailing marker made every no-op
+    // round "worth showing", so prior rounds started rendering in full.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[]} -->';
+    const md = buildMarkdown(
+      '1',
+      'o/r',
+      { title: 't', body: '', state: 'OPEN' } as never,
+      [],
+      [],
+      [
+        {
+          id: 1,
+          user: { login: 'bot' },
+          submitted_at: '2026-01-01T00:00:00Z',
+          body: `No issues found. LGTM! ✅\n\n${marker}`,
+        },
+      ],
+    );
+    expect(md).not.toContain('Review summaries');
+  });
+});
+
+describe('renderLedgerSection escaping', () => {
+  it('neutralises a pipe or newline in untrusted cell content', () => {
+    const md = renderLedgerSection({
+      v: 1,
+      round: 1,
+      findings: [
+        {
+          id: 'R1-1',
+          sev: 'C',
+          file: 'a.ts',
+          title: 'boom | forged | row\nsecond line',
+        },
+      ],
+    });
+    const rows = md.split('\n').filter((l) => l.startsWith('| R1-1'));
+    expect(rows).toHaveLength(1); // one row, not three
+    expect(rows[0]).toContain('\\|');
+  });
+
+  it('keeps a backtick in the location inside its code span', () => {
+    // The location is rendered as `path` — a backtick in the path closes the
+    // span and lets the rest render as markdown instead of as a path.
+    const md = renderLedgerSection({
+      v: 1,
+      round: 1,
+      findings: [{ id: 'R1-1', sev: 'S', file: 'a`.ts** bold **', title: 't' }],
+    });
+    const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
+    expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
   });
 });

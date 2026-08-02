@@ -65,6 +65,13 @@ import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
+// `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
+// stale-sweep-then-remove step (its rationale lives there, with the helper).
+import {
+  discardWorktree,
+  worktreeCreateFailureDetail,
+  type SweepResult,
+} from './lib/worktree.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
@@ -138,7 +145,23 @@ export function planTestEfficacy(
 
 export type MutantVerdict = 'killed' | 'survived' | 'inconclusive';
 
-export interface MutantCandidate {
+/**
+ * A candidate the probe will run. The two shapes are a union so an operator
+ * without its replacement line is UNREPRESENTABLE: `runOneMutant` takes the
+ * ACTION from `mutated` and the verdict WORDING from `operator`, so a
+ * half-populated candidate would delete a line while reporting "with its
+ * `?? fallback` dropped".
+ */
+export type MutantCandidate = DeletionMutant | ReplacementMutant;
+
+export interface ReplacementMutant extends MutantBase {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  /** The full replacement LINE (untrimmed). Required by construction. */
+  mutated: string;
+}
+
+/** What both mutant shapes carry. */
+export interface MutantBase {
   file: string;
   /** 1-based line number in the post-change file. */
   line: number;
@@ -146,10 +169,21 @@ export interface MutantCandidate {
   statement: string;
 }
 
-export interface MutantResult extends MutantCandidate {
+/**
+ * The legacy shape: the line is DELETED. `operator` is absent (or `'delete'`)
+ * and there is no replacement line — see the union above for why that is
+ * enforced by the type rather than by a convention.
+ */
+export interface DeletionMutant extends MutantBase {
+  operator?: 'delete';
+  mutated?: undefined;
+}
+
+/** An intersection, not `extends`: the candidate is a union now. */
+export type MutantResult = MutantCandidate & {
   verdict: MutantVerdict;
   detail: string;
-}
+};
 
 /**
  * At most this many deletion mutants per run. Every mutant is a full vitest run
@@ -157,6 +191,42 @@ export interface MutantResult extends MutantCandidate {
  * keeps this command inside its budget on a diff that clears eight Maps.
  */
 export const MAX_MUTANTS = 8;
+
+export type HunkVerdict = MutantVerdict;
+
+export interface HunkCandidate {
+  file: string;
+  /** 0-based index of this hunk within the file's diff against base. */
+  index: number;
+  /** The `@@ … @@` line, quoted back in the report. */
+  header: string;
+  /** New-side first line the hunk occupies — where the finding points. */
+  startLine: number;
+  /** A complete patch: the file header plus this ONE hunk. */
+  patch: string;
+}
+
+export interface HunkResult extends Omit<HunkCandidate, 'patch'> {
+  verdict: HunkVerdict;
+  detail: string;
+}
+
+/**
+ * At most this many per-hunk probes per run.
+ *
+ * Lower than {@link MAX_MUTANTS} on purpose: a hunk probe costs the same full
+ * suite run, but it is the THIRD claim on a budget the mutants and the revert
+ * probe already share, and it runs last. The cap is what keeps a 40-hunk diff
+ * from starving the revert probe rather than a statement about how many hunks
+ * are worth probing.
+ */
+export const MAX_HUNK_PROBES = 6;
+
+/**
+ * At most this many REPLACEMENT mutants per run, inside the shared cap — see
+ * the selection comment for the 24x pool measurement that forced this.
+ */
+export const REPLACEMENT_SUB_CAP = 3;
 
 /** Deadline for one vitest run (baseline, mutant, or revert probe alike). */
 const PROBE_RUN_TIMEOUT_MS = 300_000;
@@ -521,12 +591,112 @@ export interface MutantSourceFile {
  * backtick derails it) has ALL its candidates dropped and is returned in
  * `derailed` — the caller must disclose that zero for the same reason.
  */
+/**
+ * (Below: the replacement operators. `selectMutants`' own contract doc sits
+ * directly above `selectMutants` — this block documents its helper.)
+ *
+ * Replacement mutants for one added line. High-precision by construction: each
+ * pattern is anchored to a shape whose survival maps to one crisp sentence,
+ * because a survivor becomes a public Suggestion and a fuzzy operator would
+ * flood the report with "so what" mutations.
+ *
+ * The edit is computed on `codeLine` — the scanner's literal-blanked,
+ * comment-stripped, TRIMMED view — and reattached to the raw line's leading
+ * whitespace. That is only sound when the two views agree, so a line whose
+ * trimmed raw text differs from its code view (it carries a string literal or
+ * a comment) yields NO candidate: an index computed on one view and applied to
+ * the other spliced `iftrue 0)` into a guard the first time this ran, and a
+ * mangled mutant is worse than a skipped one — its compile error reads as
+ * `inconclusive` and quietly eats a cap slot. Conservative silence, as with
+ * every other selector here.
+ *
+ * At most ONE candidate per line, first match wins (coalesce → term-drop →
+ * guard-true, most-specific first): two mutants of the same line would run the
+ * suite twice to say nearly the same thing.
+ */
+export function replacementMutantsOf(
+  raw: string,
+  codeLine: string,
+): {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  mutated: string;
+} | null {
+  if (raw.trim() !== codeLine) return null;
+  const lead = /^\s*/.exec(raw)![0];
+  const done = (
+    operator: 'coalesce' | 'guard-true' | 'term-drop',
+    edited: string,
+  ) => ({ operator, mutated: lead + edited });
+
+  // `a ?? b` with a SIMPLE fallback — an identifier/member/call chain, no
+  // operators — so the drop cannot truncate a larger expression.
+  const coalesce =
+    /\s\?\?\s+[\w$.]+(?:\((?:[^()]|\([^()]*\))*\))?(?=\s*[;,)\]}]|\s*$)/.exec(
+      codeLine,
+    );
+  if (coalesce) {
+    return done(
+      'coalesce',
+      codeLine.slice(0, coalesce.index) +
+        codeLine.slice(coalesce.index + coalesce[0].length),
+    );
+  }
+  // `+ UPPER_CONST` — a constant-looking reserve/limit term in arithmetic.
+  const term = /\s\+\s+[A-Z][A-Z0-9_]{2,}\b/.exec(codeLine);
+  if (term) {
+    return done(
+      'term-drop',
+      codeLine.slice(0, term.index) +
+        codeLine.slice(term.index + term[0].length),
+    );
+  }
+  // A single-line `if (…)` whose condition CONTAINS a comparison — guards, not
+  // every branch: `if (ready)` survivors are noise, `if (a !== b)` survivors
+  // mean nothing pins when the guard must not fire. The condition must close on
+  // this line (balanced parens), or `true` would splice mid-expression.
+  // `}` optional before `else`: a brace-less `else if (a !== b)` is the same
+  // guard shape and was silently skipped.
+  const ifm = /^((?:}?\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
+  if (ifm) {
+    let depth = 1;
+    let condEnd = -1;
+    for (let i = 0; i < ifm[2].length; i++) {
+      if (ifm[2][i] === '(') depth++;
+      else if (ifm[2][i] === ')' && --depth === 0) {
+        condEnd = i;
+        break;
+      }
+    }
+    // The comparison must be in the CONDITION, not anywhere after `if (`:
+    // testing the whole remainder admitted `if (ready) emit(a !== b);` — the
+    // comparison-less shape whose survivors are pure noise, which this gate
+    // exists to exclude.
+    if (
+      condEnd > 0 &&
+      // Two exclusions, both measured. `(?<![=!<>])…(?![=>])` keeps an arrow
+      // function's `=>` from reading as a comparison. And the trailing `\s` is
+      // REQUIRED, not an accidental asymmetry with `[!=]==`: without it a
+      // generic call — `if (isRecord<string>(v))` — matches at `<string`, and
+      // a type-guard predicate is exactly the `if (ready)` shape whose
+      // survivors this gate calls noise. Telling `a<b` from `fn<T>(x)` needs a
+      // parser; the gate is silence-biased by design, and Prettier makes the
+      // unformatted comparison near-nonexistent here.
+      /[!=]==|(?<![=!<>])[<>]=?(?![=>])\s/.test(ifm[2].slice(0, condEnd))
+    ) {
+      return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
+    }
+  }
+  return null;
+}
+
 export function selectMutants(
   files: MutantSourceFile[],
   cap: number = MAX_MUTANTS,
 ): { selected: MutantCandidate[]; skippedForCap: number; derailed: string[] } {
   const preferred: MutantCandidate[] = [];
   const rest: MutantCandidate[] = [];
+  const replPreferred: MutantCandidate[] = [];
+  const replRest: MutantCandidate[] = [];
   const derailed: string[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
@@ -539,20 +709,52 @@ export function selectMutants(
       const raw = lines[n - 1];
       if (raw === undefined) continue;
       const t = raw.trim();
-      if (!SAFETY_VERB_RE.test(codeLines[n - 1] ?? '')) continue;
       if (inLiteral[n - 1]) continue;
-      if (!isRemovableStatement(lines, codeLines, n - 1)) continue;
-      (f.hasNewTests ? preferred : rest).push({
-        file: f.file,
-        line: n,
-        statement: t,
-      });
+      const code = codeLines[n - 1] ?? '';
+      if (
+        SAFETY_VERB_RE.test(code) &&
+        isRemovableStatement(lines, codeLines, n - 1)
+      ) {
+        // No `operator` field: deletion is the legacy shape, and stamping it
+        // would churn every existing report reader for zero information.
+        (f.hasNewTests ? preferred : rest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+        });
+        continue; // one candidate per line — deletion is the sharper experiment
+      }
+      const repl = replacementMutantsOf(raw, code);
+      if (repl) {
+        (f.hasNewTests ? replPreferred : replRest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+          operator: repl.operator,
+          mutated: repl.mutated,
+        });
+      }
     }
   }
-  const eligible = [...preferred, ...rest];
+  // Deletions first, then replacements — and replacements carry their OWN
+  // sub-cap. Measured over 40 real commits, the replacement operators produce
+  // ~24x the deletion pool (215 vs 9 candidates; guard-true drives it), and
+  // every mutant run drains the same time window hunk probes draw from last:
+  // uncapped, most diffs with any replacement candidates would leave hunk
+  // probing zero runs and the hunk-survived finding class would silently stop
+  // firing. Three slots keeps the highest-value replacements without buying
+  // coarser answers at the hunk probes' expense; what the sub-cap drops is
+  // counted in skippedForCap, never silently lost.
+  const replacements = [...replPreferred, ...replRest];
+  const eligible = [
+    ...preferred,
+    ...rest,
+    ...replacements.slice(0, REPLACEMENT_SUB_CAP),
+  ];
+  const subCapSkipped = Math.max(0, replacements.length - REPLACEMENT_SUB_CAP);
   return {
     selected: eligible.slice(0, cap),
-    skippedForCap: Math.max(0, eligible.length - cap),
+    skippedForCap: Math.max(0, eligible.length - cap) + subCapSkipped,
     derailed,
   };
 }
@@ -601,6 +803,21 @@ export function parseAddedLines(diffText: string): Map<string, number[]> {
 }
 
 /**
+ * The probe file that is the collocated test of `file` (the repo convention
+ * `file.test.ts` / `file.spec.ts` beside it), if one is in `testPaths`.
+ */
+export function collocatedProbe(
+  file: string,
+  testPaths: string[],
+): string | undefined {
+  const stem = file.replace(/\.[^./]+$/, '');
+  return testPaths.find((t) => {
+    const tstem = t.replace(/\.[^./]+$/, '');
+    return tstem === `${stem}.test` || tstem === `${stem}.spec`;
+  });
+}
+
+/**
  * Does the diff add or change a test collocated with this production file?
  * The repo convention is `file.test.ts` beside `file.ts`. Used only to ORDER
  * candidates under the cap, so a miss costs priority, not selection.
@@ -609,11 +826,7 @@ export function hasCollocatedNewTest(
   file: string,
   testPaths: string[],
 ): boolean {
-  const stem = file.replace(/\.[^./]+$/, '');
-  return testPaths.some((t) => {
-    const tstem = t.replace(/\.[^./]+$/, '');
-    return tstem === `${stem}.test` || tstem === `${stem}.spec`;
-  });
+  return collocatedProbe(file, testPaths) !== undefined;
 }
 
 /**
@@ -913,72 +1126,13 @@ export function safeRmWithin(worktree: string, relPath: string): void {
   rmSync(cur, { force: true });
 }
 
-type SweepResult = ReturnType<typeof spawnSync>;
-
-/**
- * Free the probe worktree's path: unregister it, then remove whatever is left.
- *
- * `git worktree remove --force` only clears a tree git still tracks. A directory
- * left at the path after metadata loss or a partial cleanup is reported "not a
- * working tree" and left in place — and a *non-empty* one then makes
- * `git worktree add` fail `already exists`, wedging every probe as
- * `inconclusive` until someone clears it by hand. So the unregister is followed
- * by a plain remove of whatever dir remains. `rmSync` unlinks a symlink rather
- * than following it, so a tampered leftover cannot redirect the delete outside
- * `tree`.
- *
- * This is `releaseWorktree`'s two-step, and deliberately NOT a call to it:
- * `releaseWorktree` runs git from the process cwd, which need not be this
- * worktree's repo, and it discards the sweep's stderr — which is usually the
- * only thing that explains a subsequent `add` failure. Both callers here need
- * `cwd: worktree` and that stderr, so the step lives here and is shared between
- * them.
- *
- * Best-effort by design: a clean path is the normal case, so the unregister does
- * not go through the throwing `git()` wrapper. `rmSync` can still throw (`force`
- * suppresses ENOENT but not EPERM/EBUSY) — callers decide what that means.
- */
-function discardWorktree(cwd: string, tree: string): SweepResult {
-  const sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
-    cwd,
-    encoding: 'utf8',
-  });
-  rmSync(tree, { recursive: true, force: true });
-  return sweep;
-}
-
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
 /**
- * The `inconclusive` detail for a probe worktree that could not be created.
- *
- * Pure, and extracted for that reason: the branch it lives on fires only when
- * `git worktree add` fails, and there is no portable way to force that in a
- * real-git test — the one lever (making `.git/worktrees` unwritable) is bypassed
- * by root and behaves differently under CI's unprivileged user, so a test built
- * on it would assert one thing locally and another in CI. The composition is the
- * part with logic in it, so it is testable here on its own.
- *
- * The stale-sweep's stderr is folded in because it is usually the explanation:
- * when `add` fails on a leftover the sweep could not clear, the sweep is what
- * says why.
- */
-export function probeCreateFailureDetail(
-  err: unknown,
-  sweepStderr: string,
-): string {
-  const sweepErr = sweepStderr.trim();
-  return (
-    `probe worktree could not be created: ${err instanceof Error ? err.message : String(err)}` +
-    (sweepErr ? ` (stale-tree sweep also reported: ${sweepErr})` : '')
-  );
-}
-
-/**
  * The warning for a probe worktree that survived its discard.
  *
- * Pure, and for the same reason as its sibling above: the branch it lives on
+ * Pure, and for the same reason as `worktreeCreateFailureDetail`: the branch it lives on
  * fires only when the path outlives both `worktree remove` and `rmSync`, which
  * no portable test can force. The reason is what makes it useful — whoever has
  * to delete the tree by hand needs to know WHY it would not go, and a bare
@@ -1141,6 +1295,295 @@ function runProbeSuite(
  * reached through the command (selection and the probe tree derive from the
  * same commit), so the test pins it directly rather than not at all.
  */
+/**
+ * Split one file's diff into one self-contained patch per hunk.
+ *
+ * The statement mutants answer "is this one safety statement protected?" for a
+ * deliberately narrow class of statement; the revert probe answers "is ANY of
+ * this protected?" all at once. Between them sits the question neither can
+ * reach: **which particular change in this diff has no test behind it.** A hunk
+ * is the natural unit for that — it is the granularity the author wrote and the
+ * granularity a reviewer reads — and reverting one at a time is the only way to
+ * attribute a green suite to a specific change rather than to the diff at large.
+ *
+ * A column-0 `@@` is unambiguously a hunk header: every body line of a unified
+ * diff starts with ' ', '+', '-' or '\', so a removed line whose own text begins
+ * `@@` arrives as `-@@` and cannot be mistaken for one.
+ *
+ * Rename patches are not guarded here: `hunkProbeInputs` diffs one pathspec at
+ * a time, so a rename renders as a pure add (`--- /dev/null`) and
+ * `selectHunkProbes` skips it. A rename reaching `runOneHunkProbe` directly
+ * would reverse-apply the rename and leave both paths present.
+ */
+export function splitDiffIntoHunks(
+  diffText: string,
+): Array<{ header: string; patch: string; startLine: number }> {
+  const lines = diffText.split('\n');
+  const first = lines.findIndex((l) => l.startsWith('@@'));
+  if (first < 0) return [];
+  // Re-captured at every `diff --git` boundary: a hunk's patch must carry ITS
+  // file's header, or a multi-file diff hands git a patch naming the wrong
+  // file. (Latent while hunkProbeInputs diffs one path at a time — but this is
+  // exported and reads as general-purpose, so it behaves as one.)
+  // Start from the LAST `diff --git` before the first `@@`: a binary entry
+  // before it has no hunks, and including its header in the initial slice
+  // would hand the first real hunk a patch naming two files.
+  let headerStart = 0;
+  for (let k = first - 1; k >= 0; k--) {
+    if (lines[k].startsWith('diff --git ')) {
+      headerStart = k;
+      break;
+    }
+  }
+  let fileHeader = lines.slice(headerStart, first);
+  const out: Array<{ header: string; patch: string; startLine: number }> = [];
+  let i = first;
+  while (i < lines.length) {
+    if (lines[i].startsWith('diff --git ')) {
+      const start = i;
+      while (
+        i < lines.length &&
+        !lines[i].startsWith('@@') &&
+        !(i > start && lines[i].startsWith('diff --git '))
+      )
+        i++;
+      fileHeader = lines.slice(start, i);
+      continue;
+    }
+    if (!lines[i].startsWith('@@')) {
+      i++;
+      continue;
+    }
+    const header = lines[i];
+    let j = i + 1;
+    while (
+      j < lines.length &&
+      !lines[j].startsWith('@@') &&
+      !lines[j].startsWith('diff --git ')
+    ) {
+      j++;
+    }
+    // Anchor at the first ADDED line, not the hunk header's start: the header
+    // opens up to three context lines above the change, and a finding anchored
+    // on untouched context misleads the reader (and the inline-comment anchor).
+    let startLine = Number(
+      /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(header)?.[1] ?? '0',
+    );
+    let offset = 0;
+    for (let k = i + 1; k < j; k++) {
+      if (lines[k].startsWith('+')) {
+        startLine += offset;
+        break;
+      }
+      // `\ No newline at end of file` marks no file line — exclude it like a
+      // removal, or startLine drifts off by one per marker (parseAddedLines
+      // already excludes it the same way).
+      if (!lines[k].startsWith('-') && !lines[k].startsWith('\\')) offset++;
+    }
+    out.push({
+      header: header.trim(),
+      startLine,
+      // `git apply` requires the trailing newline; a patch that ends mid-line is
+      // rejected with `corrupt patch`.
+      patch: `${[...fileHeader, ...lines.slice(i, j)].join('\n').replace(/\n+$/, '')}\n`,
+    });
+    i = j;
+  }
+  return out;
+}
+
+/**
+ * The hunks worth probing, in the order they should be spent.
+ *
+ * Two selection rules, both about not paying twice for the same answer:
+ *
+ *  - **A hunk that already contains a mutant is skipped.** The mutant ran a
+ *    finer-grained version of the same experiment on that hunk's own lines; a
+ *    second run over the whole hunk buys a coarser answer at the same price,
+ *    and the budget is better spent on ground nothing has covered.
+ *  - **Files whose collocated tests the diff also touches go first**, as with
+ *    mutants: a survivor is most informative exactly where the PR claims its
+ *    new tests cover the new code.
+ *
+ * Candidates the cap cannot fit are counted, never dropped in silence — a
+ * capped `survived: 0` that read as "every change is covered" is the same false
+ * assurance the mutant cap already guards against.
+ */
+export function selectHunkProbes(
+  files: Array<{
+    file: string;
+    diff: string;
+    hasNewTests: boolean;
+    mutantLines: number[];
+  }>,
+  cap: number = MAX_HUNK_PROBES,
+): { selected: HunkCandidate[]; skippedForCap: number } {
+  const preferred: HunkCandidate[] = [];
+  const rest: HunkCandidate[] = [];
+  for (const f of files) {
+    // A deleted file's hunks are all removals; `runOneHunkProbe` reads the
+    // file first and returns `inconclusive` every time. Spending cap slots on
+    // guaranteed inconclusives wastes the budget on a delete-heavy diff.
+    // An added file's reverse-apply deletes the whole file — the same waste
+    // when a probe imports it, and a file-level statement wearing a hunk-level
+    // message when nothing does.
+    if (f.diff.includes('\n+++ /dev/null')) continue;
+    if (f.diff.includes('\n--- /dev/null')) continue;
+    const hunks = splitDiffIntoHunks(f.diff);
+    hunks.forEach((h, index) => {
+      // Range from the header's new-side start, not `startLine`: that anchor
+      // sits at the first ADDED line, past leading context, so adding the hunk's
+      // full new-side length to it overshoots the hunk's end by the context-line
+      // count and silently skips a mutant in a closely following hunk.
+      const hunkStart = Number(
+        /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(h.header)?.[1] ?? '0',
+      );
+      const end = hunkStart + newSideLength(h.header);
+      if (f.mutantLines.some((n) => n >= hunkStart && n < end)) return;
+      (f.hasNewTests ? preferred : rest).push({
+        file: f.file,
+        index,
+        header: h.header,
+        startLine: h.startLine,
+        patch: h.patch,
+      });
+    });
+  }
+  const eligible = [...preferred, ...rest];
+  return {
+    selected: eligible.slice(0, cap),
+    skippedForCap: Math.max(0, eligible.length - cap),
+  };
+}
+
+/** New-side line count from an `@@ -a,b +c,d @@` header (`d` defaults to 1). */
+function newSideLength(header: string): number {
+  const m = /^@@ -\d+(?:,\d+)? \+\d+(?:,(\d+))? @@/.exec(header);
+  return m ? Number(m[1] ?? '1') : 1;
+}
+
+/**
+ * Neutralise ONE hunk in the probe tree, run the affected tests, restore.
+ *
+ * Reverse-applying the hunk's own patch is what makes this attributable: `git
+ * checkout base -- <file>` would revert the whole file and the verdict would
+ * belong to no particular change, which is precisely the all-or-nothing limit
+ * of the revert probe. `git` does the line-offset arithmetic, so a hunk later in
+ * the file is neutralised at the right place without this code tracking offsets.
+ *
+ * The asymmetry the mutants established holds here too, and for the same
+ * reason: a patch that will not apply, or a tree that will not compile without
+ * the hunk, is `inconclusive` — NEVER `killed`. A compile error says nothing
+ * about whether a test would have caught a behavioural regression, and scoring
+ * it as "a test caught it" is exactly the false assurance this command exists
+ * to remove.
+ */
+export function runOneHunkProbe(
+  probeTree: string,
+  hunk: HunkCandidate,
+  probes: string[],
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): HunkResult {
+  const { patch: _patch, ...meta } = hunk;
+  const abs = join(probeTree, hunk.file);
+  let original: string;
+  try {
+    original = readFileSync(abs, 'utf8');
+  } catch (e) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail: `the probe tree does not hold ${hunk.file}: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  const applied = spawnSync('git', ['apply', '--reverse', '-'], {
+    cwd: probeTree,
+    input: hunk.patch,
+    encoding: 'utf8',
+  });
+  if (applied.error || applied.status !== 0) {
+    // Nothing was changed (git applies a patch atomically), so there is nothing
+    // to restore — and nothing was learned.
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail: `the hunk could not be reverse-applied, so nothing was neutralised: ${(applied.stderr ?? applied.error?.message ?? '').toString().trim()}`,
+    };
+  }
+  try {
+    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
+    const verdict = classifyMutantRun(perFile);
+    const detail =
+      verdict === 'killed'
+        ? 'the suite went red with this hunk reverted — a test covers this change'
+        : verdict === 'survived'
+          ? 'every affected test still PASSED with this hunk reverted — no test in this diff fails when the change is undone'
+          : 'the tree with this hunk reverted produced no clean verdict (likely a compile or import error) — not evidence either way';
+    return { ...meta, verdict, detail };
+  } finally {
+    // Restore by content, not by re-applying the patch forward: a forward apply
+    // can fail on its own and would leave the tree neutralised for every later
+    // probe, turning one bad restore into a run of false survivors. Writing the
+    // saved bytes back also recreates a file the reverse patch deleted — and
+    // the parent directory first: reverse-applying a `new file` hunk removes
+    // the directories it emptied, and a restore that throws ENOENT from this
+    // finally loses the verdict AND marks every remaining hunk inconclusive.
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, original, 'utf8');
+  }
+}
+
+/**
+ * The positive control: append one always-failing test to a GREEN probe file,
+ * run that file, restore. Red = the harness demonstrably executes assertions
+ * (true), green = it does not (false). Restore is by content in finally, the
+ * same discipline as every other probe edit in this file.
+ *
+ * `null` is the THIRD outcome, and it is not the same as `false`: the control
+ * never ran, so nothing was demonstrated either way. Returning `false` there
+ * would state as fact that an injected test stayed green when none was ever
+ * injected — the fabricated verdict this file's budget path already refuses
+ * ("never a fabricated true or false"), and it would additionally discard the
+ * whole mutant/hunk window over an I/O error.
+ *
+ * KNOWN BOUND: it validates ONE file, not the collection. The injection goes
+ * into `greenProbes[0]`, so a collector that silently drops a DIFFERENT probe
+ * file still passes the control while that file's survivors stand. The
+ * per-file baseline gate bounds the residual window — a file that collected
+ * nothing is never scored green to begin with — so what is left is a collector
+ * that runs one file and skips another. Named because a `true` here is read as
+ * covering the whole run.
+ */
+export function runControlMutant(
+  probeTree: string,
+  probeFile: string,
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): boolean | null {
+  const abs = join(probeTree, probeFile);
+  let original: string;
+  try {
+    original = readFileSync(abs, 'utf8');
+  } catch {
+    return null; // cannot even read the probe file — nothing was demonstrated
+  }
+  try {
+    writeFileSync(
+      abs,
+      `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
+      'utf8',
+    );
+    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
+    // `gated` is the runner's "went red" verdict; anything else — still green,
+    // collected nothing, crashed — means the control did NOT demonstrate a
+    // working kill path.
+    return perFile.some((r) => r.verdict === 'gated');
+  } finally {
+    writeFileSync(abs, original, 'utf8');
+  }
+}
+
 export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
@@ -1163,7 +1606,20 @@ export function runOneMutant(
         'the probe tree does not match the selected statement at this line — nothing was mutated',
     };
   }
-  lines.splice(mutant.line - 1, 1);
+  // A replacement operator edits the line; the legacy shape deletes it.
+  const what =
+    mutant.operator === 'coalesce'
+      ? 'with its `?? fallback` dropped'
+      : mutant.operator === 'guard-true'
+        ? 'with its guard condition replaced by `true`'
+        : mutant.operator === 'term-drop'
+          ? 'with its `+ CONSTANT` term dropped'
+          : 'deleted';
+  if (mutant.mutated !== undefined) {
+    lines[mutant.line - 1] = mutant.mutated;
+  } else {
+    lines.splice(mutant.line - 1, 1);
+  }
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
     const { perFile } = runProbeSuite(
@@ -1176,14 +1632,74 @@ export function runOneMutant(
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
-        ? 'the suite went red with this statement deleted — a test catches its removal'
+        ? `the suite went red with this statement ${what} — a test catches it`
         : verdict === 'survived'
-          ? 'every affected test still PASSED with this statement deleted — no test fails when it is removed'
+          ? `every affected test still PASSED with this statement ${what} — no test fails ${
+              mutant.mutated === undefined
+                ? 'when it is removed'
+                : 'when it changes'
+            }`
           : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
     return { ...mutant, verdict, detail };
   } finally {
     writeFileSync(abs, original, 'utf8');
   }
+}
+
+/**
+ * The per-file inputs `selectHunkProbes` needs, read from the COMMITTED head.
+ *
+ * Same discipline as mutant selection: the diff comes from `base..HEAD` and so
+ * describes exactly the tree the probe worktree checks out, never whatever
+ * uncommitted state the shared worktree happens to hold. Default context (three
+ * lines) rather than `--unified=0`, because these patches are handed to
+ * `git apply`, which needs context to place a hunk.
+ *
+ * Per-file failures are swallowed to an empty diff: a blob that will not read
+ * says nothing about any test, and it must not take down the probing of the
+ * other files.
+ */
+function hunkProbeInputs(
+  worktree: string,
+  base: string,
+  headSha: string,
+  sources: string[],
+  probes: string[],
+  mutants: MutantCandidate[],
+): Array<{
+  file: string;
+  diff: string;
+  hasNewTests: boolean;
+  mutantLines: number[];
+}> {
+  return sources.map((file) => {
+    let diff = '';
+    try {
+      diff = gitCapture(
+        worktree,
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--no-color',
+        '--src-prefix=a/',
+        '--dst-prefix=b/',
+        '--no-ext-diff',
+        '--no-textconv',
+        base,
+        headSha,
+        '--',
+        file,
+      );
+    } catch {
+      diff = '';
+    }
+    return {
+      file,
+      diff,
+      hasNewTests: hasCollocatedNewTest(file, probes),
+      mutantLines: mutants.filter((m) => m.file === file).map((m) => m.line),
+    };
+  });
 }
 
 async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
@@ -1228,6 +1744,18 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   const mutantResults: MutantResult[] = [];
   let mutantsSkippedForBudget = 0;
   let mutantsSkippedForCap = 0;
+  const hunkResults: HunkResult[] = [];
+  let hunksSkippedForBudget = 0;
+  let hunksSkippedForCap = 0;
+  let hunksSkippedForBaseline = 0;
+  /** Null until the positive control ran; false = dead runner, survivors lie. */
+  let harnessValidated: boolean | null = null;
+  // Its OWN counter, not the budget's or the baseline's: a control that came
+  // back red stops the run with candidates still unprobed, and folding them
+  // into `skippedForBudget` would say the window ran out when it did not. The
+  // note explains why; these numbers are what a reader can count.
+  let mutantsSkippedForControl = 0;
+  let hunksSkippedForControl = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1328,6 +1856,25 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       candidates = [];
     }
 
+    // Hunk candidates are chosen HERE, beside the mutants, and not inside the
+    // mutant branch below. Gating them on `candidates.length > 0` would run
+    // per-hunk probes only on diffs that already have a safety-verb mutant —
+    // exactly inverting their purpose, which is to cover the changes the
+    // safety-verb filter cannot see. A diff of pure condition and return-value
+    // edits has no mutants at all and is precisely the diff this reaches.
+    let hunkCandidates: HunkCandidate[] = [];
+    try {
+      const selection = selectHunkProbes(
+        hunkProbeInputs(worktree, base, headSha, revert, probes, candidates),
+      );
+      hunkCandidates = selection.selected;
+      hunksSkippedForCap = selection.skippedForCap;
+    } catch {
+      // Selection is bookkeeping, like the mutants': a diff that will not read
+      // says nothing about any test. Probe nothing rather than guess.
+      hunkCandidates = [];
+    }
+
     const probeTree = probeWorktreePath(worktree);
     let created = false;
     let sweep: SweepResult | undefined;
@@ -1341,16 +1888,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
       // need no probe, still ship.
-      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
+      const detail = worktreeCreateFailureDetail(
+        'probe',
+        e,
+        String(sweep?.stderr ?? ''),
+      );
       for (const file of probes) {
         results.push({ file, verdict: 'inconclusive' as const, detail });
       }
       for (const c of candidates) {
         mutantResults.push({ ...c, verdict: 'inconclusive' as const, detail });
       }
+      for (const { patch: _p, ...h } of hunkCandidates) {
+        hunkResults.push({ ...h, verdict: 'inconclusive' as const, detail });
+      }
     }
 
-    if (created && candidates.length > 0) {
+    if (created && (candidates.length > 0 || hunkCandidates.length > 0)) {
       // The mutation phase runs BEFORE the revert: it needs the probe tree at
       // the unmodified PR head, and the revert below rewrites that tree to
       // base. The two cannot contaminate each other — every mutated file is in
@@ -1388,12 +1942,87 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           .map((r) => r.file);
         if (greenProbes.length === 0) {
           mutantsSkippedForBaseline = candidates.length;
+          // Their own reason, not the budget's: the mutants ran zero suites in
+          // this branch, and "the mutants used the window" would be a false note.
+          hunksSkippedForBaseline = hunkCandidates.length;
           noteMutants(
             'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing',
           );
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
-          for (const c of candidates) {
+          // POSITIVE CONTROL, before any real mutant spends the window: inject
+          // one test that must fail into a green probe file and confirm the
+          // runner actually goes red. A runner that stays green while executing
+          // a false assertion is not running assertions at all — and against a
+          // dead runner every real mutant "survives", which is precisely the
+          // false gap-report this command exists to prevent. Control green →
+          // every survivor this run would report is re-classed inconclusive.
+          // (A live review measured the cost of lacking this: four survivors
+          // reported off a runner whose collected suite never covered them.)
+          // The control pays for its run like any other experiment: without
+          // this check it silently ate one budgeted slot and skippedForBudget
+          // under-reported by one. No budget for the control — and equally, a
+          // control that could not be set up at all — means nothing was
+          // validated (null), never a fabricated true or false.
+          // Nothing to pre-set here: both loops below run with
+          // `harnessValidated` still null, re-check the same budget against a
+          // later clock, and set their own counters. Assigning full counts
+          // first was dead in every path and worse than dead in one — the hunk
+          // loop pushes collocated-probe inconclusives BEFORE its budget
+          // check, so its own figure excludes them and this one did not.
+          if (fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
+            harnessValidated = runControlMutant(
+              probeTree,
+              greenProbes[0],
+              mutantDeadline,
+              now,
+            );
+            if (harnessValidated === null) {
+              // The probe file could not be read, so no test was injected and
+              // no run happened. That is not a verdict about the runner —
+              // fall through and let the mutants spend the window as usual.
+              noteMutants(
+                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+              );
+            }
+          }
+          if (harnessValidated === false) {
+            // Three causes share this shape — a runner that executes nothing,
+            // a collector that skips the injected test, a reporter that drops
+            // failures — and none of them can kill, so spending the rest of
+            // the window would only manufacture survivors to re-class.
+            mutantsSkippedForControl = candidates.length;
+            hunksSkippedForControl = hunkCandidates.length;
+            noteMutants(
+              'positive control FAILED (the injected always-failing test did not turn the run red — a dead runner, a collector that skipped it, or a reporter that dropped the failure): nothing here can kill, every would-be survivor is reported inconclusive, and the remaining mutant/hunk window was not spent',
+            );
+          }
+          for (const c of harnessValidated === false ? [] : candidates) {
+            // The hunk loop's rule, which the mutants needed just as much.
+            // A mutant runs against `greenProbes` only, so a file whose OWN
+            // test was red in the unmutated baseline has that test excluded
+            // from the run — and then "every affected test still passed"
+            // is computed over a set that omits the one test most likely to
+            // catch the deletion. Measured live on PR #8213: six hunks in
+            // `bridge.ts` were correctly held at `inconclusive` because
+            // `bridge.test.ts` was not green, while eight mutants in the SAME
+            // file were scored `survived` and shipped as findings.
+            //
+            // The comment below this loop framed the asymmetry as "mutants
+            // guard the killed direction, hunks guard the survived one". That
+            // is true of an inconclusive RUN; it left the survived direction
+            // of a mutant unguarded against an absent covering test. Checked
+            // before the budget, because a candidate that cannot yield a
+            // verdict should not spend a suite run to say so.
+            const own = collocatedProbe(c.file, probes);
+            if (own && !greenProbes.includes(own)) {
+              mutantResults.push({
+                ...c,
+                verdict: 'inconclusive' as const,
+                detail: `this mutant's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the statement is uncovered`,
+              });
+              continue;
+            }
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
@@ -1411,6 +2040,44 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               ),
             );
           }
+
+          // Per-hunk probes run LAST and out of the same window, on whatever
+          // the mutants left. That ordering is the priority statement: a
+          // safety-verb mutant is the higher-precision experiment, so it gets
+          // the budget first, and a hunk probe is what the leftovers buy. It
+          // also means a diff whose mutants consumed the window reports zero
+          // hunk probes with `skippedForBudget` set — never a silent zero.
+          for (const h of harnessValidated === false ? [] : hunkCandidates) {
+            // A hunk whose OWN collocated test the baseline dropped (red, or the
+            // case this exists for: a probe-tree import error that collected
+            // nothing) cannot be scored `survived`: the other probes passing
+            // shows only that THEY do not cover it, not that nothing does, since
+            // the one test that would catch it never ran. The mutants hold
+            // BOTH halves of this now: an inconclusive run is never `killed`,
+            // and — since the loop above gained the same collocated check —
+            // an absent covering test is never `survived` there either. The
+            // two halves are separate guards; having one was read as having
+            // the rule, and eight mutant survivors shipped through the gap.
+            const own = collocatedProbe(h.file, probes);
+            if (own && !greenProbes.includes(own)) {
+              const { patch: _patch, ...meta } = h;
+              hunkResults.push({
+                ...meta,
+                verdict: 'inconclusive' as const,
+                detail: `this hunk's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the hunk is uncovered`,
+              });
+              continue;
+            }
+            const remaining = mutantDeadline - now();
+            if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
+              hunksSkippedForBudget =
+                hunkCandidates.length - hunkResults.length;
+              break;
+            }
+            hunkResults.push(
+              runOneHunkProbe(probeTree, h, greenProbes, mutantDeadline, now),
+            );
+          }
         }
       } catch (e) {
         // The baseline, a mutant run, or a restore failed. Not evidence about
@@ -1423,6 +2090,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             verdict: 'inconclusive' as const,
             detail,
           });
+        }
+        for (const { patch: _p, ...h } of hunkCandidates.slice(
+          hunkResults.length,
+        )) {
+          hunkResults.push({ ...h, verdict: 'inconclusive' as const, detail });
         }
       }
     }
@@ -1495,6 +2167,34 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   }
 
+  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
+  // them before findings are derived, keeping the control's verdict upstream
+  // of everything a reader acts on.
+  if (harnessValidated === false) {
+    const detail =
+      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
+    for (const m of mutantResults) {
+      if (m.verdict === 'survived') {
+        m.verdict = 'inconclusive';
+        m.detail = detail;
+      }
+    }
+    for (const h of hunkResults) {
+      if (h.verdict === 'survived') {
+        h.verdict = 'inconclusive';
+        h.detail = detail;
+      }
+    }
+    // The file-level revert probe's "inert" is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too.
+    for (const r of results) {
+      if (r.verdict === 'inert') {
+        r.verdict = 'inconclusive';
+        r.detail = detail;
+      }
+    }
+  }
+
   const findings = [
     ...unreachable.map((f) => ({
       file: f,
@@ -1513,8 +2213,31 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       .map((m) => ({
         file: m.file,
         kind: 'mutant-survived' as const,
-        message: `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
+        message:
+          m.operator === 'coalesce'
+            ? `\`${m.file}:${m.line}\`: dropping the \`?? fallback\` from \`${m.statement}\` leaves every affected test green — the fallback is untested, and it is frequently the only thing standing between a miss and a worse default. Add a test that exercises the miss path.`
+            : m.operator === 'guard-true'
+              ? `\`${m.file}:${m.line}\`: forcing this guard's condition to \`true\` leaves every affected test green — no test pins when the guard must NOT fire. Add a case just on the other side of the condition.`
+              : m.operator === 'term-drop'
+                ? `\`${m.file}:${m.line}\`: dropping the \`+ CONSTANT\` term from \`${m.statement}\` leaves every affected test green — nothing pins what that term contributes. Add a case where its presence decides the outcome (a boundary, if the expression is arithmetic).`
+                : `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
       })),
+    ...hunkResults
+      .filter((h) => h.verdict === 'survived')
+      .map((h) => {
+        const own = collocatedProbe(h.file, probes);
+        const restatesInert =
+          !!own && results.some((r) => r.verdict === 'inert' && r.file === own);
+        return {
+          file: h.file,
+          kind: 'hunk-survived' as const,
+          message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. No test in this diff fails when this particular change is undone — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
+            restatesInert
+              ? ' A file-level revert probe also came back inert, so this restates that gap at hunk granularity — read the two as one finding, not two.'
+              : ''
+          })`,
+        };
+      }),
   ];
 
   const count = (v: MutantVerdict) =>
@@ -1531,7 +2254,27 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: mutantsSkippedForBudget,
       skippedForCap: mutantsSkippedForCap,
       skippedForBaseline: mutantsSkippedForBaseline,
+      skippedForControl: mutantsSkippedForControl,
       ...(mutantsNote ? { note: mutantsNote } : {}),
+    },
+    /**
+     * `true` — an injected always-failing test turned the runner red, so this
+     * harness can kill. `false` — it stayed green: nothing here can kill, and
+     * every survivor was re-classed. `null` — the control never ran (no green
+     * baseline, no candidates, no budget, or the probe file was unreadable):
+     * the run is neither validated nor refuted, and it is NOT a survivor claim.
+     */
+    harnessValidated,
+    hunks: {
+      probed: hunkResults,
+      killed: hunkResults.filter((h) => h.verdict === 'killed').length,
+      survived: hunkResults.filter((h) => h.verdict === 'survived').length,
+      inconclusive: hunkResults.filter((h) => h.verdict === 'inconclusive')
+        .length,
+      skippedForBudget: hunksSkippedForBudget,
+      skippedForCap: hunksSkippedForCap,
+      skippedForBaseline: hunksSkippedForBaseline,
+      skippedForControl: hunksSkippedForControl,
     },
     findings,
     cleanupFailure,
@@ -1539,14 +2282,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2), 'utf8');
   writeStdoutLine(
-    `Wrote test-efficacy report to ${out} (${unreachable.length} unreachable, ${results.length} probed, ${mutantResults.length} mutant(s), ${findings.length} finding(s))`,
+    `Wrote test-efficacy report to ${out} (${unreachable.length} unreachable, ${results.length} probed, ${mutantResults.length} mutant(s), ${hunkResults.length} hunk probe(s), ${findings.length} finding(s))`,
   );
   for (const f of findings) {
     writeStdoutLine(`  [test] ${f.kind}: ${f.file}`);
   }
   if (mutantsSkippedForCap > 0) {
     writeStdoutLine(
-      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the cap of ${MAX_MUTANTS}`,
+      // BOTH caps, because this count carries drops from either: with 2
+      // deletions and 6 replacements the total is exactly MAX_MUTANTS and the
+      // main cap never fires, yet the sub-cap drops 3. Naming only the main cap
+      // then sends the reader looking for a pool of 11 candidates that does not
+      // exist — the number is right, the reason was not.
+      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the selection caps (${MAX_MUTANTS} total, ${REPLACEMENT_SUB_CAP} of them replacements)`,
     );
   }
   if (mutantsSkippedForBaseline > 0) {
@@ -1557,6 +2305,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   if (mutantsSkippedForBudget > 0) {
     writeStdoutLine(
       `  ${mutantsSkippedForBudget} mutant(s) skipped: the remaining budget cannot fit another suite run`,
+    );
+  }
+  // Both skip counts are printed for the same reason the mutants' are: a hunk
+  // probe that never ran must not be readable as a hunk that came back clean.
+  if (hunksSkippedForCap > 0) {
+    writeStdoutLine(
+      `  ${hunksSkippedForCap} hunk probe(s) skipped: more hunks than the cap of ${MAX_HUNK_PROBES}`,
+    );
+  }
+  if (hunksSkippedForBudget > 0) {
+    writeStdoutLine(
+      `  ${hunksSkippedForBudget} hunk probe(s) skipped: the mutants used the window`,
+    );
+  }
+  if (hunksSkippedForBaseline > 0) {
+    writeStdoutLine(
+      `  ${hunksSkippedForBaseline} hunk probe(s) skipped: no probe file was green in the unmutated baseline`,
     );
   }
   if (mutantsNote) {
@@ -1573,7 +2338,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
 export const testEfficacyCommand: CommandModule = {
   command: 'test-efficacy <report>',
   describe:
-    "Check whether the diff's new tests actually gate its new behaviour (unreachable + revert probe + statement-deletion mutants)",
+    "Check whether the diff's new tests actually gate its new behaviour (unreachable + revert probe + statement-deletion mutants + per-hunk probes)",
   builder: (yargs) =>
     yargs
       .positional('report', {
