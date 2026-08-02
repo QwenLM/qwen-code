@@ -188,12 +188,28 @@ export function replyProblem(r: unknown): string | null {
   const o = r as Record<string, unknown>;
   if ('status' in o) {
     const st = o['status'];
-    return typeof st === 'number' &&
-      Number.isInteger(st) &&
-      st >= 100 &&
-      st <= 599
-      ? null
-      : `responder returned a non-HTTP status ${JSON.stringify(st)}`;
+    if (
+      !(
+        typeof st === 'number' &&
+        Number.isInteger(st) &&
+        st >= 100 &&
+        st <= 599
+      )
+    )
+      return `responder returned a non-HTTP status ${JSON.stringify(st)}`;
+    // The same guard the tool branch has, and for the same reason — it was on
+    // that branch only. Measured: `{status: 500, body: circularObj}` passed
+    // validation, and `record()`'s `JSON.stringify` then threw "Converting
+    // circular structure to JSON" as an unhandled rejection, so the request
+    // hung and the drive around it timed out. One-directional reasoning:
+    // whether a reply can be serialised is a property of the reply, not of the
+    // branch it arrived on.
+    try {
+      JSON.stringify(o['body'] ?? {});
+    } catch {
+      return 'responder returned a status body that cannot be serialised (a circular reference?)';
+    }
+    return null;
   }
   if ('tool' in o) {
     if (typeof o['tool'] !== 'string' || o['tool'] === '')
@@ -669,7 +685,7 @@ export async function startMockProvider(
 export const mockProviderCommand: CommandModule = {
   command: 'mock-provider',
   describe:
-    'Serve an OPENAI-COMPATIBLE endpoint (that protocol only) for the review to drive the real product against, recording every request as JSONL — the protocol is provided, the answers are yours; for any other kind of upstream, start it yourself and use `drive`',
+    'Serve OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) endpoints for the review to drive the real product against, recording every request as JSONL — the protocol is provided, the answers are yours; for any other kind of upstream, start it yourself and use `drive`',
   builder: (yargs) =>
     yargs
       .option('responder', {

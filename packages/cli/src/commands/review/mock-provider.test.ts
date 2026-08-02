@@ -23,6 +23,7 @@ import {
   anthropicStream,
   anthropicMessage,
   anthropicText,
+  mockProviderCommand,
   type Responder,
 } from './mock-provider.js';
 
@@ -543,6 +544,26 @@ describe("the responder is the caller's module, and is treated as one", () => {
     expect(results).toEqual(bad.map(([name]) => [name, 500]));
   });
 
+  it('refuses a status body that cannot be serialised, as the tool branch does', async () => {
+    // The tool branch had this guard; the status branch did not. Measured:
+    // `{status: 500, body: circularObj}` passed validation and then
+    // `record()`'s `JSON.stringify` threw "Converting circular structure to
+    // JSON" as an UNHANDLED rejection — so the request hung and the drive
+    // around it timed out. Whether a reply can be serialised is a property of
+    // the reply, not of the branch it arrived on.
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(replyProblem({ status: 500, body: circular } as never)).toContain(
+      'cannot be serialised',
+    );
+    const { report } = await serve(
+      () => ({ status: 500, body: circular }) as never,
+    );
+    const res = await post(report.baseUrl, { stream: false, messages: [] });
+    expect(res.status).toBe(500);
+    expect(await res.text()).toContain('responder returned');
+  });
+
   it('names the problem precisely enough to fix the responder', () => {
     expect(replyProblem(undefined)).toContain('undefined');
     expect(replyProblem({ tool: '' })).toContain('tool name');
@@ -553,6 +574,100 @@ describe("the responder is the caller's module, and is treated as one", () => {
     expect(replyProblem({ tool: 't' })).toBeNull();
     expect(replyProblem({ status: 429 })).toBeNull();
   });
+});
+
+describe('what --help claims', () => {
+  it('names every route the implementation actually serves', () => {
+    // The describe said "OPENAI-COMPATIBLE endpoint (that protocol only)"
+    // after `/v1/messages` had been added, so a user reading `--help` would
+    // conclude the command cannot serve an Anthropic-wire product and go and
+    // hand-write a second mock. Asserted against the ROUTES rather than
+    // against a fixed sentence, so adding a third one without saying so fails
+    // here rather than misleading someone quietly.
+    const text = String(mockProviderCommand.describe);
+    for (const route of ['/v1/chat/completions', '/v1/messages'])
+      expect(text).toContain(route);
+  });
+});
+
+describe('the entry points nothing had driven', () => {
+  // Both were reported by a /review run on this PR: every test until now
+  // passed `respondOverride` and called `startMockProvider` directly, so the
+  // module-loading branch and the CLI handler were never executed.
+
+  const FIXTURES = join(__dirname, '__fixtures__');
+  const scratch = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mp-'));
+    return { log: join(dir, 'req.jsonl'), out: join(dir, 'report.json') };
+  };
+
+  it('loads a responder exported as `respond`, and one exported as default', async () => {
+    // The `?? mod.default` fallback survived deletion with every test green.
+    // A user writing `export default function respond(req) {…}` would have
+    // been told their module "exports no `respond` function".
+    for (const [file, want] of [
+      ['mock-responder-named.mjs', 'named'],
+      ['mock-responder-default.mjs', 'default'],
+    ]) {
+      const { log } = scratch();
+      const { report, close } = await startMockProvider({
+        log,
+        ttl: 20,
+        responder: join(FIXTURES, file),
+      });
+      const json = (await (
+        await fetch(`${report.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ stream: false, messages: [] }),
+        })
+      ).json()) as Record<string, never>;
+      expect(json['choices'][0]['message']['content']).toBe(want);
+      await close();
+    }
+  });
+
+  it('names the module when it exports neither', async () => {
+    const { log } = scratch();
+    await expect(
+      startMockProvider({
+        log,
+        ttl: 20,
+        responder: join(FIXTURES, 'mock-responder-empty.mjs'),
+      }),
+    ).rejects.toThrow(/exports no `respond` function/);
+  });
+
+  it('the CLI handler writes the report, and its TTL is in SECONDS', async () => {
+    // Dropping the `* 1000` turns a 600-second TTL into 0.6s: the mock exits
+    // before the product under test connects, and the drive around it reports
+    // a product that never answered.
+    const { log, out } = scratch();
+    const started = Date.now();
+    await (mockProviderCommand.handler as (a: unknown) => Promise<void>)({
+      responder: join(FIXTURES, 'mock-responder-named.mjs'),
+      log,
+      out,
+      ttl: 1,
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    const report = JSON.parse(readFileSync(out, 'utf8'));
+    expect(report.port).toBeGreaterThan(0);
+    expect(report.baseUrl).toContain(String(report.port));
+    expect(report.logPath).toBe(log);
+  }, 15_000);
+
+  it('sets a non-zero exit code when the responder module is unusable', async () => {
+    const { log } = scratch();
+    const before = process.exitCode;
+    await (mockProviderCommand.handler as (a: unknown) => Promise<void>)({
+      responder: join(FIXTURES, 'mock-responder-empty.mjs'),
+      log,
+      ttl: 1,
+    });
+    expect(process.exitCode).toBe(1);
+    process.exitCode = before;
+  }, 15_000);
 });
 
 describe('the invariants, over a mixed sequence', () => {
