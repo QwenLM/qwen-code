@@ -1147,11 +1147,10 @@ export class LiveHostCoordinator {
       return;
     }
     const epoch = Number(encodedEpoch);
-    const call = this.call;
     if (
-      !call ||
-      epoch !== call.epoch ||
-      call.state === 'stopping' ||
+      !this.call ||
+      epoch !== this.call.epoch ||
+      this.call.state === 'stopping' ||
       this.inputMuted
     ) {
       return;
@@ -1160,14 +1159,17 @@ export class LiveHostCoordinator {
     try {
       const accepted = this.handlers.onInputAudio?.({
         epoch,
-        callId: call.callId,
+        callId: this.call.callId,
         pcm16: Buffer.from(pcm16),
       });
       if (accepted === false) {
-        this.failCall(call.epoch, 'Live Voice audio transport dropped input.');
+        this.failCall(
+          this.call.epoch,
+          'Live Voice audio transport dropped input.',
+        );
       }
     } catch {
-      this.failCall(call.epoch, 'Live Voice audio input failed.');
+      this.failCall(this.call.epoch, 'Live Voice audio input failed.');
     }
   }
 

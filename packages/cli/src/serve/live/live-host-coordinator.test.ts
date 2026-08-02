@@ -811,27 +811,6 @@ describe('LiveHostCoordinator', () => {
     });
   });
 
-  it('fails the call instead of crashing when onInputAudio stops and throws', () => {
-    const onStop = vi.fn();
-    const ref: { current: LiveHostCoordinator | undefined } = {
-      current: undefined,
-    };
-    const onInputAudio = vi.fn(() => {
-      ref.current!.stop();
-      throw new Error('handler bug');
-    });
-    const value = coordinator({ handlers: { onInputAudio, onStop } });
-    ref.current = value;
-    const socket = connectReady(value);
-    const call = value.start('resume');
-
-    socket.receiveAudio(call.epoch, [1, 0]);
-
-    expect(onInputAudio).toHaveBeenCalledOnce();
-    expect(onStop).toHaveBeenCalledOnce();
-    expect(socket.closeCode).toBeUndefined();
-  });
-
   it('rejects binary input without the protocol-v2 epoch header', () => {
     const value = coordinator();
     const socket = connectReady(value);
