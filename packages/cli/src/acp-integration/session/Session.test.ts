@@ -17728,17 +17728,35 @@ describe('Session', () => {
       mockToolRegistry.hasPresentedProxySchema.mockImplementation(
         (name: string) => presented.has(name),
       );
+      mockToolRegistry.markProxySchemaPresented.mockImplementation(
+        (presentation: core.DeferredToolPresentation) => {
+          presented.add(presentation.name);
+          return true;
+        },
+      );
 
-      await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-search-failed',
-        [
-          {
-            id: 'search_call',
-            name: core.ToolNames.TOOL_SEARCH,
-            args: { query: 'cron' },
-          },
-        ],
+      const failedSearchResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-search-failed', [
+        {
+          id: 'search_call',
+          name: core.ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+        },
+      ]);
+      expect(failedSearchResult.deferredToolPresentations).toBeUndefined();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ deferredToolPresentations: undefined }),
+      );
+      (
+        session as unknown as {
+          commitDeferredToolPresentations(
+            presentations: readonly core.DeferredToolPresentation[],
+          ): void;
+        }
+      ).commitDeferredToolPresentations(
+        failedSearchResult.deferredToolPresentations ?? [],
       );
       const proxyResult = await (
         session as unknown as ToolCallInternals

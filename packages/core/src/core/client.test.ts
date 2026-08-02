@@ -831,12 +831,14 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
-    it('restores recorded tool-search presentations that remain in resumed API history', async () => {
+    it('restores recorded tool-search presentations after deferred tools register', async () => {
       const registry = vi.mocked(mockConfig.getToolRegistry)();
       vi.mocked(registry.getTool).mockImplementation((name: string) =>
         isDeferredProxyControlTool(name) ? ({} as never) : undefined,
       );
-      vi.mocked(registry.markProxySchemaPresented).mockClear();
+      vi.mocked(registry.markProxySchemaPresented)
+        .mockClear()
+        .mockReturnValue(false);
       const presentation = {
         name: 'cron_create',
         schemaFingerprint: 'cron-schema',
@@ -895,6 +897,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(registry.markProxySchemaPresented).toHaveBeenCalledWith(
         presentation,
       );
+
+      vi.mocked(registry.markProxySchemaPresented).mockReturnValue(true);
+      await resumedClient.setTools();
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(2);
+
+      await resumedClient.setTools();
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(2);
     });
 
     it('does not restore recorded tool-search presentations removed from resumed API history', async () => {

@@ -414,6 +414,10 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private pendingResumedDeferredToolPresentations = new Map<
+    string,
+    DeferredToolPresentation
+  >();
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -519,8 +523,12 @@ export class GeminiClient {
           resumedSessionData.conversation,
           this.getHistory(),
         )) {
-          this.config.getToolRegistry().markProxySchemaPresented(presentation);
+          this.pendingResumedDeferredToolPresentations.set(
+            presentation.name,
+            presentation,
+          );
         }
+        this.restorePendingResumedDeferredToolPresentations();
       }
       const chat = this.getChat();
       if (resumeTokenCounts) {
@@ -691,7 +699,18 @@ export class GeminiClient {
     debugLogger.debug(
       `[DEFERRED_TOOL_CALL] clear proxy schema presentations after ${reason}`,
     );
+    this.pendingResumedDeferredToolPresentations.clear();
     this.config.getToolRegistry().clearProxySchemaPresentations();
+  }
+
+  private restorePendingResumedDeferredToolPresentations(): void {
+    const toolRegistry = this.config.getToolRegistry();
+    for (const [name, presentation] of this
+      .pendingResumedDeferredToolPresentations) {
+      if (toolRegistry.markProxySchemaPresented(presentation)) {
+        this.pendingResumedDeferredToolPresentations.delete(name);
+      }
+    }
   }
 
   /**
@@ -847,6 +866,7 @@ export class GeminiClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
+    this.restorePendingResumedDeferredToolPresentations();
     const deferredTools = this.resolveDeferredToolsForReminder();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
@@ -1567,6 +1587,7 @@ export class GeminiClient {
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
   ): Promise<GeminiChat> {
+    this.pendingResumedDeferredToolPresentations.clear();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
