@@ -618,7 +618,7 @@ jobs:
               needs.prepare.outputs.is_dry_run == 'false' &&
               needs.prepare.outputs.npm_tag == 'latest' }}
         # The packages are already published; a dispatch failure must not
-        # fail the release — warn and let maintainers re-run the update
+        # fail the release — report it and let maintainers re-run the update
         # workflow manually instead.
         continue-on-error: true
         env:
@@ -629,7 +629,7 @@ jobs:
             --method POST \
             -f 'event_type=npm-published' \
             -f "client_payload[version]=${RELEASE_VERSION}" || {
-              echo "::warning::npm-published dispatch failed; run the 'Update ECS Runner Qwen' workflow manually."
+              echo "::error::npm-published dispatch failed; run the 'Update ECS Runner Qwen' workflow manually."
               exit 1
             }
 

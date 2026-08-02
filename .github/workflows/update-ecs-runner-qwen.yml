@@ -65,8 +65,12 @@ jobs:
               if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
-              echo "::warning::npm install attempt ${attempt} failed; retrying"
-              sleep $((attempt * 10))
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "::warning::npm install attempt ${attempt} failed; retrying"
+                sleep $((attempt * 10))
+              else
+                echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"
+              fi
             done
             exit 1
           )
