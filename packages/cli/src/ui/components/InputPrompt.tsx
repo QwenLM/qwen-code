@@ -125,7 +125,7 @@ export function classifyPastedImagePaths(pasted: string): {
   allImages: boolean;
 } {
   const tokens = pasted
-    .split(/ (?=@?\/|@?[A-Za-z]:\\)/)
+    .split(/ (?=@?\/|@?[A-Za-z]:[\\/])/)
     .flatMap((part) => part.split('\n'))
     .map((token) => token.trim())
     .filter(Boolean);
@@ -588,7 +588,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const insertLargePastePlaceholder = useCallback(
     (pasted: string, expandedPasted = pasted): boolean => {
-      const charCount = [...pasted].length;
+      const charCount = [...expandedPasted].length;
       const lineCount = pasted.split('\n').length;
       if (
         charCount <= LARGE_PASTE_CHAR_THRESHOLD &&
@@ -861,7 +861,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       .join(' ');
     const pastedImagePaths = classifyPastedImagePaths(pasted);
     if (pastedImagePaths.allImages) {
-      await promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
+      await promotePastedImagePaths(
+        pastedImagePaths.imagePaths,
+        fileReferences,
+      );
     } else if (!insertLargePastePlaceholder(pasted, fileReferences)) {
       buffer.insert(fileReferences, { paste: false });
     }
