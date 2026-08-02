@@ -142,14 +142,16 @@ export function loadMetadata({ issue, repository, output }) {
   try {
     const trusted = [];
     for (const artifact of artifacts) {
-      const producerRunId = positiveInteger(
-        artifact.workflow_run?.id,
-        'artifact producer run ID',
-      );
-      const producerRun = ghJson(
-        `repos/${repository}/actions/runs/${producerRunId}`,
-      );
+      let producerRunId;
+      let producerRun;
       try {
+        producerRunId = positiveInteger(
+          artifact.workflow_run?.id,
+          'artifact producer run ID',
+        );
+        producerRun = ghJson(
+          `repos/${repository}/actions/runs/${producerRunId}`,
+        );
         validateProducerRun(producerRun);
       } catch {
         continue;

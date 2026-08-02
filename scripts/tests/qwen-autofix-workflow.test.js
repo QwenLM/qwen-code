@@ -1901,6 +1901,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixJob).not.toContain('git rev-parse origin/main');
     expect(issueAutofixJob).toContain('"${candidate_dir}/base-oid"');
+    expect(issueAutofixJob).toContain('"^${base_oid}" "refs/heads/${BRANCH}"');
     expect(issueAutofixJob).toContain(
       'git merge-base --is-ancestor "${base_oid}" "${candidate_oid}"',
     );
@@ -2579,6 +2580,15 @@ printf '%s\\n' "\${status}"
     );
     expect(revalidateProofStep).toContain(
       '[[ "${live_prose_sha256}" == "${APPROVED_PROSE_SHA256}" ]]',
+    );
+    expect(revalidateProofStep).toContain(
+      'Could not confirm claim ref; preserving the claim for recovery.',
+    );
+    expect(revalidateProofStep).toContain(
+      'Could not confirm issue state; preserving the claim for recovery.',
+    );
+    expect(revalidateProofStep).toContain(
+      'echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"',
     );
     expect(claimCommentStep).toContain(
       'assign someone else or add the \\`autofix/skip\\` label',
@@ -5702,6 +5712,10 @@ printf '%s\\n' "\${status}"
     expect(issueAutofixPublishJob).toContain(
       "steps.publish.outputs.preserve_claim != 'true'",
     );
+    expect(issueAutofixPublishJob).toContain(
+      "steps.proof.outputs.preserve_claim != 'true'",
+    );
+    expect(withdrawClaimStep).toContain('always()');
     expect(withdrawClaimStep).toContain(
       'The isolated verification or publication stage failed.',
     );

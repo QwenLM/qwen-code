@@ -122,7 +122,7 @@ jobs:
             existing_issue="$(
               gh issue list \
                 --repo "${REPO}" \
-                --state open \
+                --state all \
                 --author "${AUTOFIX_BOT}" \
                 --search "${marker} in:body" \
                 --json number \
@@ -169,7 +169,6 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
-      actions: 'write'
       issues: 'write'
     steps:
       - name: 'File or update the autofix issue'
@@ -209,7 +208,7 @@ jobs:
               concurrent_issue="$(
                 gh issue list \
                   --repo "${REPO}" \
-                  --state open \
+                  --state all \
                   --author "${AUTOFIX_BOT}" \
                   --search "${marker} in:body" \
                   --json number \

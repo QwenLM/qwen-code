@@ -75,4 +75,5 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
     /sudo chmod 0555 "\$\{home\}\/reports\/\$\{report_name\}"/,
   );
   assert.doesNotMatch(wrapper, /GITHUB_TOKEN|CI_DEV_BOT_PAT|GITHUB_OUTPUT/);
+  assert.match(wrapper, /env -i \\/);
 });

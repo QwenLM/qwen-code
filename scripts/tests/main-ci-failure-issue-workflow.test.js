@@ -61,7 +61,6 @@ describe('main CI failure issue workflow', () => {
 
   it('publishes issue-bound E2E metadata before applying the required label', () => {
     expect(jobs.file_issue.permissions).toEqual({
-      actions: 'write',
       issues: 'write',
     });
     expect(workflow).toContain(
@@ -189,7 +188,7 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('--run-attempt "${WORKFLOW_RUN_ATTEMPT}"');
     expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
-    expect(workflow).toContain('--state open');
+    expect(workflow).toContain('--state all');
     expect(workflow).toContain('--json number');
     expect(workflow).toContain('.[0].number // ""');
     expect(workflow).toContain('--author "${AUTOFIX_BOT}"');
@@ -269,7 +268,6 @@ describe('main CI failure issue workflow', () => {
       expect(rendered, name).not.toContain('actions/checkout');
       expect(rendered, name).not.toContain('main-failure-signature.mjs');
       expect(job.permissions, name).toEqual({
-        actions: 'write',
         issues: 'write',
       });
     }

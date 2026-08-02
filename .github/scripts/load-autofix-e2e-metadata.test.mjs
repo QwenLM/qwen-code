@@ -361,3 +361,39 @@ test('loads only metadata whose artifact producer and source run validate', () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('rejects an artifact whose real producer run differs from its name', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-mismatch-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":701}}]}]\';;',
+        '  *"actions/runs/701"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /Artifact producer run ID mismatch/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

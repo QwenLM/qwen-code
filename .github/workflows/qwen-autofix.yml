@@ -1387,7 +1387,7 @@ jobs:
           rm -rf "${candidate_dir}"
           mkdir -p "${candidate_dir}/workdir"
           git bundle create "${candidate_dir}/candidate.bundle" \
-            "${base_oid}" "refs/heads/${BRANCH}"
+            "^${base_oid}" "refs/heads/${BRANCH}"
           printf '%s\n' "${base_oid}" > "${candidate_dir}/base-oid"
           printf '%s\n' "${candidate_oid}" > "${candidate_dir}/candidate-oid"
           cp "${WORKDIR}/pr-title.txt" "${candidate_dir}/workdir/pr-title.txt"
@@ -1795,11 +1795,19 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         run: |-
           [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]]
-          claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
-            --jq '.object.sha')"
+          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
+            --jq '.object.sha')"; then
+            echo '::warning::Could not confirm claim ref; preserving the claim for recovery.'
+            echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
           [[ "${claim_oid}" == "${CLAIM_OID}" ]]
-          issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
-            --json state,title,body,labels,assignees,closedByPullRequestsReferences)"
+          if ! issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json state,title,body,labels,assignees,closedByPullRequestsReferences)"; then
+            echo '::warning::Could not confirm issue state; preserving the claim for recovery.'
+            echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
           live_prose="$(jq -c '[.title // "", .body // ""]' <<< "${issue_json}")"
           live_prose_sha256="$(printf '%s\n' "${live_prose}" | sha256sum | cut -d ' ' -f 1)"
           [[ "${APPROVED_PROSE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
@@ -2136,7 +2144,7 @@ jobs:
 
       - name: 'Withdraw claim on failure'
         if: |-
-          ${{ always() && needs.issue-autofix.outputs.claim_owned == 'true' && steps.publish.outcome != 'success' && steps.publish.outputs.preserve_claim != 'true' }}
+          ${{ always() && needs.issue-autofix.outputs.claim_owned == 'true' && steps.publish.outcome != 'success' && steps.publish.outputs.preserve_claim != 'true' && steps.proof.outputs.preserve_claim != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-

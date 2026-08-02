@@ -54,6 +54,7 @@ cleanup_processes() {
 }
 
 command_pid=''
+# shellcheck disable=SC2317
 terminate() {
   status="${1:?status is required}"
   cleanup_processes || true
@@ -69,7 +70,7 @@ trap 'terminate 1' EXIT
 trap 'terminate 130' INT
 trap 'terminate 143' TERM
 
-sudo setpriv "${setpriv_args[@]}" env -i "${env_args[@]}" bash --noprofile --norc -c '
+sudo setpriv "${setpriv_args[@]}" env -i "${env_args[@]}" bash --noprofile --norc -ec '
   [[ "$(id -u)" != "0" ]]
   [[ "$(id -G | wc -w)" == "1" ]]
   grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status

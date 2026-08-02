@@ -342,7 +342,7 @@ export function runTargetedE2e({
     }
     writeFileSync(reportPath, `${lines.join('\n')}\n`);
   } catch (error) {
-    lines.push(`- failed: ${error.message}`);
+    lines.push(`- failed: ${String(error.message).replace(/[\r\n]+/g, ' ')}`);
     writeFileSync(reportPath, `${lines.join('\n')}\n`);
     throw error;
   } finally {
