@@ -1517,6 +1517,45 @@ describe('AnthropicContentGenerator', () => {
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('caps an effort-derived thinking budget with the request budget', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 200 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'high' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: { thinkingConfig: { thinkingBudget: 199 } },
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          max_tokens: 200,
+          thinking: { type: 'enabled', budget_tokens: 199 },
+          output_config: { effort: 'high' },
+        }),
+      );
+    });
+
     // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
     // converter passes it through to output_config.effort and bumps the
     // thinking budget accordingly.
