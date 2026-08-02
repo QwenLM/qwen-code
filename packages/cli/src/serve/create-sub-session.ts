@@ -19,9 +19,9 @@
  *                    A background event-stream subscription holds the concurrency
  *                    slot until the turn finishes (or `stop()` aborts it), so the
  *                    per-caller cap stays meaningful for fire-and-forget runs.
- *                    When the turn finishes, a completion notification is
- *                    delivered to the parent session for ALL sent-mode callers
- *                    (not only Live Voice), triggering an automatic follow-up turn.
+ *                    Live Voice launchers additionally deliver a completion
+ *                    notification to the parent session, triggering an automatic
+ *                    follow-up turn. Other callers retain fire-and-forget behavior.
  *  - `'first-turn'`— subscribe to the sub-session's event stream, accumulate its
  *                    `agent_message_chunk` text until `turn_complete`/`turn_error`
  *                    (correlated on `promptId`), and return it. `sendPrompt`'s
@@ -129,6 +129,9 @@ export interface SubSessionLauncher {
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   boundWorkspace: string;
+  /** Return sent-mode completions to the parent as automatic follow-up turns.
+   * Enabled only for the Live conversation runtime. */
+  notifySentCompletion?: boolean;
   isolatedWorkspace?: {
     materializeDirectory(sessionId: string): Promise<string>;
     discardEmptyDirectory(sessionId: string): Promise<unknown>;
@@ -651,7 +654,12 @@ async function awaitFirstTurn(
 export function createSubSessionLauncher(
   opts: CreateSubSessionLauncherOptions,
 ): SubSessionLauncher {
-  const { getBridge, boundWorkspace, isolatedWorkspace } = opts;
+  const {
+    getBridge,
+    boundWorkspace,
+    notifySentCompletion = false,
+    isolatedWorkspace,
+  } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
@@ -840,9 +848,9 @@ export function createSubSessionLauncher(
         const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
         void (async () => {
           try {
-            let notification: ReturnType<
-              typeof buildSentCompletionNotification
-            >;
+            let notification:
+              | ReturnType<typeof buildSentCompletionNotification>
+              | undefined;
             try {
               const turnError: Promise<never> = turn.then(
                 () => new Promise<never>(() => {}),
@@ -872,14 +880,17 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              notification = buildSentCompletionNotification(
-                sessionId,
-                subSessionName(info.name ?? info.prompt),
-                completion.result,
-                completion.stopReason,
-              );
+              if (notifySentCompletion) {
+                notification = buildSentCompletionNotification(
+                  sessionId,
+                  subSessionName(info.name ?? info.prompt),
+                  completion.result,
+                  completion.stopReason,
+                );
+              }
             } catch (err) {
               if (stopAc.signal.aborted) return;
+              if (!notifySentCompletion) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
@@ -888,6 +899,7 @@ export function createSubSessionLauncher(
                 'error',
               );
             }
+            if (!notification) return;
             try {
               await deliverSentCompletion(
                 bridge,

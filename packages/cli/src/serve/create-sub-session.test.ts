@@ -630,6 +630,7 @@ describe('sub-session launcher', () => {
       callerSessionId: 'same-caller',
     });
     expect(fresh.sessionId).toBeTruthy();
+    expect(fake.notifications).toEqual([]);
     launcher.stop();
   });
 
@@ -643,6 +644,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
     });
 
     const launched = await launcher.launch({
@@ -681,6 +683,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
     });
 
     await launcher.launch({
@@ -708,6 +711,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
     });
 
     await launcher.launch({
@@ -731,6 +735,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
     });
 
     const launched = await launcher.launch({
@@ -769,6 +774,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) => {
           fake.operations.push(`materialize:${sessionId}`);
@@ -828,6 +834,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -869,6 +876,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -905,6 +913,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -935,6 +944,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -977,6 +987,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -1014,6 +1025,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
       isolatedWorkspace: {
         materializeDirectory: async (sessionId) =>
           `${WS}/conversation-${sessionId}`,
@@ -1043,6 +1055,7 @@ describe('sub-session launcher', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      notifySentCompletion: true,
     });
 
     await launcher.launch({

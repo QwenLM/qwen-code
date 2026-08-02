@@ -4676,6 +4676,7 @@ async function runQwenServeImpl(
         boundWorkspace: cwd,
         ...(provenance === 'live-conversation'
           ? {
+              notifySentCompletion: true,
               isolatedWorkspace: {
                 materializeDirectory: (sessionId: string) =>
                   liveConversationWorkspace.materializeConversationDirectory(
