@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { INTERNAL_SECRET_ENV_VARS } from './sanitize-child-env.js';
+import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
 /**
  * Resolves environment variables in a string.
@@ -35,7 +35,7 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (INTERNAL_SECRET_ENV_VARS.includes(varName)) {
+    if (isInternalSecretEnvVar(varName)) {
       return match;
     }
     if (process && process.env && typeof process.env[varName] === 'string') {

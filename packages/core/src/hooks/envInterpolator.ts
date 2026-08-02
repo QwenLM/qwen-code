@@ -9,7 +9,7 @@
  * Provides secure interpolation with whitelist-based access control.
  */
 
-import { INTERNAL_SECRET_ENV_VARS } from '../utils/sanitize-child-env.js';
+import { isInternalSecretEnvVar } from '../utils/sanitize-child-env.js';
 
 /**
  * Strip CR, LF, and NUL bytes from a header value to prevent HTTP header
@@ -71,7 +71,7 @@ export function interpolateEnvVars(
       // never interpolated, even when a hook config names them in
       // allowedEnvVars — the whitelist is repo-controlled, the values
       // leave the process over the network.
-      if (INTERNAL_SECRET_ENV_VARS.includes(varName)) {
+      if (isInternalSecretEnvVar(varName)) {
         return '';
       }
       if (allowedVars.includes(varName)) {

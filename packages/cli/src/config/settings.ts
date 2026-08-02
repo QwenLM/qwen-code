@@ -358,8 +358,9 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
-  // the merge; warn so the user knows their workspace setting has no effect.
+  // security.allowPrivateNetworkHooks and security.allowedHttpHookUrls are
+  // stripped from Workspace scope during the merge; warn so the user knows
+  // their workspace setting has no effect.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (
     workspaceFile.rawJson !== undefined &&
@@ -368,6 +369,14 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   ) {
     warningSet.add(
       `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.security?.allowedHttpHookUrls !== undefined
+  ) {
+    warningSet.add(
+      `Warning: security.allowedHttpHookUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
     );
   }
 

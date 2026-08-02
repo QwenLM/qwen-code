@@ -32,6 +32,18 @@ export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 
+const INTERNAL_SECRET_ENV_VARS_UPPER = new Set(
+  INTERNAL_SECRET_ENV_VARS.map((v) => v.toUpperCase()),
+);
+
+/**
+ * Case-insensitive check for the internal-secret denylist. `process.env` is
+ * case-insensitive on Windows, so a mixed-case reference like
+ * `$qwen_server_token` must still be blocked.
+ */
+export const isInternalSecretEnvVar = (name: string): boolean =>
+  INTERNAL_SECRET_ENV_VARS_UPPER.has(name.toUpperCase());
+
 /**
  * Return a shallow copy of `env` with Qwen-internal secrets removed, so it is
  * safe to pass to a child process spawned on the user's behalf. Does not

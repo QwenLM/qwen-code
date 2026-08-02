@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { INTERNAL_SECRET_ENV_VARS } from '@qwen-code/qwen-code-core';
+import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core/sanitizeChildEnv';
 
 /**
  * Resolves environment variables in a string.
@@ -36,7 +36,7 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (INTERNAL_SECRET_ENV_VARS.includes(varName)) {
+    if (isInternalSecretEnvVar(varName)) {
       return match;
     }
     if (process && process.env && typeof process.env[varName] === 'string') {

@@ -3334,6 +3334,27 @@ describe('Settings Loading and Merging', () => {
       ).toBe(true);
     });
 
+    it('should warn when workspace settings define security.allowedHttpHookUrls', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(true);
+    });
+
     it('should let user scope win over a stripped workspace value', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(

