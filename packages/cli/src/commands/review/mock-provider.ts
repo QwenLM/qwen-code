@@ -206,6 +206,27 @@ function forRecord(v: string): string {
 }
 
 /**
+ * The request as the RECORD should hold it.
+ *
+ * Trimming `text` alone left `body` spread into the same entry carrying the
+ * identical payload: measured, a 200 KB system prompt produced an 8 KB `text`
+ * and a 205 KB log. The evidence an A/B needs is the request's SHAPE — which
+ * wire, which n, streaming or not, and enough text to tell two runs apart — so
+ * the parsed body is summarised by its keys rather than copied.
+ */
+function forRecordReq(r: MockRequest): Record<string, unknown> {
+  return {
+    method: r.method,
+    path: r.path,
+    wire: r.wire,
+    n: r.n,
+    stream: r.stream,
+    text: forRecord(r.text),
+    bodyKeys: r.body ? Object.keys(r.body) : [],
+  };
+}
+
+/**
  * One SSE chunk in the shape the protocol requires.
  *
  * `index` is unanimous across every hand-written mock that emitted a tool call
@@ -511,13 +532,33 @@ export async function startMockProvider(
           n,
         };
 
+        // Only the two chat endpoints, and only by POST with a JSON body.
+        // Measured: a call to `/v1/embeddings`, a GET, a non-JSON body and an
+        // EMPTY body each got back a plausible 200 completion — so a product
+        // that dialled the wrong endpoint, used the wrong method, or sent a
+        // broken payload looked like it was working. That is the mock hiding
+        // the very defect the review is looking for, which is worse than any
+        // answer it could give.
+        if (!isModels) {
+          const chat =
+            path.includes('/chat/completions') || path.includes('/v1/messages');
+          const why = !chat
+            ? `this mock serves /v1/chat/completions and /v1/messages only; ${path} is not one of them`
+            : mreq.method !== 'POST'
+              ? `${mreq.method} is not how either chat endpoint is called; use POST`
+              : body === null
+                ? 'the request body was empty or not JSON, so there is nothing to answer'
+                : null;
+          if (why) {
+            record({ t: Date.now(), ...forRecordReq(mreq), refused: why });
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: why }));
+            return;
+          }
+        }
+
         if (isModels) {
-          record({
-            t: Date.now(),
-            ...mreq,
-            text: forRecord(mreq.text),
-            reply: 'models',
-          });
+          record({ t: Date.now(), ...forRecordReq(mreq), reply: 'models' });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(
             JSON.stringify({
@@ -541,7 +582,7 @@ export async function startMockProvider(
             body: { error: String((err as Error).message) },
           };
         }
-        record({ t: Date.now(), ...mreq, text: forRecord(mreq.text), reply });
+        record({ t: Date.now(), ...forRecordReq(mreq), reply });
 
         if ('status' in reply) {
           res.writeHead(reply.status, { 'Content-Type': 'application/json' });

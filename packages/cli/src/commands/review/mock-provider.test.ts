@@ -139,6 +139,78 @@ describe('the wire', () => {
   });
 });
 
+describe('what it refuses to answer', () => {
+  it('400s a wrong endpoint, wrong method, or unparseable body', async () => {
+    // Measured before this existed: each of these got back a plausible 200
+    // completion. A product that dialled the wrong endpoint, used the wrong
+    // method, or sent a broken payload therefore looked like it was working —
+    // the mock hiding the very defect the review is looking for.
+    const { report } = await serve(() => ({ text: 'ok' }));
+    const B = report.baseUrl;
+    const cases: Array<[string, RequestInit, string]> = [
+      ['/embeddings', { method: 'POST', body: '{}' }, 'is not one of them'],
+      ['/chat/completions', { method: 'GET' }, 'use POST'],
+      ['/chat/completions', { method: 'POST', body: 'not json' }, 'not JSON'],
+      ['/chat/completions', { method: 'POST' }, 'not JSON'],
+    ];
+    const got: Array<[string, number]> = [];
+    for (const [p, init, phrase] of cases) {
+      const res = await fetch(`${B}${p}`, init);
+      got.push([p + ' ' + (init.method ?? ''), res.status]);
+      expect(await res.text()).toContain(phrase);
+    }
+    expect(got.map(([, s]) => s)).toEqual([400, 400, 400, 400]);
+  });
+
+  it('answers the three shapes it does serve', async () => {
+    const { report } = await serve(() => ({ text: 'ok' }));
+    const J = (b: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(b),
+    });
+    for (const p of ['/chat/completions', '/messages']) {
+      const res = await fetch(
+        `${report.baseUrl}${p}`,
+        J({ stream: false, messages: [] }),
+      );
+      expect(res.status).toBe(200);
+    }
+    expect((await fetch(`${report.baseUrl}/models`)).status).toBe(200);
+  });
+
+  it('records the refusal, so a run that dialled wrong can be seen', async () => {
+    const { report, log } = await serve(() => ({ text: 'ok' }));
+    await fetch(`${report.baseUrl}/embeddings`, { method: 'POST', body: '{}' });
+    await stop?.();
+    stop = null;
+    const rec = JSON.parse(readFileSync(log, 'utf8').trim());
+    expect(rec.refused).toContain('is not one of them');
+  });
+
+  it('keeps the RECORD small even when the body is not — body is summarised, not copied', async () => {
+    // Trimming `text` alone left `body` spread into the same entry with the
+    // identical payload: a 200 KB system prompt gave an 8 KB `text` and a
+    // 205 KB log. Now 9 KB.
+    const { report, log } = await serve(() => ({ text: 'ok' }));
+    await fetch(`${report.baseUrl}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        stream: false,
+        system: 'S'.repeat(200_000),
+        messages: [],
+      }),
+    });
+    await stop?.();
+    stop = null;
+    expect(readFileSync(log).length).toBeLessThan(30_000);
+    const rec = JSON.parse(readFileSync(log, 'utf8').trim());
+    expect(rec.body).toBeUndefined();
+    expect(rec.bodyKeys).toEqual(['stream', 'system', 'messages']);
+  });
+});
+
 describe('the bounds', () => {
   it('numbers only the requests the RESPONDER saw', async () => {
     // `/v1/models` is answered without consulting the responder, so it must
