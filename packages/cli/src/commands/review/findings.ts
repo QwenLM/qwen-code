@@ -83,6 +83,14 @@ export interface Finding {
   category?: string;
   /** Every location, in report order. A standalone finding has exactly one. */
   locations: FindingLocation[];
+  /**
+   * Local evidence-image paths attached by the review (screenshots, rendered
+   * output). Published to the designated assets repo by `publish-assets`,
+   * which weaves the resulting URLs into `assets`.
+   */
+  assetFiles?: string[];
+  /** Commit-pinned URLs of published evidence images (see `publish-assets`). */
+  assets?: string[];
   /** Set only after the fixer ran. */
   outcome?: Outcome;
   /** The fixer's reason, carried from the ledger — mainly for `skipped`. */
@@ -124,6 +132,24 @@ function fail(index: number, message: string): never {
 function asString(o: Record<string, unknown>, key: string): string | undefined {
   const v = o[key];
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+
+/** A non-empty array of non-empty strings, or undefined; anything else fails
+ * with the finding's index so a typo'd shape is named rather than dropped. */
+function stringArray(
+  o: Record<string, unknown>,
+  key: string,
+  index: number,
+): string[] | undefined {
+  const v = o[key];
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x === '')) {
+    fail(
+      index,
+      `"${key}" must be an array of non-empty strings, got ${JSON.stringify(v)}.`,
+    );
+  }
+  return v.length > 0 ? (v as string[]) : undefined;
 }
 
 function oneOf<T extends string>(
@@ -266,6 +292,10 @@ export function validateFindings(raw: unknown): Finding[] {
       );
     }
 
+    const assetFiles =
+      stringArray(o, 'assetFiles', i) ?? stringArray(o, 'asset_files', i);
+    const assets = stringArray(o, 'assets', i);
+
     // `outcomeNote` is accepted on input so the canonical artifact round-trips:
     // `validateFindings` already accepts `outcome`, and an artifact fed back
     // through `--input` that kept its outcomes but silently dropped their
@@ -296,6 +326,8 @@ export function validateFindings(raw: unknown): Finding[] {
         ? { category: asString(o, 'category')! }
         : {}),
       locations: parseLocations(o, i),
+      ...(assetFiles ? { assetFiles } : {}),
+      ...(assets ? { assets } : {}),
       ...(outcome ? { outcome } : {}),
       ...(outcome && outcomeNote ? { outcomeNote } : {}),
     } satisfies Finding;

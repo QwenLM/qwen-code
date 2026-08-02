@@ -59,6 +59,7 @@ describe('reviewCommand', () => {
       'test-efficacy',
       'test-plan',
       'findings',
+      'publish-assets',
       'compose-review',
       'submit',
       'cleanup',

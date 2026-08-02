@@ -19,6 +19,7 @@ import { prContextCommand } from './review/pr-context.js';
 import { commentStatusCommand } from './review/comment-status.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
+import { publishAssetsCommand } from './review/publish-assets.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
@@ -59,12 +60,13 @@ export const reviewCommand: CommandModule = {
       .command(testEfficacyCommand)
       .command(testPlanCommand)
       .command(findingsCommand)
+      .command(publishAssetsCommand)
       .command(composeReviewCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
