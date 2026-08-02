@@ -44,6 +44,17 @@ async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
+// The default batch transport (`defaultTranscribeBatch`) reaches the network
+// through the global `fetch`; stub it so a test can drive the production
+// default without a real ASR request and observe that the guard let it through.
+function stubFetch(impl: typeof fetch): () => void {
+  const original = globalThis.fetch
+  globalThis.fetch = impl
+  return () => {
+    globalThis.fetch = original
+  }
+}
+
 describe('createVoiceConnectionHandler', () => {
   it('forwards the private-network opt-in through the shared default guard', async () => {
     const config = {
@@ -59,6 +70,111 @@ describe('createVoiceConnectionHandler', () => {
         allowInsecureBaseUrl: undefined,
       }),
     ).rejects.toThrow(/private-network/)
+  })
+
+  // These tests drive the production defaults (no injected
+  // openStream/transcribeBatch) so a revert that drops `allowInsecureBaseUrl`
+  // from the default guard wiring fails instead of staying green.
+  it('reaches the default batch transport when the private-network opt-in is set', async () => {
+    const fetchedUrls: string[] = []
+    const restore = stubFetch(
+      (async (input: unknown) => {
+        fetchedUrls.push(String(input))
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'hello gateway' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }) as typeof fetch,
+    )
+    try {
+      const ws = new FakeWebSocket()
+      const handler = createVoiceConnectionHandler({
+        resolveConfig: () => ({
+          model: 'qwen3-asr-flash',
+          baseUrl: 'http://10.0.0.8/v1',
+          allowInsecureBaseUrl: true,
+        }),
+      })
+
+      handler(ws as never)
+      ws.emitMessage(JSON.stringify({ type: 'start' }))
+      await flush()
+      ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+      await flush()
+      ws.emitMessage(JSON.stringify({ type: 'stop' }))
+      await flush()
+
+      expect(fetchedUrls).toContain('http://10.0.0.8/v1/chat/completions')
+      expect(ws.sentJson()).toContainEqual({
+        type: 'final',
+        text: 'hello gateway',
+      })
+      expect(ws.sentJson().some((message) => message.type === 'error')).toBe(
+        false,
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  it('blocks the default batch transport for a private gateway without the opt-in', async () => {
+    const fetchedUrls: string[] = []
+    const restore = stubFetch(
+      (async (input: unknown) => {
+        fetchedUrls.push(String(input))
+        return new Response('{}', { status: 200 })
+      }) as typeof fetch,
+    )
+    try {
+      const ws = new FakeWebSocket()
+      const handler = createVoiceConnectionHandler({
+        resolveConfig: () => ({
+          model: 'qwen3-asr-flash',
+          baseUrl: 'http://10.0.0.8/v1',
+        }),
+      })
+
+      handler(ws as never)
+      ws.emitMessage(JSON.stringify({ type: 'start' }))
+      await flush()
+      ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+      await flush()
+      ws.emitMessage(JSON.stringify({ type: 'stop' }))
+      await flush()
+
+      expect(fetchedUrls).toEqual([])
+      expect(
+        ws.sentJson().some(
+          (message) =>
+            message.type === 'error' && /private-network/.test(message.message),
+        ),
+      ).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('blocks the default streaming transport for a private gateway without the opt-in', async () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'http://10.0.0.8/v1',
+      }),
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+
+    expect(
+      ws.sentJson().some(
+        (message) =>
+          message.type === 'error' && /private-network/.test(message.message),
+      ),
+    ).toBe(true)
   })
 
   it('passes configured language to streaming transports', () => {
