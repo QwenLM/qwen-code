@@ -71,7 +71,9 @@ export interface CaptureManifest {
   ansPath: string | null;
   /** The rendered image — null when freeze is unavailable or failed. */
   pngPath: string | null;
-  evidence: CaptureEvidence;
+  /** Never `none`: a refused capture writes no manifest at all — `none` is
+   * the rung a VERDICT stands on when there is no manifest to cite. */
+  evidence: Exclude<CaptureEvidence, 'none'>;
   /** Why the ladder stopped where it did (freeze missing, timeout, …). */
   degradedBecause?: string;
   /** How long the run waited before capturing, and why it stopped waiting. */

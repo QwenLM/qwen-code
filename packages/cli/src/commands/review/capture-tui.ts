@@ -66,6 +66,10 @@ function tmux(argv: string[]): string {
     // A pane of text is small; a runaway TUI writing a scrollback is not our
     // problem — capture-pane returns the visible pane only.
     maxBuffer: 8 * 1024 * 1024,
+    // Every tmux command here is a quick control call; a server wedged hard
+    // enough to sit on one for 15s should turn into a refusal, not hang the
+    // whole review agent behind it.
+    timeout: 15_000,
   }) as string;
 }
 
@@ -97,6 +101,19 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
   if (args.command.trim() === '') {
     refuse('--command must not be empty.');
     return;
+  }
+  // yargs coerces a non-numeric `--settle-ms abc` to NaN, and NaN is the
+  // worst possible value here: Atomics.wait treats a NaN timeout as
+  // INFINITY (a capture that never returns), and a NaN deadline makes the
+  // --until poll loop unexpirable. Refuse, don't hang.
+  for (const [name, v, max] of [
+    ['--settle-ms', args.settleMs, 600_000],
+    ['--timeout-ms', args.timeoutMs, 3_600_000],
+  ] as const) {
+    if (!Number.isFinite(v) || v < 0 || v > max) {
+      refuse(`${name} must be a number in [0, ${max}], got ${String(v)}`);
+      return;
+    }
   }
   // Validate the regex BEFORE any process starts: an invalid pattern is a
   // caller mistake and gets the refusal contract, not a stack trace thrown
@@ -202,16 +219,26 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
   // .ans FIRST, then render: freeze has hung mid-render on this repo's own
   // workflows, and the text evidence must already be on disk when it does.
   let png: string | null = null;
-  let degradedBecause: string | undefined;
+  // Collect every way this capture fell short of "settled png" — the field's
+  // contract is that a manifest reader learns WHY the ladder stopped where it
+  // did, and a late frame and a failed render can both be true at once.
+  const degradations: string[] = [];
+  if (settledBy === 'timeout') {
+    degradations.push(
+      `--until never matched within ${args.timeoutMs}ms — late frame captured`,
+    );
+  }
   if (ansText === '') {
     // A zero-byte capture (the pane raced to nothing) has no pixels to
     // render — freeze on empty input fails with a misleading bounds error,
     // and an empty image would be evidence-shaped noise anyway.
-    degradedBecause =
-      'pane captured empty — nothing to render, no image produced';
+    degradations.push(
+      'pane captured empty — nothing to render, no image produced',
+    );
   } else if (!which('freeze')) {
-    degradedBecause =
-      'freeze is not installed — .ans text captured, no image rendered';
+    degradations.push(
+      'freeze is not installed — .ans text captured, no image rendered',
+    );
   } else {
     // stdin MUST be /dev/null: freeze treats a pipe stdin — Node's spawnSync
     // default — as "the input is stdin" and ignores the positional file. A
@@ -236,12 +263,17 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
         .split('\n')
         .slice(-2)
         .join(' ');
-      degradedBecause = `freeze failed (${
-        r.signal ? `signal ${r.signal}` : `exit ${String(r.status)}`
-      }${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`;
+      degradations.push(
+        `freeze failed (${
+          r.signal ? `signal ${r.signal}` : `exit ${String(r.status)}`
+        }${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
+      );
     }
   }
 
+  const degradedBecause = degradations.length
+    ? degradations.join('; ')
+    : undefined;
   const manifest: CaptureManifest = {
     command: args.command,
     cols: args.cols,

@@ -113,8 +113,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
+    // The field whose contract is "why the ladder stopped" carries the late
+    // frame too, not just the freeze rung.
+    expect(manifest.degradedBecause).toContain('--until never matched');
     const ans = readFileSync(join(dir, 'cap.ans'), 'utf8');
     expect(ans).toContain('HELLO-');
+  });
+
+  it('refuses NaN durations instead of hanging on them', () => {
+    // Atomics.wait treats a NaN timeout as INFINITY, and a NaN deadline
+    // never expires — `--settle-ms abc` must refuse, not block forever.
+    run({ until: undefined, settleMs: Number.NaN });
+    expect(process.exitCode).toBe(3);
+    process.exitCode = undefined;
+    run({ timeoutMs: Number.NaN });
+    expect(process.exitCode).toBe(3);
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
   });
 
   it('sends --keys tokens verbatim, one per token', () => {
