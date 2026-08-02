@@ -358,6 +358,99 @@ export function validateFindings(raw: unknown): Finding[] {
 }
 
 /** Most severe first, then high-confidence before low, then file and line. */
+/**
+ * Does `text` name `probe`, a path that may be written relative to a package?
+ *
+ * `test-delta` reports `src/ui/auth/AuthDialog.test.tsx` — relative to the
+ * workspace whose test command failed — while a finding writes the repo-relative
+ * `packages/cli/src/ui/auth/AuthDialog.test.tsx`. Match on a separator boundary
+ * so `src/a.test.ts` cannot be satisfied by `vendor/other-src/a.test.ts`.
+ */
+function namesPath(text: string, probe: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(probe, from);
+    if (at < 0) return false;
+    const before = at === 0 ? '' : text[at - 1];
+    if (at === 0 || before === '/' || !/[A-Za-z0-9._-]/.test(before))
+      return true;
+    from = at + 1;
+  }
+}
+
+/**
+ * Hold a Critical that blames the PR for a test failure the base tree already
+ * had — the one contradiction this pipeline measures and then used to ignore.
+ *
+ * `test-delta` reruns the PR side's failed test commands on the merge base and
+ * splits the failures into `netNew` (the PR's own) and `shared` (failing on both
+ * sides, whatever files the diff touches). A Critical naming a `shared` test file
+ * is asserting a breakage against a file that was already red without the PR.
+ *
+ * Measured on #8368: `AuthDialog.test.tsx` was `shared` in two independent runs,
+ * and the base tree fails the very same test — `drives API key provider steps
+ * from endpoint options metadata` — at merge-base `e967cc90`. A Critical reading
+ * "height-based pagination breaks the pre-existing test" was carried across four
+ * rounds and into the composed review anyway, because nothing reconciled the two
+ * artifacts. The path rule this replaced was closed off in `test-delta` itself;
+ * the round ledger reopened it from the other side.
+ *
+ * Downgrade, never drop. The measurement contradicts the SEVERITY — the PR is
+ * not breaking a passing test — but the finding may still describe something
+ * real about a test that is red for two reasons. A Suggestion stays in front of
+ * a human, carrying the measurement that demoted it; a deletion would not. Only
+ * Critical is touched, and nothing is ever raised.
+ */
+export function holdCriticalsFailingOnBase(
+  findings: readonly Finding[],
+  sharedFailingFiles: readonly string[],
+): { findings: Finding[]; held: Array<{ id: string; file: string }> } {
+  const held: Array<{ id: string; file: string }> = [];
+  const out = findings.map((f) => {
+    if (f.severity !== 'Critical') return f;
+    const haystack = [
+      f.summary,
+      f.failureScenario,
+      f.suggestedFix ?? '',
+      ...f.locations.map((l) => l.file),
+    ].join('\n');
+    const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
+    if (!hit) return f;
+    held.push({ id: f.id, file: hit });
+    return {
+      ...f,
+      severity: 'Suggestion' as Severity,
+      failureScenario: `${f.failureScenario}\n\nHeld back from Critical by measurement: \`test-delta\` reran the failing test command on the merge base and ${hit} failed there too, so this is not a passing test the PR turns red. If the PR makes an already-red test fail for a NEW reason, say which test and quote both sides.`,
+    };
+  });
+  return { findings: out, held };
+}
+
+/**
+ * Every file `test-delta` measured as failing on BOTH sides, from its artifact.
+ * A shape it does not recognise yields none: an unreadable measurement must not
+ * silently hold a Critical back, and must not throw either — the review has
+ * findings to report whether or not this file parsed.
+ */
+export function sharedFailingFilesOf(raw: unknown): string[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const top = (raw as { shared?: unknown }).shared;
+  const files = new Set<string>();
+  const take = (v: unknown) => {
+    if (Array.isArray(v)) {
+      for (const e of v) if (typeof e === 'string' && e) files.add(e);
+    }
+  };
+  take(top);
+  const entries = (raw as { entries?: unknown }).entries;
+  if (Array.isArray(entries)) {
+    for (const e of entries) {
+      if (e && typeof e === 'object') take((e as { shared?: unknown }).shared);
+    }
+  }
+  return [...files];
+}
+
 export function sortFindings(findings: readonly Finding[]): Finding[] {
   return [...findings].sort((a, b) => {
     const bySeverity =
@@ -520,6 +613,7 @@ interface FindingsArgs {
   out: string;
   outcomes: string | undefined;
   print: boolean | undefined;
+  testDelta: string | undefined;
 }
 
 function readJson(path: string, what: string): unknown {
@@ -565,12 +659,18 @@ export const findingsCommand: CommandModule = {
         describe:
           'JSON array of {id, outcome, note?} recording what --fix did to each finding. Must cover every finding.',
       })
+      .option('test-delta', {
+        type: 'string',
+        describe:
+          'The test-delta artifact. A Critical naming a test file that also failed on the merge base is held back to Suggestion, carrying the measurement that demoted it.',
+      })
       .option('print', {
         type: 'boolean',
         describe: 'Also print one line per finding to stdout',
       }),
   handler: (argv) => {
-    const { input, out, outcomes, print } = argv as unknown as FindingsArgs;
+    const { input, out, outcomes, print, testDelta } =
+      argv as unknown as FindingsArgs;
 
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
@@ -578,6 +678,11 @@ export const findingsCommand: CommandModule = {
         findings,
         validateOutcomes(readJson(outcomes, 'outcomes')),
       );
+    }
+    let held: Array<{ id: string; file: string }> = [];
+    if (testDelta !== undefined) {
+      const shared = sharedFailingFilesOf(readJson(testDelta, 'test-delta'));
+      ({ findings, held } = holdCriticalsFailingOnBase(findings, shared));
     }
     const report = buildReport(findings);
 
@@ -592,6 +697,14 @@ export const findingsCommand: CommandModule = {
         `${bySeverity['Nice to have']} Nice to have; ` +
         `${byConfidence['low']} low-confidence. Wrote ${target}`,
     );
+    // Never silent: a severity this command lowered is a change to what the
+    // review says, and the reader has to be told which finding and on what
+    // evidence — otherwise the demotion reads as the reviewer's own judgement.
+    for (const h of held) {
+      writeStderrLine(
+        `findings: ${h.id} held back from Critical — test-delta measured ${h.file} as failing on the merge base too`,
+      );
+    }
     if (report.counts.byOutcome) {
       const o = report.counts.byOutcome;
       writeStderrLine(

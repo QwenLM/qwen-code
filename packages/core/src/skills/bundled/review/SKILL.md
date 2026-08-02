@@ -769,8 +769,11 @@ Write every confirmed finding — high and low confidence alike — as a JSON ar
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review findings \
   --input .qwen/tmp/qwen-review-{target}-findings-in.json \
+  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
   --out .qwen/tmp/qwen-review-{target}-findings.json
 ```
+
+**Pass `--test-delta` whenever that artifact exists.** It holds back to Suggestion any Critical that names a test file `test-delta` measured as failing on the merge base too, and says on stderr which finding and which file. A Critical asserting "this PR breaks test X" against a test that was already red is the misattribution `test-delta` exists to prevent — and the round ledger is the other door into it: measured on #8368, exactly such a Critical was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice. The finding is not deleted, because a test can be red for two reasons at once; it keeps its evidence, gains the measurement that demoted it, and stays in front of a human who can restore it by naming which test fails for a new reason and quoting both sides.
 
 **One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
 
@@ -792,9 +795,12 @@ Then record what happened to **every** finding — one of `fixed`, `skipped`, or
 "${QWEN_CODE_CLI:-qwen}" review findings \
   --input .qwen/tmp/qwen-review-{target}-findings-in.json \
   --outcomes .qwen/tmp/qwen-review-{target}-outcomes.json \
+  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
   --out .qwen/tmp/qwen-review-{target}-findings.json \
   --print
 ```
+
+`--test-delta` belongs on this invocation for the same reason it belongs on the first: this run rebuilds the artifact from the same input, so leaving it off here restores every Critical the earlier run held back.
 
 **The command refuses a ledger that does not account for every finding**, and that refusal is the whole reason it exists. A fixer that applies six of nine findings and reports six has not lied about any one of them — it has silently shortened the list, and the reader has no way to see the three that fell off. It also refuses an outcome for an id this review never produced, which is what a ledger built against the wrong list looks like. If it exits non-zero, the ledger is wrong, not the check: complete it and run it again.
 

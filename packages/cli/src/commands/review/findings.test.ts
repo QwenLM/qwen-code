@@ -19,6 +19,8 @@ import {
   validateOutcomes,
   type Finding,
   type FindingsReport,
+  holdCriticalsFailingOnBase,
+  sharedFailingFilesOf,
 } from './findings.js';
 
 /** A minimal valid finding, spread-and-overridden per case. */
@@ -457,6 +459,57 @@ describe('findings (command boundary)', () => {
     return JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
   }
 
+  it('holds a Critical back when --test-delta measured its test as failing on base', () => {
+    // Through the handler, not the helper: the option has to be parsed, the
+    // artifact read, and the held finding written into the report. The
+    // test-delta shape here is the one the command emits — a top-level
+    // `shared` beside per-command entries.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const delta = join(dir, 'test-delta.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          severity: 'Critical',
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx goes red on this change.',
+        },
+      ]),
+    );
+    writeFileSync(
+      delta,
+      JSON.stringify({
+        entries: [
+          {
+            command: 'npm test --workspace="packages/cli"',
+            netNew: [],
+            shared: ['src/ui/auth/AuthDialog.test.tsx'],
+          },
+        ],
+        netNew: [],
+        shared: ['src/ui/auth/AuthDialog.test.tsx'],
+      }),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      testDelta: delta,
+      print: false,
+    });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    expect(report.findings[0].severity).toBe('Suggestion');
+    expect(report.counts.bySeverity['Critical']).toBe(0);
+    expect(report.findings[0].failureScenario).toContain('failed there too');
+  });
+
+  it('leaves severities alone when --test-delta is not passed', () => {
+    const report = run([{ ...base, severity: 'Critical' }]);
+    expect(report.findings[0].severity).toBe('Critical');
+    expect(report.counts.bySeverity['Critical']).toBe(1);
+  });
+
   it('writes the artifact, creating intermediate directories', () => {
     const report = run([base]);
     expect(report.counts.total).toBe(1);
@@ -509,6 +562,92 @@ describe('findings (command boundary)', () => {
         print: false,
       }),
     ).toThrow(/is not valid JSON/);
+  });
+});
+
+describe('holdCriticalsFailingOnBase', () => {
+  // The shape test-delta writes: workspace-relative paths, while a finding
+  // names the repo-relative one.
+  const shared = ['src/ui/auth/AuthDialog.test.tsx'];
+  const critical = {
+    id: 'f1',
+    severity: 'Critical' as const,
+    confidence: 'high' as const,
+    source: 'review' as const,
+    summary: 'Height-based pagination breaks AuthDialog.test.tsx',
+    shortSummary: 'pagination breaks a test',
+    failureScenario:
+      "packages/cli/src/ui/auth/AuthDialog.test.tsx > 'drives API key provider steps' expects MiniMax visible without scrolling.",
+    locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx', line: 132 }],
+  };
+
+  it('holds a Critical that blames the PR for a test the base also fails', () => {
+    const { findings, held } = holdCriticalsFailingOnBase([critical], shared);
+    expect(findings[0].severity).toBe('Suggestion');
+    expect(findings[0].failureScenario).toContain('failed there too');
+    // The original scenario survives — the measurement is added to the
+    // evidence, it does not replace it.
+    expect(findings[0].failureScenario).toContain('expects MiniMax visible');
+    expect(held).toEqual([
+      { id: 'f1', file: 'src/ui/auth/AuthDialog.test.tsx' },
+    ]);
+  });
+
+  it('leaves a Critical alone when the test it names is not shared', () => {
+    const { findings, held } = holdCriticalsFailingOnBase(
+      [critical],
+      ['src/other/unrelated.test.ts'],
+    );
+    expect(findings[0].severity).toBe('Critical');
+    expect(findings[0].failureScenario).toBe(critical.failureScenario);
+    expect(held).toEqual([]);
+  });
+
+  it('never touches a finding that is not Critical', () => {
+    const { findings, held } = holdCriticalsFailingOnBase(
+      [{ ...critical, severity: 'Suggestion' as const }],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Suggestion');
+    expect(findings[0].failureScenario).toBe(critical.failureScenario);
+    expect(held).toEqual([]);
+  });
+
+  it('requires a path boundary, so a longer directory name is not a match', () => {
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          failureScenario:
+            'vendor/other-src/ui/auth/AuthDialog.test.tsx is red',
+          locations: [{ file: 'packages/cli/src/ui/auth/AuthDialog.tsx' }],
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
+  });
+});
+
+describe('sharedFailingFilesOf', () => {
+  it('takes the shared list from the top level and from every entry', () => {
+    expect(
+      sharedFailingFilesOf({
+        shared: ['src/a.test.ts'],
+        entries: [
+          { shared: ['src/a.test.ts', 'src/b.test.ts'] },
+          { shared: ['src/c.test.ts'] },
+        ],
+      }).sort(),
+    ).toEqual(['src/a.test.ts', 'src/b.test.ts', 'src/c.test.ts']);
+  });
+
+  it('yields none for a shape it does not recognise, rather than throwing', () => {
+    // An unreadable measurement must not hold a Critical back, and must not
+    // take the review down either.
+    for (const junk of [null, 42, 'shared', {}, { shared: 'nope' }, []]) {
+      expect(sharedFailingFilesOf(junk)).toEqual([]);
+    }
   });
 });
 
