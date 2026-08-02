@@ -9,12 +9,13 @@ import { CdpBrowserEmulator, type CdpFrame } from './cdp-browser-emulator.js';
 
 function setup(forward?: (m: string, p: unknown) => Promise<unknown>) {
   const replies: CdpFrame[] = [];
+  const log = vi.fn();
   const forwardToTab = vi.fn(forward ?? (async () => ({ ok: true })));
   const emu = new CdpBrowserEmulator(
-    { reply: (f) => replies.push(f), forwardToTab },
+    { reply: (f) => replies.push(f), forwardToTab, log },
     { url: 'https://example.com/', title: 'Mock Page' },
   );
-  return { emu, replies, forwardToTab };
+  return { emu, replies, forwardToTab, log };
 }
 
 describe('CdpBrowserEmulator (Plan C #5626)', () => {
@@ -180,13 +181,14 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
   });
 
   it('reports that the selected page has no DevTools target', async () => {
-    const { emu, replies } = setup();
+    const { emu, replies, log } = setup();
     await emu.handleFromClient({
       id: 11,
       method: 'Target.getDevToolsTarget',
       params: { targetId: 'qwen-cdp-page' },
     });
     expect(replies[0]).toEqual({ id: 11, result: {} });
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('surfaces a forward failure as a CDP error to the client', async () => {
@@ -381,7 +383,7 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
   });
 
   it('does not emit detachedFromTarget for a never-attached session', async () => {
-    const { emu, replies } = setup();
+    const { emu, replies, log } = setup();
     await emu.handleFromClient({
       id: 14,
       method: 'Target.detachFromTarget',
@@ -391,5 +393,6 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       replies.find((reply) => reply.method === 'Target.detachedFromTarget'),
     ).toBeUndefined();
     expect(replies.at(-1)).toEqual({ id: 14, result: {} });
+    expect(log).not.toHaveBeenCalled();
   });
 });
