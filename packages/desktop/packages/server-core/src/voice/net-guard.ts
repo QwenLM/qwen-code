@@ -129,6 +129,33 @@ function isBlockedTransitionIpv6Address(host: string): boolean {
   );
 }
 
+function unwrapIpv6TransitionStep(
+  host: string,
+): { address: string } | 'blocked' | undefined {
+  if (host.includes(':')) {
+    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (ipv4Embedded) {
+      return { address: ipv4Embedded[1]! };
+    }
+  }
+  const ipv4Mapped = readIpv4MappedIpv6(host);
+  if (ipv4Mapped) {
+    return { address: ipv4Mapped };
+  }
+  const ipv4Compatible = readIpv4CompatibleIpv6(host);
+  if (ipv4Compatible) {
+    return { address: ipv4Compatible };
+  }
+  const nat64 = readWellKnownNat64Ipv6(host);
+  if (nat64) {
+    return { address: nat64 };
+  }
+  if (host.startsWith('::ffff:')) {
+    return 'blocked';
+  }
+  return undefined;
+}
+
 /** IP-literal private-network check; hostname resolution is handled separately. */
 export function isPrivateNetworkIp(hostname: string): boolean {
   const host = normalizeIpAddress(hostname);
@@ -138,26 +165,12 @@ export function isPrivateNetworkIp(hostname: string): boolean {
   if (isLoopbackHost(host)) {
     return false;
   }
-  if (host.includes(':')) {
-    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
-    if (ipv4Embedded) {
-      return isPrivateNetworkIp(ipv4Embedded[1]!);
-    }
-  }
-  const ipv4Mapped = readIpv4MappedIpv6(host);
-  if (ipv4Mapped) {
-    return isPrivateNetworkIp(ipv4Mapped);
-  }
-  const ipv4Compatible = readIpv4CompatibleIpv6(host);
-  if (ipv4Compatible) {
-    return isPrivateNetworkIp(ipv4Compatible);
-  }
-  const nat64 = readWellKnownNat64Ipv6(host);
-  if (nat64) {
-    return isPrivateNetworkIp(nat64);
-  }
-  if (host.startsWith('::ffff:')) {
+  const step = unwrapIpv6TransitionStep(host);
+  if (step === 'blocked') {
     return true;
+  }
+  if (step) {
+    return isPrivateNetworkIp(step.address);
   }
   if (isIP(host) === 4) {
     const [first = 0, second = 0] = host.split('.').map(Number);
@@ -188,25 +201,9 @@ function isAlwaysBlockedVoiceAddress(address: string): boolean {
     return true;
   }
   if (isLoopbackHost(host)) return true;
-  if (host.includes(':')) {
-    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
-    if (ipv4Embedded) {
-      return isAlwaysBlockedVoiceAddress(ipv4Embedded[1]!);
-    }
-  }
-  const ipv4Compatible = readIpv4CompatibleIpv6(host);
-  if (ipv4Compatible) {
-    return isAlwaysBlockedVoiceAddress(ipv4Compatible);
-  }
-  const ipv4Mapped = readIpv4MappedIpv6(host);
-  if (ipv4Mapped) {
-    return isAlwaysBlockedVoiceAddress(ipv4Mapped);
-  }
-  const nat64 = readWellKnownNat64Ipv6(host);
-  if (nat64) {
-    return isAlwaysBlockedVoiceAddress(nat64);
-  }
-  if (host.startsWith('::ffff:')) return true;
+  const step = unwrapIpv6TransitionStep(host);
+  if (step === 'blocked') return true;
+  if (step) return isAlwaysBlockedVoiceAddress(step.address);
   if (isIP(host) === 4) {
     const [first = 0, second = 0] = host.split('.').map(Number);
     return (
