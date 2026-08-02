@@ -398,8 +398,12 @@ export async function resolveDesktopVoiceConfig(
     !isLoopbackHost(parsed.hostname) &&
     !allowInsecureBaseUrl
   ) {
+    const normalizedBaseUrl = `${parsed.origin}${parsed.pathname}`.replace(
+      /\/$/,
+      '',
+    );
     throw new Error(
-      'Voice endpoint must use an https baseUrl, or its exact complete URL must be listed in security.allowedInsecureVoiceBaseUrls.',
+      `Voice endpoint must use an https baseUrl, or its exact complete normalized URL (${normalizedBaseUrl}) must be listed in security.allowedInsecureVoiceBaseUrls.`,
     );
   }
   return {

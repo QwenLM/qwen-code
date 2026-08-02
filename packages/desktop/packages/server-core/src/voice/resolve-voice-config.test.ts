@@ -340,6 +340,51 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe(baseUrl)
   })
 
+  it('reports the normalized URL when an environment endpoint omits /v1', async () => {
+    const configuredBaseUrl = 'http://10.0.0.8'
+    const normalizedBaseUrl = `${configuredBaseUrl}/v1`
+    const readQwenJson = async <T,>(file: string) =>
+      (file === 'settings.json'
+        ? {
+            security: {
+              allowedInsecureVoiceBaseUrls: [configuredBaseUrl],
+            },
+          }
+        : undefined) as T | undefined
+
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {
+          OPENAI_API_KEY: 'env-key',
+          OPENAI_BASE_URL: configuredBaseUrl,
+        },
+        readQwenJson,
+      }),
+    ).rejects.toThrow(normalizedBaseUrl)
+
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {
+        OPENAI_API_KEY: 'env-key',
+        OPENAI_BASE_URL: configuredBaseUrl,
+      },
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              security: {
+                allowedInsecureVoiceBaseUrls: [normalizedBaseUrl],
+              },
+            }
+          : undefined) as T | undefined,
+    })
+
+    expect(config).toMatchObject({
+      baseUrl: normalizedBaseUrl,
+      allowInsecureBaseUrl: true,
+    })
+  })
+
   it('rejects cleartext custom providers without an exact allowlist match', async () => {
     await expect(
       resolveDesktopVoiceConfig({

@@ -72,6 +72,8 @@ describe('net-guard host classification', () => {
     expect(isPrivateNetworkIp('::192.168.1.1')).toBe(true)
     expect(isPrivateNetworkIp('::a00:1')).toBe(true)
     expect(isPrivateNetworkIp('::a9fe:a9fe')).toBe(true)
+    expect(isPrivateNetworkIp('0:0:0:0:0:0:a00:1')).toBe(true)
+    expect(isPrivateNetworkIp('0:0:0:0:0:ffff:a00:1')).toBe(true)
     expect(isPrivateNetworkIp('::5db8')).toBe(true)
     expect(isPrivateNetworkIp('8.8.8.8')).toBe(false)
     expect(isPrivateNetworkIp('::5db8:d822')).toBe(false)
@@ -233,6 +235,21 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
         { address: '::ffff:127.0.0.1' },
       ]),
     ).rejects.toThrow(/private-network/)
+
+    for (const address of [
+      '0:0:0:0:0:0:a00:8',
+      '0:0:0:0:0:0:0:1',
+      '0:0:0:0:0:0:a9fe:a9fe',
+      '0:0:0:0:0:ffff:a9fe:a9fe',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          'https://evil.example',
+          'm',
+          async () => [{ address }],
+        ),
+      ).rejects.toThrow(/private-network/)
+    }
   })
 
   it('allows a hostname that resolves to a public address', async () => {

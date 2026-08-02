@@ -818,6 +818,24 @@ describe('voice-transcriber', () => {
     expect(onEgress).not.toHaveBeenCalled();
   });
 
+  it('canonicalizes expanded IPv6 DNS results before applying network policy', async () => {
+    const config = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://asr.example/v1',
+    };
+
+    for (const address of [
+      '0:0:0:0:0:0:a00:8',
+      '0:0:0:0:0:0:0:1',
+      '0:0:0:0:0:0:a9fe:a9fe',
+      '0:0:0:0:0:ffff:a9fe:a9fe',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(config, async () => ({ address })),
+      ).rejects.toThrow(/private-network address/);
+    }
+  });
+
   it('rejects private-network IP literal voice URLs during network checks', async () => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed({

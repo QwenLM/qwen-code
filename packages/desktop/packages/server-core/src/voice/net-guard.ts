@@ -18,6 +18,16 @@ function normalizeHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[|\]$/g, '');
 }
 
+function normalizeIpAddress(address: string): string {
+  const host = normalizeHostname(address);
+  if (isIP(host) !== 6) return host;
+  try {
+    return normalizeHostname(new URL(`http://[${host}]/`).hostname);
+  } catch {
+    return host;
+  }
+}
+
 export function isLoopbackHost(hostname: string): boolean {
   const host = normalizeHostname(hostname);
   const ipv4Mapped = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
@@ -80,7 +90,7 @@ function readIpv4MappedIpv6(host: string): string | undefined {
 
 /** IP-literal private-network check; hostname resolution is handled separately. */
 export function isPrivateNetworkIp(hostname: string): boolean {
-  const host = normalizeHostname(hostname);
+  const host = normalizeIpAddress(hostname);
   if (isLoopbackHost(host)) {
     return false;
   }
@@ -125,7 +135,7 @@ export function isPrivateNetworkIp(hostname: string): boolean {
 }
 
 function isAlwaysBlockedVoiceAddress(address: string): boolean {
-  const host = normalizeHostname(address);
+  const host = normalizeIpAddress(address);
   if (isLoopbackHost(host)) return true;
   if (host.includes(':')) {
     const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);

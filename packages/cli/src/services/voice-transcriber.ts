@@ -155,6 +155,18 @@ function normalizeHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[|\]$/g, '');
 }
 
+function normalizeIpAddress(address: string): string {
+  const host = normalizeHostname(address);
+  if (isIP(host) !== 6) {
+    return host;
+  }
+  try {
+    return normalizeHostname(new URL(`http://[${host}]/`).hostname);
+  } catch {
+    return host;
+  }
+}
+
 function isLoopbackHost(hostname: string): boolean {
   const host = normalizeHostname(hostname);
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
@@ -219,7 +231,7 @@ function readIpv4MappedIpv6(host: string): string | undefined {
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
-  const host = normalizeHostname(hostname);
+  const host = normalizeIpAddress(hostname);
   if (isLoopbackHost(host)) {
     return false;
   }
@@ -260,7 +272,7 @@ function isPrivateNetworkIp(hostname: string): boolean {
 }
 
 function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
-  const host = normalizeHostname(hostname);
+  const host = normalizeIpAddress(hostname);
   if (isLoopbackHost(host)) {
     return true;
   }
