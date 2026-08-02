@@ -406,7 +406,8 @@ Some rule names automatically cover multiple tools:
 | `Read`    | `read_file`, `grep_search`, `glob`, `list_directory` |
 | `Edit`    | `edit`, `write_file`, `notebook_edit`                |
 
-> [!important] > `Read(/path/**)` matches **all four** read tools (file read, grep, glob, and directory listing).
+> [!important]
+> `Read(/path/**)` matches **all four** read tools (file read, grep, glob, and directory listing).
 > To restrict only file reading, use `ReadFile(/path/**)` or `read_file(/path/**)`.
 
 **Rule syntax examples:**
@@ -520,7 +521,8 @@ The precedence is `skills.disabled` > `skills.enabled` > `skills.defaultDisabled
 
 #### lsp
 
-> [!warning] > **Experimental Feature**: LSP support is currently experimental and disabled by default. Enable it using the `--experimental-lsp` command line flag.
+> [!warning]
+> **Experimental Feature**: LSP support is currently experimental and disabled by default. Enable it using the `--experimental-lsp` command line flag.
 
 Language Server Protocol (LSP) provides code intelligence features like go-to-definition, find references, and diagnostics.
 

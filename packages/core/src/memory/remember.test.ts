@@ -256,6 +256,28 @@ describe('remember memory helper', () => {
     );
   });
 
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(0);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
   it('lets managed-memory writes bypass base ask rules', async () => {
     const touched = path.join(getUserAutoMemoryRoot(), 'user.md');
     const basePm: Pick<

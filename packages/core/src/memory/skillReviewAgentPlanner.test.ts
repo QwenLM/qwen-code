@@ -447,6 +447,31 @@ describe('runSkillReviewByAgent limit wiring', () => {
     );
   });
 
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 0 }),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('lets an explicit maxTurns param override the configured value', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 25 }),
+      projectRoot,
+      history: [],
+      maxTurns: 3,
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 3 }),
+    );
+  });
+
   it('lets an explicit timeoutMs param override the configured value', async () => {
     await runSkillReviewByAgent({
       config: makeConfig({ timeoutMinutes: 30 }),
