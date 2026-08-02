@@ -14,6 +14,7 @@ import {
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
+import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import type { WorkspacePackage } from './lib/workspaces.js';
 
 const statfsSyncMock = vi.hoisted(() => vi.fn());
@@ -1255,5 +1256,87 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
     expect(rep.note).not.toContain('Correlate');
+  });
+
+  it('routes the run through the selected toolchain adapter (pins the delegation)', () => {
+    // This PR's whole change is that runBuildTest selects an adapter and delegates
+    // to adapter.run. Nothing else pinned that boundary: reverting the facade to the
+    // old inline implementation kept every report-shape test green. Spy on the
+    // adapter so a revert (adapter never called) turns this red.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    const runSpy = vi.spyOn(npmToolchainAdapter, 'run');
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    // The arguments are forwarded to the adapter unchanged.
+    expect(runSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        root,
+        changedFiles: ['packages/a/src/x.ts'],
+        timeout: 60,
+        install: false,
+        exec: expect.any(Function),
+      }),
+    );
+    // And the report runBuildTest returns IS the adapter's report.
+    expect(rep).toBe(runSpy.mock.results[0]?.value);
+    runSpy.mockRestore();
+  });
+
+  it('defaults the adapter exec to the real runner when none is injected', () => {
+    // Every other test injects a fake exec, so the production default path
+    // (args.exec undefined -> the real `run`) had zero coverage. Dropping the
+    // `?? run` fallback would hand the adapter exec: undefined and crash the first
+    // real `qwen review build-test`. Mock the adapter to capture the args it
+    // receives (so no real npm spawns) and pin that exec is a function.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    let receivedExec: unknown;
+    const runSpy = vi
+      .spyOn(npmToolchainAdapter, 'run')
+      .mockImplementation((args) => {
+        receivedExec = args.exec;
+        return {
+          toolchain: 'npm',
+          affected: [],
+          buildSet: [],
+          widenedWith: [],
+          install: null,
+          build: [],
+          test: [],
+          ok: true,
+          timedOut: [],
+          note: '',
+        };
+      });
+
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      // no `exec` — exercise the production default path
+    });
+
+    expect(receivedExec).toBeTypeOf('function');
+    runSpy.mockRestore();
   });
 });

@@ -131,4 +131,45 @@ describe('npm toolchain adapter', () => {
         'your brief, and give each command a deadline it can actually meet.',
     });
   });
+
+  it('does not treat a workspace repo as single-root when the root has scripts', () => {
+    // The single-root guard must fire ONLY for a workspace-less repo. A monorepo
+    // whose root package.json also has build/test scripts (this repo's shape) must
+    // still map the diff to its workspace. Forcing the guard on would set
+    // singleRoot, scope the build to '.', and silently skip the changed workspace.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'root',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'a', 'package.json'),
+      JSON.stringify({
+        name: '@x/a',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+
+    const report = npmToolchainAdapter.run({
+      root,
+      changedFiles: ['packages/a/src/x.ts'],
+      timeout: 5,
+      install: false,
+      exec: okExec,
+    });
+
+    expect(report.toolchain).toBe('npm');
+    // The diff maps to the workspace, NOT the root package.
+    expect(report.affected).toEqual(['packages/a']);
+    expect(report.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/a"',
+    ]);
+    expect(report.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+  });
 });
