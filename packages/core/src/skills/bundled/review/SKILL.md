@@ -731,6 +731,27 @@ Run it on a same-repo **PR** review only. A **local** or **file** review has no 
 
 **None of it blocks, and none of it caps.** A Test Plan defect is not a code defect — the diff is unaffected — and the verdict is about the code. The notes are disclosed in the body on every event including Approve, the same disclosed-but-not-capping treatment a deferred checker gets, and for the same reason: an author cannot fix "you wrote a sentence I could not check", so it must never become a permanent cap.
 
+### The findings, as data
+
+**Write the findings artifact before you do anything else with them.** Everything that matters in this pipeline is a computed artifact — the diff plan, the coverage report, the resolved anchors, the verdict — and the findings were the one exception: prose in a terminal, re-typed into the Step 8 report, re-typed again into the Step 7 review JSON. Three transcriptions of the same list, and this skill's history is a catalogue of what transcription costs (a Critical that changed severity between two sections of one review; an aggregate that arrived at `resolve-anchors` with its per-location anchors dropped and took the whole batch down).
+
+Write every confirmed finding — high and low confidence alike — as a JSON array, then:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review findings \
+  --input .qwen/tmp/qwen-review-{target}-findings-in.json \
+  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
+  --out .qwen/tmp/qwen-review-{target}-findings.json
+```
+
+**Pass `--test-delta` unconditionally — the blocks above already do.** `test-delta` runs only when a test command failed and a base tree was available, so on an ordinary green review the artifact is not there, and the command treats a file that is absent as no measurement taken and says nothing. It speaks up only for a file that exists and will not parse, which is a different fact. It holds back to Suggestion any Critical that names a test file `test-delta` measured as failing on the merge base too, and says on stderr which finding and which file. A Critical asserting "this PR breaks test X" against a test that was already red is the misattribution `test-delta` exists to prevent — and the round ledger is the other door into it: measured on #8368, exactly such a Critical was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice. The finding is not deleted, because a test can be red for two reasons at once; it keeps its evidence, gains the measurement that demoted it, and stays in front of a human who can restore it by naming which test fails for a new reason and quoting both sides.
+
+**One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
+
+Each entry carries `id` (unique — outcomes and resolved anchors both join on it), `severity`, `confidence`, `source`, `summary`, `failureScenario`, and either `file`/`line`/`anchor` or, for a pattern aggregate, a `locations[]` array with **one entry per location** (`suggestedFix`, `category` and `shortSummary` are optional; `shortSummary` is derived from `summary` when absent). The command validates the shape, refuses a duplicate id, refuses a finding with no failure scenario, sorts by severity → confidence → file → line → id, and writes counts nobody then recomputes by hand. Read the artifact for the numbers you quote in the Summary. This is a **canonicalization**, not a gate: it does not decide the verdict — `compose-review` does that, from the same findings — and it does not run at low effort, where the pass is unverified and emits no verdict.
+
+**Write the findings artifact BEFORE the verdict, because the verdict is computed from it.** `--test-delta` can lower a severity, and a Critical held back after `compose-review` has run reaches only the Step 8 report: the verdict line, the drafted `**[Critical]**` marker and the payload Step 7 recounts were all fixed before the measurement was consulted. Measured on #8368, that is the exact path the misattribution took into a composed review. If a hold does land after composing — a later round, a re-verified finding — treat it as a comment-set change: redraft the marker, update the comments file, and run `compose-review` again.
+
 ### Verdict
 
 **You do not decide the verdict, and you do not write it. Ask for it:**
@@ -759,25 +780,6 @@ The rules it applies — so you can read the line it gives you, not so you can a
 **And you may not overrule the line it gives you.** The failure came back in a subtler shape, on a later dogfood: the run _did_ call `compose-review`, _did_ read `Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed`, and then wrote — in its next thought — _"the compose-review flagged reverse audit as unreviewed (transcript visibility issue — the reverse audit did run substantively)"_, and reported **Approve** to the user and into the saved report. It was wrong: the auditors had run, but the orchestrator had hand-written their launch prompts, so they never got the prompt the CLI built — which is precisely what the gap said, and precisely the run's own doing. **A cap you can explain is still a cap.** If you believe a gap is wrong, the answer is to make the step verifiable — relaunch it with the prompt `agent-prompt` printed, verbatim — and run `compose-review` again. It is never to keep the verdict you preferred and narrate the gap away. The verdict you print, and the verdict in the report you save, are the one this command computed; when they differ from it, the review is lying to the person who trusted it.
 
 **The `FIX:` lines on stderr are that repair, spelled out.** For every repairable gap it capped on, `compose-review` prints one `FIX:` line naming the command — with this run's plan path already substituted. The parts that vary per agent stay as selectors: take `<id>`, `<r>` and `<path>` from the labels in the same report (never paste a literal `<...>` into a shell — it parses as a redirection), and add the `--rules` file whenever Step 2 loaded one. Execute them — **one repair round, then `compose-review` again**. If the same gap survives the round, stop: the cap stands, post with it, and disclose the gap. Do not loop repairs hoping for a different verdict, and do not skip the round and post a capped verdict the FIX lines could have lifted — both are the same failure, choosing the verdict over the evidence, in opposite directions.
-
-### The findings, as data
-
-**Write the findings artifact before you do anything else with them.** Everything that matters in this pipeline is a computed artifact — the diff plan, the coverage report, the resolved anchors, the verdict — and the findings were the one exception: prose in a terminal, re-typed into the Step 8 report, re-typed again into the Step 7 review JSON. Three transcriptions of the same list, and this skill's history is a catalogue of what transcription costs (a Critical that changed severity between two sections of one review; an aggregate that arrived at `resolve-anchors` with its per-location anchors dropped and took the whole batch down).
-
-Write every confirmed finding — high and low confidence alike — as a JSON array, then:
-
-```bash
-"${QWEN_CODE_CLI:-qwen}" review findings \
-  --input .qwen/tmp/qwen-review-{target}-findings-in.json \
-  --test-delta .qwen/tmp/qwen-review-{target}-test-delta.json \
-  --out .qwen/tmp/qwen-review-{target}-findings.json
-```
-
-**Pass `--test-delta` unconditionally — the blocks above already do.** `test-delta` runs only when a test command failed and a base tree was available, so on an ordinary green review the artifact is not there, and the command treats a file that is absent as no measurement taken and says nothing. It speaks up only for a file that exists and will not parse, which is a different fact. It holds back to Suggestion any Critical that names a test file `test-delta` measured as failing on the merge base too, and says on stderr which finding and which file. A Critical asserting "this PR breaks test X" against a test that was already red is the misattribution `test-delta` exists to prevent — and the round ledger is the other door into it: measured on #8368, exactly such a Critical was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice. The finding is not deleted, because a test can be red for two reasons at once; it keeps its evidence, gains the measurement that demoted it, and stays in front of a human who can restore it by naming which test fails for a new reason and quoting both sides.
-
-**One finding, one name.** A high-effort PR review also writes the incremental cache's cross-round `findings` ledger (Step 8), whose ids are `R<round>-<n>` — use those same ids here: a finding that will enter the ledger gets its `R<round>-<n>` as the artifact `id`, and a carried-forward finding keeps the id it already has. Two id schemes for one finding is how "R1-2" in next round's report and "f7" in this round's outcome ledger turn out to be the same defect that nobody can join.
-
-Each entry carries `id` (unique — outcomes and resolved anchors both join on it), `severity`, `confidence`, `source`, `summary`, `failureScenario`, and either `file`/`line`/`anchor` or, for a pattern aggregate, a `locations[]` array with **one entry per location** (`suggestedFix`, `category` and `shortSummary` are optional; `shortSummary` is derived from `summary` when absent). The command validates the shape, refuses a duplicate id, refuses a finding with no failure scenario, sorts by severity → confidence → file → line → id, and writes counts nobody then recomputes by hand. Read the artifact for the numbers you quote in the Summary. This is a **canonicalization**, not a gate: it does not decide the verdict — `compose-review` does that, from the same findings — and it does not run at low effort, where the pass is unverified and emits no verdict.
 
 ### Step 6B: Apply the findings (`--fix`)
 

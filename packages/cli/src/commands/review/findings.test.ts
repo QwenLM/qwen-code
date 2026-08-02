@@ -819,6 +819,30 @@ describe('holdCriticalsFailingOnBase', () => {
     });
   });
 
+  it('does not demote a finding whose subject IS the already-red test', () => {
+    // "this new assertion checks the wrong thing" names the test file as its
+    // location, and a PR touching an already-red test is exactly when such a
+    // finding gets written. The measurement says nothing about that claim.
+    const { findings } = holdCriticalsFailingOnBase(
+      [
+        {
+          ...critical,
+          summary: 'The new assertion asserts the wrong property',
+          failureScenario:
+            'It asserts `visible` where the contract is `enabled`, so a regression that flips enabled ships green.',
+          locations: [
+            {
+              file: 'packages/cli/src/ui/auth/AuthDialog.test.tsx',
+              line: 40,
+            },
+          ],
+        },
+      ],
+      shared,
+    );
+    expect(findings[0].severity).toBe('Critical');
+  });
+
   it('does not match on suggestedFix, where a test file is proposed work', () => {
     // "add a case in src/…test.tsx" is not a claim that the file is red.
     const { findings } = holdCriticalsFailingOnBase(
@@ -1027,10 +1051,29 @@ describe('sharedFailingFilesOf — cross-workspace identity', () => {
     ).toBe('Critical');
   });
 
-  it('falls back to the top level only when there are no entries', () => {
-    expect(sharedFailingFilesOf({ shared: ['src/a.test.ts'] }).shared).toEqual([
-      'src/a.test.ts',
-    ]);
+  it('holds nothing from an artifact with no entries to qualify against', () => {
+    // The top-level list is the union of the entries with the workspace
+    // context already lost. Honouring it would put back the bare path that
+    // matches inside any package — the collapse, through the last open door.
+    expect(
+      sharedFailingFilesOf({ shared: ['src/utils/errors.test.ts'] }).shared,
+    ).toEqual([]);
+  });
+
+  it('reports only shared paths it had to set aside, not net-new ones', () => {
+    // A net-new file was never eligible to hold anything back, so dropping it
+    // set nothing aside — and on a plain `npm test` with vitest projects, most
+    // keyed entries are net-new.
+    const { unidentifiable } = sharedFailingFilesOf({
+      entries: [
+        {
+          command: 'npm test',
+          netNew: ['proj::src/n.test.ts'],
+          shared: ['proj::src/s.test.ts'],
+        },
+      ],
+    });
+    expect(unidentifiable).toEqual(['proj::src/s.test.ts']);
   });
 });
 
@@ -1057,6 +1100,24 @@ describe('sharedFailingFilesOf', () => {
 });
 
 describe('validateFindings — the canonical artifact round-trips', () => {
+  it('keeps heldByMeasurement, so a hold survives being fed back', () => {
+    // The field exists so a LATER round can see that a measurement lowered
+    // this finding, and a round reads the artifact by feeding it back through
+    // --input. Dropped here, the hold survives exactly one command and
+    // counts.held returns to 0.
+    const [f] = validateFindings([
+      {
+        ...base,
+        severity: 'Suggestion',
+        heldByMeasurement: { file: 'packages/cli/src/a.test.ts' },
+      },
+    ]);
+    expect(f.heldByMeasurement).toEqual({
+      file: 'packages/cli/src/a.test.ts',
+    });
+    expect(buildReport([f]).counts.held).toBe(1);
+  });
+
   it('keeps outcome and outcomeNote when an artifact is fed back through --input', () => {
     // `validateFindings` accepts `outcome`; dropping the note while keeping the
     // outcome would strip exactly the field a `skipped` finding owes the reader.

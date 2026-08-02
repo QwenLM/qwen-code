@@ -323,6 +323,16 @@ export function validateFindings(raw: unknown): Finding[] {
     const outcomeNote =
       asString(o, 'outcomeNote') ?? asString(o, 'outcome_note');
 
+    // And `heldByMeasurement`, for the same reason and with more riding on it:
+    // the field exists so a later round can see that a measurement lowered this
+    // finding, and a round reads the artifact by feeding it back through
+    // `--input`. Dropped here, the hold survives exactly one command.
+    const heldRaw = (o as { heldByMeasurement?: unknown }).heldByMeasurement;
+    const heldFile =
+      heldRaw && typeof heldRaw === 'object'
+        ? asString(heldRaw as Record<string, unknown>, 'file')
+        : undefined;
+
     const shortSummary =
       asString(o, 'shortSummary') ?? asString(o, 'short_summary');
 
@@ -348,6 +358,7 @@ export function validateFindings(raw: unknown): Finding[] {
       locations: parseLocations(o, i),
       ...(assetFiles ? { assetFiles } : {}),
       ...(assets ? { assets } : {}),
+      ...(heldFile ? { heldByMeasurement: { file: heldFile } } : {}),
       ...(outcome ? { outcome } : {}),
       ...(outcome && outcomeNote ? { outcomeNote } : {}),
     } satisfies Finding;
@@ -431,14 +442,18 @@ export function holdCriticalsFailingOnBase(
   const held: Array<{ id: string; file: string }> = [];
   const out = findings.map((f) => {
     if (f.severity !== 'Critical') return f;
-    // `suggestedFix` is deliberately absent: it is where a finding proposes
-    // work ("add a case in src/x.test.ts"), not where it asserts its claim, and
-    // a test file named there is routinely unrelated to any file being red.
-    const haystack = [
-      f.summary,
-      f.failureScenario,
-      ...f.locations.map((l) => l.file),
-    ].join('\n');
+    // `summary` and `failureScenario` only — the two fields where a finding
+    // states its claim.
+    //
+    // `suggestedFix` is where it proposes work ("add a case in src/x.test.ts"),
+    // and `locations[].file` is its subject. Both name a test file routinely
+    // without asserting anything about that file being red, and the second is
+    // the sharper trap: for a finding ABOUT a test's content — "this new
+    // assertion checks the wrong thing" — the location IS the test file, and a
+    // PR touching an already-red test is exactly when such a finding gets
+    // written. Demoting it would use the measurement against a claim the
+    // measurement says nothing about.
+    const haystack = [f.summary, f.failureScenario].join('\n');
     const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
     if (!hit) return f;
     held.push({ id: f.id, file: hit });
@@ -526,8 +541,13 @@ export function sharedFailingFilesOf(raw: unknown): {
     for (const e of v) {
       if (typeof e !== 'string' || !e) continue;
       const qualified = repoRelative(e, workspace);
-      if (qualified === undefined) unidentifiable.add(e);
-      else into.add(qualified);
+      // Reported only for `shared`: a `netNew` path was never eligible to hold
+      // anything back, so nothing was set aside by dropping it, and saying
+      // otherwise would make the disclosure noise on the very shape (a plain
+      // `npm test` with vitest projects) that produces most of these keys.
+      if (qualified === undefined) {
+        if (into === shared) unidentifiable.add(e);
+      } else into.add(qualified);
     }
   };
 
@@ -544,10 +564,13 @@ export function sharedFailingFilesOf(raw: unknown): {
       take(shared, (e as { shared?: unknown }).shared, workspace);
       take(netNew, (e as { netNew?: unknown }).netNew, workspace);
     }
-  } else {
-    take(shared, (raw as { shared?: unknown }).shared, undefined);
-    take(netNew, (raw as { netNew?: unknown }).netNew, undefined);
   }
+  // No `entries` and therefore no `--workspace=` to qualify against. The
+  // top-level list is the union of the entries with that context already lost,
+  // so honouring it would put back the bare workspace-relative path that
+  // matches inside ANY package — the collapse `repoRelative` exists to stop,
+  // through the one door left open. A real artifact always has entries;
+  // anything else measured nothing this can safely act on.
   return {
     shared: [...shared].filter((f) => !netNew.has(f)),
     unidentifiable: [...unidentifiable],
