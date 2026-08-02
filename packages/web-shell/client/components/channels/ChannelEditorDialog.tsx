@@ -51,16 +51,12 @@ import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  hasDescriptorSenderPolicy,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
 } from './channel-editor-state';
-
-const PLATFORM_MARKS: Record<string, string> = {
-  dingtalk: 'D',
-  wecom: 'W',
-  feishu: 'F',
-};
+import { PLATFORM_MARKS } from './channel-platform';
 
 const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dingtalk: {
@@ -75,6 +71,23 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
+  },
+  github: {
+    token: 'channels.editor.field.github.token',
+    baseUrl: 'channels.editor.field.github.baseUrl',
+    groupPolicy: 'channels.editor.field.github.groupPolicy',
+    senderPolicy: 'channels.editor.field.github.senderPolicy',
+    allowedUsers: 'channels.editor.field.github.allowedUsers',
+    reasonFilter: 'channels.editor.field.github.reasonFilter',
+  },
+  gitlab: {
+    token: 'channels.editor.field.gitlab.token',
+    baseUrl: 'channels.editor.field.gitlab.baseUrl',
+    groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
+    senderPolicy: 'channels.editor.field.gitlab.senderPolicy',
+    allowedUsers: 'channels.editor.field.gitlab.allowedUsers',
+    action_prompt_template:
+      'channels.editor.field.gitlab.action_prompt_template',
   },
 };
 
@@ -113,11 +126,16 @@ function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
     : [];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function FieldShell({
   id,
   label,
   required,
   hint,
+  description,
   error,
   children,
 }: {
@@ -125,6 +143,7 @@ function FieldShell({
   label: string;
   required?: boolean;
   hint?: string;
+  description?: string;
   error?: string;
   children: ReactNode;
 }) {
@@ -142,6 +161,9 @@ function FieldShell({
         {hint ? <span className={styles.hint}>{hint}</span> : null}
       </div>
       {children}
+      {description ? (
+        <p className={styles.fieldDescription}>{description}</p>
+      ) : null}
       {error ? (
         <p role="alert" className="text-xs text-destructive">
           {error}
@@ -187,12 +209,24 @@ export function ChannelEditorDialog({
     return key ? t(key) : field.label;
   };
 
+  const fieldDescription = (field: DaemonChannelConfigFieldDescriptor) => {
+    const labelKey = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    if (labelKey) {
+      const descKey = `${labelKey}.description`;
+      const translated = t(descKey);
+      if (translated !== descKey) return translated;
+    }
+    return field.description;
+  };
+
   const validationMessage = (
     field: DaemonChannelConfigFieldDescriptor | undefined,
     code: ChannelEditorValidationCode,
   ) => {
     if (code === 'duplicate') return t('channels.editor.validation.duplicate');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
+    if (code === 'invalidOption')
+      return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {
@@ -271,6 +305,7 @@ export function ChannelEditorDialog({
         id={id}
         label={fieldLabel(field)}
         required={field.required}
+        description={fieldDescription(field)}
         hint={
           field.envResolvable
             ? t('channels.editor.environmentReference')
@@ -364,6 +399,7 @@ export function ChannelEditorDialog({
           id={id}
           label={fieldLabel(field)}
           required={field.required}
+          description={fieldDescription(field)}
           error={error}
         >
           <Switch
@@ -382,6 +418,7 @@ export function ChannelEditorDialog({
           id={id}
           label={fieldLabel(field)}
           required={field.required}
+          description={fieldDescription(field)}
           error={error}
         >
           <Select value={String(value ?? '')} onValueChange={update}>
@@ -403,12 +440,66 @@ export function ChannelEditorDialog({
         </FieldShell>
       );
     }
+    if (field.kind === 'record') {
+      let record: Record<string, string> = {};
+      if (typeof value === 'string' && value) {
+        try {
+          const parsed: unknown = JSON.parse(value);
+          if (isRecord(parsed)) {
+            record = parsed as Record<string, string>;
+          }
+        } catch {
+          /* malformed — render empty */
+        }
+      }
+      const updateRecord = (key: string, val: string) => {
+        const next = { ...record, [key]: val };
+        update(JSON.stringify(next));
+      };
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <div className={styles.recordFields}>
+            {field.options?.map((option) => {
+              const optKey = `${FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ?? ''}.option.${option.value}`;
+              const translated = t(optKey);
+              const displayLabel =
+                translated !== optKey ? translated : option.label;
+              return (
+                <div key={option.value} className={styles.recordRow}>
+                  <Label
+                    htmlFor={`${id}-${option.value}`}
+                    className={styles.recordLabel}
+                  >
+                    {displayLabel}
+                  </Label>
+                  <Input
+                    id={`${id}-${option.value}`}
+                    value={record[option.value] ?? ''}
+                    onChange={(event) =>
+                      updateRecord(option.value, event.target.value)
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </FieldShell>
+      );
+    }
     return (
       <FieldShell
         key={field.key}
         id={id}
         label={fieldLabel(field)}
         required={field.required}
+        description={fieldDescription(field)}
         hint={
           field.envResolvable
             ? t('channels.editor.environmentReference')
@@ -434,7 +525,9 @@ export function ChannelEditorDialog({
         <DialogHeader>
           <div className={styles.platformHeader}>
             <span className={styles.platformMark} aria-hidden="true">
-              {PLATFORM_MARKS[descriptor.type] ?? descriptor.displayName[0]}
+              {PLATFORM_MARKS[descriptor.type] ??
+                descriptor.displayName[0]?.toUpperCase() ??
+                '?'}
             </span>
             <div>
               <DialogTitle>
@@ -510,68 +603,87 @@ export function ChannelEditorDialog({
               {descriptor.fields.map(renderField)}
             </section>
 
-            <section className={styles.section}>
-              <h3 className={styles.sectionHeading}>
-                {t('channels.editor.section.access')}
-              </h3>
-              <RadioGroup
-                className={styles.policyGrid}
-                value={draft.senderPolicy}
-                aria-invalid={Boolean(errors['senderPolicy'])}
-                onValueChange={(value) =>
-                  setDraft((current) => ({
-                    ...current,
-                    senderPolicy:
-                      value === 'pairing' || value === 'open' ? value : '',
-                  }))
-                }
-              >
-                {(['pairing', 'open'] as const).map((policy) => (
-                  <Label
-                    key={policy}
-                    className={styles.policyCard}
-                    data-selected={draft.senderPolicy === policy}
-                  >
-                    <RadioGroupItem value={policy} />
-                    <span className={styles.policyCopy}>
-                      <span className={styles.policyTitle}>
-                        {t(`channels.editor.policy.${policy}.title`)}
-                      </span>
-                      <span className={styles.policyDescription}>
-                        {t(`channels.editor.policy.${policy}.description`)}
-                      </span>
-                    </span>
-                  </Label>
-                ))}
-              </RadioGroup>
-              {errors['senderPolicy'] ? (
-                <p role="alert" className="text-xs text-destructive">
-                  {errors['senderPolicy']}
-                </p>
-              ) : null}
-              {draft.senderPolicy === 'pairing' ? (
-                instance?.config.senderPolicy === 'pairing' ? (
-                  <ChannelPairingRequests
-                    channelName={instance.name}
-                    listRequests={listPairingRequests}
-                    approveRequest={approvePairingRequest}
-                    listApprovals={listPairingApprovals}
-                    revokeApproval={revokePairingApproval}
-                    staticAllowedUsers={configuredAllowedUsers(instance)}
-                  />
-                ) : (
-                  <Alert>
-                    <KeyRoundIcon />
-                    <AlertTitle>
-                      {t('channels.editor.pairing.saveFirst.title')}
-                    </AlertTitle>
-                    <AlertDescription>
-                      {t('channels.editor.pairing.saveFirst.description')}
-                    </AlertDescription>
-                  </Alert>
-                )
-              ) : null}
-            </section>
+            {(() => {
+              const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
+              const effectivePolicy = descriptorPolicy
+                ? String(draft.values['senderPolicy'] ?? '')
+                : draft.senderPolicy;
+              const showRadioGroup = !descriptorPolicy;
+              const showPairing = effectivePolicy === 'pairing';
+              if (!showRadioGroup && !showPairing) return null;
+              return (
+                <section className={styles.section}>
+                  <h3 className={styles.sectionHeading}>
+                    {t('channels.editor.section.access')}
+                  </h3>
+                  {showRadioGroup ? (
+                    <>
+                      <RadioGroup
+                        className={styles.policyGrid}
+                        value={draft.senderPolicy}
+                        aria-invalid={Boolean(errors['senderPolicy'])}
+                        onValueChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            senderPolicy:
+                              value === 'pairing' || value === 'open'
+                                ? value
+                                : '',
+                          }))
+                        }
+                      >
+                        {(['pairing', 'open'] as const).map((policy) => (
+                          <Label
+                            key={policy}
+                            className={styles.policyCard}
+                            data-selected={draft.senderPolicy === policy}
+                          >
+                            <RadioGroupItem value={policy} />
+                            <span className={styles.policyCopy}>
+                              <span className={styles.policyTitle}>
+                                {t(`channels.editor.policy.${policy}.title`)}
+                              </span>
+                              <span className={styles.policyDescription}>
+                                {t(
+                                  `channels.editor.policy.${policy}.description`,
+                                )}
+                              </span>
+                            </span>
+                          </Label>
+                        ))}
+                      </RadioGroup>
+                      {errors['senderPolicy'] ? (
+                        <p role="alert" className="text-xs text-destructive">
+                          {errors['senderPolicy']}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {showPairing ? (
+                    instance?.config.senderPolicy === 'pairing' ? (
+                      <ChannelPairingRequests
+                        channelName={instance.name}
+                        listRequests={listPairingRequests}
+                        approveRequest={approvePairingRequest}
+                        listApprovals={listPairingApprovals}
+                        revokeApproval={revokePairingApproval}
+                        staticAllowedUsers={configuredAllowedUsers(instance)}
+                      />
+                    ) : (
+                      <Alert>
+                        <KeyRoundIcon />
+                        <AlertTitle>
+                          {t('channels.editor.pairing.saveFirst.title')}
+                        </AlertTitle>
+                        <AlertDescription>
+                          {t('channels.editor.pairing.saveFirst.description')}
+                        </AlertDescription>
+                      </Alert>
+                    )
+                  ) : null}
+                </section>
+              );
+            })()}
           </div>
           <DialogFooter className="mt-4">
             <Button
