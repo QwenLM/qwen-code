@@ -148,6 +148,14 @@ export interface TestDeltaReport {
   /** Union across entries, deduplicated. */
   netNew: string[];
   shared: string[];
+  /**
+   * Commands the whole-command budget could not fit — their failures stay
+   * unattributed. A STRUCTURED field, not prose only: `mutants.skippedForBudget`
+   * and `hunks.skippedForBudget` are what Agent 7's brief teaches a reader to
+   * check, and an equivalent discoverable only by substring-matching `note` is
+   * the silent cap the same brief rules out.
+   */
+  skippedForBudget: string[];
   note: string;
 }
 
@@ -165,6 +173,10 @@ export interface TestDeltaArgs {
   timeout: number;
   /** Test seam — production spawns the real command. */
   exec?: (command: string, cwd: string, timeoutMs: number) => BaseRunResult;
+  /** Injectable clock, for tests only — the budget math cannot be driven to
+   *  its cutoff in real time. Matches `test-efficacy`'s seam; without it a
+   *  test has to reassign the global `Date.now`. */
+  now?: () => number;
 }
 
 /**
@@ -184,6 +196,13 @@ export interface BaseRunResult extends CommandResult {
   failingFiles?: string[];
 }
 
+// Mirrors build-test's run() on the three properties its comments call out as
+// deliberate — reviewed live when this reimplementation diverged on all three:
+// stdin ignored (a rerun that asks a question hangs to the deadline), timeout
+// read from error.code with the SIGTERM/null-status fallback (the substring
+// form misses a maxBuffer kill, which would flow into the base-green Critical
+// path), and trimmed output (a failing monorepo suite is hundreds of KB that
+// would otherwise land verbatim in the report Agent 7 reads).
 function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
   const started = Date.now();
   const r = spawnSync(command, {
@@ -236,6 +255,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     entries: [],
     netNew: [],
     shared: [],
+    skippedForBudget: [],
     note,
   });
 
@@ -267,7 +287,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // an invalid deadline. Fall back to the CLI's own default.
   const perCommandMs =
     (Number.isFinite(args.timeout) ? args.timeout : DEFAULT_TIMEOUT_S) * 1000;
-  const startedAt = Date.now();
+  const now = args.now ?? Date.now;
+  const startedAt = now();
   const skippedForBudget: string[] = [];
   /** Reruns killed by a deadline the BUDGET shortened, not by their own. */
   const budgetClamped: string[] = [];
@@ -279,8 +300,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       skippedUnrecognised.push(t.command);
       continue;
     }
-    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
-    if (remaining < 5_000) {
+    const remaining = TOTAL_BUDGET_MS - (now() - startedAt);
+    // PRICE the slot against how long the command actually took on the PR
+    // side, the way test-efficacy prices a mutant run against the measured
+    // baseline. A flat 5s floor admits a command with six seconds left, whose
+    // guaranteed timeout `budgetClamped` below then has to explain after the
+    // fact — cheaper, and honester, not to start a rerun the window cannot
+    // hold. `seconds` is the PR side's own duration; the base tree is built
+    // and warm, so it is the closest estimate available. Floored so a
+    // sub-second command still gets a usable window, and capped by the
+    // per-command deadline so a slow command is not skipped for wanting more
+    // than it would ever be given.
+    const estimateMs = Math.max((t.seconds ?? 0) * 1000, 30_000);
+    if (remaining < Math.min(estimateMs, perCommandMs)) {
       skippedForBudget.push(t.command);
       continue;
     }
@@ -407,6 +439,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     entries,
     netNew,
     shared,
+    skippedForBudget,
     note: parts.join('. ') || 'nothing to report',
   };
 }

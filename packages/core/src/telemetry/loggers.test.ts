@@ -142,6 +142,8 @@ describe('loggers', () => {
       const event = makeChatCompressionEvent({
         tokens_before: 9001,
         tokens_after: 9000,
+        cache_sharing_attempted: true,
+        cache_sharing_used: false,
       });
 
       logChatCompression(mockConfig, event);
