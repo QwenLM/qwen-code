@@ -12,6 +12,7 @@ import type {
   GcResult,
   GcRootProvider,
   OmniStorageConfig,
+  OmniStoragePaths,
   RecoveryResult,
 } from './types.js';
 import { hashToManagedId } from './types.js';
@@ -20,13 +21,6 @@ import type { OmniUploadCache } from './omni-upload-cache.js';
 const debugLogger = createDebugLogger('OMNI_GC');
 
 const HASH_SAMPLE_SIZE = 20;
-
-export interface OmniStoragePaths {
-  objectsDir: string;
-  downloadsDir: string;
-  stagingDir: string;
-  quarantineDir: string;
-}
 
 interface ObjectEntry {
   sha256: string;
@@ -80,7 +74,7 @@ async function listObjects(objectsDir: string): Promise<ObjectEntry[]> {
   return entries;
 }
 
-async function dirSize(dir: string): Promise<number> {
+export async function dirSize(dir: string): Promise<number> {
   let total = 0;
   let entries: fs.Dirent[];
   try {
@@ -248,8 +242,11 @@ export async function runStartupRecovery(
     const quarantineCutoff =
       Date.now() - config.quarantine.retentionDays * 86_400_000;
 
-    const quarantineDirs: Array<{ name: string; mtimeMs: number; size: number }> =
-      [];
+    const quarantineDirs: Array<{
+      name: string;
+      mtimeMs: number;
+      size: number;
+    }> = [];
     for (const entry of quarantineEntries) {
       const entryPath = path.join(paths.quarantineDir, entry);
       try {

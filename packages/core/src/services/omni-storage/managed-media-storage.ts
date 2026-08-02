@@ -16,6 +16,7 @@ import type {
   GcRootProvider,
   ManagedId,
   OmniStorageConfig,
+  OmniStoragePaths,
   PromoteResult,
   QuarantineReason,
   RecoveryResult,
@@ -23,12 +24,12 @@ import type {
 } from './types.js';
 import { hashToManagedId, managedIdToHash } from './types.js';
 import { OmniUploadCache } from './omni-upload-cache.js';
-import { runGc, runStartupRecovery } from './omni-gc.js';
-import type { OmniStoragePaths } from './omni-gc.js';
+import { dirSize, runGc, runStartupRecovery } from './omni-gc.js';
 
 const debugLogger = createDebugLogger('OMNI_STORAGE');
 
 const SAFE_ID = /^[a-zA-Z0-9_-]+$/;
+const SAFE_EXT = /^\.[a-zA-Z0-9]+$/;
 
 function assertSafeId(id: string, label: string): void {
   if (!SAFE_ID.test(id)) {
@@ -36,6 +37,14 @@ function assertSafeId(id: string, label: string): void {
       `Unsafe ${label}: "${id}". Only alphanumeric, hyphen, and underscore are allowed.`,
     );
   }
+}
+
+function sanitizeExtension(extension: string): string {
+  const ext = extension.startsWith('.') ? extension : `.${extension}`;
+  if (!SAFE_EXT.test(ext)) {
+    return '.bin';
+  }
+  return ext;
 }
 
 /**
@@ -171,16 +180,6 @@ export class ManagedMediaStorage {
       deduplicated: false,
       sizeBytes: data.length,
     };
-  }
-
-  /**
-   * Resolve a managedId to its filesystem path. The file may not exist
-   * (e.g. externally deleted) — callers should check with objectExists().
-   */
-  resolveObjectPath(managedId: ManagedId): string {
-    const sha256 = managedIdToHash(managedId);
-    // Extension is unknown from managedId alone; glob the prefix dir.
-    return path.join(this.paths.objectsDir, sha256.slice(0, 2), sha256);
   }
 
   /**
@@ -356,7 +355,7 @@ export class ManagedMediaStorage {
     try {
       const qEntries = await fs.promises.readdir(this.paths.quarantineDir);
       for (const entry of qEntries) {
-        quarantineBytes += await this.dirSize(
+        quarantineBytes += await dirSize(
           path.join(this.paths.quarantineDir, entry),
         );
       }
@@ -388,7 +387,7 @@ export class ManagedMediaStorage {
   // ── Internal helpers ───────────────────────────────────────────────
 
   private objectPathFor(sha256: string, extension: string): string {
-    const ext = extension.startsWith('.') ? extension : `.${extension}`;
+    const ext = sanitizeExtension(extension);
     return path.join(
       this.paths.objectsDir,
       sha256.slice(0, 2),
@@ -459,29 +458,5 @@ export class ManagedMediaStorage {
       }
       // ENOENT is fine — path doesn't exist yet
     }
-  }
-
-  private async dirSize(dir: string): Promise<number> {
-    let total = 0;
-    let entries: fs.Dirent[];
-    try {
-      entries = await fs.promises.readdir(dir, { withFileTypes: true });
-    } catch {
-      return 0;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        total += await this.dirSize(fullPath);
-      } else if (entry.isFile()) {
-        try {
-          const stat = await fs.promises.stat(fullPath);
-          total += stat.size;
-        } catch {
-          // skip
-        }
-      }
-    }
-    return total;
   }
 }

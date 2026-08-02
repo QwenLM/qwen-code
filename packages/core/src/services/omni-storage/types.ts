@@ -102,3 +102,10 @@ export interface UploadCacheEntry {
   uploadedAt: string;
   expiresAt: string;
 }
+
+export interface OmniStoragePaths {
+  objectsDir: string;
+  downloadsDir: string;
+  stagingDir: string;
+  quarantineDir: string;
+}
