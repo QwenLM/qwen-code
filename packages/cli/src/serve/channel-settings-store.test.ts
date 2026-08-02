@@ -399,17 +399,6 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientSecret: { operation: 'replace', value: 'secret' } as const,
       },
     },
-    {
-      label: 'record with undeclared key',
-      config: {
-        type: 'management-validation-test',
-        clientId: 'client-id',
-        templates: { unknown: 'hello' },
-      },
-      secrets: {
-        clientSecret: { operation: 'replace', value: 'secret' } as const,
-      },
-    },
   ])('rejects $label without writing', async ({ config, secrets }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');
@@ -473,7 +462,13 @@ describe('WorkspaceChannelSettingsStore', () => {
         type: 'management-validation-test',
         clientId: 'client-id',
         tags: ['alpha', 'beta'],
-        templates: { greeting: 'hi %user%', farewell: 'bye' },
+        templates: {
+          greeting: 'hi %user%',
+          farewell: 'bye',
+          // record options are UI hints, not a closed set: undeclared keys
+          // must be accepted (GitLab action_name set drifts server-side)
+          attention_requested: 'ping',
+        },
       },
       secrets: {
         clientSecret: { operation: 'replace', value: 'secret' },
@@ -482,7 +477,11 @@ describe('WorkspaceChannelSettingsStore', () => {
 
     expect(next.channels['bot']).toMatchObject({
       tags: ['alpha', 'beta'],
-      templates: { greeting: 'hi %user%', farewell: 'bye' },
+      templates: {
+        greeting: 'hi %user%',
+        farewell: 'bye',
+        attention_requested: 'ping',
+      },
     });
   });
 

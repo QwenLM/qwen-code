@@ -236,11 +236,7 @@ function assertDescriptorValue(
       value.every((item) => typeof item === 'string')) ||
     (field.kind === 'record' &&
       isRecord(value) &&
-      Object.values(value).every((v) => typeof v === 'string') &&
-      (field.options === undefined ||
-        Object.keys(value).every((k) =>
-          field.options!.some((opt) => opt.value === k),
-        )));
+      Object.values(value).every((v) => typeof v === 'string'));
   if (!valid) {
     throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
   }
