@@ -555,6 +555,117 @@ describe("the responder is the caller's module, and is treated as one", () => {
   });
 });
 
+describe('the invariants, over a mixed sequence', () => {
+  // Round 5 found its bug only because four rounds' fixes were exercised
+  // together: each was right alone and the counter was wrong across them. A
+  // single-path assertion cannot see that, so this drives 120 requests over
+  // every known path — both wires, streaming and not, models, three refusal
+  // shapes, oversized bodies — and checks what must hold no matter the order.
+  it('holds all of them across 120 mixed requests', async () => {
+    const seen: number[] = [];
+    const { report, log } = await serve((r) => {
+      seen.push(r.n);
+      if (r.n % 7 === 0) return { status: 503, body: { e: 'x' } };
+      if (r.n % 5 === 0) return { tool: 't', args: { n: r.n } };
+      return { text: 'x'.repeat(r.n % 60) };
+    });
+    const B = report.baseUrl;
+    const J = (b: unknown): RequestInit => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(b),
+    });
+    const paths: Array<[string, () => Promise<unknown>, boolean]> = [
+      [
+        'oai-stream',
+        () =>
+          fetch(
+            `${B}/chat/completions`,
+            J({ stream: true, messages: [{ content: 'a' }] }),
+          ),
+        true,
+      ],
+      [
+        'oai-plain',
+        () =>
+          fetch(
+            `${B}/chat/completions`,
+            J({ stream: false, messages: [{ content: 'b' }] }),
+          ),
+        true,
+      ],
+      [
+        'anth-stream',
+        () =>
+          fetch(
+            `${B}/messages`,
+            J({ stream: true, system: 's', messages: [{ content: 'c' }] }),
+          ),
+        true,
+      ],
+      [
+        'anth-plain',
+        () =>
+          fetch(
+            `${B}/messages`,
+            J({ stream: false, messages: [{ content: 'd' }] }),
+          ),
+        true,
+      ],
+      ['models', () => fetch(`${B}/models`), false],
+      ['bad-path', () => fetch(`${B}/embeddings`, J({ x: 1 })), false],
+      [
+        'bad-method',
+        () => fetch(`${B}/chat/completions`, { method: 'GET' }),
+        false,
+      ],
+      [
+        'bad-json',
+        () => fetch(`${B}/chat/completions`, { method: 'POST', body: '{{{' }),
+        false,
+      ],
+      [
+        'huge',
+        () =>
+          fetch(
+            `${B}/chat/completions`,
+            J({ stream: false, messages: [{ content: 'z'.repeat(300_000) }] }),
+          ),
+        true,
+      ],
+    ];
+    // Deterministic pseudo-random order: a fixed seed, so a failure reproduces.
+    let x = 12345;
+    let expectAsked = 0;
+    for (let i = 0; i < 120; i++) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const [, go, asks] = paths[x % paths.length];
+      await go();
+      if (asks) expectAsked++;
+    }
+    await stop?.();
+    stop = null;
+
+    const recs = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    // One record per request, whatever happened to it.
+    expect(recs).toHaveLength(120);
+    // The responder saw exactly the requests that reach it, numbered 1..N.
+    expect(seen).toHaveLength(expectAsked);
+    expect(seen).toEqual(Array.from({ length: expectAsked }, (_, i) => i + 1));
+    // ...and the record agrees with the responder about which those were.
+    const numbered = recs.filter((r) => r.n !== null);
+    expect(numbered.map((r) => r.n)).toEqual(seen);
+    // Nothing carries the parsed body, however large the request was.
+    expect(recs.every((r) => !('body' in r))).toBe(true);
+    expect(
+      recs.every((r) => r.wire === 'openai' || r.wire === 'anthropic'),
+    ).toBe(true);
+  }, 120_000);
+});
+
 describe('the pieces, without a socket', () => {
   it('flattens both message content shapes', () => {
     expect(
