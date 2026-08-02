@@ -469,6 +469,30 @@ describe('resolveDesktopVoiceConfig', () => {
     ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
   })
 
+  it('rejects always-blocked base URLs at config time even when allowlisted', async () => {
+    for (const baseUrl of [
+      'http://169.254.169.254/v1',
+      'https://169.254.169.254/v1',
+      'http://[fe80::1]/v1',
+      'http://0.0.0.0/v1',
+    ]) {
+      for (const allowlisted of [false, true]) {
+        await expect(
+          resolveDesktopVoiceConfig({
+            getVoiceModel: () => 'qwen3-asr-flash',
+            env: { OPENAI_API_KEY: 'env-key', OPENAI_BASE_URL: baseUrl },
+            readQwenJson: async <T,>(file: string) =>
+              (file === 'settings.json' && allowlisted
+                ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
+                : undefined) as T | undefined,
+          }),
+        ).rejects.toThrow(
+          'Voice endpoint must not use a private-network baseUrl.',
+        )
+      }
+    }
+  })
+
   it('reports the missing key for an exact model provider', async () => {
     const baseUrl = 'http://voice.region-a.internal.example/v1'
     await expect(

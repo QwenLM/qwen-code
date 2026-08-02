@@ -630,10 +630,19 @@ describe('voice-transcriber', () => {
     };
 
     for (const address of [
+      '0.0.0.0',
       '127.0.0.1',
+      '::1',
       '169.254.169.254',
       '100.100.100.200',
+      '::',
+      '::ffff:127.0.0.1',
       '::ffff:7f00:1',
+      '::a9fe:a9fe',
+      '::6464:64c8',
+      '::5db8',
+      'fe80::1',
+      'fd00:ec2::254',
       '::ffff:a9fe:a9fe',
       '64:ff9b::7f00:1',
       '64:ff9b::a9fe:a9fe',
@@ -800,21 +809,28 @@ describe('voice-transcriber', () => {
       }),
     ).toThrow(/security\.allowedInsecureVoiceBaseUrls/);
 
-    const blockedConfig = createConfig([
-      {
-        id: 'qwen3-asr-flash',
-        label: 'Blocked ASR',
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://169.254.169.254/v1',
-      },
-    ]);
-    expect(() =>
-      resolveVoiceTranscriptionConfig({
-        config: blockedConfig,
-        settings: createSettings(),
-        voiceModel: 'qwen3-asr-flash',
-      }),
-    ).toThrow(/private-network baseUrl\.$/);
+    for (const blockedBaseUrl of [
+      'https://169.254.169.254/v1',
+      'http://169.254.169.254/v1',
+      'http://[fe80::1]/v1',
+      'http://0.0.0.0/v1',
+    ]) {
+      const blockedConfig = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Blocked ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: blockedBaseUrl,
+        },
+      ]);
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config: blockedConfig,
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(/private-network baseUrl\.$/);
+    }
   });
 
   it('does not classify an IPv4-mapped public address as private', () => {

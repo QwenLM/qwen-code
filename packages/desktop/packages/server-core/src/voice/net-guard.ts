@@ -195,7 +195,7 @@ export function isPrivateNetworkIp(hostname: string): boolean {
   return false;
 }
 
-function isAlwaysBlockedVoiceAddress(address: string): boolean {
+export function isAlwaysBlockedVoiceAddress(address: string): boolean {
   const host = normalizeIpAddress(address);
   if (isBlockedTransitionIpv6Address(host)) {
     return true;

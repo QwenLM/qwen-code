@@ -19,7 +19,7 @@ import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import stripJsonComments from 'strip-json-comments';
 import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
-import { isLoopbackHost } from './net-guard';
+import { isAlwaysBlockedVoiceAddress, isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
 
 const DEFAULT_DASHSCOPE_BASE_URL =
@@ -454,6 +454,12 @@ export async function resolveDesktopVoiceConfig(
   const parsed = new URL(creds.baseUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error('Voice endpoint must use an http or https baseUrl.');
+  }
+  if (
+    !isLoopbackHost(parsed.hostname) &&
+    isAlwaysBlockedVoiceAddress(parsed.hostname)
+  ) {
+    throw new Error('Voice endpoint must not use a private-network baseUrl.');
   }
   if (
     parsed.protocol === 'http:' &&
