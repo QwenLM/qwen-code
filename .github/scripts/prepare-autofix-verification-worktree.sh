@@ -21,7 +21,7 @@ case "${phase}" in
     sudo install -d -o root -g root -m 0711 "${home}/runs" "${home}/reports"
     ;;
   dependencies)
-    [[ -d "${workspace}/node_modules" ]]
+    [[ -d "${workspace}/node_modules" ]] || { echo "prepare-autofix-verification-worktree: ${workspace}/node_modules is missing; install dependencies first" >&2; exit 1; }
     manifest="$(mktemp)"
     while IFS= read -r -d '' dependency_dir; do
       relative_dir="${dependency_dir#"${workspace}/"}"

@@ -791,6 +791,53 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(recurrence.body.includes('[run 302]'));
 });
 
+test('runCli analyze --jobs maps manifest logPath to log content', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-analyze-'));
+  const logPath = join(dir, 'job.log');
+  writeFileSync(logPath, TRUSTED_VITEST_LOG);
+  const manifestPath = join(dir, 'manifest.json');
+  writeFileSync(
+    manifestPath,
+    JSON.stringify([
+      { name: 'E2E Test (Linux) - sandbox:none - shard 1/3', logPath },
+      { name: 'E2E Test (Linux) - sandbox:none - shard 2/3', logPath: null },
+    ]),
+  );
+
+  let output = '';
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    output += chunk;
+    return true;
+  };
+  try {
+    runCli([
+      'analyze',
+      '--workflow',
+      'E2E Tests',
+      '--jobs',
+      manifestPath,
+      logPath,
+    ]);
+  } finally {
+    process.stdout.write = original;
+  }
+
+  const analysis = JSON.parse(output);
+  assert.equal(
+    analysis.targetedE2e.cases[0].job,
+    'E2E Test (Linux) - sandbox:none - shard 1/3',
+  );
+  assert.equal(analysis.targetedE2e.cases[0].id, TRUSTED_VITEST_TEST_ID);
+  // The null-logPath job records a reason, so the set is incomplete.
+  assert.equal(analysis.targetedE2e.eligible, false);
+  assert.ok(
+    analysis.targetedE2e.reasons.some((r) =>
+      r.includes('missing log for failed job'),
+    ),
+  );
+});
+
 test('runCli plan --existing merges recorded recurrences from the file', () => {
   const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
   const existing = renderIssueBody({ analysis, occurrence: OCCURRENCE });

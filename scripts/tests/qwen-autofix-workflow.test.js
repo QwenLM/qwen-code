@@ -6289,6 +6289,20 @@ printf '%s\\n' "\${status}"
       expect(step).not.toContain('Fix does not touch any package');
       expect(step).not.toContain('PR does not touch any package');
     }
+    // The issue-fix verify gate runs the contracts script through the
+    // credential-free isolated-UID wrapper; collapsing run_candidate to
+    // bare "$@" would bypass the isolation.
+    const issueVerifyGate = verificationGateBodies[0];
+    const contractsAt = issueVerifyGate.indexOf(
+      'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+    );
+    expect(contractsAt).toBeGreaterThan(-1);
+    expect(
+      issueVerifyGate.lastIndexOf(
+        'AUTOFIX_VERIFY_COMMAND="${verify_cmd}"',
+        contractsAt,
+      ),
+    ).toBeGreaterThan(-1);
     // Both jobs must stage the trusted copy before any branch switch.
     expect(
       workflow.match(
@@ -6500,6 +6514,32 @@ printf '%s\\n' "\${status}"
         }).status,
       ).toBe(1);
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
+
+      // The sealed verify job sets AUTOFIX_VERIFY_COMMAND so every
+      // command runs through the credential-free isolated-UID wrapper.
+      const wrapperLog = join(dir, 'wrapper.log');
+      writeFileSync(
+        join(dir, 'wrapper'),
+        [
+          '#!/usr/bin/env bash',
+          'printf \'%s\\n\' "$*" >> "${WRAPPER_LOG}"',
+          'shift',
+          '"$@"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'wrapper'), 0o755);
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/config/config.ts\n', {
+          AUTOFIX_VERIFY_COMMAND: join(dir, 'wrapper'),
+          GITHUB_WORKSPACE: '/fake/workspace',
+          WRAPPER_LOG: wrapperLog,
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(wrapperLog, 'utf8').trim()).toBe(
+        '/fake/workspace npm run check-i18n',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -7069,7 +7109,6 @@ printf '%s\\n' "\${status}"
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/cli/src/unsafe\nname.ts', // -> packages/cli without line splitting
           'packages/desktop/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped

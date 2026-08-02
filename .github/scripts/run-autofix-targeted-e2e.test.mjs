@@ -120,6 +120,14 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   const finalizeAt = source.indexOf("[workspace, 'finalize']");
   const reportAt = source.indexOf("[workspace, 'report', reportName]");
   const vitestAt = source.indexOf('run(vitestWrapper,');
+  const readReportAt = source.indexOf(
+    "JSON.parse(readFileSync(jsonPath",
+    vitestAt,
+  );
+  const validateReportAt = source.indexOf(
+    'validateVitestReport(report, testCase, workspace)',
+    vitestAt,
+  );
   const removeReportAt = source.indexOf(
     "[workspace, 'remove-report', reportName]",
     vitestAt,
@@ -140,6 +148,8 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
     finalizeAt,
     reportAt,
     vitestAt,
+    readReportAt,
+    validateReportAt,
     removeReportAt,
     cleanupAt,
     finalOutputAuditAt,
@@ -155,7 +165,9 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   assert.ok(outputAuditAt < finalizeAt);
   assert.ok(finalizeAt < reportAt);
   assert.ok(reportAt < vitestAt);
-  assert.ok(vitestAt < removeReportAt);
+  assert.ok(vitestAt < readReportAt);
+  assert.ok(readReportAt < validateReportAt);
+  assert.ok(validateReportAt < removeReportAt);
   assert.ok(removeReportAt < cleanupAt);
   assert.ok(cleanupAt < finalOutputAuditAt);
 });

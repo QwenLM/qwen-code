@@ -284,6 +284,9 @@ describe('repo-hygiene workflow structure', () => {
     expect(verify).toContain(
       'cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"',
     );
+    // The resolver reads NUL-delimited input; dropping -z makes its
+    // while-read loop exit immediately and CHANGED_PKGS silently empty.
+    expect(verify).toMatch(/git diff --name-only -z origin\/main\.\.\.HEAD/);
     // WORKDIR holds the PR title/body and findings.json the publish and issue
     // steps consume after verification, so it is mounted read-only: sandboxed
     // code must not rewrite the prose the bot later publishes. HOME and the npm
