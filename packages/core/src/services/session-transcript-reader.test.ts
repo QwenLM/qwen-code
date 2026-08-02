@@ -600,6 +600,42 @@ describe('SessionTranscriptReader', () => {
     expect(vi.mocked(fs.open)).toHaveBeenCalledTimes(1);
   });
 
+  it('tolerates a null part element when projecting branch points', async () => {
+    const serialize = (value: unknown) => JSON.stringify(value);
+    await writeRawTranscript(
+      [
+        serialize({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-01-01T00:00:00.000Z',
+          type: 'user',
+          provenance: 'real_user',
+          cwd: workspaceDir,
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'question' }] },
+        }),
+        serialize({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-01-01T00:00:01.000Z',
+          type: 'assistant',
+          provenance: 'assistant_output',
+          cwd: workspaceDir,
+          version: '1.0.0',
+          message: { role: 'model', parts: [null, { text: 'answer' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+  });
+
   it('reports a branch point whose checkpoint falls on a later page', async () => {
     const user = record('u1', null, 'prompt');
     const assistant = record('a1', 'u1', 'answer');

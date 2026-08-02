@@ -24,8 +24,12 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus } from './httpErrors.js';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
+import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -1320,6 +1324,9 @@ export function createDaemonSessionActions({
           displayName: result.displayName,
         };
       } catch (error) {
+        if (isStaleBranchPointError(error)) {
+          throw markNoticeDispatched(error);
+        }
         throw dispatchActionError(
           addNotice,
           'Branch session failed',
@@ -1536,6 +1543,15 @@ function isAbortError(error: unknown): boolean {
   return (
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+function isStaleBranchPointError(error: unknown): error is DaemonHttpError {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 409 &&
+    isRecord(error.body) &&
+    error.body['code'] === 'branch_point_invalid'
   );
 }
 

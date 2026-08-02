@@ -177,8 +177,10 @@ const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 
 function projectBranchPointParts(record: ChatRecord): Part[] {
-  return (record.message?.parts ?? []).flatMap((part) => {
+  return ((record.message?.parts ?? []) as unknown[]).flatMap((rawPart) => {
     const projected: Part[] = [];
+    if (rawPart === null || typeof rawPart !== 'object') return projected;
+    const part = rawPart as Part;
     if (part.functionCall) {
       projected.push({
         functionCall: {

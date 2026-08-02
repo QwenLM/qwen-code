@@ -186,12 +186,10 @@ describe('branch points', () => {
     }
   });
 
-  it('rejects malformed boundaries and dangling tool calls', () => {
+  it('rejects a start boundary that does not resolve on the chain', () => {
     const records = [
       record('u1', null, 'user', [{ text: 'question' }]),
-      record('a1', 'u1', 'assistant', [
-        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
-      ]),
+      record('a1', 'u1', 'assistant', [{ text: 'answer' }]),
     ];
     expect(
       resolveCompletedTurnBranchCandidate({
@@ -200,6 +198,15 @@ describe('branch points', () => {
         endInclusiveRecordUuid: 'a1',
       }),
     ).toBeUndefined();
+  });
+
+  it('rejects dangling tool calls', () => {
+    const records = [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a1', 'u1', 'assistant', [
+        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+      ]),
+    ];
     expect(
       resolveCompletedTurnBranchCandidate({
         activeChain: records,

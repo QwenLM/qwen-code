@@ -2421,7 +2421,7 @@ export function registerSessionRoutes(
         if (atRecordId !== undefined && typeof atRecordId !== 'string') {
           res.status(400).json({
             error: '`atRecordId` must be a string',
-            code: 'invalid_branch_point',
+            code: 'branch_point_invalid',
           });
           return;
         }

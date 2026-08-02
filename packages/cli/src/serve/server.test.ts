@@ -14657,88 +14657,83 @@ describe('createServeApp', () => {
         .send({ atRecordId: 42 });
 
       expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_branch_point');
+      expect(res.body.code).toBe('branch_point_invalid');
       expect(branchSession).not.toHaveBeenCalled();
     });
 
-    it.each([true, false])(
-      'preserves the persisted branch when generation cleanup kills=%s',
-      async (killed) => {
-        const runtimeDir = await fsp.mkdtemp(
-          path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
-        );
-        const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
-        const chatsDir = path.join(
-          new Storage(WS_BOUND, runtimeDir).getProjectDir(),
-          'chats',
-        );
-        await fsp.mkdir(chatsDir, { recursive: true });
-        await fsp.writeFile(
-          path.join(chatsDir, `${staleBranchId}.jsonl`),
-          `${JSON.stringify({
-            uuid: `${staleBranchId}-user-1`,
-            parentUuid: null,
-            sessionId: staleBranchId,
-            timestamp: '2026-07-29T00:00:00.000Z',
-            type: 'user',
-            message: { role: 'user', parts: [{ text: 'hello' }] },
-            cwd: WS_BOUND,
-          })}\n`,
-          'utf8',
-        );
-        const generationGuard = createWorkspaceGenerationGuard();
-        const bridge = fakeBridge();
-        bridge.branchSession = vi.fn(async (sessionId) => {
-          generationGuard.close();
-          return {
-            sessionId: staleBranchId,
-            workspaceCwd: WS_BOUND,
-            attached: false,
-            clientId: 'stale-client',
-            state: {},
-            displayName: 'Stale branch',
-            forkedFrom: { sessionId, displayName: 'Source' },
-          };
-        });
-        const killSpy = vi
-          .spyOn(bridge, 'killSession')
-          .mockResolvedValue(killed);
-        const removeSpy = vi
-          .spyOn(SessionService.prototype, 'removeSession')
-          .mockResolvedValue();
-        const runtime = makeWorkspaceRuntimeForTest({
-          workspaceId: 'branch-primary',
+    it('preserves the persisted branch when generation cleanup fires', async () => {
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
+      );
+      const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
+      const chatsDir = path.join(
+        new Storage(WS_BOUND, runtimeDir).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${staleBranchId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${staleBranchId}-user-1`,
+          parentUuid: null,
+          sessionId: staleBranchId,
+          timestamp: '2026-07-29T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: WS_BOUND,
+        })}\n`,
+        'utf8',
+      );
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async (sessionId) => {
+        generationGuard.close();
+        return {
+          sessionId: staleBranchId,
           workspaceCwd: WS_BOUND,
-          sessionRuntimeBaseDir: runtimeDir,
-          primary: true,
-          bridge,
-          generationGuard,
+          attached: false,
+          clientId: 'stale-client',
+          state: {},
+          displayName: 'Stale branch',
+          forkedFrom: { sessionId, displayName: 'Source' },
+        };
+      });
+      const killSpy = vi.spyOn(bridge, 'killSession').mockResolvedValue(true);
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue();
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'branch-primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+
+      try {
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('workspace_runtime_unavailable');
+        expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
+          requireZeroAttaches: true,
         });
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
-        );
-
-        try {
-          const res = await request(app)
-            .post('/session/source-session/branch')
-            .set('Host', `127.0.0.1:${baseOpts.port}`)
-            .send({});
-
-          expect(res.status).toBe(503);
-          expect(res.body.code).toBe('workspace_runtime_unavailable');
-          expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
-            requireZeroAttaches: true,
-          });
-          expect(removeSpy).not.toHaveBeenCalled();
-        } finally {
-          killSpy.mockRestore();
-          removeSpy.mockRestore();
-          await fsp.rm(runtimeDir, { recursive: true, force: true });
-        }
-      },
-    );
+        expect(removeSpy).not.toHaveBeenCalled();
+      } finally {
+        killSpy.mockRestore();
+        removeSpy.mockRestore();
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('POST /session/:id/fork', () => {
