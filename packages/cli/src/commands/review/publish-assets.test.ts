@@ -24,6 +24,7 @@ const ghWithInputMock = vi.hoisted(() =>
 vi.mock('./lib/gh.js', () => ({
   gh: ghMock,
   ghWithInput: ghWithInputMock,
+  ghWithInputRetried: ghWithInputMock,
   setGhHost: setGhHostMock,
 }));
 
@@ -251,13 +252,29 @@ describe('publish-assets', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
-  it('refuses the whole batch when one file fails validation', () => {
+  it('refuses the whole batch when one file fails validation — exit 3, not a crash', () => {
+    // A validation refusal speaks the same language as every other gate in
+    // this command: exit 3 and {"published": false} on stdout, never an
+    // uncaught throw (which would surface as yargs exit 1 with a stack trace
+    // and an empty stdout).
     happyGh();
     const good = pngFile('a.png');
     const bad = join(dir, 'evil.svg');
     writeFileSync(bad, '<svg/>');
-    expect(() => run({ files: [good, bad] })).toThrow(/evil\.svg/);
+    run({ files: [good, bad] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('evil.svg');
     // All-or-nothing: nothing was pushed, not even the good file.
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('refuses an unreadable file the same way', () => {
+    run({ files: [join(dir, 'absent.png')] });
+    expect(process.exitCode).toBe(3);
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
@@ -309,6 +326,19 @@ describe('publish-assets', () => {
     run({ files: [pngFile('a.png')], host: 'github.example.com' });
     expect(process.exitCode).toBeUndefined();
     expect(setGhHostMock).toHaveBeenCalledWith('github.example.com');
+    // BEFORE any API call — the test name's claim, now asserted: a refactor
+    // that moved the setGhHost below the first gh call would route the branch
+    // lookup at github.com and only then switch hosts.
+    const firstApiOrder = Math.min(
+      ...[...ghMock.mock.invocationCallOrder, Number.POSITIVE_INFINITY],
+      ...[
+        ...ghWithInputMock.mock.invocationCallOrder,
+        Number.POSITIVE_INFINITY,
+      ],
+    );
+    expect(setGhHostMock.mock.invocationCallOrder[0]).toBeLessThan(
+      firstApiOrder,
+    );
     // And the manifest URLs carry the host.
     const manifest = JSON.parse(
       readFileSync(join(dir, 'manifest.json'), 'utf8'),
@@ -334,20 +364,150 @@ describe('publish-assets', () => {
   });
 });
 
+describe('publish-assets — round-2 review pins', () => {
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-r2-'));
+    argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, '8346 --comment\n');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockClear();
+    stdoutSpy.mockClear();
+    stderrSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+    process.exitCode = undefined;
+  });
+
+  const png = (name: string): string => {
+    const p = join(dir, name);
+    writeFileSync(p, Buffer.from('89504e470d0a1a0a0000000d', 'hex'));
+    return p;
+  };
+  const baseArgs = () =>
+    ({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [png('a.png')],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    }) as never;
+
+  it('an operator-exported GH_HOST routes AND names the URLs — one host, both jobs', () => {
+    // With --host absent, gh children inherit the parent env; routing at the
+    // operator's Enterprise host while the URLs claimed github.com made every
+    // returned URL a 404. The env is part of the input: read once, used for
+    // both.
+    process.env['GH_HOST'] = 'ghe.corp.example';
+    ghMock.mockImplementation((...a: string[]) =>
+      a.includes('.object.sha') ? 'headsha' : '{}',
+    );
+    ghWithInputMock.mockImplementation(() => '{}');
+    runPublishAssets(baseArgs());
+    expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.corp.example');
+    const manifest = JSON.parse(readFileSync(join(dir, 'm.json'), 'utf8'));
+    expect(manifest.published[0].url).toMatch(
+      /^https:\/\/ghe\.corp\.example\//,
+    );
+  });
+
+  it('a non-404 branch-lookup failure is rethrown, never read as "branch missing"', () => {
+    // A 403 rate-limit answered by the create path would bury the real error
+    // under the create's 422 — the catch-all shape putContent's comment warns
+    // against.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limit exceeded');
+    });
+    ghWithInputMock.mockImplementation(() => '{}');
+    expect(() => runPublishAssets(baseArgs())).toThrow(/403/);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty assets repo is named as the condition it is', () => {
+    // GitHub reports a default_branch even for an empty repo; the base-sha
+    // 404 must not read as branch-missing.
+    let refCalls = 0;
+    ghMock.mockImplementation((...a: string[]) => {
+      const path = String(a[1] ?? '');
+      if (path.includes('git/ref/heads/')) {
+        refCalls += 1;
+        throw new Error('HTTP 404: Not Found');
+      }
+      if (a.includes('.default_branch') || path === 'repos/owner/assets') {
+        return 'main';
+      }
+      return '{}';
+    });
+    expect(() => runPublishAssets(baseArgs())).toThrow(/appears to be empty/);
+    expect(refCalls).toBe(2);
+  });
+
+  it('a PUT failure naming 422 only in the API path is rethrown', () => {
+    // execFileSync embeds the command line in err.message, and the remote
+    // path bakes in the PR number — evidence for PR #4220 must not read a 401
+    // as "already exists".
+    writeFileSync(argsFile, '4220 --comment\n');
+    ghMock.mockImplementation((...a: string[]) =>
+      a.includes('.object.sha') ? 'headsha' : '{}',
+    );
+    ghWithInputMock.mockImplementation(() => {
+      throw new Error(
+        'Command failed: gh api -X PUT repos/owner/assets/contents/4220-review/abc-a.png — HTTP 401: Bad credentials',
+      );
+    });
+    expect(() =>
+      runPublishAssets({ ...(baseArgs() as object), pr: 4220 } as never),
+    ).toThrow(/401/);
+    // One attempt per file — no sha-lookup retry was triggered by the "422"
+    // digits in the path.
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('publish-assets — empty is two different things', () => {
   let dir: string;
   let argsFile: string;
+  let savedSessionId: string | undefined;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'publish-assets-empty-'));
     argsFile = join(dir, 'args.txt');
     writeFileSync(argsFile, '8346 --comment\n');
     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    // Same guard as the sibling blocks: the skillArgs seam is honoured only
+    // with no session id, and this suite is dogfooded from inside sessions.
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
     stdoutSpy.mockClear();
     process.exitCode = undefined;
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
     process.exitCode = undefined;
   });
 

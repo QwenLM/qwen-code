@@ -177,6 +177,12 @@ describe('validateFindings — evidence assets', () => {
     );
   });
 
+  it('rejects a whitespace-only entry, matching the sibling asString rule', () => {
+    expect(() => validateFindings([{ ...base, assetFiles: ['  '] }])).toThrow(
+      /"assetFiles" must be an array of non-empty strings/,
+    );
+  });
+
   it('drops an empty array instead of carrying a vacuous field', () => {
     const [f] = validateFindings([{ ...base, assetFiles: [] }]);
     expect(f.assetFiles).toBeUndefined();

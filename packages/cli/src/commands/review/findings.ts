@@ -143,7 +143,12 @@ function stringArray(
 ): string[] | undefined {
   const v = o[key];
   if (v === undefined) return undefined;
-  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x === '')) {
+  // trim(), matching the sibling asString: a whitespace-only evidence path is
+  // as nameless as an empty one.
+  if (
+    !Array.isArray(v) ||
+    v.some((x) => typeof x !== 'string' || x.trim() === '')
+  ) {
     fail(
       index,
       `"${key}" must be an array of non-empty strings, got ${JSON.stringify(v)}.`,

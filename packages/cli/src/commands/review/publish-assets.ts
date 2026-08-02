@@ -37,7 +37,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { gh, ghWithInput, setGhHost } from './lib/gh.js';
+import { gh, ghWithInputRetried, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
   assetsBranch,
@@ -80,15 +80,21 @@ function putContent(
       ...(sha ? { sha } : {}),
     });
   try {
-    ghWithInput(payload(), 'api', '-X', 'PUT', api, '--input', '-');
+    ghWithInputRetried(payload(), 'api', '-X', 'PUT', api, '--input', '-');
   } catch (err) {
     // Retry ONLY the already-exists shape (a 422 asking for the blob sha —
     // the idempotent re-run case, since identical content hashes to the same
     // remote path). Anything else — auth, network, a 404 on the repo — is
     // rethrown as itself: a catch-all retry here would answer a 401 with a
     // second failure from the sha lookup, burying the error the user needs.
+    //
+    // Anchored `HTTP 422`, never a bare `422`: execFileSync embeds the whole
+    // command line in err.message, and the API path bakes in the PR number —
+    // publishing evidence for PR #422 (or #4220) would otherwise read every
+    // failure, 401 included, as "already exists". Caught by this skill's own
+    // review.
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/422|"sha"|sha wasn't supplied|already exists/i.test(msg)) {
+    if (!/HTTP 422|"sha"|sha wasn't supplied|already exists/i.test(msg)) {
       throw err;
     }
     const existing = gh(
@@ -97,7 +103,7 @@ function putContent(
       '--jq',
       '.sha',
     );
-    ghWithInput(
+    ghWithInputRetried(
       payload(existing.trim()),
       'api',
       '-X',
@@ -121,25 +127,54 @@ function ensureBranch(repo: string, branch: string): void {
   try {
     gh('api', `repos/${repo}/git/ref/heads/${branch}`);
     return;
-  } catch {
-    // Missing — create from the default branch head.
+  } catch (err) {
+    // Only a 404 means "branch missing". A 401/403/exhausted-5xx caught here
+    // would send the create call at a branch that exists and bury the real
+    // error under its 422 — the exact catch-all-shape putContent's comment
+    // warns against.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/HTTP 404|Not Found/i.test(msg)) throw err;
   }
   const defaultBranch = gh('api', `repos/${repo}`, '--jq', '.default_branch');
-  const baseSha = gh(
-    'api',
-    `repos/${repo}/git/ref/heads/${defaultBranch.trim()}`,
-    '--jq',
-    '.object.sha',
-  );
-  ghWithInput(
-    JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseSha.trim() }),
-    'api',
-    '-X',
-    'POST',
-    `repos/${repo}/git/refs`,
-    '--input',
-    '-',
-  );
+  let baseSha: string;
+  try {
+    baseSha = gh(
+      'api',
+      `repos/${repo}/git/ref/heads/${defaultBranch.trim()}`,
+      '--jq',
+      '.object.sha',
+    );
+  } catch (err) {
+    // GitHub reports a default_branch even for an EMPTY repo, so the failure
+    // lands here — as a bare 404 that reads like the branch-missing case.
+    // Name the actual condition and what fixes it.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/HTTP 404|Not Found/i.test(msg)) {
+      throw new Error(
+        `assets repository ${repo} appears to be empty (its default branch ` +
+          `${defaultBranch.trim()} has no commits). Push an initial commit to ` +
+          'it once; publish-assets creates and reuses its own branch from there.',
+      );
+    }
+    throw err;
+  }
+  try {
+    ghWithInputRetried(
+      JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseSha.trim() }),
+      'api',
+      '-X',
+      'POST',
+      `repos/${repo}/git/refs`,
+      '--input',
+      '-',
+    );
+  } catch (err) {
+    // A retried create can double-fire after a proxy 502 that GitHub in fact
+    // processed; the duplicate answers 422 already-exists, and an existing
+    // branch is this function's goal, not a failure.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/already exists|HTTP 422/i.test(msg)) throw err;
+  }
 }
 
 export function runPublishAssets(args: PublishAssetsArgs): void {
@@ -194,7 +229,14 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     return;
   }
 
-  if (args.host) setGhHost(args.host);
+  // ONE effective host for both the gh routing and the returned URLs. With
+  // --host absent, gh children inherit the parent env — including an
+  // operator-exported GH_HOST — so publishes would route at Enterprise while
+  // rawAssetUrl claimed github.com, and every returned URL would 404. The env
+  // is part of the input; read it once and use it for both.
+  const effectiveHost =
+    args.host ?? process.env['GH_HOST']?.trim() ?? undefined;
+  if (effectiveHost) setGhHost(effectiveHost);
 
   // ── Collect the files: --files, or every assetFiles in the artifact ───────
   let findings: Finding[] | undefined;
@@ -243,25 +285,44 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     remotePath: string;
     contentBase64: string;
   }
-  const stats = unique.map((file) => {
+  // A validation refusal is a REFUSAL, not a crash: the same exit-3 +
+  // `{"published": false}` contract every other gate in this command keeps
+  // (bad --pr, missing designation, unauthorised run, empty --files). A
+  // throw here would surface as yargs exit 1 with a stack trace and an empty
+  // stdout — a different failure language for the same kind of answer.
+  const refuse = (reason: string): void => {
+    writeStderrLine(`publish-assets: refused — ${reason}`);
+    writeStdoutLine(JSON.stringify({ published: false }));
+    process.exitCode = 3;
+  };
+  interface Stat {
+    file: string;
+    abs: string;
+    basename: string;
+    bytes: number;
+  }
+  const stats: Stat[] = [];
+  for (const file of unique) {
     const abs = resolve(file);
     try {
       const st = statSync(abs);
       if (!st.isFile()) throw new Error('not a regular file');
-      return { file, abs, basename: basename(abs), bytes: st.size };
+      stats.push({ file, abs, basename: basename(abs), bytes: st.size });
     } catch (err) {
-      throw new Error(
-        `publish-assets: cannot read ${JSON.stringify(file)}: ${
+      refuse(
+        `cannot read ${JSON.stringify(file)}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return;
     }
-  });
+  }
   // Per-file rules and the aggregate cap live in one pure ruling
   // (validateAssetBatch), so the 40MB total is unit-tested without fixtures.
   const batch = validateAssetBatch(stats);
   if (!batch.ok) {
-    throw new Error(`publish-assets: refused — ${batch.reason}`);
+    refuse(batch.reason);
+    return;
   }
   const prepared: Prepared[] = stats.map((st) => {
     const content = readFileSync(st.abs);
@@ -298,7 +359,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     file: p.file,
     remotePath: p.remotePath,
     url: rawAssetUrl({
-      host: args.host,
+      host: effectiveHost,
       repo,
       commitSha: headSha,
       remotePath: p.remotePath,

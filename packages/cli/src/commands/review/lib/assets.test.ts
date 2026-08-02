@@ -82,7 +82,19 @@ describe('parseAssetsRepo', () => {
     expect(parseAssetsRepo('QwenLM/qwen-code')).toEqual({
       repo: 'QwenLM/qwen-code',
     });
-    for (const bad of ['just-a-name', 'a/b/c', 'a b/c', 'o/r?x=1', ' / ']) {
+    for (const bad of [
+      'just-a-name',
+      'a/b/c',
+      'a b/c',
+      'o/r?x=1',
+      ' / ',
+      // Dot segments are legal characters that mean something else in a URL
+      // path — the same rule submit's isRepo enforces.
+      'owner/..',
+      '../repo',
+      './x',
+      'x/.',
+    ]) {
       const r = parseAssetsRepo(bad);
       // Name the offending value in the assertion itself, so a regression
       // says which shape slipped through rather than "expected true".

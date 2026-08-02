@@ -96,7 +96,14 @@ export function parseAssetsRepo(
         'a fork or scratch repo otherwise) to publish review evidence images.',
     };
   }
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v)) {
+  const parts = v.split('/');
+  const segmentOk = (p: string) =>
+    /^[A-Za-z0-9_.-]+$/.test(p) && p !== '.' && p !== '..';
+  // `.` and `..` are made of legal characters and mean something else entirely
+  // once they reach a URL path — the same rule submit's isRepo enforces for
+  // the repo IT interpolates. `owner/..` here is a typo that would otherwise
+  // fail as a confusing 404 three calls later.
+  if (parts.length !== 2 || !parts.every(segmentOk)) {
     return {
       error: `QWEN_REVIEW_ASSETS_REPO must be owner/repo, got ${JSON.stringify(v)}.`,
     };
