@@ -13,6 +13,7 @@ describe('buildAuthProviderCatalog', () => {
     const catalog = buildAuthProviderCatalog('/workspace');
     const kimi = catalog.providers.find((provider) => provider.id === 'kimi');
 
+    expect(kimi?.envKey).toBe('KIMI_CODE_API_KEY');
     expect(kimi?.models?.map((model) => model.id)).toEqual([
       'k3-256k',
       'k3',
@@ -22,6 +23,9 @@ describe('buildAuthProviderCatalog', () => {
 
     const options = kimi?.baseUrl as ServeAuthProviderBaseUrlOption[];
     expect(options).toHaveLength(3);
+    expect(options[0]?.envKey).toBe('KIMI_CODE_API_KEY');
+    expect(options[1]?.envKey).toBe('MOONSHOT_API_KEY');
+    expect(options[2]?.envKey).toBe('MOONSHOT_API_KEY');
     expect(options[0]?.models?.map((model) => model.id)).toEqual([
       'k3-256k',
       'k3',

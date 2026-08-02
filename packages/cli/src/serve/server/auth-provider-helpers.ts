@@ -49,9 +49,16 @@ function buildAuthProviderDescriptor(
   );
   const defaultBaseUrl = resolveBaseUrl(provider);
   const models = resolveProviderModels(provider, defaultBaseUrl);
+  const envKey =
+    typeof provider.envKey === 'function'
+      ? provider.envKey(provider.protocol, defaultBaseUrl)
+      : provider.envKey;
   const baseUrl = Array.isArray(provider.baseUrl)
     ? provider.baseUrl.map((option) => ({
         ...option,
+        ...(typeof provider.envKey === 'function'
+          ? { envKey: provider.envKey(provider.protocol, option.url) }
+          : {}),
         ...(option.models
           ? { models: option.models.map(serializeProviderModel) }
           : {}),
@@ -67,7 +74,7 @@ function buildAuthProviderDescriptor(
       ? { protocolOptions: [...provider.protocolOptions] }
       : {}),
     ...(baseUrl !== undefined ? { baseUrl } : {}),
-    ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
+    ...(envKey ? { envKey } : {}),
     ...(models
       ? {
           models: models.map(serializeProviderModel),

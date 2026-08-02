@@ -105,6 +105,18 @@ function selectedBaseUrlModelIds(
   return modelIds(provider);
 }
 
+function selectedBaseUrlEnvKey(
+  provider: DaemonAuthProviderDescriptor,
+  baseUrl: string,
+  protocol: string,
+): string {
+  if (Array.isArray(provider.baseUrl)) {
+    const option = provider.baseUrl.find((item) => item.url === baseUrl);
+    if (option?.envKey) return option.envKey;
+  }
+  return provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
+}
+
 function titleForStep(
   step: AuthStep,
   provider: DaemonAuthProviderDescriptor,
@@ -787,7 +799,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const review = useMemo(() => {
     if (!provider) return '';
-    const envKey = provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
+    const envKey = selectedBaseUrlEnvKey(provider, baseUrl, protocol);
     const normalizedIds = normalizeModelIds(models);
     const generationConfig: Record<string, unknown> = {};
     if (thinking) generationConfig['extra_body'] = { enable_thinking: true };

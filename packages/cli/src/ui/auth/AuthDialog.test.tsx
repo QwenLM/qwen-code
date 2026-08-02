@@ -184,6 +184,7 @@ const pressEnterAndWaitFor = async (
   lastFrame: () => string | undefined,
   expectedText: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\r');
   await vi.waitFor(
     () => {
@@ -191,6 +192,7 @@ const pressEnterAndWaitFor = async (
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const moveDownAndWaitForSelection = async (
@@ -198,8 +200,10 @@ const moveDownAndWaitForSelection = async (
   lastFrame: () => string | undefined,
   label: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\u001b[B');
   await waitForSelectedOption(lastFrame, label);
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const navigateToCustomProtocolSelect = async (
@@ -1151,6 +1155,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'Third-party Providers · Provider',
       );
       await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1163,7 +1168,16 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
-      await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
+      await wait();
+      for (const label of [
+        'Grok (xAI) API Key',
+        'Idealab API Key',
+        'Kimi',
+        'MiniMax API Key',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,

@@ -685,10 +685,21 @@ export function clearPersistedAuth(): void {
       }
       // Standard OpenAI bucket (legacy + the api-key flow's default).
       delete env['OPENAI_API_KEY'];
-      // Every preset provider with a static string envKey.
+      // Every preset provider env key, including keys derived from endpoint
+      // options.
       for (const p of ALL_PROVIDERS) {
         if (typeof p.envKey === 'string') {
           delete env[p.envKey];
+          continue;
+        }
+        const protocols = p.protocolOptions ?? [p.protocol];
+        const baseUrls = Array.isArray(p.baseUrl)
+          ? p.baseUrl.map((option) => option.url)
+          : [p.baseUrl ?? ''];
+        for (const protocol of protocols) {
+          for (const baseUrl of baseUrls) {
+            delete env[p.envKey(protocol, baseUrl)];
+          }
         }
       }
       // Custom-provider env keys are derived dynamically by

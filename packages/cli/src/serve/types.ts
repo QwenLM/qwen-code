@@ -425,6 +425,7 @@ export interface ServeAuthProviderBaseUrlOption {
   id: string;
   label: string;
   url: string;
+  envKey?: string;
   models?: ServeAuthProviderModel[];
   documentationUrl?: string;
   apiKeyUrl?: string;

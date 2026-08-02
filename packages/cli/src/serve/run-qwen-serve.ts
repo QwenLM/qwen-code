@@ -875,7 +875,7 @@ function normalizeInstallModelIds(
   return [...new Set(modelIds)];
 }
 
-function buildProviderSetupInputs(
+export function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   helpers: {
