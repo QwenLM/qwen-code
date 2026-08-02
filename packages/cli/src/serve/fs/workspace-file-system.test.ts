@@ -261,6 +261,25 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((err as { hint?: string }).hint).toMatch(/readBytes/);
   });
 
+  it('reports the same lineEnding on every page of a CRLF file', async () => {
+    // A one-line slice arrives as text ending in '\r' — the '\n' was consumed
+    // as its terminator — so detecting on the slice would call page 1 'lf'
+    // while the cursor path called page 2 'crlf', for one file.
+    const target = path.join(h.workspace, 'crlf-pages.txt');
+    await fsp.writeFile(target, 'aa\r\nbb\r\ncc\r\n');
+    const r = await h.fs.resolve('crlf-pages.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 1,
+    });
+    expect(second.content).toBe('bb\r');
+    expect(second.meta.lineEnding).toBe('crlf');
+  });
   it('pages a large log by cursor and reassembles it exactly', async () => {
     const target = path.join(h.workspace, 'cursor-page.log');
     const lines = Array.from(
