@@ -703,7 +703,8 @@ export interface DaemonStatusReport {
       /**
        * Which children the daemon's RSS sampling covers. Only the primary ACP
        * child is sampled, and only while an SSE/WS watcher is active; when no
-       * client is observing, childRssBytes reads 0.
+       * client is observing, childRssBytes reads 0. After the last watcher
+       * detaches, the last sampled value persists until it ages out (~30s).
        */
       childRssCoverage: 'primary_only';
       modeled: {

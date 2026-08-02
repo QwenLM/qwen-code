@@ -321,6 +321,8 @@ interface DaemonStatusRuntimeMemory {
    * ACP child is sampled today, so this section must not be read as
    * process-tree observation. Sampling is gated on an active SSE/WS watcher;
    * when no client is observing, childRssBytes reads 0 even for the primary.
+   * The drop is not instant: after the last watcher detaches, the last sampled
+   * value persists until it ages out of the staleness window (~30s).
    */
   childRssCoverage: 'primary_only';
   /**
