@@ -4581,6 +4581,20 @@ describe('qwen-autofix workflow', () => {
     expect(flat).toContain('Simplicity First');
     expect(flat).toContain('added no bloat');
     expect(flat).toContain('never a reason to bloat the code');
+    // Merge readiness applies to the review as a whole, while actionability
+    // applies to each finding. An approval must not hide a verified defect.
+    expect(flat).toContain(
+      "Treat merge readiness and each feedback point's actionability as independent decisions",
+    );
+    expect(flat).toContain(
+      'A reproduced current correctness defect remains Required',
+    );
+    expect(flat).toContain(
+      'Classify adjacent diagnostics, comments, tests, and hardening independently',
+    );
+    expect(flat).toContain(
+      'write `<workdir>/no-action.md` only after every actionable feedback point has an explicit disposition and no verified Required item remains unresolved',
+    );
     // The rationale is structural, not etiquette: the gate re-runs the same
     // commands, so skipping them only moves the rejection later. Pin that
     // framing so the requirement is not softened back into "please verify".

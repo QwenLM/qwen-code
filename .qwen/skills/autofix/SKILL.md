@@ -285,6 +285,12 @@ Read `git diff origin/<base>...HEAD` first, then `<workdir>/feedback.md`.
 
 Classify every feedback point:
 
+Treat merge readiness and each feedback point's actionability as independent
+decisions. An overall `APPROVE` verdict or wording such as "non-blocking",
+"follow-up", or "not a regression" does not make every item optional. A
+reproduced current correctness defect remains Required. Classify adjacent
+diagnostics, comments, tests, and hardening independently.
+
 Address each the way AGENTS.md's Simplicity First and Comments rules demand:
 the smallest change that resolves the point, no error handling for a condition
 that cannot occur, no comment that restates the code. Review rounds ratchet
@@ -402,6 +408,8 @@ Finish with exactly one outcome:
   disposition and the reason in a sentence or two, plus the question you need
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
-- No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
+- No change: write `<workdir>/no-action.md` only after every actionable
+  feedback point has an explicit disposition and no verified Required item
+  remains unresolved. Follow GitHub Actions Rules' bilingual requirement.
 - The GitHub Actions Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.
