@@ -1216,10 +1216,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         // Handle double ESC for clearing input.
-        // When the agent is actively responding, let ESC fall through to
-        // AppContainer's global handler so it cancels the ongoing work.
-        // #8201.
-        if (uiState.streamingState === StreamingState.Responding) {
+        // When the agent is actively responding AND the input buffer is
+        // empty, let ESC fall through to AppContainer's global handler so
+        // it cancels the ongoing work. Gate on empty buffer to avoid
+        // BaseTextInput's default ESC (unconditional clear) silently wiping
+        // typed input without the double-press confirmation. #8201.
+        if (
+          uiState.streamingState === StreamingState.Responding &&
+          buffer.text === ''
+        ) {
+          resetEscapeState();
           return false;
         }
 

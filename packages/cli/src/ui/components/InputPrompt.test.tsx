@@ -37,6 +37,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import stripAnsi from 'strip-ansi';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { StreamingState } from '../types.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
   useAgentViewActions,
@@ -5687,6 +5688,58 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(true);
       unmountEdited();
+    });
+  });
+
+  describe('ESC during active agent response (#8201)', () => {
+    it('does not pop queued messages into input when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued message'],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // popAllQueuedMessages must NOT be called when agent is responding
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not silently clear typed input on single ESC when responding', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Buffer must NOT be cleared - double-ESC confirmation still applies
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
     });
   });
 });
