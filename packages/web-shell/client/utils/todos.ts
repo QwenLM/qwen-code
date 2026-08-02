@@ -140,20 +140,25 @@ export function getFloatingTodos(
   return { todos, planId, allCompleted, sourceMessageId };
 }
 
-export function getLatestActiveTodos(messages: readonly Message[]): TodoItem[] {
-  let todos: TodoItem[] = [];
+export function getActiveTodosForPlanRevision(
+  messages: readonly Message[],
+  revision: { planId: string; sourceCallId: string } | null | undefined,
+): TodoItem[] {
+  if (!revision) return [];
   for (const message of messages) {
-    if (message.role === 'plan') {
-      todos = message.todos;
-      continue;
-    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      const nextTodos = extractTodosFromToolCall(tool);
-      if (nextTodos !== undefined) todos = nextTodos;
+      if (
+        tool.callId !== revision.sourceCallId ||
+        getTodoPlanId(tool) !== revision.planId
+      ) {
+        continue;
+      }
+      const todos = extractTodosFromToolCall(tool) ?? [];
+      return todos;
     }
   }
-  return hasActiveTodos(todos) ? todos : [];
+  return [];
 }
 
 export function getAgentToolsForPlan(

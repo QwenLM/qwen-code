@@ -1320,6 +1320,10 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private readonly workflowApprovalAbortController = new AbortController();
+  private activeTodoPlanRevision?: {
+    planId: string;
+    sourceCallId: string;
+  };
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -4429,6 +4433,24 @@ export class Session implements SessionContext {
     };
 
     await this.client.sessionUpdate(params);
+
+    if (update.sessionUpdate === 'plan') {
+      const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      const plan = isRecord(meta?.['qwenTodoPlan'])
+        ? meta['qwenTodoPlan']
+        : undefined;
+      const transcript = isRecord(meta?.['qwenTranscript'])
+        ? meta['qwenTranscript']
+        : undefined;
+      const planId = plan?.['id'];
+      const sourceCallId = transcript?.['planToolCallId'];
+      this.activeTodoPlanRevision =
+        typeof planId === 'string' &&
+        typeof sourceCallId === 'string' &&
+        update.entries.length > 0
+          ? { planId, sourceCallId }
+          : undefined;
+    }
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -6449,8 +6471,13 @@ export class Session implements SessionContext {
         `Unknown approval mode: ${params.modeId}`,
       );
     }
+    const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
-    if (approvalMode === ApprovalMode.PLAN) {
+    if (
+      approvalMode === ApprovalMode.PLAN &&
+      previousApprovalMode !== ApprovalMode.PLAN
+    ) {
+      this.activeTodoPlanRevision = undefined;
       this.clearTodoStopGuardTrust();
     }
 
@@ -7971,6 +7998,13 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
+                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
+                      ? {
+                          qwenTodoApproval: {
+                            ...this.activeTodoPlanRevision,
+                          },
+                        }
+                      : {}),
                   },
                 },
               };
@@ -8360,6 +8394,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+              this.activeTodoPlanRevision = undefined;
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }

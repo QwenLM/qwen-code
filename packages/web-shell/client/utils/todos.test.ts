@@ -8,7 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
-  getLatestActiveTodos,
+  getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
   isTodoWriteToolName,
@@ -38,6 +38,7 @@ function todoWriteMessage(
   id: string,
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
+  planId?: string,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -45,7 +46,14 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats ? { rawOutput: { stats } } : {}),
+    ...(stats || planId
+      ? {
+          rawOutput: {
+            ...(stats ? { stats } : {}),
+            ...(planId ? { plan: { id: planId } } : {}),
+          },
+        }
+      : {}),
   };
   return { id, role: 'tool_group', tools: [tool] };
 }
@@ -230,29 +238,36 @@ describe('getFloatingTodos', () => {
   });
 });
 
-describe('getLatestActiveTodos', () => {
-  it('keeps the persisted workflow available after a later user message', () => {
+describe('getActiveTodosForPlanRevision', () => {
+  it('returns only the snapshot named by the approval revision', () => {
     const todos = [todo('1', 'in_progress')];
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('m1', todos),
-        userMessage('revision'),
-      ]),
+      getActiveTodosForPlanRevision(
+        [
+          todoWriteMessage('m1', todos, undefined, 'plan-1'),
+          userMessage('revision'),
+          todoWriteMessage('m2', [todo('2', 'pending')], undefined, 'plan-1'),
+        ],
+        { planId: 'plan-1', sourceCallId: 'call-m1' },
+      ),
     ).toEqual(todos);
   });
 
-  it('honors an explicit clear and ignores a terminal-only snapshot', () => {
+  it('rejects missing and mismatched revisions but preserves terminal ones', () => {
+    expect(getActiveTodosForPlanRevision([], undefined)).toEqual([]);
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('m1', [todo('1', 'in_progress')]),
-        todoWriteMessage('clear', []),
-      ]),
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        { planId: 'plan-other', sourceCallId: 'call-m1' },
+      ),
     ).toEqual([]);
+    const completed = [todo('1', 'completed')];
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('done', [todo('1', 'completed')]),
-      ]),
-    ).toEqual([]);
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('done', completed, undefined, 'plan-1')],
+        { planId: 'plan-1', sourceCallId: 'call-done' },
+      ),
+    ).toEqual(completed);
   });
 });
 

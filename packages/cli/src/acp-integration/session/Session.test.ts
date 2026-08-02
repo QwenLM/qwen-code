@@ -13595,6 +13595,20 @@ describe('Session', () => {
           },
         ]),
       );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+          },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
 
       try {
         await session.prompt({
@@ -13628,6 +13642,12 @@ describe('Session', () => {
           toolCall: expect.objectContaining({
             kind: 'switch_mode',
             rawInput: { plan: 'Original plan' },
+            _meta: expect.objectContaining({
+              qwenTodoApproval: {
+                planId: 'plan-1',
+                sourceCallId: 'todo-call-1',
+              },
+            }),
           }),
         }),
       );

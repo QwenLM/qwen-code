@@ -2133,7 +2133,12 @@ async function triggerAutoRecap(): Promise<{
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
+  overrides: {
+    resolved?: boolean;
+    toolName?: string;
+    kind?: string;
+    todoPlan?: { planId: string; sourceCallId: string };
+  } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -2146,7 +2151,10 @@ function makePendingPermissionBlock(
     toolCall: {
       toolCallId: 'tc-1',
       kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
-      _meta: { toolName },
+      _meta: {
+        toolName,
+        ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
+      },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -2362,26 +2370,66 @@ afterEach(() => {
 
 describe('App plan todos', () => {
   it('gates the exit-plan workflow on the experimental setting', async () => {
+    const approvedEntries = [
+      {
+        content: 'Prepare',
+        status: 'completed',
+        _meta: { qwenTodo: { id: 'prepare' } },
+      },
+      {
+        content: 'Ship',
+        status: 'pending',
+        _meta: { qwenTodo: { id: 'ship', blockedBy: ['prepare'] } },
+      },
+    ];
     testState.messages = [
       {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
+        id: 'approved-plan',
+        role: 'tool_group',
+        tools: [
           {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
+            callId: 'todo-approved',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: approvedEntries,
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
       { id: 'revision', role: 'user', content: 'Revise the wording' },
+      {
+        id: 'newer-plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-newer',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                ...approvedEntries.map((entry) => ({
+                  ...entry,
+                  status: 'completed',
+                })),
+                {
+                  content: 'Deploy',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'deploy' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
     ];
     testState.blocks = [
       makePendingPermissionBlock({
         toolName: 'exit_plan_mode',
         kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
       }),
     ];
 
