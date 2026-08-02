@@ -295,19 +295,6 @@ describe('ManagedMediaStorage', () => {
       );
       await expect(storage.createStagingDir('a/b')).rejects.toThrow('Unsafe');
     });
-
-    it('blocks staging creation when over budget', async () => {
-      const smallStorage = new ManagedMediaStorage(
-        path.join(tmpDir, 'omni-budget'),
-        testConfig({ maxTotalBytes: 10 }),
-      );
-      await smallStorage.initialize();
-      await smallStorage.commitBuffer(Buffer.from('x'.repeat(100)), '.bin');
-
-      await expect(smallStorage.createStagingDir('inv-1')).rejects.toThrow(
-        'over budget',
-      );
-    });
   });
 
   describe('downloads', () => {
@@ -552,10 +539,16 @@ describe('startup recovery', () => {
       'temp',
     );
 
+    // Create .tmp in objects root (from commitObject protocol)
+    await fs.promises.writeFile(
+      path.join(root, 'objects', '.commit-deadbeef.tmp'),
+      'leaked temp',
+    );
+
     const result = await storage.runStartupRecovery();
     expect(result.stagingDirsRemoved).toBe(1);
     expect(result.partFilesRemoved).toBe(1);
-    expect(result.tmpFilesRemoved).toBeGreaterThanOrEqual(1);
+    expect(result.tmpFilesRemoved).toBeGreaterThanOrEqual(2);
 
     // Verify cleaned
     const stagingEntries = await fs.promises.readdir(
@@ -599,6 +592,40 @@ describe('startup recovery', () => {
 
     const result = await storage.runStartupRecovery();
     expect(result.quarantineEntriesRemoved).toBe(1);
+  });
+
+  it('cleans quarantine by budget (oldest first)', async () => {
+    const storage = new ManagedMediaStorage(
+      path.join(tmpDir, 'omni'),
+      testConfig({
+        quarantine: { retentionDays: 30, maxBytes: 100 },
+      }),
+    );
+    await storage.initialize();
+
+    const root = path.join(tmpDir, 'omni');
+
+    // Create two quarantine dirs, each ~60 bytes (total ~120 > 100 budget)
+    for (const [name, age] of [
+      ['q-old', 2000],
+      ['q-new', 1000],
+    ] as const) {
+      const dir = path.join(root, 'quarantine', name);
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(dir, 'artifact.bin'),
+        'x'.repeat(60),
+      );
+      const t = new Date(Date.now() - age);
+      await fs.promises.utimes(dir, t, t);
+    }
+
+    const result = await storage.runStartupRecovery();
+    // Oldest should be removed to get under budget
+    expect(result.quarantineEntriesRemoved).toBeGreaterThanOrEqual(1);
+
+    const remaining = await fs.promises.readdir(path.join(root, 'quarantine'));
+    expect(remaining).toContain('q-new');
   });
 });
 

@@ -169,7 +169,10 @@ export class ManagedMediaStorage {
     const objectPath = this.objectPathFor(sha256, extension);
     const prefixDir = path.dirname(objectPath);
     await fs.promises.mkdir(prefixDir, { recursive: true, mode: 0o700 });
-    const tmpPath = `${objectPath}.tmp`;
+    const tmpPath = path.join(
+      prefixDir,
+      `.commit-${randomBytes(8).toString('hex')}.tmp`,
+    );
     await fs.promises.writeFile(tmpPath, data, { mode: 0o600 });
     await fs.promises.rename(tmpPath, objectPath);
 
@@ -211,13 +214,6 @@ export class ManagedMediaStorage {
 
   async createStagingDir(invocationId: string): Promise<string> {
     assertSafeId(invocationId, 'invocationId');
-    const budget = await this.getBudgetStatus();
-    if (budget.overBudget) {
-      throw new Error(
-        'Object store is over budget with all objects referenced. ' +
-          'Cannot create new staging directories.',
-      );
-    }
     const dir = path.join(this.paths.stagingDir, invocationId);
     await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
     return dir;
