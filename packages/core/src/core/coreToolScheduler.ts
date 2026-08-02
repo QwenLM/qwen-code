@@ -5565,8 +5565,9 @@ export class CoreToolScheduler {
 
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
-        let cancelMessage =
-          'The tool had already completed; its output was discarded.';
+        let cancelMessage = executionThrew
+          ? 'User cancelled tool execution.'
+          : 'The tool had already completed; its output was discarded.';
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5646,7 +5647,9 @@ export class CoreToolScheduler {
             'cancelled',
             createCancelledResponse(
               scheduledCall.request,
-              'The tool had already completed; its output was discarded.',
+              executionThrew
+                ? 'User cancelled tool execution.'
+                : 'The tool had already completed; its output was discarded.',
               executionStatus,
               failureHookArtifacts,
             ),
