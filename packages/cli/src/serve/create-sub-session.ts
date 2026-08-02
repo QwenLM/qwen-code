@@ -403,12 +403,13 @@ async function deliverSentCompletion(
   const isolatedCwd = isolatedWorkspace
     ? await isolatedWorkspace.materializeDirectory(parentSessionId)
     : undefined;
-  let materializedDirectoryUnused = isolatedCwd !== undefined;
+  let materializedDirectoryUnused = false;
   try {
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
     });
+    materializedDirectoryUnused = isolatedCwd !== undefined;
     if (isolatedCwd !== undefined) {
       if (
         restoredParent.hasActivePrompt === true &&
