@@ -331,6 +331,7 @@ describe('audio bridge service', () => {
         audioCount: 1,
         convertedCount: 0,
         egressCount: 0,
+        modelId: 'qwen3-asr-flash',
       }),
     ).toBe(
       'Audio bridge could not transcribe 1 audio file(s): transcription was unavailable.',
