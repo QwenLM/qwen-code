@@ -220,13 +220,35 @@ describe('qwen-triage tmux workflow', () => {
   });
 
   it('pins the action reinstall to the version the job already runs', () => {
+    const ensure = step('Ensure qwen CLI');
     expect(workflow).toContain("id: 'ensure_qwen'");
-    expect(workflow).toContain(
-      'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
-    );
+    // Every exit-0 path of the step must emit the version output — the action
+    // pin reads it, and a path that forgets it re-pins the reinstall to an
+    // empty string (which the action treats as `latest`, resurrecting the
+    // stale-dist-tag bug the pin exists to prevent). Three success paths,
+    // three emissions: already-latest, fallback-to-installed (twice: registry
+    // down, install failed), and fresh-install.
+    const emissions = (
+      ensure.match(/echo "version=\$\{?\w+\}?" >> "\$\{GITHUB_OUTPUT\}"/g) ?? []
+    ).length;
+    expect(emissions).toBeGreaterThanOrEqual(4);
     expect(workflow).toContain(
       "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
     );
+  });
+
+  it('resolves latest, retries the install, and never trusts a cwd .npmrc', () => {
+    // The step used to short-circuit on any pre-installed qwen — the same bug
+    // the review runner fixed in c9f0d0657 — and its stale version output then
+    // pinned the action reinstall to a stale release. Pin the repaired shape:
+    // resolve-then-compare, a bounded retry loop, the RUNNER_TEMP cwd (npm
+    // reads a cwd .npmrc from the persistent workspace into a global install),
+    // and the registry-down fallback that still triages on the installed CLI.
+    const ensure = step('Ensure qwen CLI');
+    expect(ensure).toContain("@qwen-code/qwen-code@latest' version");
+    expect(ensure).toContain('for attempt in 1 2 3; do');
+    expect(ensure).toContain('cd "${RUNNER_TEMP:?}"');
+    expect(ensure).toContain('triaging with installed qwen');
   });
 
   it('passes triage output through env before bash reads it', () => {
