@@ -86,4 +86,12 @@ describe('CDP acceptance helpers', () => {
       isCdpSmokePassed({ tools: 29, listPages: null, error: 'failed' }),
     ).toBe(false);
   });
+
+  it('parses a selected page URL when the title contains parentheses', () => {
+    expect(
+      parseSelectedPageUrl(
+        '## Pages\n1: Rust (programming language) (https://en.wikipedia.org/wiki/Rust) [selected]',
+      ),
+    ).toBe('https://en.wikipedia.org/wiki/Rust');
+  });
 });

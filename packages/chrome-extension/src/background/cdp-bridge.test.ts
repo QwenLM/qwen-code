@@ -10,6 +10,9 @@ interface ChromeHarness {
   attach: ReturnType<typeof vi.fn>;
   detach: ReturnType<typeof vi.fn>;
   sendCommand: ReturnType<typeof vi.fn>;
+  debuggerEventListeners: Array<
+    (source: chrome.debugger.Debuggee, method: string, params?: object) => void
+  >;
   debuggerDetachListeners: Array<
     (source: chrome.debugger.Debuggee, reason: string) => void
   >;
@@ -19,6 +22,7 @@ function installChromeHarness(options?: {
   deferAttach?: boolean;
 }): ChromeHarness & { finishAttach(): void } {
   let attachCallback: (() => void) | undefined;
+  const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
   const attach = vi.fn(
     (
@@ -48,7 +52,7 @@ function installChromeHarness(options?: {
       detach,
       sendCommand,
       onEvent: {
-        addListener: vi.fn(),
+        addListener: vi.fn((listener) => debuggerEventListeners.push(listener)),
         removeListener: vi.fn(),
       },
       onDetach: {
@@ -68,6 +72,7 @@ function installChromeHarness(options?: {
     },
     runtime: {
       getPlatformInfo: vi.fn((callback) => callback({ os: 'mac' })),
+      lastError: undefined as chrome.runtime.LastError | undefined,
     },
   } as unknown as typeof chrome;
 
@@ -75,6 +80,7 @@ function installChromeHarness(options?: {
     attach,
     detach,
     sendCommand,
+    debuggerEventListeners,
     debuggerDetachListeners,
     finishAttach() {
       attachCallback?.();
@@ -196,5 +202,81 @@ describe('CDP bridge', () => {
       }),
     );
     expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 });
+  });
+
+  it('forwards debugger events for the attached tab', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    chromeHarness.debuggerEventListeners[0]?.(
+      { tabId: 7 },
+      'Runtime.consoleAPICalled',
+      { type: 'log' },
+    );
+
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_event',
+      method: 'Runtime.consoleAPICalled',
+      params: { type: 'log' },
+    });
+  });
+
+  it('ignores debugger events from a different tab', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    chromeHarness.debuggerEventListeners[0]?.(
+      { tabId: 999 },
+      'Runtime.consoleAPICalled',
+      { type: 'log' },
+    );
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a CDP command when chrome.runtime.lastError is set', async () => {
+    const chromeHarness = installChromeHarness();
+    chromeHarness.sendCommand.mockImplementation(
+      (
+        _target: chrome.debugger.Debuggee,
+        _method: string,
+        _params: object,
+        callback: (result?: object) => void,
+      ) => {
+        (chrome.runtime as { lastError: unknown }).lastError = {
+          message: 'No tab with id: 7',
+        };
+        callback(undefined);
+        (chrome.runtime as { lastError: unknown }).lastError = undefined;
+      },
+    );
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    bridge.handleCdpFrame(
+      frame({
+        type: 'cdp_command',
+        id: 2,
+        method: 'Runtime.evaluate',
+        params: { expression: '1' },
+      }),
+      send,
+    );
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_result',
+        id: 2,
+        error: { code: -32000, message: 'No tab with id: 7' },
+      }),
+    );
   });
 });

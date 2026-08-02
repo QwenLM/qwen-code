@@ -105,10 +105,11 @@ export function deriveCapabilityStatus(
     }
     // The /cdp path pattern mirrors run-real-chrome.mjs's acceptance wait.
     const usesTunnel = server.config?.args?.some((arg) => {
-      if (!/\/cdp(?:$|[/?#])/.test(arg)) return false;
+      const candidate = arg.replace(/^--?[\w-]+=/, '');
+      if (!/\/cdp(?:$|[/?#])/.test(candidate)) return false;
       if (!baseUrl) return true;
       try {
-        const argUrl = new URL(arg);
+        const argUrl = new URL(candidate);
         const daemonUrl = new URL(baseUrl);
         // The panel treats every loopback spelling as one host (isLoopback in
         // sidepanel.js), so a daemon bound to `localhost`/`::1` is the same

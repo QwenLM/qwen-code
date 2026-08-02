@@ -99,7 +99,7 @@ describe('scanArtifactRoots', () => {
     }
   });
 
-  it('scans the contents of the generated extension zip', async () => {
+  it('rejects a missing extension zip', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-zip-'));
     try {
       const zip = path.join(root, 'extension.zip');
