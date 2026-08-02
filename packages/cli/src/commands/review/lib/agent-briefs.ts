@@ -592,12 +592,13 @@ It writes the \`run:\` script **verbatim** as an executable and reports what the
 
 \`\`\`bash
 "\${QWEN_CODE_CLI:-qwen}" review mock-provider --responder <a module you write> \\
-  --log <plan dir>/mock.jsonl --ttl 600 --out <plan dir>/mock.json
+  --log <plan dir>/mock.jsonl --ttl 600 --out <plan dir>/mock.json &
+until [ -s <plan dir>/mock.json ]; do sleep 0.1; done  # its port is in that report
 "\${QWEN_CODE_CLI:-qwen}" review drive --cwd <the worktree> --script <what to run> \\
   --ready <a command polled until it exits 0> --timeout 300 --out <plan dir>/drive.json
 \`\`\`
 
-\`mock-provider\` serves \`/v1/chat/completions\` (OpenAI) and \`/v1/messages\` (Anthropic) on an OS-assigned port it reports back, and appends every request to a JSONL log; your responder module exports \`respond(req)\` returning \`{text}\`, \`{tool, args}\` or \`{status, body}\`, and never has to get SSE framing right. **The log is the A/B evidence** — drive the same script against the PR worktree and the \`base-tree\` path, then diff the two request sequences; a difference is evidence, a reading is not.
+\`mock-provider\` serves \`/v1/chat/completions\` (OpenAI) and \`/v1/messages\` (Anthropic) on an OS-assigned port it reports back, and appends every request to a JSONL log; your responder module exports \`respond(req)\` returning \`{text}\`, \`{tool, args}\` or \`{status, body}\`, and never has to get SSE framing right. **It serves for the whole \`--ttl\` and returns only when that expires** — so background it and wait, as above; run sequentially it is already shut down by the time the next line starts. Its report is written once the port is bound, which is what makes the file's appearance a readiness signal rather than a guess, and the TTL is the only thing that ends it — set it to bound the drive, not to match it. **The log is the A/B evidence** — drive the same script against the PR worktree and the \`base-tree\` path, then diff the two request sequences; a difference is evidence, a reading is not.
 
 \`drive\` owns the three things that used to be guesswork, and its \`outcome\` is what you rule on, never the captured text alone: \`completed\` carries the script's own \`exitCode\` and is the only value that licenses a behavioural claim; \`not-ready\` means the readiness probe never passed, so **nothing was driven and nothing observed is evidence either way**; \`timed-out\` and \`overflowed\` mean the capture is PARTIAL — a partial capture is not evidence that the run produced nothing; \`unavailable\` (no tmux) is an environment gap and explicitly not a finding. Pass \`--ready\` for anything that binds a port: without it the drive starts immediately, and an empty capture reads as "the feature does not work" when it means "the daemon had not finished starting".
 
