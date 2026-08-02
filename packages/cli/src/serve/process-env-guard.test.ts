@@ -187,11 +187,21 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/live/provider-credentials.ts',
+    'packages/cli/src/serve/live/live-host-coordinator.ts',
+    {
+      reason: 'Live Host diagnostics are enabled for the whole daemon process.',
+      accesses: { 'key:QWEN_LIVE_DIAGNOSTICS': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/live/live-session-coordinator.ts',
     {
       reason:
-        'Embedded callers may omit the daemon-level environment argument.',
-      accesses: { whole: 1 },
+        'Live audio diagnostics are enabled and located for the whole daemon process.',
+      accesses: {
+        'key:QWEN_LIVE_DIAGNOSTICS': 2,
+        'key:QWEN_LIVE_DIAGNOSTICS_DIR': 1,
+      },
     },
   ],
 ]);
