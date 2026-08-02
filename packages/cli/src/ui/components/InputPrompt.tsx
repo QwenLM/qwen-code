@@ -1199,10 +1199,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         // Pop queued messages into input on ESC (before double-ESC clear).
-        // But when the agent is actively responding, let ESC fall through to
-        // AppContainer's global handler so it cancels the ongoing work first.
-        // #8201: without this guard, ESC pops the queue and returns true,
-        // consuming the key before the global cancel-work handler can fire.
+        // Skip when the agent is actively responding: popQueueIntoInput()
+        // fills the shared buffer, which makes AppContainer's broadcast ESC
+        // handler take its "input has content -> double-press to clear"
+        // branch instead of the cancel-work branch. #8201.
         if (
           !isAttachmentMode &&
           uiState.messageQueue.length > 0 &&
@@ -1217,10 +1217,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Handle double ESC for clearing input.
         // When the agent is actively responding AND the input buffer is
-        // empty, let ESC fall through to AppContainer's global handler so
-        // it cancels the ongoing work. Gate on empty buffer to avoid
-        // BaseTextInput's default ESC (unconditional clear) silently wiping
-        // typed input without the double-press confirmation. #8201.
+        // empty, defer to AppContainer's broadcast ESC handler so it takes
+        // its cancel-work branch (KeypressContext broadcasts to all handlers
+        // regardless of this return value; returning false here simply avoids
+        // BaseTextInput's default ESC wiping the buffer, which would have
+        // already been empty anyway). Gate on empty buffer to prevent
+        // BaseTextInput's default ESC from silently wiping typed input
+        // without the double-press confirmation. #8201.
         if (
           uiState.streamingState === StreamingState.Responding &&
           buffer.text === ''
