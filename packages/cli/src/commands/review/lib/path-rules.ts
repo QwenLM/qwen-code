@@ -29,7 +29,9 @@
 // its shape from ships opinions about `var`, `==`, and nested ternaries — which
 // collide head-on with this skill's Exclusion Criteria against formatter-fixable
 // nits, and would spend a reviewer's attention on the things a linter already owns.
-// A path rule earns its place by naming a defect the dimensions cannot see.
+// A path rule earns its place by naming a defect the dimensions cannot see — and it
+// pays a cost: the checklist rides in the brief of every matching agent, so a rule
+// that does not earn its tokens on the median matching diff is not a rule.
 
 export interface PathRule {
   /** Named in the brief, so an agent can say which rule it applied. */
@@ -83,12 +85,12 @@ const JAVA: PathRule = {
 
 **JVM-cost defects provable from the source (Suggestion — a cost, not a wrongness):**
 
-- **A regex compiled per call.** \`Pattern.compile(...)\` in a method body or loop, and the \`String\` conveniences that hide it — \`matches\`, \`replaceAll\`, \`replaceFirst\`, and \`split\` with a real regex (a single-character \`split\` takes a fast path only when the character is not a regex metacharacter — \`split(".")\` does not) — recompile the pattern on every invocation. On a per-request or per-record path that is real CPU. Fix: \`private static final Pattern\`.
+- **A regex compiled per call.** \`Pattern.compile(...)\` in a method body or loop, and the \`String\` conveniences that hide it — \`matches\`, \`replaceAll\`, \`replaceFirst\`, and \`split\` with a real regex (a one- or two-character \`split\` argument takes a fast path only when it is not a regex construct — \`split(".")\` does not, since \`.\` is a metacharacter; the escaped two-character form \`split("\\\\.")\` does) — recompile the pattern on every invocation. On a per-request or per-record path that is real CPU. Fix: \`private static final Pattern\`.
 - **\`+=\` on a \`String\` inside a loop.** Each iteration rebuilds and copies the whole accumulated prefix; the loop is O(n²) in the final length. Fix: one \`StringBuilder\` outside the loop.
 - **Boxing on a hot path.** A \`Long\`/\`Integer\` loop accumulator, a \`Map<Long, …>\` over dense \`int\` keys, \`.boxed()\` in a counted stream: every box past the small-integer cache is an allocation plus a pointer chase per iteration. Fix: primitives, or the primitive streams/collections.
 - **A capturing lambda or method reference inside a hot loop.** A non-capturing lambda is a singleton; one that closes over a local allocates per iteration. If the diff moves a capturing lambda into a loop, hoist it or restructure it to capture nothing.
 - **A log message built whether or not it is logged.** \`log.debug("result: " + value)\` pays the concatenation with the level off, and even \`log.debug("{}", expensive())\` still pays \`expensive()\`. Fix: parameterized messages, and guard expensive arguments with \`isDebugEnabled()\` or a supplier-based logging API.
-- **A collection sized after the fact.** A \`HashMap\`/\`ArrayList\` the code then fills with a known N pays repeated rehash/grow-copy chains; presize it (a \`HashMap\` needs \`N/0.75 + 1\` to avoid rehashing at all).
+- **A collection sized after the fact.** A \`HashMap\`/\`ArrayList\` the code then fills with a known N pays repeated rehash/grow-copy chains; presize it (a \`HashMap\` needs \`N/0.75 + 1\` to avoid rehashing at all — \`HashMap.newHashMap(n)\`, JDK 19+, does that arithmetic for you).
 - **Legacy synchronized types in new code.** \`Vector\`, \`Hashtable\`, \`StringBuffer\` put a monitor on every call; the unsynchronized equivalents are the default for a reason.
 - **An exception used as control flow.** Validating by catching \`NumberFormatException\`, looping until \`EOFException\`: \`fillInStackTrace\` costs more than the work being guarded. Validate instead.
 - **Reflection rediscovered per call.** \`getMethod\`/\`getField\` on every invocation of a hot path; cache the \`Method\`/\`Field\` — or a \`MethodHandle\` — once.
@@ -109,12 +111,12 @@ Two more ways a diff can flip it: an already-compiled callee whose **native** si
 
 **Measure it; do not estimate bytecode from source.** Two tiers, in order of cost:
 
-1. **Static — available whenever the project builds.** Extract the one class and \`javac\` it into a **scratch** output dir (\`javac -d /tmp/<scratch> …\`), then \`javap -c -p\` the class and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — get the base side **without touching the tree**: \`git show <merge-base>:<path> > /tmp/<scratch>/X.java\`, compile that too, and measure both; a method already over on the base side is pre-existing, not a finding. **Never \`git checkout\`, \`git stash\`, or build in place.** In a PR review the worktree is shared with agents running concurrently, and in a local review it is the user's own checkout — mutating it corrupts work you cannot see. A full \`mvn\`/\`gradle\` build also executes the branch's contributor-controlled build logic, so prefer \`javac\` on the extracted file over a project build, and treat any build you do run as untrusted code.
+1. **Static — available when the class compiles, which for a leaf class is always and for a connected one needs its dependencies.** Allocate a private scratch dir first — \`SCRATCH=$(mktemp -d)\`, never a fixed path like \`/tmp/scratch\`: other agents are compiling concurrently, and two of them writing different revisions of the same class into one directory read each other's \`.class\` files and measure the wrong bytecode (on Windows, \`%TEMP%\` plays the role of \`/tmp\`). Then \`javac -proc:none -nowarn -d "$SCRATCH" X.java\` — \`-proc:none\` is not optional: annotation processors on the classpath (Lombok, Dagger, one the PR itself added) run at compile time with your privileges, so a \`javac\` without it is itself an untrusted-code execution. Give the compiler what it needs to resolve imports: \`-sourcepath\` at the module source root, plus \`-cp\` against an already-built \`target/classes\` / \`build/classes\` if one exists; if neither is present, \`mvn dependency:build-classpath -Dmdep.outputFile="$SCRATCH/cp.txt"\` writes the dependency classpath **without compiling or running the project**, then \`javac -cp @"$SCRATCH/cp.txt"\`. Then \`javap -c -p\` the class and read the method's size: the offset of its last instruction plus that instruction's width. Compare against 35 and 325. For the **crossing** claim — "this diff pushed it over the threshold" — get the base side **without touching the tree**: \`git show <merge-base>:<path> > "$SCRATCH/X.java"\`, compile that too, and measure both; a method already over on the base side is pre-existing, not a finding. If the class will not compile even with its dependencies, go straight to the mechanism-at-\`Confidence: low\` form below — **never \`git checkout\`, \`git stash\`, build in place, or run \`mvn\`/\`gradle\` to force a compile.** In a PR review the worktree is shared with agents running concurrently and the branch's build logic is contributor-controlled — the attack surface, not a cost; in a local review it is the user's own checkout. Mutating either corrupts work you cannot see.
 2. **Dynamic — when the code is runnable.** Run the workload with \`-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining\` and grep for the method: \`callee is too large\` / \`hot method too big\` is the JVM itself declining to inline. JMH gives the before/after throughput; JITWatch visualizes the same decision logs.
 
 A finding that a method "can no longer be inlined" without one of these two tiers is a guess stated as fact. Report the **mechanism** instead, at \`Confidence: low\`: the threshold at risk, what the diff added to the method, and the measurement still to run. And if the diff *claims* this path got faster while the mechanism above says it cannot have, the finding is the unsubstantiated claim.
 
-**When the finding IS a grown hot method, the fix to suggest is hot/cold splitting — not reverting the change, and not \`@ForceInline\`** (which copies the callee's full body into every caller, bloating their bytecode and their own inline budgets). Move the cold paths — error handling, rare branches, defensive validation, the \`switch\` arms that almost never fire — into a small private helper, leaving the common path under the threshold; the helper, now called from one site, is itself inlinable. Name the bytecode range to extract and the size it leaves behind, the way the measurement names them: "extract bytecodes 212–311 (~100 bytes) into \`applyRounding\`, leaving \`parseAmount\` at ~238 bytes" is a finding an author can act on; "consider splitting the method" is not.
+**When the finding IS a grown hot method, the fix to suggest is hot/cold splitting — not reverting the change, and not a JVM tuning flag** (\`-XX:FreqInlineSize\`, \`-XX:CompileCommand=inline\`): those are runtime knobs the PR's author cannot ship in a code change, and raising an inline threshold to fit one method pays for it at every other call site. (The JDK-internal \`@ForceInline\` is not available to application code at all.) Move the cold paths — error handling, rare branches, defensive validation, the \`switch\` arms that almost never fire — into a small private helper, leaving the common path under the threshold; the helper, now called from one site, is itself inlinable. Name the bytecode range to extract and the size it leaves behind, the way the measurement names them: "extract bytecodes 212–311 (~100 bytes) into \`applyRounding\`, leaving \`parseAmount\` at ~238 bytes" is a finding an author can act on; "consider splitting the method" is not.
 
 **Favour precision over recall here.** A guessed JVM finding is the easiest kind for an author to dismiss, and one dismissal teaches them to skip the rest of the review. Every finding needs the concrete hot path and the concrete cost, like any other. Performance findings are **Suggestions** — slow is a cost, not incorrect behaviour — **except where the cost is itself the wrongness**: unbounded allocation, quadratic work, or unbounded cache growth on attacker-reachable input is a denial-of-service hole, which the severity ladder grades Critical, not a Suggestion. Name the reachable input that triggers it; "this loop is slow" with no attacker-reachable trigger stays a Suggestion.`,
 };
@@ -132,10 +134,16 @@ export const PATH_RULES: PathRule[] = [GITHUB_ACTIONS, JAVA];
  */
 function describePaths(which: readonly string[]): string {
   const CAP = 10;
-  if (which.length <= CAP) {
-    return which.join(', ');
+  // Production paths before test paths: the hot-path items this heading exists to
+  // introduce do not apply under src/test, so a PR that is mostly test classes
+  // must not fill the heading with files the rule explicitly scopes out.
+  const prod = which.filter((p) => !/src\/test\//i.test(p));
+  const test = which.filter((p) => /src\/test\//i.test(p));
+  const ordered = [...prod, ...test];
+  if (ordered.length <= CAP) {
+    return ordered.join(', ');
   }
-  return `${which.slice(0, CAP).join(', ')}, …and ${which.length - CAP} more`;
+  return `${ordered.slice(0, CAP).join(', ')}, …and ${ordered.length - CAP} more`;
 }
 
 /**

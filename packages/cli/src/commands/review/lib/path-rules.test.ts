@@ -180,18 +180,80 @@ describe('pathRulesFor — the Java/JVM rule', () => {
     expect(out).toMatch(/Performance findings are \*\*Suggestions\*\*/);
   });
 
-  it('prescribes a measurement that cannot mutate the shared tree', () => {
+  it('prescribes a measurement that cannot mutate the tree or run contributor code', () => {
     // The roster runs nine agents in ONE worktree concurrently, and a local
-    // review stands in the user's own checkout. "Compile the base revision the
-    // same way" reads as `git checkout`/`git stash` in that tree — corrupting
-    // files every other agent is reading. The procedure must be non-mutating
-    // (extract the base side with `git show`, build into a scratch dir), and it
-    // must say so, because an agent will do the natural thing unless told.
+    // review stands in the user's own checkout. Three distinct hazards the
+    // procedure must close, each found by review:
+    //  - a fixed scratch path (/tmp/scratch) collides between concurrent agents
+    //    compiling different revisions of the same class → mktemp -d;
+    //  - plain javac runs classpath annotation processors with the agent's
+    //    privileges → -proc:none, and mvn/gradle (the branch's build logic) is a
+    //    prohibition, not a discouraged preference;
+    //  - "extract and javac" fails on any class with imports, so the tier names
+    //    a classpath path (-sourcepath / target/classes / dependency:build-classpath,
+    //    which resolves without building) and a graceful fall-back to the
+    //    mechanism tier instead of escalating to a project build.
     const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('mktemp -d');
+    expect(out).toContain('-proc:none');
+    expect(out).toContain('dependency:build-classpath');
     expect(out).toContain('git show');
-    expect(out).toMatch(/Never `git checkout`, `git stash`, or build in place/);
-    // And the build it does run is contributor-controlled, hence untrusted.
-    expect(out).toContain('untrusted code');
+    expect(out).toMatch(
+      /never `git checkout`, `git stash`, build in place, or run `mvn`\/`gradle`/,
+    );
+  });
+
+  it('pins the correctness traps that make this section Critical, not Suggestion', () => {
+    // Probe-confirmed in review: deleting the entire correctness-traps block left
+    // every test green, so a future edit could silently drop the only instruction
+    // that grades a shared SimpleDateFormat or a get-then-put race as *wrong*.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('SimpleDateFormat');
+    expect(out).toContain('ConcurrentHashMap');
+    expect(out).toContain('computeIfAbsent');
+    expect(out).toContain('volatile');
+  });
+
+  it('pins the JVM-cost defect patterns an agent would otherwise skim past', () => {
+    // Same probe, Suggestion side: the nine source-provable patterns (regex,
+    // string +=, boxing, capturing lambda, log guard, presizing, legacy
+    // synchronized types, exceptions as control flow, per-call reflection) had
+    // zero coverage. Spot-pin the load-bearing ones so a mangled section fails.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('Pattern.compile');
+    expect(out).toContain('StringBuilder');
+    expect(out).toContain('Boxing on a hot path');
+    expect(out).toContain('newHashMap');
+  });
+
+  it('steers the fix away from JVM tuning flags and internal annotations', () => {
+    // For a grown hot method the actionable fix is hot/cold splitting. The wrong
+    // suggestions an agent reaches for are runtime knobs the PR author cannot
+    // ship in a code change (-XX:FreqInlineSize, -XX:CompileCommand=inline) and
+    // the JDK-internal @ForceInline, which application code cannot use at all —
+    // none of these is general, so the checklist names them only to rule them out.
+    const out = pathRulesFor(['src/Main.java']);
+    expect(out).toContain('hot/cold splitting');
+    expect(out).toContain('CompileCommand=inline');
+    expect(out).toMatch(/runtime knobs the PR's author cannot ship/);
+    expect(out).toContain('@ForceInline` is not available to application code');
+  });
+
+  it('names production paths before test paths in the heading', () => {
+    // The hot-path items the heading introduces do not apply under src/test, so a
+    // PR that is mostly test classes must not fill the ten named slots with files
+    // the rule scopes out. Production first, then tests.
+    const tests = Array.from(
+      { length: 30 },
+      (_, i) => `src/test/java/com/x/T${i}Test.java`,
+    );
+    const prod = ['src/main/java/com/x/A.java', 'src/main/java/com/x/B.java'];
+    const out = pathRulesFor([...tests, ...prod]);
+    expect(out).toContain('src/main/java/com/x/A.java');
+    expect(out).toContain('src/main/java/com/x/B.java');
+    // The first named slot is production, not a test file.
+    const heading = out.split('\n').find((l) => l.startsWith('### ')) ?? '';
+    expect(heading.indexOf('A.java')).toBeLessThan(heading.indexOf('T0Test'));
   });
 
   it('keeps the DoS escape hatch the workflow rule already needed', () => {
