@@ -231,6 +231,36 @@ describe('HttpHookRunner', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // Still 1
     });
 
+    it('should not follow redirects — 3xx is a non-blocking error and the target is never contacted', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 302,
+        headers: new Headers({
+          location: 'http://169.254.169.254/latest/meta-data',
+        }),
+        json: async () => ({}),
+      });
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      const result = await httpRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      // Non-2xx (incl. 3xx) is a non-blocking error per spec
+      expect(result.success).toBe(true);
+      expect(result.output?.continue).toBe(true);
+      // Exactly one request: the redirect target is never fetched
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/hook',
+        expect.objectContaining({ redirect: 'manual' }),
+      );
+    });
+
     it('should parse JSON response with hook output', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
