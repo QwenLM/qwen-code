@@ -10247,6 +10247,12 @@ class QwenAgent implements Agent {
         if (atRecordId !== undefined && typeof atRecordId !== 'string') {
           throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
         }
+        if (isSideTask && atRecordId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'atRecordId is not supported for side tasks',
+          );
+        }
 
         const sourceSession = this.sessions.get(sessionId);
         if (!sourceSession) {

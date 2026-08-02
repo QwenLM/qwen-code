@@ -12979,6 +12979,35 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('rejects atRecordId on a side task instead of silently discarding it', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      renameSession: vi.fn().mockResolvedValue(true),
+      removeSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        name: 'Side task',
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).rejects.toThrow('atRecordId is not supported for side tasks');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('maps an inactive durable checkpoint to branch_point_invalid', async () => {
     const checkpoint = '11111111-1111-4111-8111-111111111111';
     const recording = makeRecordingService();

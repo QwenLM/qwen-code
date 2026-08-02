@@ -4336,49 +4336,52 @@ describe('SessionService', () => {
       expect(fs.existsSync(targetPath)).toBe(false);
     });
 
-    it('preserves a committed titled session when final directory fsync fails', async () => {
-      const oldId = '55555555-5555-5555-5555-555555555557';
-      const newId = '66666666-6666-6666-6666-666666666671';
-      const warnings: string[] = [];
-      service = new SessionService(cwd, {
-        onWarning: (message) => warnings.push(message),
-      });
-      seedSession(oldId);
-      const chatsDir = realPath.join(
-        service['storage'].getProjectDir(),
-        'chats',
-      );
-      const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
-      const realOpenSync = fs.openSync;
-      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
-        filePath: fs.PathLike,
-        flags: fs.OpenMode,
-        mode?: fs.Mode,
-      ) => {
-        if (
-          filePath === chatsDir &&
-          flags === 'r' &&
-          fs.existsSync(targetPath)
-        ) {
-          throw new Error('directory fsync failed');
+    it.skipIf(process.platform === 'win32')(
+      'preserves a committed titled session when final directory fsync fails',
+      async () => {
+        const oldId = '55555555-5555-5555-5555-555555555557';
+        const newId = '66666666-6666-6666-6666-666666666671';
+        const warnings: string[] = [];
+        service = new SessionService(cwd, {
+          onWarning: (message) => warnings.push(message),
+        });
+        seedSession(oldId);
+        const chatsDir = realPath.join(
+          service['storage'].getProjectDir(),
+          'chats',
+        );
+        const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+        const realOpenSync = fs.openSync;
+        const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+          filePath: fs.PathLike,
+          flags: fs.OpenMode,
+          mode?: fs.Mode,
+        ) => {
+          if (
+            filePath === chatsDir &&
+            flags === 'r' &&
+            fs.existsSync(targetPath)
+          ) {
+            throw new Error('directory fsync failed');
+          }
+          return realOpenSync(filePath, flags, mode);
+        }) as typeof fs.openSync);
+
+        try {
+          await expect(
+            service.forkSession(oldId, newId, { title: 'Durable branch' }),
+          ).rejects.toThrow('directory fsync failed');
+        } finally {
+          openSpy.mockRestore();
         }
-        return realOpenSync(filePath, flags, mode);
-      }) as typeof fs.openSync);
 
-      try {
-        await expect(
-          service.forkSession(oldId, newId, { title: 'Durable branch' }),
-        ).rejects.toThrow('directory fsync failed');
-      } finally {
-        openSpy.mockRestore();
-      }
-
-      expect(fs.existsSync(targetPath)).toBe(true);
-      expect(service.getSessionTitle(newId)).toBe('Durable branch');
-      expect(warnings).toEqual([
-        expect.stringContaining(`branch committed session=${newId}`),
-      ]);
-    });
+        expect(fs.existsSync(targetPath)).toBe(true);
+        expect(service.getSessionTitle(newId)).toBe('Durable branch');
+        expect(warnings).toEqual([
+          expect.stringContaining(`branch committed session=${newId}`),
+        ]);
+      },
+    );
 
     it('retains the claim when cleanup fails so garbage collection can retry', async () => {
       const oldId = '55555555-5555-5555-5555-555555555558';

@@ -360,4 +360,24 @@ describe('branch points', () => {
       }),
     ).toMatchObject({ assistantRecordUuid: 'assistant-final' });
   });
+
+  it('rejects a checkpoint whose claimed assistant differs from the resolved one', () => {
+    const records = [
+      record('user-1', null, 'user', [{ text: 'first' }]),
+      record('assistant-1', 'user-1', 'assistant', [{ text: 'first answer' }]),
+      record('user-2', 'assistant-1', 'user', [{ text: 'second' }]),
+      record('assistant-2', 'user-2', 'assistant', [{ text: 'second answer' }]),
+    ];
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint', 'assistant-2', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: 'user-2',
+        assistantRecordUuid: 'assistant-1',
+      },
+    };
+
+    expect(resolveBranchPoints([...records, checkpoint])).toEqual(new Map());
+  });
 });

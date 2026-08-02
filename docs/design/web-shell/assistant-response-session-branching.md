@@ -474,12 +474,16 @@ prompt.
 
 ### 12.1 Bridge queue
 
-Each live session owns a `historyMutationQueue` covering:
+Each live session owns a `promptQueue` FIFO promise chain (in
+`packages/acp-bridge/src/bridge.ts`) covering:
 
 - prompt and trusted continuation;
 - branch;
 - rewind; and
 - close/drain coordination.
+
+A branch request additionally rejects with `BranchWhilePromptActiveError` while
+a prompt is active.
 
 Closing first marks the session as closing, rejects new mutations, and drains
 accepted work before teardown. Read-only attach and load operations do not join
@@ -537,9 +541,11 @@ The target transcript:
 - rebuilds a clean target parent chain.
 
 When a retained checkpoint's `startExclusiveRecordUuid` points to a filtered
-creation record, rewrite it to `null`. Otherwise retain the UUID: historical
-fork construction preserves source record UUIDs, so that retained record is
-also the target predecessor representing the same exclusive turn boundary.
+creation record, remap it to the nearest retained predecessor, falling back to
+`null` only when no retained predecessor exists. Otherwise retain the UUID:
+historical fork construction preserves source record UUIDs, so that retained
+record is also the target predecessor representing the same exclusive turn
+boundary.
 Run `resolveBranchPoints()` on the completed target chain before publication so
 earlier Assistant responses remain branchable from the new session.
 
