@@ -35,7 +35,9 @@ vi.mock('../utils/package.js', () => ({
   })),
 }));
 
-const { loadSandboxConfig } = await import('./sandboxConfig.js');
+const { loadSandboxConfig, resetSandboxProbeCacheForTest } = await import(
+  './sandboxConfig.js'
+);
 
 /** A `spawnSync` result standing in for a runtime that answers `version`. */
 function healthy(): Partial<SpawnSyncReturns<string>> {
@@ -109,6 +111,7 @@ function installed(...commands: string[]) {
 describe('loadSandboxConfig sandbox command selection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetSandboxProbeCacheForTest();
     platform.mockReturnValue('linux');
     delete process.env['SANDBOX'];
     delete process.env['QWEN_SANDBOX'];
@@ -148,6 +151,22 @@ describe('loadSandboxConfig sandbox command selection', () => {
     expect(config?.command).toBe('podman');
   });
 
+  it('probes each runtime once and reuses the result across calls', async () => {
+    // Selection runs more than once per startup (the sandbox hop, then again
+    // inside loadCliConfig), so without the cache a wedged runtime pays the
+    // timeout on every pass. Two selections must probe docker only once.
+    installed('docker', 'podman');
+    probes({ docker: healthy() });
+
+    await loadSandboxConfig({}, { sandbox: true });
+    await loadSandboxConfig({}, { sandbox: true });
+
+    const dockerProbes = spawnSync.mock.calls.filter(
+      ([cmd]) => cmd === 'docker',
+    ).length;
+    expect(dockerProbes).toBe(1);
+  });
+
   it('still prefers docker when it is usable', async () => {
     installed('docker', 'podman');
     probes({ docker: healthy(), podman: healthy() });
@@ -164,6 +183,27 @@ describe('loadSandboxConfig sandbox command selection', () => {
     await expect(loadSandboxConfig({}, { sandbox: true })).rejects.toThrow(
       /docker.*cannot run.*Cannot connect to the Docker daemon/s,
     );
+  });
+
+  it('strips ANSI and control characters from the runtime failure', async () => {
+    // The runtime's stderr is interpolated into a FatalSandboxError that
+    // reaches the terminal, so its escape and control bytes must not survive.
+    process.env['QWEN_SANDBOX'] = 'docker';
+    installed('docker');
+    probes({
+      docker: {
+        status: 1,
+        stdout: '',
+        stderr: '\x1b[31mCannot connect to the daemon\x1b[0m\x07\n',
+      },
+    });
+
+    const error = await loadSandboxConfig({}, {}).catch((e: Error) => e);
+    const message = (error as Error).message;
+
+    expect(message).toContain('Cannot connect to the daemon');
+    expect(message).not.toContain('\x1b');
+    expect(message).not.toContain('\x07');
   });
 
   it('surfaces the timeout error when a probe is killed at the cap', async () => {

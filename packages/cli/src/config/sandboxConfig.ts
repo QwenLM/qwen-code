@@ -5,7 +5,10 @@
  */
 
 import type { SandboxConfig } from '@qwen-code/qwen-code-core';
-import { FatalSandboxError } from '@qwen-code/qwen-code-core';
+import {
+  FatalSandboxError,
+  stripAnsiAndControl,
+} from '@qwen-code/qwen-code-core';
 import commandExists from 'command-exists';
 import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
@@ -30,9 +33,22 @@ function isSandboxCommand(value: string): value is SandboxConfig['command'] {
 }
 
 // A healthy `docker version` answers in roughly 200-500ms, so this is already
-// an order of magnitude of headroom. Probes run sequentially, so the ceiling is
-// paid once per wedged runtime — keeping it tight matters for startup.
+// an order of magnitude of headroom. Keeping it tight matters because a wedged
+// daemon blocks startup for the full cap.
 const SANDBOX_PROBE_TIMEOUT_MS = 5_000;
+
+// `loadSandboxConfig` runs twice on a sandboxed startup — once for the sandbox
+// hop and once inside loadCliConfig — so selection is entered more than once
+// per process. Cache each command's probe outcome so a runtime is contacted at
+// most once; otherwise the wedged-daemon-then-fallback case pays the timeout
+// twice. Daemon state changing mid-startup is not worth serving. Mirrors the
+// ripgrep health cache (`ripgrepUtils.ts`).
+const probeCache = new Map<SandboxConfig['command'], string | undefined>();
+
+/** Clears the per-process probe cache so tests stay hermetic. */
+export function resetSandboxProbeCacheForTest(): void {
+  probeCache.clear();
+}
 
 /**
  * Confirms that a sandbox command can actually run, not merely that it is on
@@ -44,8 +60,8 @@ const SANDBOX_PROBE_TIMEOUT_MS = 5_000;
  * `sandbox-exec` is a kernel facility rather than a daemon-backed client, so
  * its presence on PATH is already sufficient.
  *
- * @returns The first line of the failure output when the command cannot run,
- *          or undefined when it is usable.
+ * @returns The failure output when the command cannot run, or undefined when it
+ *          is usable. The result is cached per command for the process.
  */
 function probeSandboxCommand(
   command: SandboxConfig['command'],
@@ -53,7 +69,17 @@ function probeSandboxCommand(
   if (command === 'sandbox-exec') {
     return undefined;
   }
+  if (probeCache.has(command)) {
+    return probeCache.get(command);
+  }
+  const failure = runSandboxProbe(command);
+  probeCache.set(command, failure);
+  return failure;
+}
 
+function runSandboxProbe(
+  command: SandboxConfig['command'],
+): string | undefined {
   try {
     const result = spawnSync(command, ['version'], {
       encoding: 'utf8',
@@ -71,7 +97,12 @@ function probeSandboxCommand(
       .split('\n')
       .map((line) => line.trim())
       .find((line) => line.length > 0);
-    return firstLine ?? `'${command} version' exited with ${result.status}`;
+    // The runtime's own output reaches a FatalSandboxError message, so strip
+    // ANSI/control characters from that untrusted string before it hits the
+    // terminal.
+    return firstLine
+      ? stripAnsiAndControl(firstLine)
+      : `'${command} version' exited with ${result.status}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
