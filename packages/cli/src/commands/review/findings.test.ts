@@ -142,6 +142,39 @@ describe('validateFindings', () => {
   });
 });
 
+describe('validateFindings — evidence assets', () => {
+  it('accepts assetFiles and assets and round-trips both', () => {
+    const [f] = validateFindings([
+      {
+        ...base,
+        assetFiles: ['shots/before.png'],
+        assets: ['https://github.com/o/r/raw/sha/8346-review/x-before.png'],
+      },
+    ]);
+    expect(f.assetFiles).toEqual(['shots/before.png']);
+    expect(f.assets).toEqual([
+      'https://github.com/o/r/raw/sha/8346-review/x-before.png',
+    ]);
+  });
+
+  it('rejects a non-array assetFiles, naming the finding and the field', () => {
+    expect(() =>
+      validateFindings([{ ...base, assetFiles: 'shot.png' }]),
+    ).toThrow(/Finding at index 0: "assetFiles" must be an array/);
+  });
+
+  it('rejects an empty-string entry rather than publishing a nameless file', () => {
+    expect(() => validateFindings([{ ...base, assets: ['ok', ''] }])).toThrow(
+      /"assets" must be an array of non-empty strings/,
+    );
+  });
+
+  it('drops an empty array instead of carrying a vacuous field', () => {
+    const [f] = validateFindings([{ ...base, assetFiles: [] }]);
+    expect(f.assetFiles).toBeUndefined();
+  });
+});
+
 describe('compressSummary', () => {
   it('passes a short summary through unchanged', () => {
     expect(compressSummary('Retry counter never reset')).toBe(
