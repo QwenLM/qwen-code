@@ -1005,6 +1005,14 @@ export default {
     'Генерация сводки уже выполняется, дождитесь завершения предыдущего запроса',
   'No conversation found to summarize.':
     'Не найдено диалогов для создания сводки.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Путь сводки уже существует и не является сгенерированной сводкой: {{path}}',
+  'Summary path must be within the project root.':
+    'Путь сводки должен находиться в корне проекта.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Путь сводки указывает на существующий каталог: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Путь сводки заканчивается разделителем, но является существующим файлом: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

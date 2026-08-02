@@ -309,7 +309,7 @@ For same-repo reviews, results are saved as a Markdown file in your project's `.
 .qwen/reviews/2026-04-06-150510-local.md
 ```
 
-Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict.
+Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict. Section headings and descriptive prose follow the output language preference; technical identifiers (SHAs, file paths, gate names, finding ids) stay verbatim.
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
