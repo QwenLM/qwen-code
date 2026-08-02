@@ -836,12 +836,13 @@ describe('useGeminiStream', () => {
     mockRunAudioBridge.mockImplementation(async ({ signal }) => {
       Object.defineProperty(signal, 'aborted', { value: true });
       return {
-        status: 'ok',
-        parts: [{ text: 'discarded transcript' }],
+        status: 'failed',
+        parts: [{ text: 'transcription was cancelled' }],
         audioCount: 1,
-        convertedCount: 1,
+        convertedCount: 0,
         egressCount: 1,
         modelId: 'qwen3-asr-flash',
+        error: 'transcription was cancelled',
       };
     });
     const { result, mockSendMessageStream } = renderTestHook();
@@ -851,6 +852,44 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockSendMessageStream).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({ type: MessageType.INFO }),
+      expect.any(Number),
+    );
+  });
+
+  it('shows partial audio conversion failures as information', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'one transcript' }, { text: 'audio unavailable' }],
+      audioCount: 2,
+      convertedCount: 1,
+      egressCount: 2,
+      modelId: 'qwen3-asr-flash',
+      error: 'one transcription failed',
+    });
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@first.wav @second.wav');
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Converted 1 of 2 audio file(s)'),
+      }),
+      expect.any(Number),
+    );
   });
 
   it('shows an error when every audio conversion fails', async () => {
@@ -3389,6 +3428,136 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, ...expectedMidTurnParts],
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+  });
+
+  it('resolves and bridges mid-turn @ audio messages before submitting tool results', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: {
+        mimeType: 'audio/wav',
+        data: 'UklGRg==',
+      },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [transcriptPart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: [resolvedTextPart, resolvedAudioPart],
+        shouldProceed: true,
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-audio',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: queuedPrompt,
+        preserveUnsupportedAudioForBridge: true,
+      }),
+    );
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [resolvedTextPart, resolvedAudioPart],
+      signal: expect.any(AbortSignal),
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('[mid-turn audio transcript]');
+    expect(sent).not.toContain('inlineData');
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, transcriptPart],
+      expect.any(AbortSignal),
+      'prompt-id-midturn-audio',
       expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });

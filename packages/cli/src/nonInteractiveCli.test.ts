@@ -59,6 +59,7 @@ import {
   AlreadyReportedError,
   _resetExitLatchForTest,
 } from './utils/errors.js';
+import { RunBudgetEnforcer } from './utils/runBudget.js';
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
@@ -617,7 +618,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('stops before sending when cancellation lands during audio bridging', async () => {
+  it('routes cancellation that lands during audio bridging', async () => {
     setupMetricsMock();
     const { handleAtCommand } = await import(
       './ui/hooks/atCommandProcessor.js'
@@ -639,14 +640,60 @@ describe('runNonInteractive', () => {
       };
     });
 
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'listen @recording.wav',
-      'prompt-audio-cancelled',
-    );
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'listen @recording.wav',
+        'prompt-audio-cancelled',
+      ),
+    ).rejects.toThrow('process.exit(130) called');
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+  });
 
-    expect(exitCode).toBe(1);
+  it('routes a budget abort that lands during audio bridging', async () => {
+    setupMetricsMock();
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    vi.spyOn(RunBudgetEnforcer.prototype, 'getExceeded')
+      .mockReturnValueOnce({
+        kind: 'wall-time',
+        limit: 60,
+        observed: 60,
+        message: 'Run aborted: wall-clock budget of 60s exceeded.',
+      })
+      // process.exit is mocked to throw, so the outer catch runs in tests.
+      // Avoid a second budget-handler entry parking on the exit latch.
+      .mockReturnValue(null);
+    runAudioBridgeSpy.mockImplementation(async ({ signal }) => {
+      Object.defineProperty(signal, 'aborted', { value: true });
+      return {
+        status: 'failed',
+        parts: [{ text: 'transcription was cancelled' }],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+        error: 'transcription was cancelled',
+      };
+    });
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'listen @recording.wav',
+        'prompt-audio-budget',
+      ),
+    ).rejects.toThrow('process.exit(55) called');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('wall-clock budget of 60s exceeded'),
+    );
     expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
   });
 

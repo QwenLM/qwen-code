@@ -1203,7 +1203,9 @@ export const useGeminiStream = (
           addItem(
             {
               type:
-                result.status === 'failed' && result.convertedCount === 0
+                result.status === 'failed' &&
+                result.convertedCount === 0 &&
+                !signal.aborted
                   ? MessageType.ERROR
                   : MessageType.INFO,
               text: formatAudioBridgeNotice(result),
