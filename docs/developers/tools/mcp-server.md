@@ -37,6 +37,8 @@ Each discovered MCP tool is wrapped in a `DiscoveredMCPTool` instance that:
 - **Processes responses** for both the LLM context and user display
 - **Maintains connection state** and handles timeouts
 
+After a connection loss, the current invocation is replayed only for a trusted server in a trusted workspace when the tool explicitly declares `idempotentHint: true`, or declares `readOnlyHint: true` without a conflicting `destructiveHint: true` or `idempotentHint: false`. Missing, conflicting, or untrusted annotations are treated as unsafe because the server may have completed a side effect before the response was lost. Tool authors should publish accurate MCP annotations; administrators should still verify them before enabling server trust.
+
 ### Transport Mechanisms
 
 The CLI supports three MCP transport types:

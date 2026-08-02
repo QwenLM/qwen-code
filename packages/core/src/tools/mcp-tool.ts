@@ -143,6 +143,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolResult
 > {
   private static readonly MAX_RECONNECT_RETRIES = 3;
+  private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
+    'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call was not declared safe to replay. Do not retry automatically; verify the outcome before trying again.';
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -263,6 +265,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       throw error;
     }
 
+    if (!this.cliConfig) {
+      throw error;
+    }
+
+    if (!this.canSafelyReplay()) {
+      throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE);
+    }
+
     if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
       debugLogger.info(
         `Reconnection attempt ${this.retryCount + 1}/${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES} for MCP server '${this.serverName}'`,
@@ -297,6 +307,29 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     throw error;
+  }
+
+  private canSafelyReplay(): boolean {
+    if (
+      this.trust !== true ||
+      this.cliConfig?.isTrustedFolder() !== true ||
+      !this.annotations
+    ) {
+      return false;
+    }
+
+    if (
+      this.annotations.readOnlyHint === true &&
+      (this.annotations.destructiveHint === true ||
+        this.annotations.idempotentHint === false)
+    ) {
+      return false;
+    }
+
+    return (
+      this.annotations.idempotentHint === true ||
+      this.annotations.readOnlyHint === true
+    );
   }
 
   private shouldAttemptReconnect(error: unknown): boolean {

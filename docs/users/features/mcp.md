@@ -273,6 +273,14 @@ environment. This is kept as an escape hatch for at least one release.
 
 - **Server trust** (`trust: true`): bypasses confirmation prompts for that server (use sparingly).
 
+### Connection-loss replay
+
+Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+
+Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
+
+Annotations are server-provided behavior hints, not permissions or an authorization boundary. Only configure `trust: true` for servers you control and whose annotations you have verified.
+
 ### OAuth authentication
 
 Qwen Code supports OAuth 2.0 authentication for MCP servers. This is useful when accessing remote servers that require authentication.
