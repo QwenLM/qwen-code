@@ -8,6 +8,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const desktopReleaseWorkflow = readFileSync(
+  '.github/workflows/desktop-release.yml',
+  'utf8',
+);
+const liveHostInstaller = readFileSync(
+  'packages/cli/src/serve/live/live-host-installer.ts',
+  'utf8',
+);
 
 describe('release workflow', () => {
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
@@ -38,5 +46,35 @@ describe('release workflow', () => {
         "          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'",
     );
     expect(workflow).toContain('echo "::error::npm-published dispatch failed;');
+  });
+});
+
+describe('desktop release workflow', () => {
+  it('publishes the tested and notarized Live Host installer contract', () => {
+    expect(desktopReleaseWorkflow).toContain(
+      "run: 'bun run live-host:typecheck && bun run live-host:test'",
+    );
+    expect(desktopReleaseWorkflow).toContain(
+      "run: 'bun run live-host:dist:mac:no-publish'",
+    );
+    expect(desktopReleaseWorkflow).toContain(
+      'codesign --verify --deep --strict',
+    );
+    expect(desktopReleaseWorkflow).toContain('xcrun stapler validate');
+    expect(desktopReleaseWorkflow).toContain(
+      'packages/desktop/apps/live-host/release/*.dmg',
+    );
+
+    for (const asset of [
+      'Qwen-Live-Host-manifest.json',
+      'Qwen-Live-Host-arm64.zip',
+      'Qwen-Live-Host-x64.zip',
+    ]) {
+      expect(desktopReleaseWorkflow).toContain(`release-assets/${asset}`);
+      expect(liveHostInstaller).toContain(asset);
+    }
+    expect(liveHostInstaller).toContain(
+      'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest',
+    );
   });
 });
