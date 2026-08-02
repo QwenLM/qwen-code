@@ -62,6 +62,13 @@ const request = async (method, params = {}) => {
 };
 const textOf = (result) =>
   (result?.content || []).map((part) => part.text || '').join('\n');
+// chrome-devtools-mcp emits each node as `- role "label" [uid=...]`, so the
+// uid trails the label; find the labelled line, then pull the trailing uid.
+const uidFor = (snapshotText, label) =>
+  snapshotText
+    .split('\n')
+    .find((line) => line.includes(label))
+    ?.match(/\[uid=([^\]]+)\]/)?.[1];
 const call = async (name, args = {}) => {
   const result = await request('tools/call', { name, arguments: args });
   if (result?.isError) throw new Error(`${name}: ${textOf(result)}`);
@@ -177,12 +184,8 @@ try {
   await call('navigate_page', { type: 'url', url: fixtureUrl });
 
   const snapshot = textOf(await call('take_snapshot'));
-  const buttonUid = snapshot.match(
-    /uid=([^\s]+).*button "Run fixture action"/,
-  )?.[1];
-  const linkUid = snapshot.match(
-    /uid=([^\s]+).*link "Open fixture target"/,
-  )?.[1];
+  const buttonUid = uidFor(snapshot, 'button "Run fixture action"');
+  const linkUid = uidFor(snapshot, 'link "Open fixture target"');
   checks.snapshot = snapshot.includes('Qwen CDP Fixture');
   checks.buttonFound = Boolean(buttonUid);
   checks.linkFound = Boolean(linkUid);
@@ -199,9 +202,7 @@ try {
     async () => textOf(await call('take_snapshot')),
     (text) => text.includes('clicked'),
   );
-  const freshLinkUid = afterClick.match(
-    /uid=([^\s]+).*link "Open fixture target"/,
-  )?.[1];
+  const freshLinkUid = uidFor(afterClick, 'link "Open fixture target"');
   checks.linkAppeared = Boolean(freshLinkUid);
   checks.buttonClick = afterClick.includes('clicked');
 

@@ -12,7 +12,7 @@ The Qwen Code Chrome Extension ("the Extension") bridges the Chrome browser with
 | ----------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `tabs`      | Select the active tab and read its URL and title for AI-assisted browser automation                   | Active tab metadata — sent only to your local daemon                                                                           |
 | `debugger`  | Attach Chrome DevTools Protocol (CDP) to the active tab so the local daemon can drive browser actions | CDP commands/responses — the attached tab's DOM/text, console output, network activity, and cookies, sent to your local daemon |
-| `storage`   | Persist extension configuration (daemon port, capability flags)                                       | Key-value settings only, no browsing data                                                                                      |
+| `storage`   | Persist extension configuration (daemon address, optional bearer token)                               | Key-value settings only, no browsing data                                                                                      |
 | `alarms`    | Schedule periodic connection health checks to the local daemon                                        | No user data                                                                                                                   |
 | `sidePanel` | Display the extension's side panel UI                                                                 | No data access beyond rendering UI                                                                                             |
 
@@ -32,7 +32,7 @@ The Extension only ever talks to localhost, but understand the wider system befo
 
 ## Data storage
 
-- The Extension stores only configuration keys (daemon address, capability status) in `chrome.storage`.
+- The Extension stores only configuration keys (daemon address and an optional bearer token) in `chrome.storage`.
 - No browsing history, page content, or personal information is persisted by the Extension.
 
 ## Data sharing

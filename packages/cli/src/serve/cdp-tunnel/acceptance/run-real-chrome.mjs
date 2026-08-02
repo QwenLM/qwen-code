@@ -175,11 +175,15 @@ try {
     (value) =>
       value.features?.includes('cdp_tunnel_over_ws') &&
       !value.features?.includes('browser_automation_mcp'),
-  );
+  ).catch((error) => {
+    throw new Error(`${error.message}\n${getDaemonOutput()}`);
+  });
   await waitForJson(
     `${baseUrl}/workspace/mcp`,
     (value) => value.servers?.length === 0,
-  );
+  ).catch((error) => {
+    throw new Error(`${error.message}\n${getDaemonOutput()}`);
+  });
   console.log('DEGRADED-MODE: PASS');
   await stopChild(daemon);
 
