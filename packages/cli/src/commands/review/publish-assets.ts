@@ -97,12 +97,20 @@ function putContent(
     if (!/HTTP 422|"sha"|sha wasn't supplied|already exists/i.test(msg)) {
       throw err;
     }
-    const existing = gh(
-      'api',
-      `${api}?ref=${encodeURIComponent(branch)}`,
-      '--jq',
-      '.sha',
-    ).trim();
+    let existing: string;
+    try {
+      existing = gh(
+        'api',
+        `${api}?ref=${encodeURIComponent(branch)}`,
+        '--jq',
+        '.sha',
+      ).trim();
+    } catch {
+      // The retry premise was wrong (the 422 was not the sha-missing shape —
+      // branch protection, say — and the path does not exist): the GET's 404
+      // must not replace the PUT error the user actually needs.
+      throw err;
+    }
     if (existing === '' || existing === 'null') {
       // The path is claimed to exist yet has no blob sha to update against —
       // whatever is going on, a PUT with sha:"null" would only bury the
@@ -223,6 +231,14 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   }
   const repo = repoResult.repo;
 
+  // ONE effective host, resolved BEFORE the gate: the gate must bind the
+  // host the write will actually route at — --host, else an operator-exported
+  // GH_HOST, else github.com — not merely the flag. Binding args.host while
+  // routing at effectiveHost let a GH_HOST-driven Enterprise write pass a
+  // github.com authorisation; caught by this skill's own review.
+  const effectiveHost =
+    args.host ?? process.env['GH_HOST']?.trim() ?? undefined;
+
   // ── Gate 2: an authorised run — the same gate as `submit` ─────────────────
   // The PR identity used for authorisation binding is the PR the evidence is
   // FOR (the one under review), regardless of which repo hosts the images.
@@ -236,7 +252,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     // legitimately authorised runs. Without --reviewed-repo the gate binds the
     // PR number (and host) alone.
     repo: args.reviewedRepo,
-    host: args.host,
+    host: effectiveHost,
   });
   if (!auth.ok) {
     refuse(
@@ -248,13 +264,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
     return;
   }
 
-  // ONE effective host for both the gh routing and the returned URLs. With
-  // --host absent, gh children inherit the parent env — including an
-  // operator-exported GH_HOST — so publishes would route at Enterprise while
-  // rawAssetUrl claimed github.com, and every returned URL would 404. The env
-  // is part of the input; read it once and use it for both.
-  const effectiveHost =
-    args.host ?? process.env['GH_HOST']?.trim() ?? undefined;
+  // …and the same effectiveHost routes the gh calls and names the URLs.
   if (effectiveHost) {
     try {
       setGhHost(effectiveHost);

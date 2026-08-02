@@ -183,6 +183,12 @@ describe('validateFindings — evidence assets', () => {
     );
   });
 
+  it('treats a null assets field as absent, like every sibling parser', () => {
+    const [f] = validateFindings([{ ...base, assetFiles: null, assets: null }]);
+    expect(f.assetFiles).toBeUndefined();
+    expect(f.assets).toBeUndefined();
+  });
+
   it('drops an empty array instead of carrying a vacuous field', () => {
     const [f] = validateFindings([{ ...base, assetFiles: [] }]);
     expect(f.assetFiles).toBeUndefined();

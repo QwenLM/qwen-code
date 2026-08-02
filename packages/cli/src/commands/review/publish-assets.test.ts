@@ -51,6 +51,7 @@ describe('publish-assets', () => {
   let dir: string;
   let argsFile: string;
   let savedSessionId: string | undefined;
+  let savedGhHostMain: string | undefined;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'publish-assets-'));
@@ -63,9 +64,15 @@ describe('publish-assets', () => {
     // of these tests for reasons that have nothing to do with the code.
     savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
+    // GH_HOST is an input to this command (effectiveHost); a developer's or
+    // dogfooding session's exported value must not leak into URL assertions.
+    savedGhHostMain = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
     ghMock.mockReset();
     ghWithInputMock.mockReset();
-    setGhHostMock.mockClear();
+    // mockReset, not mockClear: a sibling block's persistent
+    // mockImplementation (the malformed-GH_HOST test) survives mockClear.
+    setGhHostMock.mockReset();
     stdoutSpy.mockClear();
     stderrSpy.mockClear();
     process.exitCode = undefined;
@@ -77,6 +84,9 @@ describe('publish-assets', () => {
     if (savedSessionId !== undefined) {
       process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
     }
+    if (savedGhHostMain !== undefined) {
+      process.env['GH_HOST'] = savedGhHostMain;
+    } else delete process.env['GH_HOST'];
     process.exitCode = undefined;
   });
 
@@ -435,14 +445,25 @@ describe('publish-assets — round-2 review pins', () => {
 
   it('a non-404 branch-lookup failure is rethrown, never read as "branch missing"', () => {
     // A 403 rate-limit answered by the create path would bury the real error
-    // under the create's 422 — the catch-all shape putContent's comment warns
-    // against.
-    ghMock.mockImplementation(() => {
-      throw new Error('HTTP 403: rate limit exceeded');
+    // under the create's 422. The mock 403s ONLY the branch ref lookup —
+    // every later call would succeed — so a regression that swallowed the 403
+    // would visibly proceed to the default-branch lookup, and the
+    // exactly-one-call assertion below would name it. (The first shape threw
+    // 403 from every call, which a broadened swallow still passed; measured
+    // vacuous by this PR's own review.)
+    ghMock.mockImplementation((...a: string[]) => {
+      if (String(a[1] ?? '').includes(`git/ref/heads/pr-assets/`)) {
+        throw new Error('HTTP 403: rate limit exceeded');
+      }
+      if (a.includes('.default_branch')) return 'main';
+      if (a.includes('.object.sha')) return 'basesha';
+      return '{}';
     });
     ghWithInputMock.mockImplementation(() => '{}');
     expect(() => runPublishAssets(baseArgs())).toThrow(/403/);
     expect(ghWithInputMock).not.toHaveBeenCalled();
+    // Rethrown AT the lookup: the default-branch query was never reached.
+    expect(ghMock).toHaveBeenCalledTimes(1);
   });
 
   it('an empty assets repo is named as the condition it is', () => {
@@ -538,7 +559,10 @@ describe('publish-assets — round-3 self-review pins', () => {
 
   it('a malformed operator GH_HOST is a refusal naming its source, not a TypeError', () => {
     process.env['GH_HOST'] = 'not a hostname';
-    setGhHostMock.mockImplementation(() => {
+    // Once, not persistent: a lingering implementation leaks into sibling
+    // blocks whose beforeEach only mockClear()ed — measured by this PR's own
+    // review as a cross-block failure with GH_HOST exported.
+    setGhHostMock.mockImplementationOnce(() => {
       throw new TypeError('--host must be a hostname');
     });
     runPublishAssets(baseArgs());
@@ -574,34 +598,52 @@ describe('publish-assets — round-3 self-review pins', () => {
   it('a branch-create 422 that is NOT already-exists surfaces, never swallowed', () => {
     // "Object does not exist" (a bad base sha) is also a 422; treating it as
     // success would leave every later PUT failing against a branch that was
-    // never created, far from the cause.
+    // never created, far from the cause. The mock fails ONLY the refs POST —
+    // PUTs would succeed — so a regression that swallowed this 422 would
+    // sail on to a PUT and the no-PUT assertion below would name it. (The
+    // first shape of this test threw the same message from every call, which
+    // a broadened swallow still passed; measured vacuous by this PR's own
+    // review.)
     ghMock
       .mockImplementationOnce(() => {
         throw new Error('HTTP 404: Not Found');
       })
       .mockImplementationOnce(() => 'main')
       .mockImplementationOnce(() => 'basesha');
-    ghWithInputMock.mockImplementation(() => {
-      throw new Error('HTTP 422: Validation Failed — Object does not exist');
+    ghWithInputMock.mockImplementation((_input: string, ...rest: string[]) => {
+      if (rest.join(' ').includes('git/refs')) {
+        throw new Error('HTTP 422: Validation Failed — Object does not exist');
+      }
+      return '{}';
     });
     expect(() => runPublishAssets(baseArgs())).toThrow(/Object does not exist/);
+    // The create failed and nothing may proceed past it: no contents PUT.
+    const putCalls = (ghWithInputMock as Mock).mock.calls.filter((c) =>
+      String(c.slice(1).join(' ')).includes('/contents/'),
+    );
+    expect(putCalls).toHaveLength(0);
   });
 });
 
-describe('publish-assets — empty is two different things', () => {
+describe('publish-assets — round-4 pins', () => {
   let dir: string;
   let argsFile: string;
   let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'publish-assets-empty-'));
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-r4-'));
     argsFile = join(dir, 'args.txt');
     writeFileSync(argsFile, '8346 --comment\n');
     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
-    // Same guard as the sibling blocks: the skillArgs seam is honoured only
-    // with no session id, and this suite is dogfooded from inside sessions.
     savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockReset();
     stdoutSpy.mockClear();
+    stderrSpy.mockClear();
     process.exitCode = undefined;
   });
   afterEach(() => {
@@ -610,6 +652,156 @@ describe('publish-assets — empty is two different things', () => {
     if (savedSessionId !== undefined) {
       process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
     }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+    process.exitCode = undefined;
+  });
+
+  const png = (name: string): string => {
+    const p = join(dir, name);
+    writeFileSync(p, Buffer.from('89504e470d0a1a0a0000000d', 'hex'));
+    return p;
+  };
+  const okGh = (): void => {
+    ghMock.mockImplementation((...a: string[]) =>
+      a.includes('.object.sha') ? 'headsha' : '{}',
+    );
+    ghWithInputMock.mockImplementation(() => '{}');
+  };
+  const baseArgs = () =>
+    ({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [png('a.png')],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    }) as never;
+
+  it('a double-fired branch create ("Reference already exists") is success', () => {
+    // The positive half of the idempotency swallow: a proxy 502 that GitHub
+    // in fact processed answers the retried POST with already-exists, and the
+    // publish must proceed. Inverting the swallow condition would fail here.
+    ghMock
+      .mockImplementationOnce(() => {
+        throw new Error('HTTP 404: Not Found');
+      })
+      .mockImplementationOnce(() => 'main')
+      .mockImplementationOnce(() => 'basesha')
+      .mockImplementation((...a: string[]) =>
+        a.includes('.object.sha') ? 'headsha' : '{}',
+      );
+    ghWithInputMock.mockImplementation((_i: string, ...rest: string[]) => {
+      if (rest.join(' ').includes('git/refs')) {
+        throw new Error('HTTP 422: Reference already exists');
+      }
+      return '{}';
+    });
+    runPublishAssets(baseArgs());
+    expect(process.exitCode).toBeUndefined();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: true, count: 1 }),
+    );
+  });
+
+  it('accepts the canonical report shape its own --findings-out writes', () => {
+    // An idempotent re-run feeds this command its own output: the
+    // { findings: [...] } report, not a bare array. Dropping the fallback
+    // must fail here, not in a user's pipeline.
+    okGh();
+    const img = png('shot.png');
+    const artifact = join(dir, 'report.json');
+    writeFileSync(
+      artifact,
+      JSON.stringify({
+        findings: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            summary: 'panel clips',
+            failureScenario: '80 cols clips',
+            file: 'src/p.ts',
+            assetFiles: [img],
+          },
+        ],
+        counts: {},
+        outcomesRecorded: false,
+      }),
+    );
+    const outArtifact = join(dir, 'report-out.json');
+    runPublishAssets({
+      ...(baseArgs() as object),
+      files: undefined,
+      findings: artifact,
+      findingsOut: outArtifact,
+    } as never);
+    expect(process.exitCode).toBeUndefined();
+    const updated = JSON.parse(readFileSync(outArtifact, 'utf8'));
+    expect(updated.findings[0].assets).toHaveLength(1);
+  });
+
+  it('an Enterprise-URL authorisation refuses a host-less (github.com) write', () => {
+    // The gate binds the host in BOTH directions: absent --host and GH_HOST
+    // means the write routes at github.com, which must not pass an
+    // authorisation the user recorded for their Enterprise host.
+    writeFileSync(
+      argsFile,
+      'https://ghe.corp.example/reviewed/upstream/pull/8346 --comment\n',
+    );
+    runPublishAssets(baseArgs());
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('ghe.corp.example');
+    expect(why).toContain('github.com');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a github.com-URL authorisation still passes a host-less write', () => {
+    writeFileSync(
+      argsFile,
+      'https://github.com/reviewed/upstream/pull/8346 --comment\n',
+    );
+    okGh();
+    runPublishAssets(baseArgs());
+    expect(process.exitCode).toBeUndefined();
+  });
+});
+
+describe('publish-assets — empty is two different things', () => {
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-empty-'));
+    argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, '8346 --comment\n');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    // Same guards as the sibling blocks: the skillArgs seam is honoured only
+    // with no session id; GH_HOST feeds effectiveHost; and mockReset (never
+    // mockClear) removes a sibling's persistent throwing implementation.
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockReset();
+    stdoutSpy.mockClear();
+    stderrSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
     process.exitCode = undefined;
   });
 
@@ -652,14 +844,19 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
   let dir: string;
   let argsFile: string;
   let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'publish-assets-host-'));
     argsFile = join(dir, 'args.txt');
     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
     savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
     ghMock.mockReset();
     ghWithInputMock.mockReset();
+    setGhHostMock.mockReset();
+    stderrSpy.mockClear();
     process.exitCode = undefined;
   });
   afterEach(() => {
@@ -668,6 +865,8 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
     if (savedSessionId !== undefined) {
       process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
     }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
     process.exitCode = undefined;
   });
 

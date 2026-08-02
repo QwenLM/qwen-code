@@ -127,6 +127,16 @@ export function gh(...args: string[]): string {
 }
 
 /**
+ * Run `gh` with `input` on its stdin, WITH the same transient-error retry as
+ * `gh()` — for callers whose input-carrying writes are idempotent
+ * (publish-assets: content-hashed PUTs, a ref create whose duplicate is
+ * caught). Non-idempotent writes use `ghWithInput` below.
+ */
+export function ghWithInputRetried(input: string, ...args: string[]): string {
+  return execGhWithRetry(args, { input });
+}
+
+/**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
  *
  * Unlike `gh()`, this does NOT retry on transient errors: `submit.ts` POSTs
@@ -143,10 +153,6 @@ export function gh(...args: string[]): string {
  * did not write, or a 422. Sending the validated bytes over stdin (`--input -`)
  * closes that window: the bytes checked are the bytes posted.
  */
-export function ghWithInputRetried(input: string, ...args: string[]): string {
-  return execGhWithRetry(args, { input });
-}
-
 export function ghWithInput(input: string, ...args: string[]): string {
   return (
     execFileSync('gh', args, {

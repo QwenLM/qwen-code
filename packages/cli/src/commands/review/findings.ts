@@ -142,7 +142,10 @@ function stringArray(
   index: number,
 ): string[] | undefined {
   const v = o[key];
-  if (v === undefined) return undefined;
+  // `== null` covers null too: every sibling optional-field parser (asString)
+  // treats null as absent, and an artifact author who renders "no assets" as
+  // null must not crash the whole canonicalization.
+  if (v == null) return undefined;
   // trim(), matching the sibling asString: a whitespace-only evidence path is
   // as nameless as an empty one.
   if (

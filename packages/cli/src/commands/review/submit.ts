@@ -143,7 +143,11 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
     skillArgs: args.skillArgs,
     pr: args.pr,
     repo: args.repo,
-    host: args.host,
+    // The EFFECTIVE host, not merely the flag: with --host absent the gh
+    // child inherits an operator-exported GH_HOST, so that is where this
+    // write would route — and what the gate must bind. Same resolution as
+    // publish-assets.
+    host: args.host ?? process.env['GH_HOST']?.trim() ?? undefined,
   });
 }
 

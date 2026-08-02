@@ -65,7 +65,16 @@ export interface WriteAuthorizationRequest {
    * (and host) alone.
    */
   repo?: string;
-  /** GitHub Enterprise host, when not github.com. */
+  /**
+   * The EFFECTIVE host of the write — where the gh calls will actually route,
+   * including an operator-exported GH_HOST the caller resolved. Absent means
+   * github.com, and the gate compares against that default rather than
+   * skipping the check: a URL-shaped authorisation recorded for an Enterprise
+   * host must not admit a write routed at github.com merely because the
+   * caller omitted --host — and vice versa. (The asymmetric `req.host &&`
+   * guard this replaces bound the host in one direction only; caught by this
+   * skill's own review.)
+   */
   host?: string;
 }
 
@@ -142,17 +151,16 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
         };
       }
     }
-    // The host check stands on its own, NOT nested under the repo binding: a
-    // caller that omits the repo (publish-assets without --reviewed-repo)
-    // still binds the host, exactly as the docs promise ("the PR number and
-    // host alone"). Nested, an Enterprise-host mismatch slipped through
-    // whenever the repo was absent — caught by this skill's own review.
-    if (req.host && t.host.toLowerCase() !== req.host.toLowerCase()) {
+    // The host check stands on its own, NOT nested under the repo binding —
+    // and it binds in BOTH directions: an absent req.host means the write
+    // routes at github.com, which is a host like any other, not an exemption.
+    const writeHost = (req.host ?? 'github.com').toLowerCase();
+    if (t.host.toLowerCase() !== writeHost) {
       return {
         ok: false,
         why:
           `the review arguments authorise ${t.host}, but this submission ` +
-          `targets ${req.host}`,
+          `targets ${req.host ?? 'github.com'}`,
       };
     }
   }
