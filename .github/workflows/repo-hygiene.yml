@@ -652,13 +652,18 @@ jobs:
           # the branch under verification. --user matches the runner uid so
           # sandbox-created files stay runner-owned (the host's git reset --hard
           # below must be able to overwrite them). RUNNER_TEMP is mounted
-          # read-only for the trusted staged gate scripts; HOME and the npm cache
-          # are redirected into WORKDIR so npm never needs a host HOME.
+          # read-only for the trusted staged gate scripts. WORKDIR holds the
+          # pr-title.txt / pr-body.md / findings.json that the publish and issue
+          # steps consume AFTER this step, so it is mounted read-only: untrusted
+          # code executing here must not rewrite the prose the bot later
+          # publishes. HOME and the npm cache therefore live in a dedicated
+          # read-write scratch dir (a sibling of WORKDIR) instead of WORKDIR.
           # GITHUB_OUTPUT is deliberately NOT passed: the gate scripts skip their
           # outcome write when it is unset and signal failure by exit code, which
           # docker propagates back to this step. The docker run is invoked as a
           # top-level command (not wrapped in a function) so a check failure
           # trips the ERR salvage trap below exactly as the bare command did.
+          SANDBOX_SCRATCH="${WORKDIR}-sandbox"
           SANDBOX_ARGS=(
             --init --rm -i
             --network none
@@ -667,12 +672,13 @@ jobs:
             --security-opt no-new-privileges
             --workdir "${GITHUB_WORKSPACE}"
             --mount "type=bind,src=${GITHUB_WORKSPACE},dst=${GITHUB_WORKSPACE}"
-            --mount "type=bind,src=${WORKDIR},dst=${WORKDIR}"
+            --mount "type=bind,src=${WORKDIR},dst=${WORKDIR},readonly"
             --mount "type=bind,src=${RUNNER_TEMP},dst=${RUNNER_TEMP},readonly"
-            -e "HOME=${WORKDIR}/sandbox-home"
-            -e "npm_config_cache=${WORKDIR}/npm-cache"
+            --mount "type=bind,src=${SANDBOX_SCRATCH},dst=${SANDBOX_SCRATCH}"
+            -e "HOME=${SANDBOX_SCRATCH}/sandbox-home"
+            -e "npm_config_cache=${SANDBOX_SCRATCH}/npm-cache"
           )
-          mkdir -p "${WORKDIR}/sandbox-home" "${WORKDIR}/npm-cache"
+          mkdir -p "${SANDBOX_SCRATCH}/sandbox-home" "${SANDBOX_SCRATCH}/npm-cache"
 
           # Re-stage gate scripts from the trusted checkout: the agent's
           # write_file deny list cannot cover RUNNER_TEMP (out-of-workspace),

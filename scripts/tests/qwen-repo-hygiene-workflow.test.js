@@ -284,6 +284,23 @@ describe('repo-hygiene workflow structure', () => {
     expect(verify).toContain(
       'cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"',
     );
+    // WORKDIR holds the PR title/body and findings.json the publish and issue
+    // steps consume after verification, so it is mounted read-only: sandboxed
+    // code must not rewrite the prose the bot later publishes. HOME and the npm
+    // cache live in a dedicated read-write scratch dir instead of WORKDIR.
+    expect(verify).toContain(
+      '--mount "type=bind,src=${WORKDIR},dst=${WORKDIR},readonly"',
+    );
+    expect(verify).toContain('SANDBOX_SCRATCH="${WORKDIR}-sandbox"');
+    expect(verify).toContain(
+      '--mount "type=bind,src=${SANDBOX_SCRATCH},dst=${SANDBOX_SCRATCH}"',
+    );
+    expect(verify).toContain('-e "HOME=${SANDBOX_SCRATCH}/sandbox-home"');
+    expect(verify).toContain(
+      '-e "npm_config_cache=${SANDBOX_SCRATCH}/npm-cache"',
+    );
+    expect(verify).not.toContain('HOME=${WORKDIR}/');
+    expect(verify).not.toContain('npm_config_cache=${WORKDIR}/');
   });
 
   it('pushes from a clean clone with neutralized git config and bypassed hooks', () => {
