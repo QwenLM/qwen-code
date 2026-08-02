@@ -17,6 +17,7 @@ const {
   createSubSessionLauncher,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
 } = await import('./create-sub-session.js');
 
 type FakeEvent = { type: string; data: unknown };
@@ -582,6 +583,30 @@ describe('sub-session launcher', () => {
       }),
     ).rejects.toThrow(/cap 3/);
     expect(fake.spawns).toHaveLength(3);
+    launcher.stop();
+  });
+
+  it('clamps the total cap to the tracked-id set size', async () => {
+    const fake = makeFakeBridge({ events: () => [], blockAfterEvents: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      maxConcurrentTotal: MAX_TRACKED_SPAWNED_SESSIONS + 100,
+    });
+    for (let i = 0; i < MAX_TRACKED_SPAWNED_SESSIONS; i++) {
+      await launcher.launch({
+        prompt: `p${i}`,
+        completion: 'sent',
+        callerSessionId: `c-${i}`,
+      });
+    }
+    await expect(
+      launcher.launch({
+        prompt: 'overflow',
+        completion: 'sent',
+        callerSessionId: 'c-overflow',
+      }),
+    ).rejects.toThrow(`cap ${MAX_TRACKED_SPAWNED_SESSIONS}`);
     launcher.stop();
   });
 

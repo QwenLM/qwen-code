@@ -93,7 +93,7 @@ const MAX_NAME_LENGTH = 60;
 /** How many spawned sub-session ids the depth-1 gate remembers. Far above any
  * plausible live sub-session count (`maxSessions` defaults to 32), so eviction
  * only ever discards long-reaped sessions. */
-const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
+export const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
 
 export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
@@ -265,8 +265,12 @@ export function createSubSessionLauncher(
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
   const maxConcurrentPerCaller =
     opts.maxConcurrentPerCaller ?? MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER;
-  const maxConcurrentTotal =
-    opts.maxConcurrentTotal ?? MAX_CONCURRENT_SUB_SESSIONS_TOTAL;
+  // Clamped to the tracked-id set size so the depth-1 gate's FIFO eviction
+  // never discards a still-alive sub-session id.
+  const maxConcurrentTotal = Math.min(
+    opts.maxConcurrentTotal ?? MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+    MAX_TRACKED_SPAWNED_SESSIONS,
+  );
   const inflight = new Map<string, number>();
   // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
   // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
