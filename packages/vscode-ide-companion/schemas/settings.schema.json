@@ -727,7 +727,7 @@
               "minimum": 1
             },
             "enableCacheControl": {
-              "description": "Enable cache control for DashScope providers.",
+              "description": "Enable provider prompt-cache controls.",
               "type": "boolean",
               "default": true
             },
