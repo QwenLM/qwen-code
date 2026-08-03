@@ -22,7 +22,7 @@ The exact-match result travels with the resolved voice configuration so every eg
 
 An exact match permits cleartext transport and private RFC 1918, CGNAT, or IPv6 unique-local addresses. Loopback aliases, unspecified addresses, link-local ranges, and known cloud metadata addresses remain blocked. Explicit localhost behavior remains unchanged.
 
-Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; `modelProviders` applies the CLI's REPLACE strategy, so the highest-precedence scope that defines it supplies the whole provider set. It never reads Workspace settings for this exception. It resolves the selected voice model before credentials and accepts exactly one provider entry with the same model ID, preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
+Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; `modelProviders` deep-merges per provider-group key exactly like the CLI (the higher scope's array wins for the same key; disjoint keys all survive). It never reads Workspace settings for this exception. It resolves the selected voice model before credentials; same-ID provider entries are ambiguous unless they are exact `(id, baseUrl)` duplicates, where the first registered entry wins like the CLI model registry, preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
 
 ## Configuration ownership
 

@@ -22,7 +22,11 @@ import { dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import stripJsonComments from 'strip-json-comments';
 import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
-import { isAlwaysBlockedVoiceAddress, isLoopbackHost } from './net-guard';
+import {
+  isAlwaysBlockedVoiceAddress,
+  isLoopbackHost,
+  isPrivateNetworkIp,
+} from './net-guard';
 import type { VoiceConfig } from './transcribe';
 
 const DEFAULT_DASHSCOPE_BASE_URL =
@@ -143,48 +147,24 @@ async function readEnvFileFromDisk(
   }
 }
 
-// Minimal dotenv-compatible parser for the home .env fallback: KEY=VALUE lines
-// with an optional `export` prefix, quoted values, and inline comments.
-function parseEnvFileContent(content: string): Record<string, string> {
+// dotenv@17's LINE grammar, copied verbatim: the CLI parses the same
+// ~/.qwen/.env with dotenv.parse (loadEnvironment / getHomeEnvFallbackVars),
+// so one file must yield identical values on both surfaces. Keep in sync.
+const DOTENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+/** Parse home .env content exactly like dotenv@17. Exported for tests. */
+export function parseEnvFileContent(content: string): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) {
-      continue;
-    }
-    const match = line.match(
-      /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/,
-    );
-    if (!match) {
-      continue;
-    }
+  const lines = content.replace(/\r\n?/g, '\n');
+  let match: RegExpExecArray | null;
+  while ((match = DOTENV_LINE.exec(lines)) !== null) {
     let value = match[2] ?? '';
+    value = value.trim();
     const quote = value[0];
-    if (
-      value.length >= 2 &&
-      (quote === '"' || quote === "'") &&
-      value.endsWith(quote)
-    ) {
-      value = value.slice(1, -1);
-      if (quote === '"') {
-        value = value.replace(
-          /\\(n|r|t|\\)/g,
-          (_all, escaped: string) =>
-            escaped === 'n'
-              ? '\n'
-              : escaped === 'r'
-                ? '\r'
-                : escaped === 't'
-                  ? '\t'
-                  : '\\',
-        );
-      }
-    } else {
-      const commentStart = value.startsWith('#') ? 0 : value.search(/\s#/);
-      if (commentStart !== -1) {
-        value = value.slice(0, commentStart);
-      }
-      value = value.trim();
+    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, '$2');
+    if (quote === '"') {
+      value = value.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
     }
     result[match[1]!] = value;
   }
@@ -193,7 +173,8 @@ function parseEnvFileContent(content: string): Record<string, string> {
 
 // Mirrors the CLI's getHomeEnvFallbackVars: <qwen dir>/.env first, ~/.env only
 // when QWEN_HOME is unset, the first definition of a key wins, and the process
-// env always takes precedence over file values.
+// env takes precedence over file values — except an empty-string env var, which
+// the CLI's loadEnvironment treats as "effectively unset" and fills from .env.
 async function getHomeEnvFallback(
   env: NodeJS.ProcessEnv,
   readHomeEnvFile: (file: string) => Promise<string | undefined>,
@@ -210,7 +191,7 @@ async function getHomeEnvFallback(
       continue;
     }
     for (const [key, value] of Object.entries(parseEnvFileContent(content))) {
-      if (!Object.hasOwn(env, key)) {
+      if (!Object.hasOwn(env, key) || env[key] === '') {
         result[key] ??= value;
       }
     }
@@ -342,6 +323,23 @@ function unwrapWrappedProviderConfigs(
   return unwrapped ?? modelProviders;
 }
 
+// The CLI's customDeepMerge has no REPLACE branch — two plain objects always
+// recurse — so the CLI deep-merges modelProviders per provider-group key: the
+// same key takes the highest scope's array, and disjoint keys all survive.
+// Mirror that so a managed System scope overrides user entries per key instead
+// of discarding the user's whole provider set.
+function mergeModelProviders(
+  ...scopes: Array<Record<string, QwenProvider[]> | undefined>
+): Record<string, QwenProvider[]> | undefined {
+  let merged: Record<string, QwenProvider[]> | undefined;
+  for (const scope of scopes) {
+    const unwrapped = unwrapWrappedProviderConfigs(scope);
+    if (!unwrapped) continue;
+    merged = { ...(merged ?? {}), ...unwrapped };
+  }
+  return merged;
+}
+
 function mergeTrustedQwenSettings(
   systemDefaults: QwenSettings | undefined,
   user: QwenSettings | undefined,
@@ -353,14 +351,10 @@ function mergeTrustedQwenSettings(
       ...(user?.env ?? {}),
       ...(system?.env ?? {}),
     },
-    // The CLI declares modelProviders with MergeStrategy.REPLACE: the
-    // highest-precedence scope that defines it supplies the whole object.
-    // Mirror that so a managed System scope can fully override a user's
-    // provider set instead of unioning with it.
-    modelProviders: unwrapWrappedProviderConfigs(
-      system?.modelProviders ??
-        user?.modelProviders ??
-        systemDefaults?.modelProviders,
+    modelProviders: mergeModelProviders(
+      systemDefaults?.modelProviders,
+      user?.modelProviders,
+      system?.modelProviders,
     ),
     security: {
       ...(systemDefaults?.security ?? {}),
@@ -440,10 +434,22 @@ function fromExactModelProvider(
   if (!settings) return undefined;
   const providers = Object.values(settings.modelProviders ?? {}).flat();
   const matches = providers.filter((provider) => provider.id === voiceModel);
-  if (matches.length > 1) {
-    throw new Error(`Voice model '${voiceModel}' is ambiguous.`);
+  // The CLI registry keys models by (id, baseUrl) and keeps the first
+  // registration of an exact duplicate; only differing baseUrls conflict.
+  // (An empty baseUrl folds into the bare-id key, as in modelRegistryKey.)
+  const distinct: QwenProvider[] = [];
+  for (const match of matches) {
+    const matchKey = match.baseUrl || '';
+    if (!distinct.some((kept) => (kept.baseUrl || '') === matchKey)) {
+      distinct.push(match);
+    }
   }
-  const provider = matches[0];
+  if (distinct.length > 1) {
+    throw new Error(
+      `Voice model '${voiceModel}' is ambiguous. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  const provider = distinct[0];
   if (!provider) return undefined;
   if (!provider.baseUrl?.trim()) {
     throw new Error(
@@ -568,12 +574,14 @@ export async function resolveDesktopVoiceConfig(
     resolvedDeps.env,
     resolvedDeps.readHomeEnvFile,
   );
-  // Same precedence as the CLI: the process env wins; the home .env only fills
-  // keys the process env does not define.
-  const effectiveEnv: NodeJS.ProcessEnv = {
-    ...homeEnvFallback,
-    ...resolvedDeps.env,
-  };
+  // Same precedence as the CLI: the process env wins, except an empty-string
+  // env var is "effectively unset" and must not re-shadow a filled fallback.
+  const effectiveEnv: NodeJS.ProcessEnv = { ...homeEnvFallback };
+  for (const [key, value] of Object.entries(resolvedDeps.env)) {
+    if (value !== '' || !Object.hasOwn(homeEnvFallback, key)) {
+      effectiveEnv[key] = value;
+    }
+  }
   const systemDefaults = resolveSettingsEnvVars(rawSystemDefaults, effectiveEnv);
   const userSettings = resolveSettingsEnvVars(rawUserSettings, effectiveEnv);
   const systemSettings = resolveSettingsEnvVars(rawSystemSettings, effectiveEnv);
@@ -611,6 +619,15 @@ export async function resolveDesktopVoiceConfig(
   ) {
     throw new Error(
       `Voice endpoint must use an https baseUrl, or its exact complete normalized URL (${creds.baseUrl}) must be listed in security.allowedInsecureVoiceBaseUrls.`,
+    );
+  }
+  if (
+    !isLoopbackHost(parsed.hostname) &&
+    !allowInsecureBaseUrl &&
+    isPrivateNetworkIp(parsed.hostname)
+  ) {
+    throw new Error(
+      `Voice endpoint must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${creds.baseUrl}) to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
   return {

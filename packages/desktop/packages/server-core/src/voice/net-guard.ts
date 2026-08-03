@@ -263,7 +263,7 @@ export async function assertVoiceBaseUrlNetworkAllowed(
       (!allowInsecureBaseUrl && isPrivateNetworkIp(host))
     ) {
       throw new Error(
-        `Voice model '${model}': baseUrl is a private-network address.`,
+        `Voice model '${model}' resolved to a private-network address.`,
       );
     }
     return;
@@ -285,7 +285,10 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     throw new Error(
       records.some((record) => isLoopbackVoiceAddress(record.address))
         ? `Voice model '${model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl such as http://localhost.`
-        : `Voice model '${model}' resolved to a private-network address.`,
+        : allowInsecureBaseUrl &&
+            records.some((record) => isAlwaysBlockedVoiceAddress(record.address))
+          ? `Voice model '${model}' resolved to an address that is always blocked (metadata, link-local, or transition range), even when the baseUrl is listed in security.allowedInsecureVoiceBaseUrls.`
+          : `Voice model '${model}' resolved to a private-network address.`,
     );
   }
 }

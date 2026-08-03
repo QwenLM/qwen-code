@@ -51,6 +51,9 @@ async function lookupPublicHost(): Promise<{ address: string }> {
 describe('voice-transcriber', () => {
   beforeEach(() => {
     vi.stubEnv('OPENAI_API_KEY', '');
+    // Without this, tests that resolve through process.env read the machine's
+    // real DASHSCOPE_API_KEY (the documented standard setup) and fail.
+    vi.stubEnv('DASHSCOPE_API_KEY', '');
   });
 
   afterEach(() => {
@@ -657,7 +660,7 @@ describe('voice-transcriber', () => {
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(trusted, async () => ({ address })),
-      ).rejects.toThrow(/private-network address/);
+      ).rejects.toThrow('resolved to an address that is always blocked');
     }
   });
 

@@ -58,9 +58,9 @@ describe('net-guard host classification', () => {
     expect(isLoopbackHost('localhost')).toBe(true)
     expect(isLoopbackHost('127.0.0.1')).toBe(true)
     expect(isLoopbackHost('::1')).toBe(true)
-    // Callers normalize IPv6 literals first (URL parsing /
-    // normalizeIpAddress), so the mapped form arrives as canonical hex.
-    expect(isLoopbackHost('::ffff:7f00:1')).toBe(true)
+    // Mapped loopback forms are intentionally not loopback-exempt: they stay
+    // blocked through the transition-unwrap chain (fail-closed).
+    expect(isLoopbackHost('::ffff:7f00:1')).toBe(false)
     expect(isLoopbackHost('dashscope.aliyuncs.com')).toBe(false)
   })
 
@@ -398,7 +398,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
         },
         async () => [{ address: '169.254.169.254' }],
       ),
-    ).rejects.toThrow(/private-network/)
+    ).rejects.toThrow('resolved to an address that is always blocked')
 
     for (const address of [
       '0.0.0.0',
@@ -433,7 +433,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
           },
           async () => [{ address }],
         ),
-      ).rejects.toThrow(/private-network/)
+      ).rejects.toThrow('resolved to an address that is always blocked')
     }
 
     await expect(
@@ -447,7 +447,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
           { address: 'fd00:0ec2:0000:0000:0000:0000:0000:0254' },
         ],
       ),
-    ).rejects.toThrow(/private-network/)
+    ).rejects.toThrow('resolved to an address that is always blocked')
   })
 
   it('skips DNS for IP-literal and loopback hosts', async () => {
