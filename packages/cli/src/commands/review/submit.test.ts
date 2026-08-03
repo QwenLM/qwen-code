@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
@@ -97,6 +98,62 @@ afterEach(() => {
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
   else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+});
+
+describe('authorization — URL-shaped host and repo binding at the submit call site', () => {
+  // The pr-url binding (repo + bidirectional host) was, until now, exercised
+  // only through publish-assets' suite; the gate is shared, and submit is the
+  // caller that always binds the repo. Pin it here too.
+  let dir: string;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'submit-auth-'));
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+  });
+
+  function authFor(rawArgs: string, over: Record<string, unknown> = {}) {
+    const argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, `${rawArgs}\n`);
+    return reviewWriteAuthorization({
+      userAuthorized: false,
+      skillArgs: argsFile,
+      pr: 123,
+      repo: 'o/r',
+      host: undefined,
+      ...over,
+    } as never);
+  }
+
+  it('binds the repo of a URL-shaped authorisation', () => {
+    expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
+    const wrong = authFor('https://github.com/other/repo/pull/123 --comment');
+    expect(wrong.ok).toBe(false);
+    expect(wrong.why).toContain('other/repo');
+  });
+
+  it('binds the host in both directions, defaulting an absent host to github.com', () => {
+    // Enterprise authorisation, host-less write → refused.
+    const up = authFor('https://ghe.corp.example/o/r/pull/123 --comment');
+    expect(up.ok).toBe(false);
+    expect(up.why).toContain('ghe.corp.example');
+    // github.com authorisation, Enterprise write → refused.
+    const down = authFor('https://github.com/o/r/pull/123 --comment', {
+      host: 'ghe.corp.example',
+    });
+    expect(down.ok).toBe(false);
+    // Matching Enterprise pair → passes.
+    expect(
+      authFor('https://ghe.corp.example/o/r/pull/123 --comment', {
+        host: 'ghe.corp.example',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the posting gate', () => {

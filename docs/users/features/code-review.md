@@ -227,6 +227,19 @@ Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findin
 
 The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
 
+## Evidence Images in PR Comments
+
+GitHub's API cannot attach images to review comments, so `/review` can host evidence images (TUI screenshots, rendered-output comparisons) in a repository you designate and embed them by URL:
+
+```bash
+export QWEN_REVIEW_ASSETS_REPO=your-org/your-repo   # a repo you can push to
+/review 123 --comment
+```
+
+Maintainers typically point it at the repo under review; anyone else can use a fork or a scratch repo. Images land on the `pr-assets/<pr>-review` branch with content-hashed names, and comments reference them by **commit-pinned** URL — immutable even if the branch later moves, and working unchanged on GitHub Enterprise.
+
+The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and a manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
+
 ## Follow-up Actions
 
 After the review, context-aware tips appear as ghost text. Press Tab to accept:
