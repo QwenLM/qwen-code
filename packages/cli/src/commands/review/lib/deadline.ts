@@ -39,9 +39,12 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * resolution and the submission itself. Sized from the measured #8368
  * cadence — each audit round plus its verification took 28-53 minutes, and
  * the run needed roughly 15 more to compose and post — so one hour keeps a
- * refused round's whole tail affordable. On the default 180-minute CI budget
- * this leaves the loop about two hours, roughly three rounds; a local run
- * has no deadline and no reserve at all.
+ * refused round's whole tail affordable. This is only the fallback: the
+ * budget itself is chosen outside the CLI (a repository variable, a workflow
+ * input, a `/review --timeout=N` comment), so the review workflow passes a
+ * reserve scaled to the budget it resolved rather than trusting this
+ * constant to fit an arbitrary one. A local run has no deadline and no
+ * reserve at all.
  */
 export const DEFAULT_RESERVE_SECONDS = 3600;
 
