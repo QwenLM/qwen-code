@@ -172,6 +172,23 @@ jobs:
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
             rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
           fi
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
+            git -C "$GITHUB_WORKSPACE" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" || true
+                done
+            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
+            git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" || true
+                  fi
+                done
+            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
+          fi
 
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
       # instant the branch is pushed) instead of github.ref. github.ref is the
