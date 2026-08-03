@@ -24,6 +24,9 @@ import {
   type ExecResult,
 } from './drive.js';
 
+const describeOnNonWindows =
+  process.platform === 'win32' ? describe.skip : describe;
+
 const ok = (stdout = ''): ExecResult => ({ status: 0, stdout, stderr: '' });
 const fail = (stderr = ''): ExecResult => ({ status: 1, stdout: '', stderr });
 
@@ -96,7 +99,7 @@ describe('the sentinel', () => {
   });
 });
 
-describe('the wrapper, driven for real', () => {
+describeOnNonWindows('the wrapper, driven for real', () => {
   // Four ways a script can leave, all of which a reviewer's drive script uses.
   // These run real bash — the harness tests above cannot see a shell semantic —
   // and read the verdict from the sentinel FILE, the channel that has to

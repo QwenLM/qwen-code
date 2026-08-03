@@ -8,10 +8,12 @@ import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 import { classifyAuditOutput } from '../audit-runtime-critical.js';
+
+const itPosix = process.platform === 'win32' ? it.skip : it;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -59,7 +61,9 @@ describe('scripts/audit-runtime-critical.js', () => {
     );
   });
 
-  it('still fails the build on a real critical vulnerability', () => {
+  const criticalGateName =
+    'still fails the build on a real critical vulnerability';
+  itPosix(criticalGateName, () => {
     // The whole risk of this change is shipping a gate that never fires again.
     // Drive the real script end to end against a stubbed `npm` on PATH, so the
     // exit code being asserted is the one CI would actually see.
@@ -85,7 +89,9 @@ describe('scripts/audit-runtime-critical.js', () => {
       const counts = (critical) =>
         JSON.stringify({
           vulnerabilities: {},
-          metadata: { vulnerabilities: { critical, high: 0, total: critical } },
+          metadata: {
+            vulnerabilities: { critical, high: 0, total: critical },
+          },
         });
       // A finding still blocks the merge...
       expect(runWithNpmStub(counts(2), 1)).toBe(1);
@@ -119,7 +125,8 @@ describe('scripts/audit-runtime-critical.js', () => {
       [
         '-e',
         `import(${JSON.stringify(
-          join(root, 'scripts', 'audit-runtime-critical.js'),
+          pathToFileURL(join(root, 'scripts', 'audit-runtime-critical.js'))
+            .href,
         )}).then((m) => console.log(typeof m.classifyAuditOutput))`,
       ],
       { encoding: 'utf8' },

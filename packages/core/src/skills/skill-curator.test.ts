@@ -18,6 +18,8 @@ import {
   setAutoSkillPinned,
 } from './skill-curator.js';
 
+const itPosix = process.platform === 'win32' ? it.skip : it;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 describe('auto-skill curator', () => {
@@ -91,7 +93,9 @@ describe('auto-skill curator', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('ignores auto-skill directories whose names carry control/ANSI bytes', async () => {
+  const controlByteName =
+    'ignores auto-skill directories whose names carry control/ANSI bytes';
+  itPosix(controlByteName, async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const old = new Date(now.getTime() - 100 * DAY_MS);
 
@@ -911,7 +915,9 @@ describe('auto-skill curator', () => {
     expect(status.lastRunAt).toBeDefined();
   });
 
-  it('reports skippedErrors when rename fails transiently', async () => {
+  const renameFailureName =
+    'reports skippedErrors when rename fails transiently';
+  itPosix(renameFailureName, async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const old = new Date(now.getTime() - 100 * DAY_MS);
     const manifest = await writeSkill('auto-skill-err', 'auto-skill', old);

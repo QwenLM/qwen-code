@@ -163,7 +163,9 @@ describe('runExtractStep', () => {
     expect(meta.index).toBe(1);
     expect(meta.workingDirectory).toBe('scripts');
     // Executable, with the runner's default shell recorded.
-    expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    if (process.platform !== 'win32') {
+      expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    }
     expect(meta.shell).toBe('bash');
   });
 

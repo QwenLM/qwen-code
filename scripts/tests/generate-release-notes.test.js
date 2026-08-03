@@ -30,6 +30,8 @@ import {
   tryAppendDegradedStepSummary,
 } from '../generate-release-notes.js';
 
+const itPosix = process.platform === 'win32' ? it.skip : it;
+
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
 
 const entry = (number, title, labels = []) => ({
@@ -485,7 +487,9 @@ describe('generateReleaseNotes', () => {
     expect(result.warnings).toEqual(['Model configuration is unavailable.']);
   });
 
-  it('runs the CLI path with fake gh data and writes fallback notes', () => {
+  const cliFallbackName =
+    'runs the CLI path with fake gh data and writes fallback notes';
+  itPosix(cliFallbackName, () => {
     const dir = mkdtempSync(join(tmpdir(), 'release-notes-cli-'));
     try {
       const gh = join(dir, 'gh');

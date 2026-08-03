@@ -27,8 +27,11 @@ import {
   runSkillReviewByAgent,
   SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
+
 import { ToolNames } from '../tools/tool-names.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
+
+const itPosix = process.platform === 'win32' ? it.skip : it;
 
 vi.mock('../utils/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
@@ -415,7 +418,9 @@ describe('buildTaskPrompt', () => {
     expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
-  it('excludes archived directory names carrying control bytes from the prompt', async () => {
+  const controlByteName =
+    'excludes archived directory names carrying control bytes from the prompt';
+  itPosix(controlByteName, async () => {
     // Mirrors the curator's charset guard: a crafted archived directory name
     // with ANSI/control bytes must not reach the task prompt verbatim.
     const directoryName = 'auto-skill-evil\u001b[31m';

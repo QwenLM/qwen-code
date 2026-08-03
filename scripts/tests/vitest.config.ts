@@ -11,6 +11,18 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['scripts/tests/**/*.test.{js,ts}'],
+    exclude:
+      process.platform === 'win32'
+        ? [
+            'scripts/tests/lint.test.js',
+            'scripts/tests/qwen-autofix-workflow.test.js',
+            'scripts/tests/qwen-fleet-shepherd-workflow.test.js',
+            'scripts/tests/qwen-repo-hygiene-workflow.test.js',
+            'scripts/tests/qwen-resolve-workflow.test.js',
+            'scripts/tests/qwen-triage-finalize-workflow.test.js',
+            'scripts/tests/qwen-triage-workflow.test.js',
+          ]
+        : [],
     setupFiles: ['scripts/tests/test-setup.ts'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full

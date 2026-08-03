@@ -47,6 +47,8 @@ import type {
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
 
+const itPosix = process.platform === 'win32' ? it.skip : it;
+
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
   remainingFailures: 0,
@@ -1658,7 +1660,9 @@ describe('SessionWriterLease', () => {
     }
   });
 
-  it('detects an atomic replacement during content verification', async () => {
+  const replacementDuringReadName =
+    'detects an atomic replacement during content verification';
+  itPosix(replacementDuringReadName, async () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');

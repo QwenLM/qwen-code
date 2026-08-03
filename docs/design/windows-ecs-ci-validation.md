@@ -1,0 +1,20 @@
+# Windows ECS CI validation
+
+## Goal
+
+Run the required Windows test gate on the self-hosted ECS runner without weakening Windows-specific installer coverage.
+
+## Failure classification
+
+- Cross-platform assertions use platform-native paths and resolved fixture roots.
+- POSIX-only filesystem contracts, such as executable mode bits, control bytes in file names, permission failures, and replacing an open file, remain covered on Linux and are skipped only where Windows cannot express the fixture.
+- Tests for workflows whose jobs run exclusively on Linux are excluded from the Windows script suite. Linux CI remains their reachable producer and authoritative coverage.
+- Cross-platform script tests remain enabled. POSIX-only subprocess fixtures are guarded individually instead of excluding their otherwise portable test files.
+
+## Required Windows coverage
+
+The Windows script suite continues to run `install-script.test.js`, including all nine Windows installer end-to-end cases and their security checks. Other script tests that already pass on Windows also remain enabled.
+
+## Verification gate
+
+The change is ready when formatting, lint configuration checks, targeted CLI and core tests, and the script suite pass locally where applicable, followed by a complete `npm run test:ci` on the Windows ECS runner.
