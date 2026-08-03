@@ -142,11 +142,18 @@ function installMixedVitest(): void {
     vitestScript(),
     `#!/usr/bin/env node
 import path from 'node:path';
+import fs from 'node:fs';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return 'failed';
+  } catch {}
+  return f.includes('skip') ? 'skipped' : 'passed';
+};
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: f.includes('skip') ? 'skipped' : 'passed' }],
+    assertionResults: [{ status: st(f) }],
   })),
 }));
 `,
@@ -187,19 +194,34 @@ beforeEach(() => {
     script,
     `#!/usr/bin/env node
 import path from 'node:path';
+import fs from 'node:fs';
 const args = process.argv.slice(2);
 if (args[0] !== 'run' || args[1] !== '--reporter=json') {
   process.stderr.write('unexpected vitest argv: ' + JSON.stringify(args));
   process.exit(1);
 }
 const files = args.slice(2).filter((a) => a.includes('.test.'));
+// Like the real runner, the injected positive control FAILS: a fake that
+// stayed green under it would (correctly) be ruled a dead harness and every
+// survivor scenario in this suite would re-class to inconclusive.
+const st = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
+      ? 'failed'
+      : 'passed';
+  } catch {
+    return 'passed';
+  }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: st(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: files.length,
-  numFailedTests: 0,
-  testResults: files.map((f) => ({
-    name: path.resolve(f),
-    assertionResults: [{ status: 'passed' }],
-  })),
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
 }));
 `,
   );
@@ -424,12 +446,18 @@ describe('test-efficacy probe isolation (#6832)', () => {
       join(repo, 'node_modules', 'vitest', 'vitest.mjs'),
       `#!/usr/bin/env node
 import path from 'node:path';
+import fs from 'node:fs';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return [{ status: 'failed' }];
+  } catch {}
+  return path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }];
+};
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults:
-      path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }],
+    assertionResults: st(f),
   })),
 }));
 `,
@@ -642,7 +670,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const src = fs.readFileSync(path.join(process.cwd(), 'packages/lib/src/f.ts'), 'utf8');
-const failed = src.includes('state.clear()') ? 0 : 1;
+const ctl = files.some((f) => { try { return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL'); } catch { return false; } });
+const failed = ctl ? 1 : src.includes('state.clear()') ? 0 : 1;
 process.stdout.write(JSON.stringify({
   numPassedTests: failed ? 0 : files.length,
   numFailedTests: failed ? files.length : 0,
@@ -826,17 +855,308 @@ process.stdout.write(JSON.stringify({
     ]);
   });
 
+  it('re-classes every survivor and spends nothing when the positive control fails', async () => {
+    // The control's WHOLE point, and the half no other case reaches. This is
+    // the same tree as the survivor test above — one uncovered `state.clear()`
+    // and an inert probe file — run against a DEAD runner: one that reports
+    // `passed` for every file it is handed, including the injected
+    // always-failing control. Against that runner the survivor above is not a
+    // coverage gap, it is the runner not executing assertions, and reporting
+    // it would be the false gap-report this command exists to prevent.
+    // Two separated change blocks, so the diff carries a mutant candidate AND
+    // a hunk candidate: the filler keeps them more than two context windows
+    // apart, and `selectHunkProbes` drops the hunk that already contains a
+    // mutant line. Without the second block every hunk counter reads zero and
+    // the hunk half of the re-class is asserted against nothing.
+    const filler = Array.from(
+      { length: 8 },
+      (_, i) => `const a${i} = ${i};\n`,
+    ).join('');
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        filler +
+        'export const KEEP = a0 + a7;\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n' +
+        filler +
+        'export const KEEP = a0 + a7;\n' +
+        'export function extra() {\n' +
+        '  return a1 + a2;\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // A runner that reports green unconditionally — it never reads the file,
+    // so the injected control is green too. Three real defects share this
+    // shape (a runner that executes nothing, a collector that skips the
+    // injected test, a reporter that drops failures) and none can kill.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(false);
+    // Nothing was spent after the control came back green: a mutant run
+    // against a runner that cannot kill only manufactures survivors.
+    expect(out.mutants.probed).toEqual([]);
+    expect(out.hunks.probed).toEqual([]);
+    // …and the candidates it declined are counted under their OWN reason.
+    // Folding them into `skippedForBudget` would blame a window that never
+    // ran out; a bare zero would read as "there was nothing to probe".
+    expect(out.mutants.skippedForControl).toBe(1);
+    expect(out.mutants.skippedForBudget).toBe(0);
+    expect(out.hunks.skippedForControl).toBeGreaterThan(0);
+    expect(out.mutants.note).toContain('positive control FAILED');
+    // The file-level revert probe's `inert` is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too — so it
+    // is re-classed with the rest.
+    expect(out.probed.map((p: { verdict: string }) => p.verdict)).toEqual([
+      'inconclusive',
+    ]);
+    expect(out.probed[0].detail).toContain('positive control failed');
+    // The re-class happens UPSTREAM of findings: nothing a reader acts on may
+    // carry a survivor claim this run cannot support.
+    expect(out.findings).toEqual([]);
+  });
+
+  it('holds a mutant at inconclusive when its OWN test was red in the baseline', async () => {
+    // Measured live on PR #8213: six hunks in `bridge.ts` were correctly held
+    // at `inconclusive` because `bridge.test.ts` never ran green, while eight
+    // mutants in the SAME file were scored `survived` and shipped as findings.
+    // A mutant runs against `greenProbes` only, so the red collocated test is
+    // excluded from the run, and "every affected test still passed" is then
+    // computed over a set that omits the one test most likely to catch the
+    // deletion. Two files here: `f.ts` whose own test is red, and `g.ts`
+    // whose own test is green — the second is what shows the guard is
+    // targeted rather than a blanket refusal.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write('packages/lib/src/f.ts', 'export const a = new Map();\n');
+    write('packages/lib/src/g.ts', 'export const b = new Map();\n');
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const a = new Map();\nexport function fReset() {\n  a.clear();\n}\n',
+    );
+    write(
+      'packages/lib/src/g.ts',
+      'export const b = new Map();\nexport function gReset() {\n  b.clear();\n}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { fReset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof fReset).toBe("function"));\n',
+    );
+    write(
+      'packages/lib/src/g.test.ts',
+      'import { gReset } from "./g.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof gReset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/g.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+          { path: 'packages/lib/src/g.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // `f.test.ts` is red from the start — the baseline shape this is about.
+    // Everything else is green, and the injected control still turns the run
+    // red, so the harness is validated and survivors would be licensed.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return 'failed';
+  } catch {}
+  return path.basename(f) === 'f.test.ts' ? 'failed' : 'passed';
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: st(f) }],
+}));
+const nf = results.filter((r) => r.assertionResults[0].status === 'failed').length;
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length - nf,
+  numFailedTests: nf,
+  testResults: results,
+}));
+`,
+    );
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(true);
+    const forF = out.mutants.probed.filter((m: { file: string }) =>
+      m.file.endsWith('f.ts'),
+    );
+    expect(forF.length).toBeGreaterThan(0);
+    for (const m of forF) {
+      expect(m.verdict).toBe('inconclusive');
+      expect(m.detail).toContain('f.test.ts');
+      expect(m.detail).toContain('did not run green');
+      // The clause that actually regressed. The old flat wording satisfied
+      // both assertions above, so only this one pins the chain the bug
+      // shipped on: baseline classification -> reason tag -> sentence.
+      // `f.test.ts` fails an assertion here, so `gated` is the measured state.
+      expect(m.detail).toContain('was RED there');
+      expect(m.detail).not.toContain('compile or import error');
+    }
+    // ...and nothing a reader acts on carries a survivor claim for that file.
+    expect(
+      (out.findings as Array<{ kind: string; file: string }>).filter(
+        (f) => f.kind === 'mutant-survived' && f.file.endsWith('f.ts'),
+      ),
+    ).toEqual([]);
+    // The guard is targeted: `g.ts`, whose own test IS green, still gets a
+    // real verdict rather than being swept up with it.
+    const forG = out.mutants.probed.filter((m: { file: string }) =>
+      m.file.endsWith('g.ts'),
+    );
+    expect(forG.length).toBeGreaterThan(0);
+    expect(
+      forG.every((m: { verdict: string }) => m.verdict !== 'inconclusive'),
+    ).toBe(true);
+  });
+
+  it('a control that could not be SET UP leaves the window spendable', async () => {
+    // `null` is not `false`, and this is where the difference is observable.
+    // A control that never ran demonstrated nothing about the runner, so the
+    // mutants must still spend their window — reporting `false` here would
+    // discard the whole phase over an I/O error and stamp every survivor with
+    // "an injected always-failing test stayed green" about a run that never
+    // happened.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // Green, then it deletes the probe file it just reported on — a stand-in
+    // for the concurrent sweep / permissions failure that makes the control's
+    // own `readFileSync` throw. The runner itself stays honest, so nothing
+    // here is a claim about whether it can kill.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+for (const f of files) { try { fs.unlinkSync(f); } catch {} }
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBeNull();
+    expect(out.mutants.note).toContain('could not be set up');
+    expect(out.mutants.note).toContain('NOT validated');
+    // The window was NOT discarded — this is the whole difference from `false`.
+    expect(out.mutants.probed.length).toBeGreaterThan(0);
+    expect(out.mutants.skippedForControl).toBe(0);
+  });
+
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
     // Three safety-verb candidates, but the budget expires after one: the
     // counter, the `skippedForBudget` report field, and the stdout line are
-    // exercised end-to-end. The injected clock advances 100 s per SUITE RUN
-    // (the fake runner logs each run; the real budget is 540 s and a real run
-    // cannot reach it in a test) — a simulated duration, not a count of
-    // `Date.now()` calls, so the implementation is free to consult the clock
-    // as often as it likes. The mutant deadline is 240 s (540 − 300 revert
-    // reservation), the baseline measures 100 s, so `estimatedRunMs` is
-    // 115 s; after the baseline and one mutant the clock reads 200 s and the
-    // remaining 40 s cannot fit another run.
+    // exercised end-to-end. The injected clock reads a simulated DURATION off
+    // the fake runner's suite-run count, not a count of `Date.now()` calls, so
+    // the implementation is free to consult the clock as often as it likes.
+    // The arithmetic lives at the `now:` argument below and only there — this
+    // comment carried a second copy of it, and when the per-run figure changed
+    // the copy did not, leaving two disagreeing budgets inside one test.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
     write(
       'packages/lib/src/f.ts',
@@ -883,13 +1203,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 fs.appendFileSync(${JSON.stringify(runsLog)}, 'run\\n');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const status = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL') ? 'failed' : 'passed';
+  } catch { return 'passed'; }
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: status(f) }],
+}));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: files.length,
-  numFailedTests: 0,
-  testResults: files.map((f) => ({
-    name: path.resolve(f),
-    assertionResults: [{ status: 'passed' }],
-  })),
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
+  testResults: results,
 }));
 `,
     );
@@ -912,13 +1239,16 @@ process.stdout.write(JSON.stringify({
         worktree: wt,
         base,
         out: join(repo, 'out.json'),
-        now: () => suiteRuns() * 100_000,
+        // 60 s per suite run: baseline + POSITIVE CONTROL = 120 s, estimated
+        // run 75 s, one mutant fits (→180 s), the remaining 60 s does not.
+        now: () => suiteRuns() * 60_000,
       });
     } finally {
       stdoutSpy.mockRestore();
     }
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(true); // the control spent its run and passed
     expect(out.mutants.probed.length).toBe(1);
     expect(out.mutants.skippedForBudget).toBe(2);
     expect(out.mutants.skippedForBaseline).toBe(0);

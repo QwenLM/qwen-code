@@ -2545,6 +2545,32 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
       });
 
+      it('should treat max_turns 0 as an unlimited turn budget', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 0 };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [{ name: 'list_files', args: { path: '/test' } }],
+            [{ name: 'list_files', args: { path: '/test2' } }],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
       it('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
         // Use fake timers to reliably test timeouts
         vi.useFakeTimers();

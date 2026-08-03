@@ -10,7 +10,6 @@ import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { ToolErrorType } from '../tools/tool-error.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_CANCEL,
@@ -72,6 +71,7 @@ import {
   recordSubagentExecutionMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordToolExecutionMetrics,
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
@@ -138,6 +138,8 @@ import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -154,6 +156,47 @@ function recordUiTelemetryEventToChat(config: Config, uiEvent: UiEvent): void {
 }
 
 export { getCommonAttributes };
+
+type NormalizedToolCallEvent = ToolCallEvent & {
+  execution_status: NonNullable<ToolCallEvent['execution_status']>;
+};
+
+/**
+ * Normalizes a tool call event for telemetry sinks. Error fields are
+ * deleted (not set to undefined) on success so downstream consumers
+ * see key-absent rather than key-present-with-undefined.
+ */
+export function normalizeToolCallEvent(
+  event: ToolCallEvent,
+): NormalizedToolCallEvent {
+  const functionName = event.function_name ?? '';
+  const normalized: NormalizedToolCallEvent = {
+    ...event,
+    function_name:
+      functionName.trim().length > 0 ? functionName : 'unknown_tool',
+    success: event.status === 'success',
+    execution_status: event.execution_status ?? 'unknown',
+  };
+
+  if (event.status === 'error') {
+    normalized.error_type = event.error_type?.trim() || ToolErrorType.UNKNOWN;
+  } else {
+    delete normalized.error;
+    delete normalized.error_type;
+  }
+
+  return normalized;
+}
+
+const debugLogger = createDebugLogger('TELEMETRY_SINK');
+
+function runToolTelemetrySink(sink: () => void): void {
+  try {
+    sink();
+  } catch (e) {
+    debugLogger.debug('Telemetry sink failed (best-effort):', e);
+  }
+}
 
 export function logStartSession(
   config: Config,
@@ -245,24 +288,6 @@ export function logUserRetry(config: Config, event: UserRetryEvent): void {
   logger.emit(logRecord);
 }
 
-function normalizeToolCallEvent(event: ToolCallEvent): ToolCallEvent {
-  const isError = event.status === 'error';
-  return {
-    ...event,
-    function_name:
-      event.function_name.trim().length > 0
-        ? event.function_name
-        : 'unknown_tool',
-    success: event.status === 'success',
-    error: isError ? event.error : undefined,
-    error_type: isError
-      ? event.error_type?.trim()
-        ? event.error_type
-        : ToolErrorType.UNKNOWN
-      : undefined,
-  };
-}
-
 export function logToolCall(config: Config, event: ToolCallEvent): void {
   const normalizedEvent = normalizeToolCallEvent(event);
   const uiEvent = {
@@ -270,39 +295,55 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  if (!isInternalPromptId(normalizedEvent.prompt_id)) {
-    recordUiTelemetryEventToChat(config, uiEvent);
-  }
-  QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
+  runToolTelemetrySink(() => {
+    uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  });
+  runToolTelemetrySink(() => {
+    if (!isInternalPromptId(normalizedEvent.prompt_id)) {
+      recordUiTelemetryEventToChat(config, uiEvent);
+    }
+  });
+  runToolTelemetrySink(() => {
+    QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
+  });
   if (!isTelemetrySdkInitialized()) return;
 
-  const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
-    ...normalizedEvent,
-    'event.name': EVENT_TOOL_CALL,
-    'event.timestamp': new Date().toISOString(),
-    function_args: safeJsonStringify(normalizedEvent.function_args, 2),
-  };
-  if (normalizedEvent.error) {
-    attributes['error.message'] = normalizedEvent.error;
-  }
-  if (normalizedEvent.error_type) {
-    attributes['error.type'] = normalizedEvent.error_type;
-  }
+  runToolTelemetrySink(() => {
+    const attributes: LogAttributes = {
+      ...getCommonAttributes(config),
+      ...normalizedEvent,
+      'event.name': EVENT_TOOL_CALL,
+      'event.timestamp': new Date().toISOString(),
+      function_args: safeJsonStringify(normalizedEvent.function_args, 2),
+    };
+    if (normalizedEvent.error) {
+      attributes['error.message'] = normalizedEvent.error;
+    }
+    if (normalizedEvent.error_type) {
+      attributes['error.type'] = normalizedEvent.error_type;
+    }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `Tool call: ${normalizedEvent.function_name}${normalizedEvent.decision ? `. Decision: ${normalizedEvent.decision}` : ''}. Success: ${normalizedEvent.success}. Duration: ${normalizedEvent.duration_ms}ms.`,
-    attributes,
-  };
-  logger.emit(logRecord);
-  recordToolCallMetrics(config, normalizedEvent.duration_ms, {
-    function_name: normalizedEvent.function_name,
-    status: normalizedEvent.status,
-    success: normalizedEvent.success,
-    decision: normalizedEvent.decision,
-    tool_type: normalizedEvent.tool_type,
+    const logger = logs.getLogger(SERVICE_NAME);
+    const logRecord: LogRecord = {
+      body: `Tool call: ${normalizedEvent.function_name}${normalizedEvent.decision ? `. Decision: ${normalizedEvent.decision}` : ''}. Success: ${normalizedEvent.success}. Duration: ${normalizedEvent.duration_ms}ms.`,
+      attributes,
+    };
+    logger.emit(logRecord);
+  });
+  runToolTelemetrySink(() => {
+    recordToolCallMetrics(config, normalizedEvent.duration_ms, {
+      function_name: normalizedEvent.function_name,
+      status: normalizedEvent.status,
+      success: normalizedEvent.success,
+      decision: normalizedEvent.decision,
+      tool_type: normalizedEvent.tool_type,
+    });
+  });
+  runToolTelemetrySink(() => {
+    recordToolExecutionMetrics(config, {
+      execution_status: normalizedEvent.execution_status,
+      tool_type: normalizedEvent.tool_type,
+    });
   });
 }
 

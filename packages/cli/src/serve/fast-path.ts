@@ -6,6 +6,10 @@
 
 import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import {
+  isValidMemoryBudgetMb,
+  memoryBudgetRangeError,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -44,6 +48,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxJournalEvents', 'max-journal-events'],
   ['maxJournalBytes', 'max-journal-bytes'],
   ['mcp-client-budget', 'mcp-client-budget'],
+  ['memoryBudgetMb', 'memory-budget-mb'],
   ['promptDeadlineMs', 'prompt-deadline-ms'],
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
@@ -226,6 +231,11 @@ function getServeFastPathValidationError(
     (!Number.isSafeInteger(maxJournalBytes) || maxJournalBytes < 1)
   ) {
     return 'qwen serve: --max-journal-bytes must be a positive safe integer.';
+  }
+
+  const memoryBudgetMb = parsed.options.memoryBudgetMb;
+  if (memoryBudgetMb !== undefined && !isValidMemoryBudgetMb(memoryBudgetMb)) {
+    return memoryBudgetRangeError();
   }
 
   return null;

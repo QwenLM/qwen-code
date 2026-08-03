@@ -15,8 +15,10 @@ import type {
   MemoryRecallDeliveryPoint,
   MemoryRecallDiscardReason,
 } from './types.js';
+import type { ToolExecutionStatus } from '../core/turn.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
+const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
 const API_REQUEST_COUNT = `${SERVICE_NAME}.api.request.count`;
 const API_REQUEST_LATENCY = `${SERVICE_NAME}.api.request.latency`;
@@ -94,6 +96,15 @@ const COUNTER_DEFINITIONS = {
       status?: 'success' | 'error' | 'cancelled';
       decision?: 'accept' | 'reject' | 'modify' | 'auto_accept';
       tool_type?: 'native' | 'mcp';
+    },
+  },
+  [TOOL_EXECUTION_COUNT]: {
+    description: 'Counts tool execution outcomes.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (toolExecutionCounter = c),
+    attributes: {} as {
+      execution_status: ToolExecutionStatus | 'unknown';
+      tool_type: 'native' | 'mcp';
     },
   },
   [API_REQUEST_COUNT]: {
@@ -371,6 +382,7 @@ export enum ApiRequestPhase {
 
 let cliMeter: Meter | undefined;
 let toolCallCounter: Counter | undefined;
+let toolExecutionCounter: Counter | undefined;
 let toolCallLatencyHistogram: Histogram | undefined;
 let apiRequestCounter: Counter | undefined;
 let apiRequestLatencyHistogram: Histogram | undefined;
@@ -599,6 +611,17 @@ export function recordToolCallMetrics(
   toolCallLatencyHistogram.record(durationMs, {
     ...baseMetricDefinition.getCommonAttributes(config),
     function_name: attributes.function_name,
+  });
+}
+
+export function recordToolExecutionMetrics(
+  config: TelemetryRuntimeConfig,
+  attributes: MetricDefinitions[typeof TOOL_EXECUTION_COUNT]['attributes'],
+): void {
+  if (!toolExecutionCounter || !isMetricsInitialized) return;
+  toolExecutionCounter.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
   });
 }
 
