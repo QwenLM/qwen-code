@@ -250,10 +250,12 @@ function createRemotePtyHostHandle({
       }
     },
     dispose(): void {
+      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
+        child?.kill('SIGTERM');
+      });
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 1 });
-      }
+      child?.kill('SIGTERM');
+      exitTracker.resolve({ exitCode: 1 });
     },
   };
 }
@@ -266,9 +268,10 @@ function createChildExitTracker(child: ChildProcess): {
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
     child.once('exit', (code, signal) => {
+      const signalNumber = signal ? os.constants.signals[signal] : undefined;
       resolve({
         exitCode: typeof code === 'number' ? code : 1,
-        ...(signal ? { signal: os.constants.signals[signal] ?? 1 } : {}),
+        ...(signalNumber ? { signal: signalNumber } : {}),
       });
     });
   });
