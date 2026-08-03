@@ -196,25 +196,82 @@ describe('runBuildTest', () => {
     expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
   });
 
-  it('builds and tests nothing for a docs-only diff — and says so', () => {
+  it('fail-opens a docs-only diff to the full test suite — nothing built, disclosure recorded', () => {
+    // No workspace source changed, so there is nothing to build — but a file
+    // outside every workspace (a root script, a config, even docs the tests
+    // read) can affect any package, and no scoped subset covers that. The safe
+    // direction is the repo's own full suite, with the fallback disclosed in
+    // `testScope` rather than silently skipping the run.
     writeFileSync(
       join(root, 'package.json'),
-      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['README.md', 'docs/x.md']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.affected).toEqual([]);
+    expect(rep.build).toEqual([]);
+    // The root's own full-suite command, not a per-workspace subset.
+    expect(rep.test.map((t) => t.command)).toEqual(['npm test']);
+    expect(calls.some((c) => c.startsWith('npm run build'))).toBe(false);
+    expect(rep.ok).toBe(true);
+    expect(rep.testScope).toEqual({
+      mode: 'full',
+      reason: expect.stringContaining('outside every workspace'),
+    });
+    // The note carries the disclosure the agent renders into its report.
+    expect(rep.note).toContain('FULL suite');
+    expect(rep.note).toContain('nothing was built');
+  });
+
+  it('still runs nothing for an EMPTY diff — a full suite would measure nothing', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
     );
     pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
-    writePlan(['README.md', 'docs/x.md']);
+    writePlan([]);
 
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 5,
       install: false,
+      exec: okExec,
     });
-    expect(rep.affected).toEqual([]);
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
     expect(rep.ok).toBe(true);
-    expect(rep.note).toContain('no package to build');
+    expect(rep.testScope).toEqual({ mode: 'workspaces', workspaces: [] });
+    expect(rep.note).toContain('no test to run');
   });
 
   it('builds and tests a single-package npm repo (no `workspaces` field)', () => {
@@ -530,7 +587,7 @@ describe('runBuildTest', () => {
     expect(buildOnly.note).not.toContain('ran the tests');
   });
 
-  it('scopes the build to the changed workspace and its dependents', () => {
+  it('scopes build AND tests to the changed workspace and its dependents', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -544,7 +601,14 @@ describe('runBuildTest', () => {
       dependencies: { '@x/core': '*' },
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/island', { name: '@x/island', scripts: { build: 'exit 0' } });
+    // Enough unrelated islands that the two-package closure stays under the
+    // more-than-half cap and the scoped path is what this test exercises.
+    for (const island of ['island1', 'island2', 'island3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+    }
     writePlan(['packages/core/src/a.ts']);
 
     const rep = runBuildTest({
@@ -557,13 +621,239 @@ describe('runBuildTest', () => {
     expect(rep.affected).toEqual(['packages/core']);
     // core changed, so leaf's compile is where a break would surface.
     expect(rep.buildSet).toContain('packages/leaf');
-    // island depends on nothing that changed.
-    expect(rep.buildSet).not.toContain('packages/island');
-    // Only the changed workspace's tests run.
+    // The islands depend on nothing that changed.
+    expect(rep.buildSet).not.toContain('packages/island1');
+    // The changed workspace's tests run — and so do its dependent's: a
+    // behaviour change in core can fail leaf's suite while leaf still compiles.
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/leaf"',
+    ]);
+    expect(rep.testScope).toEqual({
+      mode: 'workspaces',
+      workspaces: ['packages/core', 'packages/leaf'],
+    });
+    // The note names the scope, so the review body can state what ran.
+    expect(rep.note).toContain('packages/core, packages/leaf');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('tests the TRANSITIVE dependents of a changed workspace, not just direct ones', () => {
+    // core <- mid <- top: a behaviour change in core can surface in top's suite
+    // with mid unchanged in between. The closure must follow the chain.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/mid', {
+      name: '@x/mid',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/top', {
+      name: '@x/top',
+      // devDependencies count: a test-only consumer is still a consumer.
+      devDependencies: { '@x/mid': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope).toEqual({
+      mode: 'workspaces',
+      workspaces: ['packages/core', 'packages/mid', 'packages/top'],
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/mid"',
+      'npm test --workspace="packages/top"',
     ]);
     expect(rep.ok).toBe(true);
+  });
+
+  it('falls back to the full suite when the closure covers more than half the workspaces', () => {
+    // With core feeding both dependents, the closure is 3 of 4 workspaces. Past
+    // half, a scoped run is not meaningfully narrower than the suite, and the
+    // root's own full-suite command (with its own parallelism) is the honest run.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/a', {
+      name: '@x/a',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/b', {
+      name: '@x/b',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.mode).toBe('full');
+    expect(rep.testScope?.reason).toContain('more than half');
+    // One root command — the repo's own suite — not a near-total subset.
+    expect(rep.test.map((t) => t.command)).toEqual(['npm test']);
+    // The BUILD stays scoped: the fallback is about test coverage, and the
+    // packages outside the closure cannot have been broken at compile time.
+    expect(rep.buildSet).not.toContain('packages/island');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('falls back to the full suite when a mixed diff also touches non-workspace files', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'scripts/build.js']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.mode).toBe('full');
+    expect(rep.testScope?.reason).toContain('scripts/build.js');
+    expect(rep.test.map((t) => t.command)).toEqual(['npm test']);
+    // The workspace part of the diff still gets its scoped compile signal.
+    expect(rep.affected).toEqual(['packages/a']);
+    expect(rep.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/a"',
+    ]);
+  });
+
+  it('runs every workspace suite on a full fallback when the root has no test script', () => {
+    // "Full" must not quietly become "none" on a repo whose root package.json
+    // defines no test entry — the per-workspace commands are the suite then.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', '.github/workflows/ci.yml']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.mode).toBe('full');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+      'npm test --workspace="packages/b"',
+    ]);
+  });
+
+  it('falls back to the full suite when a workspace package.json does not parse', () => {
+    // `readWorkspacePackages` silently drops an unparseable manifest, so the
+    // dependency graph is missing that package's reverse edges — a dependent of
+    // the diff could be invisible, and the scoped set silently too small.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    mkdirSync(join(root, 'packages', 'broken'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'broken', 'package.json'),
+      '{ not json',
+    );
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.mode).toBe('full');
+    expect(rep.testScope?.reason).toContain('packages/broken');
+    expect(rep.test.map((t) => t.command)).toEqual(['npm test']);
+  });
+
+  it('keeps a plain single-package repo report free of the testScope field', () => {
+    // A single-package repo's one suite IS its full suite — the field would
+    // claim a scoping decision that never happened, and this repo shape's
+    // report must stay byte-identical to what it was before scoping existed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'solo',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writePlan(['src/index.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.ok).toBe(true);
+    expect(JSON.stringify(rep)).not.toContain('testScope');
   });
 
   it('reports a build failure with its output, and does not call it ok', () => {

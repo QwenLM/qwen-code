@@ -167,13 +167,22 @@ export function readRootPackage(root: string): WorkspacePackage | null {
   };
 }
 
-/** Expand the globs against the tree: every workspace package that exists. */
-export function readWorkspacePackages(root: string): WorkspacePackage[] {
-  const globs = readWorkspaceGlobs(root);
+/**
+ * Every directory the positive globs claim, expanded against the tree.
+ *
+ * Shared between `readWorkspacePackages` (which then parses each manifest) and
+ * the test-scope trust check in `workspace-scope.ts` (which needs the dirs whose
+ * manifests do NOT parse — the ones `readWorkspacePackages` silently drops). Two
+ * separate expansions would drift, and a dir only one of them saw is exactly a
+ * package the dependency graph is missing.
+ */
+export function workspaceDirCandidates(
+  root: string,
+  globs: string[],
+): string[] {
   const dirs = new Set<string>();
-
   for (const glob of globs) {
-    if (glob.startsWith('!')) continue; // handled by workspaceDirFor, below
+    if (glob.startsWith('!')) continue; // negations are applied by workspaceDirFor
     const g = glob.replace(/\/$/, '');
     if (g.endsWith('/*')) {
       const base = g.slice(0, -2);
@@ -190,9 +199,15 @@ export function readWorkspacePackages(root: string): WorkspacePackage[] {
       dirs.add(g);
     }
   }
+  return [...dirs].sort();
+}
+
+/** Expand the globs against the tree: every workspace package that exists. */
+export function readWorkspacePackages(root: string): WorkspacePackage[] {
+  const globs = readWorkspaceGlobs(root);
 
   const pkgs: WorkspacePackage[] = [];
-  for (const dir of dirs) {
+  for (const dir of workspaceDirCandidates(root, globs)) {
     // A directory a negation excludes is not a workspace, and its own
     // `package.json` says nothing about that — `packages/desktop` is a separate
     // bun workspace with its own lockfile, and building it from here fails.
@@ -239,6 +254,59 @@ export function affectedWorkspaces(
   return [...dirs].sort();
 }
 
+/** Forward edges for a package list: dir -> the workspace dirs it depends on. */
+function dependencyEdges(packages: WorkspacePackage[]): Map<string, string[]> {
+  const byName = new Map(packages.map((p) => [p.name, p]));
+  const dependsOn = new Map<string, string[]>();
+  for (const p of packages) {
+    dependsOn.set(
+      p.dir,
+      p.deps
+        .map((d) => byName.get(d)?.dir)
+        .filter((d): d is string => !!d && d !== p.dir),
+    );
+  }
+  return dependsOn;
+}
+
+/**
+ * The affected workspaces plus everything that depends on them, transitively —
+ * the set a change can actually break.
+ *
+ * This is both the reverse half of `buildSetFor` (a consumer's COMPILE is where
+ * a breaking API change surfaces) and the test scope build-test runs (a
+ * consumer's TESTS are where a breaking behaviour change surfaces — a change to
+ * `core` can leave every dependent compiling and still fail their suites). One
+ * definition, so the set that gets built and the set that gets tested cannot
+ * drift apart.
+ *
+ * Closure over the AFFECTED set only — never over the set as it grows to
+ * include dependencies. Seeding it with the dependency closure instead makes
+ * every consumer of every dependency a dependent: a leaf change that merely
+ * *uses* `core` would drag in everything else that uses `core`, which is the
+ * whole monorepo, which is the full run this exists to avoid.
+ */
+export function reverseDependencyClosure(
+  affected: string[],
+  packages: WorkspacePackage[],
+): string[] {
+  const byDir = new Map(packages.map((p) => [p.dir, p]));
+  const dependsOn = dependencyEdges(packages);
+  const consumers = new Set<string>(affected.filter((a) => byDir.has(a)));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const p of packages) {
+      if (consumers.has(p.dir)) continue;
+      if ((dependsOn.get(p.dir) ?? []).some((d) => consumers.has(d))) {
+        consumers.add(p.dir);
+        grew = true;
+      }
+    }
+  }
+  return [...consumers].sort();
+}
+
 /**
  * The build set: every affected workspace, everything it depends on, and
  * everything that depends on it — ordered dependencies-first.
@@ -262,38 +330,12 @@ export function buildSetFor(
   alsoBuild: string[] = [],
 ): string[] {
   const byDir = new Map(packages.map((p) => [p.dir, p]));
-  const byName = new Map(packages.map((p) => [p.name, p]));
+  const dependsOn = dependencyEdges(packages);
 
-  // Forward edges: dir -> the workspace dirs it depends on.
-  const dependsOn = new Map<string, string[]>();
-  for (const p of packages) {
-    dependsOn.set(
-      p.dir,
-      p.deps
-        .map((d) => byName.get(d)?.dir)
-        .filter((d): d is string => !!d && d !== p.dir),
-    );
-  }
-
-  // 1. The affected packages and everything that depends on them, transitively.
-  //
-  // Reverse-closure over the AFFECTED set only — never over the set as it grows
-  // to include dependencies. Seeding it with the dependency closure instead makes
-  // every consumer of every dependency a dependent: a leaf change that merely
-  // *uses* `core` would drag in everything else that uses `core`, which is the
-  // whole monorepo, which is the full build this exists to avoid.
-  const consumers = new Set<string>(affected.filter((a) => byDir.has(a)));
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const p of packages) {
-      if (consumers.has(p.dir)) continue;
-      if ((dependsOn.get(p.dir) ?? []).some((d) => consumers.has(d))) {
-        consumers.add(p.dir);
-        grew = true;
-      }
-    }
-  }
+  // 1. The affected packages and everything that depends on them, transitively
+  //    (see `reverseDependencyClosure` for why the closure is taken over the
+  //    affected set only).
+  const consumers = reverseDependencyClosure(affected, packages);
 
   // 2. Those, plus everything they compile against — and plus anything the
   //    compiler explicitly asked for, with its own dependencies. `alsoBuild` joins

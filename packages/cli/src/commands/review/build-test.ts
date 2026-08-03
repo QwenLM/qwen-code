@@ -57,6 +57,11 @@ import {
   readWorkspacePackages,
   type WorkspacePackage,
 } from './lib/workspaces.js';
+import {
+  resolveTestScope,
+  unparseableWorkspaceManifests,
+  type TestScope,
+} from './lib/workspace-scope.js';
 
 /** The build command for a dir: the root package takes no `--workspace`. */
 function buildCommand(dir: string): string {
@@ -90,6 +95,15 @@ export interface BuildTestReport {
   install: CommandResult | null;
   build: CommandResult[];
   test: CommandResult[];
+  /**
+   * What the test phase covered, so the review can state exactly what was and
+   * was not run: a scoped subset (`workspaces` names it — the changed
+   * workspaces plus their reverse-dependency closure) or the full suite
+   * (`reason` says why scoping fell back). Only set for workspace monorepos —
+   * a single-package repo's one suite IS its full suite, and its report must
+   * stay byte-identical to what it was before scoping existed.
+   */
+  testScope?: TestScope;
   /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
@@ -409,7 +423,28 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ? ['.']
       : []
     : affectedWorkspaces(changed, globs);
-  if (affected.length === 0) {
+
+  // The test scope, decided up front because it changes the control flow below:
+  // a diff with nothing to BUILD can still oblige a full TEST run. Undefined for
+  // a single-root repo — its one suite is its full suite, and its report must
+  // not change shape.
+  const testScope = singleRoot
+    ? undefined
+    : resolveTestScope({
+        changed,
+        globs,
+        packages,
+        unparseable: unparseableWorkspaceManifests(root, globs),
+      });
+  const fullTests = testScope?.mode === 'full' && !args.buildOnly;
+
+  // With no affected workspace and no full-suite obligation there is nothing to
+  // run at all. A diff that touches nothing inside a workspace no longer lands
+  // here on its own — a root script or config can affect any package's tests, so
+  // that case fail-opens to the full suite below — but an empty diff does, and
+  // so does a build-only call (the merge-base probe), whose full run would
+  // measure nothing about this PR.
+  if (affected.length === 0 && !fullTests) {
     return {
       toolchain: 'npm',
       affected: [],
@@ -418,6 +453,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       install: null,
       build: [],
       test: [],
+      ...(testScope ? { testScope } : {}),
       ok: true,
       timedOut: [],
       note:
@@ -455,6 +491,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     install: null,
     build: [],
     test: [],
+    ...(testScope ? { testScope } : {}),
     ok: true,
     timedOut: [],
     note: '',
@@ -679,13 +716,38 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   results.buildSet = set;
   results.widenedWith = [...widened];
 
-  // Test only what changed. `npm test` at the root runs every workspace in
-  // parallel and does not finish; the packages the diff did not touch cannot have
-  // been broken by it, and their tests were green before this PR and will be green
-  // after it.
-  for (const dir of args.buildOnly ? [] : affected) {
-    const pkg = byDir.get(dir);
-    if (!pkg?.scripts.includes('test')) continue;
+  // Test what the diff can break: the changed workspaces plus their
+  // reverse-dependency closure. Testing the changed ones alone under-tests in
+  // the one way a compile cannot catch — a behaviour change in `core` leaves
+  // every dependent compiling and still fails their suites. The closure is a
+  // subset of the build set (which adds compile-time dependencies on top), so
+  // every tested package was built above, with everything it compiles against.
+  //
+  // When the scope decision fell back to `full`, run the repo's own full-suite
+  // command — one root `npm test`, which brings the repo's own parallelism —
+  // and only when the root defines no test script, every workspace's suite
+  // one by one. Falling back is an optimisation given up, never coverage given
+  // up: that is the fail-open contract, and `testScope.reason` discloses it.
+  // The BUILD above stays scoped even then: a package outside the reverse
+  // closure cannot have been compile-broken by this diff, so building it adds
+  // no signal — and a full sequential build on a large monorepo would spend the
+  // whole command budget before a single test ran.
+  const rootHasTest = !!(
+    singleRoot ? byDir.get('.') : readRootPackage(root)
+  )?.scripts.includes('test');
+  const testDirs = args.buildOnly
+    ? []
+    : !testScope
+      ? affected // single root: its one package, exactly as before scoping
+      : testScope.mode === 'workspaces'
+        ? (testScope.workspaces ?? [])
+        : rootHasTest
+          ? ['.']
+          : packages.map((p) => p.dir);
+  for (const dir of testDirs) {
+    const runnable =
+      dir === '.' ? rootHasTest : !!byDir.get(dir)?.scripts.includes('test');
+    if (!runnable) continue;
     const r = exec(testCommand(dir), root, perCommandMs);
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
@@ -704,17 +766,32 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // message meant for a real compile/assertion failure.
     const realFailures = failed.filter((r) => !r.timedOut);
     if (results.ok) {
+      // The tests sentence names the scope, because it is the agent's report
+      // that has to be able to say what was and was not run: a scoped run names
+      // its workspaces, a fallback names its reason. The single-root wording is
+      // unchanged from before scoping existed — that repo shape has exactly one
+      // suite either way.
+      const testsClause = args.buildOnly
+        ? '. Tests were not run (build-only).'
+        : !testScope
+          ? ' and ran the tests of the changed ones. Everything passed.'
+          : testScope.mode === 'workspaces'
+            ? ` and ran the tests scoped to ${(testScope.workspaces ?? []).join(', ')} ` +
+              '— the changed workspaces plus every workspace that depends on ' +
+              'them. Everything passed.'
+            : `. Tests fell back to the FULL suite: ${testScope.reason}. ` +
+              'Everything passed.';
       results.note =
-        `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
-        `diff changes, plus what they compile against${
-          widened.size
-            ? `, plus ${[...widened].join(', ')} the compiler asked for`
-            : ''
-        })${
-          args.buildOnly
-            ? '. Tests were not run (build-only).'
-            : ' and ran the tests of the changed ones. Everything passed.'
-        }`;
+        affected.length > 0
+          ? `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
+            `diff changes, plus what they compile against${
+              widened.size
+                ? `, plus ${[...widened].join(', ')} the compiler asked for`
+                : ''
+            })${testsClause}`
+          : // Reachable only on the full-suite fallback: an affected-less diff
+            // with nothing to test returned early, long before this note.
+            `The diff changes no workspace sources, so nothing was built${testsClause}`;
     } else if (realFailures.length === 0) {
       results.note =
         `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
@@ -747,8 +824,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build and test the workspaces the diff changes (and what they compile ' +
-    'against), with a deadline the commands can actually meet',
+    'Build the workspaces the diff changes (and what they compile against), ' +
+    'test those plus their dependents, with a deadline the commands can ' +
+    'actually meet',
   builder: (yargs) =>
     yargs
       .option('plan', {
