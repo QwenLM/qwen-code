@@ -959,14 +959,24 @@ export class ContentGenerationPipeline {
 
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
-    // DashScope rejects forced tool selection while thinking is enabled.
+    // DashScope rejects forced tool selection while thinking is enabled. The
+    // `reasoning_effort` clause is family-gated like the disable path above:
+    // on non-qwen models sharing the DashScope endpoint it is an opaque
+    // sampling override, not a thinking switch, and dropping `required`
+    // there would degrade their forced-tool side queries.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
       (thinkingMandatory ||
         typed['enable_thinking'] === true ||
-        (typeof reasoningEffort === 'string' && reasoningEffort !== 'none'))
+        ((model.startsWith('qwen') || model === 'coder-model') &&
+          typeof reasoningEffort === 'string' &&
+          reasoningEffort !== 'none'))
     ) {
+      debugLogger.debug(
+        'DashScope: dropping tool_choice=required while thinking is enabled',
+        { model, reasoningEffort, thinkingMandatory },
+      );
       delete typed['tool_choice'];
     }
 
