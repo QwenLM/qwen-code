@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  buildGoalEvidenceCheckpointWindow,
   buildGoalEvidenceCatalog,
   EvidenceSourceUnavailableError,
   InvalidGoalEvidenceReferenceError,
@@ -14,6 +15,11 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
+  materializeGoalEvidenceCheckpoint,
+  type GoalCheckpointVerifier,
+} from './goal-checkpoint.js';
+import {
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   type GoalControlRequest,
   type GoalSnapshotV2,
@@ -57,6 +63,7 @@ export interface CreateGoalRuntimeOptions {
   journal: GoalJournal;
   evidenceSource?: GoalEvidenceSource;
   verifier?: GoalVerifier;
+  checkpointVerifier?: GoalCheckpointVerifier;
 }
 
 export interface GoalEvidenceSource {
@@ -136,6 +143,14 @@ function normalizeRecoveredBlockedAudit(
   };
 }
 
+function isRepeatedBlockerProposal(proposal: GoalTerminalProposal): boolean {
+  return (
+    proposal.status === 'blocked' &&
+    proposal.blockerKind !== 'authority' &&
+    proposal.blockerKind !== 'external'
+  );
+}
+
 export function createGoalRuntime(
   options: CreateGoalRuntimeOptions,
 ): GoalRuntime & {
@@ -145,6 +160,9 @@ export function createGoalRuntime(
     throw new Error(
       'Goal evidence source and verifier must be configured together',
     );
+  }
+  if (options.checkpointVerifier && !options.evidenceSource) {
+    throw new Error('Goal checkpoint verifier requires a Goal evidence source');
   }
 
   let snapshot: GoalSnapshotV2 = {
@@ -182,6 +200,14 @@ export function createGoalRuntime(
         controller: AbortController;
       }
     | undefined;
+  let checkpointAttempt:
+    | {
+        permit: GoalTurnPermit;
+        goal: NonNullable<GoalSnapshotV2['goal']>;
+        recordUuid: string;
+        controller: AbortController;
+      }
+    | undefined;
   let blockedAudit: GoalStateRecordPayloadV2['blockedAudit'];
   let nextVerifierFeedback: string | undefined;
   let currentTurnFeedback: string | undefined;
@@ -189,6 +215,21 @@ export function createGoalRuntime(
   let disposed = false;
   let recoveryError: Error | undefined;
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
+  type CheckpointAttempt = NonNullable<typeof checkpointAttempt>;
+
+  const createCheckpointAttempt = (
+    permit: GoalTurnPermit,
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    recordUuid: string = randomUUID(),
+  ): CheckpointAttempt | undefined =>
+    options.evidenceSource && options.checkpointVerifier
+      ? {
+          permit: structuredClone(permit),
+          goal: structuredClone(goal),
+          recordUuid,
+          controller: new AbortController(),
+        }
+      : undefined;
 
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
@@ -226,6 +267,7 @@ export function createGoalRuntime(
       currentPermit ||
       pendingProposal ||
       verificationAttempt ||
+      checkpointAttempt ||
       snapshot.activity !== 'idle' ||
       snapshot.goal?.status !== 'active'
     ) {
@@ -300,7 +342,8 @@ export function createGoalRuntime(
       snapshot.goal?.status !== 'active' ||
       currentPermit ||
       pendingProposal ||
-      verificationAttempt
+      verificationAttempt ||
+      checkpointAttempt
     ) {
       return;
     }
@@ -372,12 +415,24 @@ export function createGoalRuntime(
     snapshot.goal.status === 'active' &&
     snapshot.activity === 'verifying';
 
-  const invalidateVerification = (reason: string) => {
+  const isCurrentCheckpointAttempt = (attempt: CheckpointAttempt) =>
+    checkpointAttempt === attempt &&
+    snapshot.goal?.goalId === attempt.permit.goalId &&
+    snapshot.goal.revision === attempt.permit.revision &&
+    snapshot.goal.status === 'active' &&
+    snapshot.activity === 'verifying';
+
+  const invalidateAttempts = (reason: string) => {
     const attempt = verificationAttempt;
+    const checkpoint = checkpointAttempt;
     verificationAttempt = undefined;
+    checkpointAttempt = undefined;
     pendingProposal = undefined;
     if (attempt && !attempt.controller.signal.aborted) {
       attempt.controller.abort(new Error(reason));
+    }
+    if (checkpoint && !checkpoint.controller.signal.aborted) {
+      checkpoint.controller.abort(new Error(reason));
     }
   };
 
@@ -449,8 +504,8 @@ export function createGoalRuntime(
     outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
       | { kind: 'usage_limited'; reason: string },
-  ): Promise<void> => {
-    await enqueue(async () => {
+  ): Promise<CheckpointAttempt | undefined> =>
+    enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
 
       const now = Date.now();
@@ -494,7 +549,7 @@ export function createGoalRuntime(
         currentTurnFeedback = undefined;
         snapshot = structuredClone(terminalSnapshot);
         broadcast(attempt.proposal.status);
-        return;
+        return undefined;
       }
 
       if (outcome.kind === 'usage_limited') {
@@ -522,9 +577,12 @@ export function createGoalRuntime(
         currentTurnFeedback = undefined;
         snapshot = structuredClone(limitedSnapshot);
         broadcast('usage_limited');
-        return;
+        return undefined;
       }
 
+      const rejectedCheckpoint = isRepeatedBlockerProposal(attempt.proposal)
+        ? undefined
+        : createCheckpointAttempt(attempt.permit, snapshot.goal);
       const rejectedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
@@ -539,6 +597,14 @@ export function createGoalRuntime(
         v: GOAL_STATE_VERSION,
         cause: 'verifier_reject',
         snapshot: rejectedSnapshot,
+        ...(rejectedCheckpoint
+          ? {
+              checkpointPending: {
+                permit: structuredClone(rejectedCheckpoint.permit),
+                recordUuid: rejectedCheckpoint.recordUuid,
+              },
+            }
+          : {}),
         ...(blockedAudit
           ? { blockedAudit: structuredClone(blockedAudit) }
           : {}),
@@ -546,12 +612,21 @@ export function createGoalRuntime(
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
       verificationAttempt = undefined;
       pendingProposal = undefined;
-      snapshot = structuredClone(rejectedSnapshot);
+      checkpointAttempt = rejectedCheckpoint;
+      snapshot = {
+        ...structuredClone(rejectedSnapshot),
+        activity: rejectedCheckpoint ? 'verifying' : 'idle',
+      };
       nextVerifierFeedback = outcome.result.reason;
+      if (rejectedCheckpoint) {
+        continuationQueued = false;
+        broadcast('verifier_reject');
+        return rejectedCheckpoint;
+      }
       const continuationBroadcast = admitAfterRejection();
       if (!continuationBroadcast) broadcast('verifier_reject');
+      return undefined;
     });
-  };
 
   const runVerification = async (
     attempt: VerificationAttempt,
@@ -600,7 +675,177 @@ export function createGoalRuntime(
         outcome = { kind: 'usage_limited', reason };
       }
     }
-    await recordVerificationOutcome(attempt, outcome);
+    const checkpoint = await recordVerificationOutcome(attempt, outcome);
+    if (checkpoint) await runCheckpoint(checkpoint);
+  };
+
+  const finishCheckpointCheck = async (
+    attempt: CheckpointAttempt,
+  ): Promise<void> => {
+    await enqueue(async () => {
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const persistedCause =
+        nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
+      const now = Date.now();
+      const checkedSnapshot: GoalSnapshotV2 = {
+        v: GOAL_STATE_VERSION,
+        goal: {
+          ...snapshot.goal,
+          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
+          updatedAt: now,
+        },
+        activity: 'idle',
+      };
+      await options.journal.recordGoalState(attempt.recordUuid, {
+        v: GOAL_STATE_VERSION,
+        cause: persistedCause,
+        snapshot: checkedSnapshot,
+        ...(blockedAudit
+          ? { blockedAudit: structuredClone(blockedAudit) }
+          : {}),
+      });
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      checkpointAttempt = undefined;
+      snapshot = structuredClone(checkedSnapshot);
+      if (promoteQueuedUserTurn()) {
+        broadcast('checkpoint');
+      } else {
+        queueContinuation('checkpoint');
+      }
+    });
+  };
+
+  const recordCheckpointFailure = async (
+    attempt: CheckpointAttempt,
+    reason: string,
+  ): Promise<void> => {
+    await enqueue(async () => {
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const now = Date.now();
+      const limitedSnapshot: GoalSnapshotV2 = {
+        v: GOAL_STATE_VERSION,
+        goal: {
+          ...snapshot.goal,
+          status: 'usage_limited',
+          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
+          updatedAt: now,
+          lastReason: reason,
+        },
+        activity: 'idle',
+      };
+      await options.journal.recordGoalState(randomUUID(), {
+        v: GOAL_STATE_VERSION,
+        cause: 'usage_limited',
+        snapshot: limitedSnapshot,
+      });
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      checkpointAttempt = undefined;
+      continuationQueued = false;
+      nextVerifierFeedback = undefined;
+      currentTurnFeedback = undefined;
+      snapshot = structuredClone(limitedSnapshot);
+      broadcast('usage_limited');
+    });
+  };
+
+  const recordCheckpoint = async (
+    attempt: CheckpointAttempt,
+    checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
+  ): Promise<void> => {
+    if (!checkpoint) return;
+    await enqueue(async () => {
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const now = Date.now();
+      const persistedCause =
+        nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
+      const checkpointSnapshot: GoalSnapshotV2 = {
+        v: GOAL_STATE_VERSION,
+        goal: {
+          ...snapshot.goal,
+          evidenceCursor: { recordId: attempt.recordUuid },
+          evidenceCheckpoint: checkpoint,
+          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
+          updatedAt: now,
+        },
+        activity: 'idle',
+      };
+      await options.journal.recordGoalState(attempt.recordUuid, {
+        v: GOAL_STATE_VERSION,
+        cause: persistedCause,
+        snapshot: checkpointSnapshot,
+        ...(blockedAudit
+          ? { blockedAudit: structuredClone(blockedAudit) }
+          : {}),
+      });
+      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      checkpointAttempt = undefined;
+      snapshot = structuredClone(checkpointSnapshot);
+      if (promoteQueuedUserTurn()) {
+        broadcast('checkpoint');
+      } else {
+        queueContinuation('checkpoint');
+      }
+    });
+  };
+
+  const runCheckpoint = async (attempt: CheckpointAttempt): Promise<void> => {
+    const evidenceSource = options.evidenceSource;
+    const checkpointVerifier = options.checkpointVerifier;
+    if (!evidenceSource || !checkpointVerifier) {
+      await recordCheckpointFailure(
+        attempt,
+        'Goal checkpoint recovery dependencies are unavailable',
+      );
+      return;
+    }
+
+    try {
+      await evidenceSource.flush();
+      if (attempt.controller.signal.aborted) return;
+      const records = await evidenceSource.readActiveTranscriptChain();
+      if (attempt.controller.signal.aborted) return;
+      const window = buildGoalEvidenceCheckpointWindow({
+        records,
+        goal: attempt.goal,
+        permit: attempt.permit,
+      });
+      if (window.truncated) {
+        await recordCheckpointFailure(
+          attempt,
+          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+        );
+        return;
+      }
+      if (!window.shouldCheckpoint) {
+        await finishCheckpointCheck(attempt);
+        return;
+      }
+      const result = await checkpointVerifier(
+        {
+          goal: {
+            goalId: attempt.goal.goalId,
+            revision: attempt.goal.revision,
+            objective: attempt.goal.objective,
+          },
+          previousClaims: window.previousClaims,
+          evidence: window.evidence,
+        },
+        attempt.controller.signal,
+      );
+      if (attempt.controller.signal.aborted) return;
+      const checkpoint = materializeGoalEvidenceCheckpoint({
+        checkpointId: attempt.recordUuid,
+        createdAt: Date.now(),
+        previousClaims: window.previousClaims,
+        evidence: window.evidence,
+        result,
+      });
+      await recordCheckpoint(attempt, checkpoint);
+    } catch (error) {
+      if (attempt.controller.signal.aborted) return;
+      const reason = error instanceof Error ? error.message : String(error);
+      await recordCheckpointFailure(attempt, reason);
+    }
   };
 
   return {
@@ -613,58 +858,83 @@ export function createGoalRuntime(
       return () => listeners.delete(listener);
     },
     restore(records: readonly GoalRecoveryRecord[]): Promise<void> {
-      return enqueue(async () => {
-        assertAvailable();
-        if (restored) return;
-        const recovery = recoverGoalFromRecords(records);
-        if (recovery.kind === 'unsupported') {
-          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
-          throw recoveryError;
-        }
-        try {
-          let recoveredSnapshot: GoalSnapshotV2 | undefined;
-          let recoveredCause: GoalStateCause | undefined;
-          if (recovery.kind === 'v2') {
-            recoveredSnapshot = {
-              ...structuredClone(recovery.payload.snapshot),
-              activity: 'idle',
-            };
-            blockedAudit = recovery.payload.blockedAudit
-              ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
-              : undefined;
-            recoveredCause = recovery.payload.cause;
-          } else if (recovery.kind === 'legacy') {
-            const recordUuid = randomUUID();
-            const payload = createMigratedGoalState({
-              objective: recovery.objective,
-              goalId: randomUUID(),
-              recordUuid,
-              now: Date.now(),
-            });
-            try {
-              await options.journal.recordGoalState(recordUuid, payload);
-            } catch (error) {
-              throw new GoalPersistenceUnavailableError(
-                error instanceof Error ? error.message : String(error),
-                { cause: error },
-              );
+      const restoring = enqueue(
+        async (): Promise<CheckpointAttempt | undefined> => {
+          assertAvailable();
+          if (restored) return;
+          const recovery = recoverGoalFromRecords(records);
+          if (recovery.kind === 'unsupported') {
+            recoveryError = new GoalPersistenceUnavailableError(
+              recovery.reason,
+            );
+            throw recoveryError;
+          }
+          try {
+            let recoveredSnapshot: GoalSnapshotV2 | undefined;
+            let recoveredCause: GoalStateCause | undefined;
+            if (recovery.kind === 'v2') {
+              recoveredSnapshot = {
+                ...structuredClone(recovery.payload.snapshot),
+                activity: 'idle',
+              };
+              blockedAudit = recovery.payload.blockedAudit
+                ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
+                : undefined;
+              recoveredCause = recovery.payload.cause;
+              const pending = recovery.payload.checkpointPending;
+              if (pending && recoveredSnapshot.goal) {
+                checkpointAttempt = createCheckpointAttempt(
+                  pending.permit,
+                  recoveredSnapshot.goal,
+                  pending.recordUuid,
+                );
+                if (!checkpointAttempt) {
+                  throw new GoalPersistenceUnavailableError(
+                    'Goal checkpoint recovery dependencies are unavailable',
+                  );
+                }
+                recoveredSnapshot.activity = 'verifying';
+              }
+              if (recoveredCause === 'verifier_reject') {
+                nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
+              }
+            } else if (recovery.kind === 'legacy') {
+              const recordUuid = randomUUID();
+              const payload = createMigratedGoalState({
+                objective: recovery.objective,
+                goalId: randomUUID(),
+                recordUuid,
+                now: Date.now(),
+              });
+              try {
+                await options.journal.recordGoalState(recordUuid, payload);
+              } catch (error) {
+                throw new GoalPersistenceUnavailableError(
+                  error instanceof Error ? error.message : String(error),
+                  { cause: error },
+                );
+              }
+              assertAvailable();
+              recoveredSnapshot = structuredClone(payload.snapshot);
+              recoveredCause = payload.cause;
             }
-            assertAvailable();
-            recoveredSnapshot = structuredClone(payload.snapshot);
-            recoveredCause = payload.cause;
+            if (recoveredSnapshot) snapshot = recoveredSnapshot;
+            recoveryError = undefined;
+            restored = true;
+            if (recoveredSnapshot) broadcast(recoveredCause);
+            if (!checkpointAttempt) queueContinuation();
+            return checkpointAttempt;
+          } catch (error) {
+            if (!disposed) {
+              recoveryError =
+                error instanceof Error ? error : new Error(String(error));
+            }
+            throw error;
           }
-          if (recoveredSnapshot) snapshot = recoveredSnapshot;
-          recoveryError = undefined;
-          restored = true;
-          if (recoveredSnapshot) broadcast(recoveredCause);
-          queueContinuation();
-        } catch (error) {
-          if (!disposed) {
-            recoveryError =
-              error instanceof Error ? error : new Error(String(error));
-          }
-          throw error;
-        }
+        },
+      );
+      return restoring.then(async (attempt) => {
+        if (attempt) await runCheckpoint(attempt);
       });
     },
     bindHost(nextHost: GoalTurnHost): () => void {
@@ -681,7 +951,8 @@ export function createGoalRuntime(
       if (
         snapshot.activity === 'verifying' ||
         pendingProposal ||
-        verificationAttempt
+        verificationAttempt ||
+        checkpointAttempt
       ) {
         queuedTurnKey ??= turnKey;
         continuationQueued = false;
@@ -747,7 +1018,10 @@ export function createGoalRuntime(
     },
     finishTurn(permit: GoalTurnPermit): Promise<void> {
       const finish = enqueue(
-        async (): Promise<VerificationAttempt | undefined> => {
+        async (): Promise<{
+          verification?: VerificationAttempt;
+          checkpoint?: CheckpointAttempt;
+        }> => {
           assertOperational();
           if (!isCurrentPermit(permit) || !snapshot.goal) {
             throw new Error(STALE_GOAL_TURN_MESSAGE);
@@ -762,21 +1036,32 @@ export function createGoalRuntime(
             activity: 'idle',
           };
           const persistedBlockedAudit = currentProposal?.blockedAuditCandidate;
+          const proposal = currentProposal;
+          const activeProposal =
+            proposal && persistedSnapshot.goal?.status === 'active'
+              ? proposal
+              : undefined;
+          const nextCheckpoint = !activeProposal
+            ? createCheckpointAttempt(permit, nextGoal)
+            : undefined;
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: 'turn_finished',
             snapshot: persistedSnapshot,
+            ...(nextCheckpoint
+              ? {
+                  checkpointPending: {
+                    permit: structuredClone(nextCheckpoint.permit),
+                    recordUuid: nextCheckpoint.recordUuid,
+                  },
+                }
+              : {}),
             ...(persistedBlockedAudit
               ? { blockedAudit: structuredClone(persistedBlockedAudit) }
               : {}),
           });
           assertAvailable();
           const nextTurnKey = queuedTurnKey;
-          const proposal = currentProposal;
-          const activeProposal =
-            proposal && persistedSnapshot.goal?.status === 'active'
-              ? proposal
-              : undefined;
           if (activeProposal?.blockedAuditCandidate) {
             blockedAudit = activeProposal.blockedAuditCandidate;
           } else if (persistedSnapshot.goal?.status === 'active') {
@@ -798,7 +1083,10 @@ export function createGoalRuntime(
                   controller: new AbortController(),
                 }
               : undefined;
-          const verifying = Boolean(pendingProposal || verificationAttempt);
+          checkpointAttempt = nextCheckpoint;
+          const verifying = Boolean(
+            pendingProposal || verificationAttempt || checkpointAttempt,
+          );
           snapshot = {
             ...structuredClone(persistedSnapshot),
             activity: verifying ? 'verifying' : 'idle',
@@ -826,11 +1114,20 @@ export function createGoalRuntime(
           if (!verifying && !currentPermit) {
             queueContinuation();
           }
-          return verificationAttempt;
+          return {
+            ...(verificationAttempt
+              ? { verification: verificationAttempt }
+              : {}),
+            ...(checkpointAttempt ? { checkpoint: checkpointAttempt } : {}),
+          };
         },
       );
-      return finish.then(async (attempt) => {
-        if (attempt) await runVerification(attempt);
+      return finish.then(async (attempts) => {
+        if (attempts.verification) {
+          await runVerification(attempts.verification);
+        } else if (attempts.checkpoint) {
+          await runCheckpoint(attempts.checkpoint);
+        }
       });
     },
     async getGoalForWorker(permit: GoalTurnPermit): Promise<GoalWorkerView> {
@@ -955,7 +1252,7 @@ export function createGoalRuntime(
           request.action === 'clear';
         const invalidatedHost = currentPermitHost ?? host;
         if (invalidatesPermit) {
-          invalidateVerification(`Goal ${request.action}`);
+          invalidateAttempts(`Goal ${request.action}`);
         }
         if (invalidatesPermit) {
           currentPermit = undefined;
@@ -1003,7 +1300,7 @@ export function createGoalRuntime(
       continuationQueued = false;
       currentProposal = undefined;
       pendingProposal = undefined;
-      invalidateVerification('Goal runtime disposed');
+      invalidateAttempts('Goal runtime disposed');
       blockedAudit = undefined;
       nextVerifierFeedback = undefined;
       currentTurnFeedback = undefined;

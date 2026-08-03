@@ -119,6 +119,7 @@ function legacyStatusKind(
     case 'usage_limited':
       return 'aborted';
     case 'turn_finished':
+    case 'checkpoint':
     case 'verifier_accept':
     case 'verifier_reject':
       return payload.snapshot.goal?.status === 'complete'

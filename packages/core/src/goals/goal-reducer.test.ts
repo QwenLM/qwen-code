@@ -547,4 +547,147 @@ describe('goal reducer', () => {
     expect(parsed?.blockedAudit).toEqual(blockedAudit);
     expect(parsed?.blockedAudit).not.toBe(blockedAudit);
   });
+
+  it('parses and clones a persisted evidence checkpoint', () => {
+    const evidenceCheckpoint = {
+      checkpointId: 'checkpoint-1',
+      createdAt: 42,
+      claims: [
+        {
+          id: 'checkpoint-1:1',
+          proofKind: 'external_fact' as const,
+          claim: 'The focused suite passed.',
+          sourceRefs: ['tool-1'],
+        },
+      ],
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'checkpoint',
+      snapshot: snapshot(
+        goalRecord({
+          evidenceCursor: { recordId: 'checkpoint-1' },
+          evidenceCheckpoint,
+        }),
+      ),
+    });
+
+    expect(parsed?.snapshot.goal?.evidenceCheckpoint).toEqual(
+      evidenceCheckpoint,
+    );
+    expect(parsed?.snapshot.goal?.evidenceCheckpoint).not.toBe(
+      evidenceCheckpoint,
+    );
+  });
+
+  it('rejects persisted checkpoint claims without Core-owned sequential IDs', () => {
+    expect(
+      parseGoalStateRecordPayloadV2({
+        v: 2,
+        cause: 'checkpoint',
+        snapshot: snapshot(
+          goalRecord({
+            evidenceCursor: { recordId: 'checkpoint-1' },
+            evidenceCheckpoint: {
+              checkpointId: 'checkpoint-1',
+              createdAt: 42,
+              claims: [
+                {
+                  id: 'checkpoint-1:custom',
+                  proofKind: 'external_fact',
+                  claim: 'The focused suite passed.',
+                  sourceRefs: ['tool-1'],
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    ).toBeUndefined();
+  });
+
+  it('parses and clones a durable pending checkpoint', () => {
+    const checkpointPending = {
+      permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+      recordUuid: 'checkpoint-1',
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'turn_finished',
+      snapshot: snapshot(goalRecord()),
+      checkpointPending,
+    });
+
+    expect(parsed?.checkpointPending).toEqual(checkpointPending);
+    expect(parsed?.checkpointPending).not.toBe(checkpointPending);
+  });
+
+  it.each([
+    [
+      'a mismatched Goal',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'other', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'a mismatched revision',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 2, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'an unsupported cause',
+      'checkpoint',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'a stopped Goal',
+      'turn_finished',
+      snapshot(goalRecord({ status: 'paused' })),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'checkpoint-1',
+      },
+    ],
+    [
+      'an empty checkpoint ID',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: '',
+      },
+    ],
+    [
+      'the current evidence cursor as its checkpoint ID',
+      'turn_finished',
+      snapshot(goalRecord()),
+      {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+        recordUuid: 'r-100',
+      },
+    ],
+  ])(
+    'rejects a pending checkpoint with %s',
+    (_label, cause, goalSnapshot, checkpointPending) => {
+      expect(
+        parseGoalStateRecordPayloadV2({
+          v: 2,
+          cause,
+          snapshot: goalSnapshot,
+          checkpointPending,
+        }),
+      ).toBeUndefined();
+    },
+  );
 });

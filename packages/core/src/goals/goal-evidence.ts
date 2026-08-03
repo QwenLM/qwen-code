@@ -7,6 +7,8 @@
 import type { Part } from '@google/genai';
 import {
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  type GoalEvidenceCheckpointClaim,
+  type GoalEvidenceProofKind,
   type GoalRecord,
   type GoalTerminalProposal,
   type GoalTurnPermit,
@@ -16,13 +18,16 @@ const CATALOG_PREVIEW_LIMIT = 240;
 const CATALOG_ENTRY_LIMIT = 100;
 const CATALOG_BYTE_LIMIT = 24_000;
 const CATALOG_LINEAGE_LIMIT = 16;
+const CHECKPOINT_ENTRY_THRESHOLD = 80;
+const CHECKPOINT_BYTE_THRESHOLD = 19_200;
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
   | 'assistant_output'
-  | 'tool_result';
+  | 'tool_result'
+  | 'goal_checkpoint';
 
 type GoalRecordProvenance =
   | GoalEvidenceProvenance
@@ -39,10 +44,7 @@ export interface GoalEvidenceRecord {
   message?: { parts?: Part[] };
 }
 
-export type GoalEvidenceProofKind =
-  | 'user_input'
-  | 'delivered_output'
-  | 'external_fact';
+export type { GoalEvidenceProofKind } from './goal-protocol.js';
 
 export interface GoalEvidenceCatalogEntry {
   uuid: string;
@@ -74,6 +76,13 @@ export interface GoalEvidenceContext {
 
 export interface GoalEvidenceValidationInput extends GoalEvidenceContext {
   proposal: GoalTerminalProposal;
+}
+
+export interface GoalEvidenceCheckpointWindow {
+  previousClaims: GoalEvidenceCheckpointClaim[];
+  evidence: ValidatedGoalEvidenceRecord[];
+  truncated: boolean;
+  shouldCheckpoint: boolean;
 }
 
 export type EvidenceSourceUnavailableCode =
@@ -131,6 +140,7 @@ interface EvidenceAnalysis {
   indexByUuid: Map<string, number>;
   lineageTurnIds: string[];
   catalogTruncated: boolean;
+  catalogBytes: number;
 }
 
 interface ParsedGoalContext {
@@ -147,6 +157,42 @@ export function buildGoalEvidenceCatalog(
     entries: analysis.catalog.map((entry) => ({ ...entry })),
     lineageTurnIds: analysis.lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT),
     truncated: analysis.catalogTruncated,
+  };
+}
+
+export function buildGoalEvidenceCheckpointWindow(
+  input: GoalEvidenceContext,
+): GoalEvidenceCheckpointWindow {
+  const analysis = analyzeEvidence(input);
+  const rawEntries = analysis.catalog.filter(
+    (entry) => entry.provenance !== 'goal_checkpoint',
+  );
+  const shouldCheckpoint =
+    !analysis.catalogTruncated &&
+    rawEntries.length > 0 &&
+    (analysis.catalog.length >= CHECKPOINT_ENTRY_THRESHOLD ||
+      analysis.catalogBytes >= CHECKPOINT_BYTE_THRESHOLD);
+  const evidence = (shouldCheckpoint ? rawEntries : []).map((entry) => {
+    const recordIndex = analysis.indexByUuid.get(entry.uuid);
+    const record =
+      recordIndex === undefined ? undefined : input.records[recordIndex];
+    const content = record ? evidenceContent(record, entry.provenance) : '';
+    if (!content) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'ineligible_reference',
+        `Transcript record ${entry.uuid} has no eligible evidence content.`,
+        entry.uuid,
+      );
+    }
+    return { ...entry, content };
+  });
+  return {
+    previousClaims: structuredClone(
+      input.goal.evidenceCheckpoint?.claims ?? [],
+    ),
+    evidence,
+    truncated: analysis.catalogTruncated,
+    shouldCheckpoint,
   };
 }
 
@@ -248,11 +294,21 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     );
   }
 
+  const checkpointEntries = checkpointCatalogEntries(input.goal);
   const selectedEvidence: GoalEvidenceCatalogEntry[] = [];
-  let catalogBytes = 0;
-  let catalogTruncated = false;
+  let catalogBytes = checkpointEntries.reduce(
+    (total, entry) => total + Buffer.byteLength(JSON.stringify(entry), 'utf8'),
+    0,
+  );
+  let catalogTruncated =
+    checkpointEntries.length >= CATALOG_ENTRY_LIMIT ||
+    catalogBytes > CATALOG_BYTE_LIMIT;
+  const rawEntryLimit = Math.max(
+    0,
+    CATALOG_ENTRY_LIMIT - checkpointEntries.length,
+  );
   for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
-    if (selectedEvidence.length >= CATALOG_ENTRY_LIMIT) {
+    if (selectedEvidence.length >= rawEntryLimit) {
       catalogTruncated = true;
       break;
     }
@@ -268,16 +324,16 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
   }
 
   selectedEvidence.reverse();
-  const eligibleByUuid = new Map(
-    selectedEvidence.map((entry) => [entry.uuid, entry]),
-  );
+  const catalog = [...checkpointEntries, ...selectedEvidence];
+  const eligibleByUuid = new Map(catalog.map((entry) => [entry.uuid, entry]));
   return {
     cursorIndex,
-    catalog: selectedEvidence,
+    catalog,
     eligibleByUuid,
     indexByUuid,
     lineageTurnIds,
     catalogTruncated,
+    catalogBytes,
   };
 }
 
@@ -326,6 +382,21 @@ function validateReference(
   input: GoalEvidenceValidationInput,
   analysis: EvidenceAnalysis,
 ): ValidatedGoalEvidenceRecord {
+  const checkpointClaim = input.goal.evidenceCheckpoint?.claims.find(
+    (claim) => claim.id === reference,
+  );
+  if (checkpointClaim) {
+    const catalogEntry = analysis.eligibleByUuid.get(reference);
+    if (!catalogEntry) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'reference_not_catalogued',
+        `Evidence reference ${reference} is outside the bounded Goal evidence catalog.`,
+        reference,
+      );
+    }
+    return { ...catalogEntry, content: checkpointClaim.claim };
+  }
+
   const recordIndex = analysis.indexByUuid.get(reference);
   if (recordIndex === undefined) {
     throw new InvalidGoalEvidenceReferenceError(
@@ -412,8 +483,8 @@ function validateBlockerCoverage(
   ) {
     if (
       !citedRecords.some(
-        ({ provenance }) =>
-          provenance === 'real_user' || provenance === 'tool_result',
+        ({ proofKind }) =>
+          proofKind === 'user_input' || proofKind === 'external_fact',
       )
     ) {
       throw new InvalidGoalEvidenceReferenceError(
@@ -425,8 +496,8 @@ function validateBlockerCoverage(
     const oldestBlockerIndex = Math.min(
       ...citedRecords
         .filter(
-          ({ provenance }) =>
-            provenance === 'real_user' || provenance === 'tool_result',
+          ({ proofKind }) =>
+            proofKind === 'user_input' || proofKind === 'external_fact',
         )
         .map(({ uuid }) =>
           analysis.catalog.findIndex((entry) => entry.uuid === uuid),
@@ -464,6 +535,20 @@ function validateBlockerCoverage(
       'A repeated blocker requires evidence from the current and two immediately preceding Goal turns.',
     );
   }
+}
+
+function checkpointCatalogEntries(
+  goal: GoalRecord,
+): GoalEvidenceCatalogEntry[] {
+  const checkpoint = goal.evidenceCheckpoint;
+  if (!checkpoint) return [];
+  return checkpoint.claims.map((claim) => ({
+    uuid: claim.id,
+    provenance: 'goal_checkpoint',
+    turnId: `checkpoint:${checkpoint.checkpointId}`,
+    preview: claim.claim.slice(0, CATALOG_PREVIEW_LIMIT),
+    proofKind: claim.proofKind,
+  }));
 }
 
 function catalogEvidence(

@@ -12,6 +12,7 @@ import type {
   GoalTurnPermit,
 } from './goal-protocol.js';
 import {
+  buildGoalEvidenceCheckpointWindow,
   buildGoalEvidenceCatalog,
   EvidenceSourceUnavailableError,
   InvalidGoalEvidenceReferenceError,
@@ -230,6 +231,63 @@ describe('Goal evidence catalog', () => {
       Buffer.byteLength(JSON.stringify(catalog.entries), 'utf8'),
     ).toBeLessThanOrEqual(24_000);
     expect(catalog.entries.at(-1)?.uuid).toBe('evidence-79');
+  });
+
+  it('requests a checkpoint before the catalog reaches its byte limit', () => {
+    const records = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 60 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: 'x'.repeat(240),
+        }),
+      ),
+    ];
+
+    expect(
+      buildGoalEvidenceCheckpointWindow({
+        records,
+        goal: goal(),
+        permit: permit(),
+      }),
+    ).toMatchObject({
+      truncated: false,
+      shouldCheckpoint: true,
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ uuid: 'evidence-59' }),
+      ]),
+    });
+  });
+
+  it('does not expand raw evidence below the checkpoint threshold', () => {
+    let fullPayloadReads = 0;
+    const level2: Record<string, unknown> = {};
+    Object.defineProperty(level2, 'payload', {
+      enumerable: true,
+      get: () => {
+        fullPayloadReads += 1;
+        return 'x'.repeat(1_000_000);
+      },
+    });
+    const records = [
+      record('cursor', 'system'),
+      record('tool-1', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { level1: { level2 } },
+      }),
+    ];
+    const input = { records, goal: goal(), permit: permit() };
+
+    expect(buildGoalEvidenceCatalog(input).truncated).toBe(false);
+    expect(fullPayloadReads).toBe(0);
+
+    expect(buildGoalEvidenceCheckpointWindow(input)).toMatchObject({
+      shouldCheckpoint: false,
+      truncated: false,
+    });
+    expect(fullPayloadReads).toBe(0);
   });
 
   it('bounds reference count, rejects duplicates, and bounds cited bytes', () => {

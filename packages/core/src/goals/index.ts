@@ -60,6 +60,8 @@ export type {
   LegacyGoalTerminal,
 } from './goal-legacy-projection.js';
 export * from './goal-evidence.js';
+export * from './goal-checkpoint.js';
+export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
 export { goalTurnContext } from './goal-turn-context.js';

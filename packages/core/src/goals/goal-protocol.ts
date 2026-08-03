@@ -7,6 +7,10 @@
 export const GOAL_STATE_VERSION = 2 as const;
 export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
 export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
+export const GOAL_CHECKPOINT_CLAIM_LIMIT = 32;
+export const GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS = 2_000;
+export const GOAL_CHECKPOINT_CLAIM_MAX_BYTES = 16_000;
+export const GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT = 32;
 export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
   'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 
@@ -35,6 +39,24 @@ export interface GoalTurnPermit extends GoalExpectedVersion {
   turnId: string;
 }
 
+export type GoalEvidenceProofKind =
+  | 'user_input'
+  | 'delivered_output'
+  | 'external_fact';
+
+export interface GoalEvidenceCheckpointClaim {
+  id: string;
+  proofKind: GoalEvidenceProofKind;
+  claim: string;
+  sourceRefs: string[];
+}
+
+export interface GoalEvidenceCheckpoint {
+  checkpointId: string;
+  createdAt: number;
+  claims: GoalEvidenceCheckpointClaim[];
+}
+
 export interface GoalRecord {
   goalId: string;
   revision: number;
@@ -45,6 +67,7 @@ export interface GoalRecord {
   activeTimeMs: number;
   createdAt: number;
   updatedAt: number;
+  evidenceCheckpoint?: GoalEvidenceCheckpoint;
   lastReason?: string;
 }
 
@@ -123,6 +146,7 @@ export type GoalStateCause =
   | 'pause'
   | 'resume'
   | 'turn_finished'
+  | 'checkpoint'
   | 'verifier_accept'
   | 'verifier_reject'
   | 'complete'
@@ -135,6 +159,10 @@ export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;
   cause: GoalStateCause;
   snapshot: GoalSnapshotV2;
+  checkpointPending?: {
+    permit: GoalTurnPermit;
+    recordUuid: string;
+  };
   blockedAudit?: {
     fingerprint: string;
     count: number;
