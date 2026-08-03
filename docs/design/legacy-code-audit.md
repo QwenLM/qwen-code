@@ -25,23 +25,22 @@ ways:
   zero self-adjudicated false positives, ~32.5M tokens.
 
 The findings the fan-out added were not marginal. The single most severe —
-a command substitution nested inside an allow-matched outer command
-bypassing the deny rules end-to-end, the denied inner command never
-consulted (the working payload is withheld from this document because the
-bypass is unpatched as of writing) — was touched by the naive agent but
-filed as a Suggestion without proving the consequence. The cross-file
-tracer (1c) found the two Criticals nobody else could: the AUTO
-destructive-command guard being skipped on any L4-allow, and session-rule
-deletion silently no-oping in the permissions dialog. Both required
+a deny-bypass in compound-command evaluation (the mechanism and the working
+payload are withheld from this document because the bypass is unpatched as
+of writing) — was touched by the naive agent but filed as a Suggestion
+without proving the consequence. The cross-file tracer (1c) found the two
+Criticals nobody else could: a destructive-command guard that does not
+engage under a class of permissive configurations, and a rule-deletion path
+that silently no-ops (both withheld for the same reason). Both required
 assembling a three-file chain — the finding class that only exists because
 one agent owns the cross-file walk.
 
 Two more measurements shape this design:
 
-- **Duplication is structural, not incidental.** The command-substitution
-  bypass was found independently by 3 agents; the interpreter-strip gap by
-  3; session-commit dead infrastructure by 3. Any legacy-audit pipeline
-  needs dedup as a first-class step.
+- **Duplication is structural, not incidental.** The compound-command
+  deny-bypass was found independently by 3 agents; the interpreter-strip
+  gap by 3; session-commit dead infrastructure by 3. Any legacy-audit
+  pipeline needs dedup as a first-class step.
 - **Cost concentrates in the walks, not the files.** The three most
   expensive agents (1c 6.8M, 5 6.4M, 3a 6.2M tokens) are the ones whose
   briefs demand repo-wide greps or mutation reasoning — and they are also
@@ -79,9 +78,10 @@ audit outputs. The numbers in this section are author-reported from those
 records, and the Dogfood item in Verification is the external check they
 rest on. Committing a redacted copy of both records under
 `docs/design/assets/` — the exploitable payload is already withheld from
-this document, so a summary would cost nothing — is the follow-up that makes
-them checkable; it awaits the author's machine, the only place the untracked
-originals exist.
+this document, so a summary would cost nothing — is a precondition of this
+design's argument, not a follow-up: the records must land in this PR, and
+doing so awaits the author's machine, the only place the untracked originals
+exist.
 
 ## Scope and non-goals
 
@@ -114,29 +114,37 @@ and a companion DESIGN.md of over 500 lines, so the bill is bigger than one
 section; the benefit is that neither document lies about its flow.
 
 What is reused is the **TypeScript layer**, in two grades. **Lifts
-as-is:** `agent-prompt` roster/brief printing, the findings schema, the
+as-is:** `agent-prompt` roster/brief printing, the findings schema, and the
 budget machinery's shape (a plan-derived size→work mapping; `plan-files`
-supplies the line counts), and the chunk-tiling logic from `plan-diff`.
-**Needs a target-kind parameter, not a lift:** the roster machinery
-(`lib/roster.ts`) keys on diff metrics — the `srcDiffLines`/`diffLines`
-topology gate, `hasDeletions()` (true on an empty file list by design), a
-resolved PR number — so a diff-free plan misfires through it (once
-`plan-files` populates per-file entries, `hasDeletions()` returns false —
-its true-on-empty fail-safe only fires on an empty list — so 1b is not
-required, and with no worktree or untracked files, `reviewMode()` resolves
-`diff-only`, the one mode where `requiredAgents()` drops both 7 and 1c,
-so the roster comes back missing the 1c this design keeps as mandatory,
+supplies the line counts). **Needs a target-kind parameter, not a lift:**
+the roster machinery (`lib/roster.ts`) keys on diff metrics — the
+`srcDiffLines`/`diffLines` topology gate, `hasDeletions()` (true on an empty
+file list by design), a resolved PR number — so a diff-free plan misfires
+through it (once `plan-files` populates per-file entries, `hasDeletions()`
+returns false — its true-on-empty fail-safe only fires on an empty list — so
+1b is not required, and with no worktree or untracked files, `reviewMode()`
+resolves `diff-only`, the one mode where `requiredAgents()` drops both 7 and
+1c, so the roster comes back missing the 1c this design keeps as mandatory,
 and reports no territory fan-out at any module size); `check-coverage`'s
 core predicate is "the agent was
 pointed at diff lines AND opened the diff file", and an audit has no diff
-file, so it must be re-expressed as "opened file F / range R"; and the
-chunk constant counts diff lines (`DEFAULT_MAX_CHUNK_LINES = 400`), so its
-source-line analog lives in `plan-files`. The trade still holds —
+file, so it must be re-expressed as "opened file F". The trade still holds —
 parameterizing target kind is cheaper than forking the document — but the
 shared layer is the printing, schema, and budget shape, not the gates. The
 cross-round findings ledger does not lift into v1 — see Open questions.
 
 ### Target resolution and planning
+
+**Decisions** (rationale in the prose below):
+
+- `plan-files` enumerates and classifies production files with
+  `plan-diff`'s four file-kind rules; `test` files route to Agent 5, not the
+  subject set.
+- The topology gate is a hard bound in v1: source ≤ 9,000 AND
+  source-plus-test ≤ 18,000 lines; over either arm refuses at plan time.
+- Larger subsystems are audited as coherent sub-paths, one bounded run each.
+- Event/lifecycle modules are detected by call patterns and get 1c's
+  event-coverage brief; the detection outcome rides into the report header.
 
 `/audit <path>` resolves a directory (or file set) and runs a new
 subcommand, `qwen audit plan-files <path>`, which plays the role
@@ -148,62 +156,24 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   `plan-diff` uses — all four kinds, `source` / `test` / `generated` /
   `docs`, where `test` is the kind this design most depends on: it is what
   routes files out of the subject set and into Agent 5's;
-- counts lines and applies the topology gate — two arms, in `/review`'s shape
-  (its gate is `src ≤ 500 AND total ≤ 3200`): source lines ≤ a `plan-files`
-  constant pinned at 9,000, and source-plus-test lines ≤ 18,000. The source
-  arm sits above the largest module the experiments validated whole-file
-  (8,516) — a fail-safe choice, not a calibrated value: every module larger
-  than the two measured ones lands in the untested branch, and the margin's
-  job is to keep every size class with whole-file evidence below the gate. The
-  test arm exists because Agent 5's subject is the test corpus, which the
-  source count excludes — an 8k-source module with a 20k-line test tree would
-  otherwise pass the gate while Agent 5 reads 28k lines whole; and Agent 5
-  reads its corpus whole at every topology (it is one of the walks the
-  above-gate branch retains whole-module), so no tiling can bound that read —
-  a module over the test arm refuses at plan time and asks for a narrower
-  path. The 18,000 constant is an unmeasured first cut — twice the validated
-  source bound — and rides into the report header with the other unexercised
-  constants. A module under both arms stays below the gate: dimension agents
-  each read the whole file set — the only topology either experiment
-  exercised, validated at 7,638 and 8,516 lines. A module over the source arm
-  but under the test arm takes the above-gate branch: tiles files into chunks
-  of 400 source lines (`plan-files`' source-line analog of `/review`'s
-  diff-line chunk constant — the unit changes; source lines are what a
-  diff-free target has) and fans out per-chunk agents with folded-in dimension
-  briefs, mirroring Step 3B — with whole-module agents retained for the walks
-  that are meaningless per-chunk (1c cross-file, 3a reuse, 5 test-coverage,
-  and any personas the tier includes — these are whole-module by
-  construction). The fan-out is bounded by the per-run agent ceiling below — a
-  tiling that exceeds it refuses the run and asks for a narrower path. The
-  above-gate branch is untested extrapolation — neither experiment routed a
-  module through it — and a run that does says so in the report header;
-- nominates heavy-file candidates for the invariant-checklist triple —
-  untested in the experiments; expected to transfer by analogy from the
-  diff-based checklist, flagged as extrapolation in the report header.
-  Heaviness splits by decider: `plan-files` does the deterministic half —
-  nominating source files at or above the same 300-line floor `classifyHeavy`
-  uses (the legacy floor, because `classifyHeavy` (`lib/heavy.ts`) does not
-  lift: it triggers on diff metrics — ≥ 300 pre-lines AND rewrite ratio ≥ 0.4
-  or ≥ 800 changed lines — and an audit target is merged, unchanged code, so a
-  lifted `classifyHeavy` marks nothing heavy and the triple silently never
-  runs) — and the nomination is bounded so the plan-time agent cap can count
-  it: nominees are the top-K files by source line count, K being the largest
-  count whose three-agent triples fit what remains of the 40-agent ceiling
-  after the rest of the roster is counted (above the gate only — below it no
-  triple runs — and when nothing remains, no triple runs and the header says
-  so). Floor-crossing files beyond K are named in the report header, not
-  silently dropped. The orchestrator then makes the semantic call over the
-  nominees: which of them hold long-lived mutable state (class-level fields,
-  caches, timers, registries) or carry the checklist's other subject, an error
-  taxonomy — and that call may only shrink the nominee set, never grow it. A
-  deterministic subcommand cannot decide a semantic predicate, but a semantic
-  stage that could add agents would make the cap uncountable — the count that
-  decides the refusal would be evaluated before the stage that determines it —
-  so the plan-time count charges three agents per nominee, an upper bound the
-  shrink-only marking keeps honest, and the marking is disclosed in the report
-  header. As in `/review`'s roster, the triple runs only above the topology
-  gate: below it every dimension agent already reads every file whole, so
-  three more whole-file agents would add cost but no new view;
+- counts lines and applies the topology gate as a hard bound — two arms, in
+  `/review`'s shape (its gate is `src ≤ 500 AND total ≤ 3200`): source lines
+  ≤ a `plan-files` constant pinned at 9,000, and source-plus-test lines ≤
+  18,000; a module over either arm refuses at plan time and asks for a
+  narrower path, because v1 has no above-gate branch (deferred — see Open
+  questions). The source arm sits above the largest module the experiments
+  validated whole-file (8,516) — a fail-safe choice, not a calibrated value:
+  every module larger than the two measured ones is untested territory, and
+  the margin's job is to keep every size class with whole-file evidence
+  below the gate. The test arm exists because Agent 5's subject is the test
+  corpus, which the source count excludes — an 8k-source module with a
+  20k-line test tree would otherwise pass the gate while Agent 5 reads 28k
+  lines whole, and Agent 5 reads its corpus whole, so no bound short of
+  refusal limits that read. The 18,000 constant is an unmeasured first cut —
+  twice the validated source bound — and rides into the report header with
+  the other unexercised constants. A module under both arms stays below the
+  gate: dimension agents each read the whole file set — the only topology
+  either experiment exercised, validated at 7,638 and 8,516 lines;
 - detects event/lifecycle modules by emit/dispatch/subscribe call
   patterns and flags them for the 1c event-coverage brief; the detection
   outcome (detected / not detected, heuristic) rides into the report
@@ -227,65 +197,71 @@ so the report never frames execution as a read.
 
 ### Budget ceiling
 
+**Decisions** (rationale in the bullets below):
+
+- Every run prints a pre-launch estimate and starts only on user
+  confirmation — the same confirmation carries the execution consent.
+- Medium is capped at 60M tokens and 40 agents, enforced at plan time
+  against the priced part of the plan; the caps are advisory for the
+  unpriced rest.
+- Verification shards are not counted against the agent cap — the finding
+  count is unknowable at plan time.
+- An over-cap plan refuses and asks for a narrower path or a lower tier;
+  overshoot is made visible in the report header, not prevented.
+
 The default tier is the expensive one by construction — fan-out recall is
 the product — so it ships with a stated bound, not an open tab:
 
 - **Pre-launch estimate, confirmed.** `plan-files` prints what the run will
-  launch (roster by role, chunk count) and an expected token range — the two
-  measured arms came in at ~4–6M tokens per 1,000 module lines for the
-  8-dimension core (32.5M at 7,638 lines; ~46M at 8,516, derived from the
-  cross-file tracer's 16M at ~35% of its arm) — both arms measured on the
-  whole-file topology, so applying the same rate above the gate, where the
-  topology changes to chunk agents, is an extrapolation of the estimate
-  itself, flagged in the header alongside the topology — and the run starts
-  only on user confirmation, the same confirmation that carries the execution
-  consent above. Medium adds work no measurement covers (6a, the invariant
-  triple on heavy files, verification), so the confirmation names that delta
-  as unmeasured rather than pricing it into the range.
+  launch (roster by role) and an expected token range — the two measured
+  arms came in at ~4–6M tokens per 1,000 module lines for the 8-dimension
+  core (32.5M at 7,638 lines; ~46M at 8,516, derived from the cross-file
+  tracer's 16M at ~35% of its arm), both on the whole-file topology that is
+  now the only topology — and the run starts only on user confirmation, the
+  same confirmation that carries the execution consent above. Medium adds
+  work no measurement covers (6a, verification), so the confirmation names
+  that delta as unmeasured rather than pricing it into the range.
 - **Ceiling.** Medium is capped at 60M tokens and 40 agents, both enforced at
-  plan time — the agent count against the deterministic roster, charging three
-  agents per heavy nominee (the shrink-only semantic marking makes that an
-  upper bound), the token cap against the estimate range's top. That top is
-  not the run's conservative cost: the estimate prices only the measured
-  8-dimension core, while medium's added work — 6a, the invariant triple,
-  verification — is named as unmeasured at the confirmation and stays
-  unpriced, so the cap guards the priced part of the plan and is advisory for
-  the rest; with no runtime accounting, nothing enforces it mid-flight. The
-  overshoot is made visible rather than prevented — the report header records
-  the run's actual token consumption against the estimate, so the delta lands
-  in the record and feeds the next calibration — and a plan whose priced part
-  is over either cap refuses and asks for a narrower path or a lower tier.
+  plan time — the agent count against the deterministic roster, the token
+  cap against the estimate range's top. That top is not the run's
+  conservative cost: the estimate prices only the measured 8-dimension core,
+  while medium's added work — 6a, verification — is named as unmeasured at
+  the confirmation and stays unpriced, so the cap guards the priced part of
+  the plan and is advisory for the rest; with no runtime accounting, nothing
+  enforces it mid-flight. The agent cap carries the same carve-out: it
+  counts the deterministic roster, while verification shards scale with the
+  finding count, which is unknowable at plan time — so 40 is a roster bound,
+  not a run bound, and a run that finds much exceeds it. The overshoot is
+  made visible rather than prevented — the report header records the run's
+  actual token consumption against the estimate, so the delta lands in the
+  record and feeds the next calibration — and a plan whose priced part is
+  over either cap refuses and asks for a narrower path or a lower tier.
   Both constants are unmeasured first cuts — 60M is ~1.3× the larger measured
   arm — and they ride into the report header with the other
   unexercised-machinery flags. High is extrapolation: its estimate is the
   medium estimate multiplied by the round structure — a range from the
-  earliest dry stop (initial fan-out + 2 rounds) to the 5-round hard cap — and
-  the confirmation names that range, not the single-pass number; its total
-  ceiling waits for its first measurement, and the header says so.
+  earliest dry stop (initial fan-out + 2 rounds) to the 5-round hard cap —
+  and the confirmation names that range, not the single-pass number; its
+  total ceiling waits for its first measurement, and the header says so.
 
 The ceiling bounds the total; it does not pick which agents get cut — that
 stays the marginal-yield decision above.
 
-**The band these constants leave.** Below the gate the design is measured
-and cheap: the topology is the one both experiments exercised, the estimate
-is priced from them, and 60M is ~1.3× the larger measured arm — the cap
-binds nothing the measurements cover. Above the gate the reachable band is
-narrow: the token cap binds at ~10,000 module lines at the estimate range's
-top (60M / 6M per 1,000 lines), and the agent cap bounds the tiling at (40 -
-whole-module - 3 × nominees) × 400 source lines — 14,400 for medium's four
-whole-module agents at zero nominees, and 1,200 less per nominee. A module
-clearing the 9,000 gate is therefore auditable at medium only up to roughly
-10,000 lines, less as nominees accumulate; past that `/audit` refuses and
-asks for a narrower path. That refusal deliberately diverges from `/review`,
-which scales — Step 3B launches one agent per chunk with no ceiling — and
-the divergence gets its argument: the cap exists because the above-gate
-branch is unmeasured and this design has no runtime accounting, so an
-uncapped tiling would launch a budget the plan cannot quote, and refusal at
-plan time against named constants is the only enforcement this design has.
-The escape valve for a cohesive larger subsystem is auditing coherent
-sub-paths as separate bounded runs; widening the band waits on measuring the
-chunk topology's actual rate — until then the header flags every above-gate
-run as extrapolation.
+**What the constants leave.** Below the gate the design is measured and the
+caps do not bind: the topology is the one both experiments exercised, the
+estimate is priced from them, and the worst-case below-gate estimate —
+9,000 source lines at the range's 6M-per-1,000 top — lands at ~54M under
+the 60M cap, with the 40-agent cap similarly above the 9-agent roster. The
+caps stay as the named bound the deferred above-gate branch will enforce
+(Open questions), and as a backstop against the estimate erring — refusal
+at plan time against named constants is the only enforcement this design
+has. Above the gate v1 refuses. That refusal deliberately diverges from
+`/review`, which scales — Step 3B launches one agent per chunk with no
+ceiling — and the divergence keeps its argument: the above-gate topology is
+unmeasured and this design has no runtime accounting, so an uncapped tiling
+would launch a budget the plan cannot quote. The escape valve for a cohesive
+larger subsystem is auditing coherent sub-paths as separate bounded runs;
+widening past the gate waits on measuring the chunk topology's actual rate.
 
 ### Roster
 
@@ -317,7 +293,12 @@ clean" has no channel to land on.
 | 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                                                                                                                        |
 | 6a attacker persona  | undirected                              | untested; one undirected seat at every tier ≥ medium — see below                                                                                                     |
 | 6b/6c personas       | high effort only                        | untested in the experiments                                                                                                                                          |
-| invariant a/b/c      | heavy files only                        | unchanged                                                                                                                                                            |
+
+**Tier arithmetic:** medium launches the table's nine dimension agents (rows
+1a through 6a) plus verification shards; high adds the 6b/6c row. The
+invariant triple is deferred with the above-gate branch (Open questions),
+and the 40-agent cap counts the roster only — the ceiling's carve-out names
+what it does not count.
 
 **Why one undirected seat survives at medium.** Round 1 dropped all three
 personas on cost. Round 2 nearly produced the counterexample: the naive
@@ -364,6 +345,11 @@ the module's existing tests, is an open question below), 8
 (diff-specialized; a module-specialized variant is an open question, not
 v1).
 
+**Deferred with the above-gate branch:** the invariant-checklist triple and
+its heavy-file nomination — in `/review`'s roster the triple triggers only
+above the topology gate, and v1 refuses above it, so the triple has nothing
+to trigger on until the deferred branch returns.
+
 ### The pre-existing inversion and legacy severity heuristics
 
 `/review` rejects findings about pre-existing code; in a legacy audit
@@ -397,7 +383,7 @@ Measured overlap makes dedup mandatory: the same root cause arrives from
 up to four agents, at different abstractions (a splitter divergence, its
 security consequence, its missing test). Dedup must cluster by **root
 cause**, not by location — a naive path:line merge would have kept the
-experiment's three substitution findings separate. This is an LLM
+experiment's three compound-command findings separate. This is an LLM
 clustering step over the findings file, with each cluster keeping the
 strongest evidence (an end-to-end probe beats a unit probe beats a
 read-based claim). **Dedup must never downgrade severity:** the cluster's
@@ -461,11 +447,9 @@ brief must name both cases.
   agent errored) must be distinguishable from a full one, because "0 security
   findings" on a run whose security agent never completed is not "safe"
   (`/review` solves this with `unreviewedDimensions`). The header also carries
-  every flag this design attaches to unexercised machinery — above-gate
-  topology and the whole-file token rate applied under it, the invariant
-  triple's extrapolation, 6a's untested status, the event-module detection
-  outcome, the unmeasured ceiling constants (60M tokens / 40 agents), the
-  heavy-nomination bound and any floor-crossing files it excluded, the
+  every flag this design attaches to unexercised machinery — 6a's untested
+  status, the event-module detection outcome, the unmeasured ceiling
+  constants (60M tokens / 40 agents) and the low-tier size gate, the
   high-tier loop, twice-whiffed reverse-audit scopes, budget-bound walks,
   unmeasured tiers — since `/audit` has no verdict for them to cap.
 - **Local-only, verified not assumed:** the report must never land in version
@@ -496,28 +480,46 @@ brief must name both cases.
 
 ### Effort tiers
 
-- **low** — inline read by the orchestrator itself, angle rotation as in
-  `/review` low minus angle B (removed behaviour — merged code has no
-  deletions; the same absence that dropped agent 1b), with the surviving
-  angles re-anchored from diff to module by the Roster section's mechanical
-  change — B is the only outright removal — and the lifted three-angle floor
-  rebased to A and C: two angles at the floor, disclosed in the header, since
-  a silent shrink would land on exactly the small triage targets the floor
-  exists for; unverified findings, capped at 10 — `/review` low's cap, which
-  this tier mirrors in shape and standing. Unmeasured in the experiments —
-  both rounds ran only the naive and fan-out arms — and flagged as such in the
-  report header, like its siblings. For "is this module worth a real audit".
-  It shares the single-reader shape the naive-exclusion argument below
-  rejects, with the measurement against it (~7× recall behind fan-out), and
-  survives that argument only because it claims no audit standing: labeled
-  unverified, capped, sold as triage — a thin result reads as "run a real
-  audit before concluding anything", not as a verdict on the module.
+**Decisions** (rationale in the bullets below):
+
+- Three tiers: low (unverified triage, inline), medium (default: the
+  measured 8-dimension core + 6a + verification), high (medium + 6b/6c +
+  iterative reverse audit).
+- Low gets its own size gate (2,000 source lines, unmeasured); over it, low
+  refuses and points at medium.
+- The naive single-agent pass is not a tier.
+
+The tiers, in detail:
+
+- **low** — inline read by the orchestrator itself, behind its own size
+  gate: source lines ≤ 2,000, an unmeasured first cut — low reads the module
+  once per angle in a single context, and the gate keeps that accumulated
+  read within it; a module over the gate refuses low and points at medium;
+  the constant rides into the report header with the other unexercised
+  machinery. Angle rotation as in `/review` low minus angle B (removed
+  behaviour — merged code has no deletions; the same absence that dropped
+  agent 1b), with the surviving angles re-anchored from diff to module by
+  the Roster section's mechanical change — B is the only outright removal.
+  The D/E/F unlock ("one per 60 source lines", re-anchored from diff to
+  module) saturates on arrival at any realistic module size, so low
+  effectively always walks all five surviving angles, and the lifted
+  three-angle floor rebased to A and C — two angles at the floor, disclosed
+  in the header, since a silent shrink would land on exactly the small
+  triage targets the floor exists for — bites only on sub-60-line targets,
+  which Scope already routes to `/review <file-path>`. Unverified findings,
+  capped at 10 — `/review` low's cap, which this tier mirrors in shape and
+  standing. Unmeasured in the experiments — both rounds ran only the naive
+  and fan-out arms — and flagged as such in the report header, like its
+  siblings. For "is this module worth a real audit". It shares the
+  single-reader shape the naive-exclusion argument below rejects, with the
+  measurement against it (~7× recall behind fan-out), and survives that
+  argument only because it claims no audit standing: labeled unverified,
+  capped, sold as triage — a thin result reads as "run a real audit before
+  concluding anything", not as a verdict on the module.
 - **medium** (default) — the replicated 8-dimension core plus the 6a
-  blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a**, plus invariant
-  a/b/c on the files the heavy-marking above selects (above the topology
-  gate only, as in `/review`'s roster) + verification. Rounds 1-2
-  measured the 8-dimension core; 6a rests on the near-miss argument
-  above, not on experiment.
+  blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a**, plus verification.
+  Rounds 1-2 measured the 8-dimension core; 6a rests on the near-miss
+  argument above, not on experiment.
 - **high** — medium + the other two personas (6b/6c) + iterative reverse
   audit carrying the full `/review` Step 5 semantics, not just its stop
   rule. Each round fans out over the module with the cumulative confirmed
@@ -561,6 +563,17 @@ capped, sold as triage — as above.)
 
 ## Open questions
 
+- **The above-gate branch.** v1 refuses above the topology gate; the
+  machinery that would serve larger modules — chunk tiling at `plan-files`'
+  source-line analog of `/review`'s 400-line chunk constant, per-chunk
+  fan-out with folded-in dimension briefs (whole-module walks retained for
+  1c, 3a, 5, and the personas), heavy-file nomination (the 300-line floor,
+  the top-K bound, the shrink-only semantic marking) with its
+  invariant-checklist triple, and the agent-cap arithmetic that bounds the
+  tiling — is deferred until the chunk topology's actual token rate is
+  measured. Neither experiment routed a module through it, so all of it is
+  extrapolation; the sub-path escape valve in Budget ceiling is v1's only
+  route for larger modules until then.
 - **Module-specialized finders.** `/review`'s Agent 8 writes a
   domain-specific brief per diff; whether a per-module equivalent (cron
   schedulers, protocol state machines) earns its cost is untested.
@@ -583,16 +596,17 @@ capped, sold as triage — as above.)
 
 ## Verification
 
-- Unit: `plan-files` tiling/classification/topology gates (both arms) and its
-  heavy-candidate nomination (the deterministic 300-line floor and the top-K
-  bound; the orchestrator's semantic marking is model-driven, not
-  unit-testable); roster selection per tier; the dedup clusterer's merge
-  behavior on synthetic overlapping findings — including the max-severity rule
-  (a cluster whose mildest copy is a Suggestion must come out at its Critical
-  member's severity, with both scenarios intact).
+- Unit: `plan-files` classification and topology gates (both arms — both
+  are refusal bounds in v1); roster selection per tier; the dedup
+  clusterer's merge behavior on synthetic overlapping findings — including
+  the max-severity rule (a cluster whose mildest copy is a Suggestion must
+  come out at its Critical member's severity, with both scenarios intact).
 - ~~Integration: second-module replication~~ — **done** (hooks module,
   2026-08-03; margin reproduced at ~7× against a pre-declared 3×
   criterion, zero self-adjudicated false positives both arms).
+- Docs: a user-facing page for `/audit` under `docs/users/features/`
+  (`legacy-audit.md`, the analog of `/review`'s `code-review.md`) — named
+  here so the ship criteria include it.
 - Dogfood: audit a module whose maintainers can confirm or reject the
   Criticals — the external check the self-adjudicated precision record
   rests on — as PR #6457's confirmed-defect set calibrated `/review`.
