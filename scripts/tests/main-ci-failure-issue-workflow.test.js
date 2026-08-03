@@ -202,6 +202,38 @@ describe('main CI failure issue workflow', () => {
     );
   });
 
+  it('files a new issue when a non-eligible failure recurs on a closed issue', () => {
+    // --state all dedupe can match a CLOSED bot issue; the eligible branch
+    // comments on it, but a closed non-eligible issue must not be silently
+    // body-edited (GitHub sends no notification for body edits, so main
+    // would stay red with no open issue) — drop the match and file a new
+    // issue instead. Safe: non-eligible issues carry no approval labels.
+    const closedCheck = workflow.indexOf(
+      'if [[ -n "${EXISTING_ISSUE}" && "${AUTOFIX_ELIGIBLE}" != \'true\' ]]; then',
+    );
+    const notEligible = workflow.indexOf(
+      'if [[ "${AUTOFIX_ELIGIBLE}" != \'true\' ]]; then',
+    );
+    expect(closedCheck).toBeGreaterThan(-1);
+    expect(notEligible).toBeGreaterThan(closedCheck);
+    expect(workflow).toContain(
+      'existing_issue_state="$(gh issue view "${EXISTING_ISSUE}"',
+    );
+    expect(workflow).toContain('--json state --jq \'.state // ""\'');
+    expect(workflow).toContain(
+      'if [[ "${existing_issue_state}" == \'CLOSED\' ]]; then',
+    );
+    expect(workflow).toContain(
+      'is closed; filing a new issue for this recurrence.',
+    );
+    expect(workflow).toContain("EXISTING_ISSUE=''");
+    // The state read sits before the reuse/update block so the dropped match
+    // falls through to issue creation.
+    expect(closedCheck).toBeLessThan(
+      workflow.indexOf('leaving its routing unchanged.'),
+    );
+  });
+
   it('deduplicates by failing test and includes run context', () => {
     // The dedupe key is the failing test, not the commit: a standing red used to
     // open one issue per merge. The markers themselves live in the helper.
@@ -311,6 +343,12 @@ describe('main CI failure issue workflow', () => {
     );
     expect(writeStep.run.indexOf('gh api user')).toBeLessThan(
       writeStep.run.indexOf('gh issue'),
+    );
+    // Pin every write verb family: on the eligible existing-issue path the
+    // first runtime write is `gh label create`, which the gh-issue-only pin
+    // above never covers.
+    expect(writeStep.run.indexOf('gh api user')).toBeLessThan(
+      writeStep.run.indexOf('gh label'),
     );
   });
 

@@ -68,6 +68,12 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
     /expected_report="\$\{5:\?expected report path is required\}"/,
   );
   assert.match(wrapper, /vitest report path disagreement/);
+  // Anchor existence independently: an indexOf ordering check alone stays
+  // green (-1 < anything) when the assignment is deleted.
+  assert.match(
+    wrapper,
+    /report="\$\{home\}\/reports\/\$\{report_name\}\/report\.json"/,
+  );
   assert.ok(
     wrapper.indexOf('report="${home}/reports/${report_name}/report.json"') <
       wrapper.indexOf('vitest report path disagreement'),

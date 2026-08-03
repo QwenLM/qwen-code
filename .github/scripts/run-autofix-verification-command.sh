@@ -3,6 +3,10 @@ set -euo pipefail
 
 workspace="${1:?workspace is required}"
 shift
+if [[ $# -eq 0 ]]; then
+  echo 'run-autofix-verification-command.sh: no command provided' >&2
+  exit 1
+fi
 user='qwen-autofix-verify'
 home='/tmp/qwen-autofix-verify-home'
 uid="$(id -u "${user}")"

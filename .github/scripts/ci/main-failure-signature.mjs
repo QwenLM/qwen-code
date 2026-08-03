@@ -301,6 +301,7 @@ function occurrenceLine({ sha, runUrl, runId, at }) {
 const TRIMMED_NOTE = '_Older recurrences trimmed._';
 const RECURRENCE_HEADING = '## Recurrences';
 const ALSO_FAILING_HEADING = '## Also failing';
+const FAILING_TESTS_HEADING = '## Failing tests';
 // The "## Also failing" list is machine-owned and rebuilt from the current
 // failure set on every merge, so the previous one is stripped first. The block
 // is the heading plus its contiguous bullet list — nothing else is ever written
@@ -416,7 +417,7 @@ export function renderIssueBody({
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
       '',
-      '## Failing tests',
+      FAILING_TESTS_HEADING,
       '',
       ...testLines,
       '',
@@ -449,18 +450,27 @@ export function renderIssueBody({
   // disappear instead of being listed forever.
   const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
 
+  // Machine rebuilds of eligible issues strip the body down to markers and
+  // occurrence lines, losing the create-time failing-tests section. Rebuild
+  // it from the current failure set so the list stays authoritative instead
+  // of being re-emitted under the "Also failing" heading's inverted meaning.
+  const baseProse =
+    autofixEligible && !strippedProse.includes(FAILING_TESTS_HEADING)
+      ? `${strippedProse}\n\n${FAILING_TESTS_HEADING}\n\n${testLines.join('\n')}`
+      : strippedProse;
+
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
   const missingMarkers = bodyMarkers.filter(
-    (marker) => !strippedProse.includes(marker),
+    (marker) => !baseProse.includes(marker),
   );
   const missingTests = testLines.filter(
-    (line) => line.startsWith('- `') && !strippedProse.includes(line),
+    (line) => line.startsWith('- `') && !baseProse.includes(line),
   );
   const notedProse =
-    autofixEligible && !strippedProse.includes(AUTOFIX_REDACTION_NOTE)
-      ? `${strippedProse}\n\n${AUTOFIX_REDACTION_NOTE}`
-      : strippedProse;
+    autofixEligible && !baseProse.includes(AUTOFIX_REDACTION_NOTE)
+      ? `${baseProse}\n\n${AUTOFIX_REDACTION_NOTE}`
+      : baseProse;
   const withMarkers = missingMarkers.length
     ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${notedProse}`
     : notedProse;
@@ -528,8 +538,10 @@ function publicMachineMarkers(body, repository) {
     .split('\n')
     .find((line) => signaturePattern.test(line));
   const { lines } = splitOccurrenceBlock(text);
+  // The timestamp slot is pinned to the shape occurrenceLine emits: a loose
+  // `.+` would carry forged markdown through every machine rebuild.
   const occurrencePattern = new RegExp(
-    `^- \x60[0-9a-f]{12}\x60 \u00b7 .+ \u00b7 \\[run \\d+\\]\\(https://github\\.com/${escapeRegExp(repository)}/actions/runs/\\d+\\)$`,
+    `^- \x60[0-9a-f]{12}\x60 \u00b7 \\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z \u00b7 \\[run \\d+\\]\\(https://github\\.com/${escapeRegExp(repository)}/actions/runs/\\d+\\)$`,
   );
   const validLines = lines.filter((line) => occurrencePattern.test(line));
   const parts = [];

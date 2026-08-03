@@ -250,21 +250,21 @@ Implement the selected issue in the checked-out repository:
    then construct the closest focused regression test or surrogate.
 4. Make the minimal root-cause change. The independent verification gate
    rejects candidate commits that touch tests, fixtures, mocks, snapshots,
-   scripts, CI files, or any other protected verification input (see
-   `isProtectedVerificationPath` in
+   scripts, CI files, settings sources (`packages/cli/src/config/settings.ts`,
+   `settingsSchema.ts`), the generated `settings.schema.json`, or any other
+   protected verification input (see `isProtectedVerificationPath` in
    `.github/scripts/validate-autofix-verification-outputs.mjs`), so the commit
    must be production source only: scratch tests for local verification are
-   fine but must stay uncommitted, and a fix that requires committed test
-   changes must write `<workdir>/failure.md` and stop instead.
+   fine but must stay uncommitted, and a fix that requires committed changes
+   to any protected verification input must write `<workdir>/failure.md` and
+   stop instead.
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest
    tests for touched packages, and integration tests after `npm run bundle`
    when the touched behavior is only exercised through the bundled CLI or
-   integration harness. If the change touched a settings source, also run
-   `npm run generate:settings-schema` and stage the regenerated schema (see the
-   generated-artifact rule in GitHub Actions Rules). Keep fixing and rerunning runnable
-   checks until they pass. If a required runnable check remains failing, write
+   integration harness. Keep fixing and rerunning runnable checks until they
+   pass. If a required runnable check remains failing, write
    `<workdir>/failure.md` and stop.
 7. Re-read the full diff as a skeptical reviewer.
 8. Ensure `git status --short` shows only intended files, then create one

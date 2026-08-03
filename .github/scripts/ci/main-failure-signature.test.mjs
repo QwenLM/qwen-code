@@ -794,6 +794,10 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(!recurrence.body.includes('0123456789abcdef'));
   assert.ok(recurrence.body.includes('[run 301]'));
   assert.ok(recurrence.body.includes('[run 302]'));
+  // The rebuild re-emits the stripped body with a rebuilt failing-tests
+  // section instead of re-listing the original tests under "## Also failing".
+  assert.ok(recurrence.body.includes('## Failing tests'));
+  assert.ok(!recurrence.body.includes('## Also failing'));
   // The redaction note is present on creation and survives the machine
   // rebuild, so humans always see where the exact failures are visible and
   // that body prose is discarded on the next recurrence.
@@ -802,11 +806,13 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(recurrence.body.includes('keep investigative notes in'));
 
   // An occurrence line pointing away from this repository's runs is not
-  // trusted machine content; the rebuild must drop it.
+  // trusted machine content; the rebuild must drop it — and so must a line
+  // whose timestamp slot carries attacker markdown (a loose middle field
+  // would re-emit it on every rebuild).
   const forgedPath = join(dir, 'forged.md');
   writeFileSync(
     forgedPath,
-    `${planned.body}- \`ffffffffffff\` · 2026-07-28T00:00:00Z · [run 999](https://evil.example/runs/999)\n`,
+    `${planned.body}- \`ffffffffffff\` · 2026-07-28T00:00:00Z · [run 999](https://evil.example/runs/999)\n- \`eeeeeeeeeeee\` · [forged](https://evil.example/img) · [run 998](https://github.com/QwenLM/qwen-code/actions/runs/998)\n`,
   );
   output = '';
   process.stdout.write = (chunk) => {
@@ -838,6 +844,7 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   }
   const forged = JSON.parse(output);
   assert.ok(!forged.body.includes('[run 999]'));
+  assert.ok(!forged.body.includes('[run 998]'));
   assert.ok(!forged.body.includes('evil.example'));
   assert.ok(forged.body.includes('[run 301]'));
   assert.ok(forged.body.includes('[run 303]'));
@@ -932,4 +939,66 @@ test('runCli plan --existing merges recorded recurrences from the file', () => {
   assert.ok(planned.body.includes('[run 301]'));
   assert.ok(planned.body.includes('[run 302]'));
   assert.equal(planned.title, analysis.title);
+});
+
+test('caps targeted E2E cases at five and marks the set incomplete', () => {
+  const logs = [];
+  const jobs = [];
+  for (let index = 0; index < 6; index += 1) {
+    const log = `2026-07-27T02:37:25.9531933Z FAIL cli/qwen-serve-client-mcp.test.ts > suite > case ${index}`;
+    logs.push(log);
+    jobs.push({
+      name: 'E2E Test (Linux) - sandbox:none - shard 1/3',
+      log,
+    });
+  }
+  const analysis = analyzeLogs('E2E Tests', logs, jobs);
+  assert.equal(analysis.targetedE2e.totalCases, 6);
+  assert.equal(analysis.targetedE2e.cases.length, 5);
+  assert.equal(analysis.targetedE2e.eligible, false);
+  assert.equal(analysis.targetedE2e.complete, false);
+  assert.ok(
+    analysis.targetedE2e.reasons.some((reason) =>
+      reason.includes('too many environment-specific failures: 6 > 5'),
+    ),
+  );
+  assert.equal(isAutofixEligible(analysis), false);
+});
+
+test('rebuilds the eligible failing-tests section on recurrence', () => {
+  const analysis = analyzeLogs('E2E Tests', [TRUSTED_VITEST_LOG], [
+    {
+      name: 'E2E Test (Linux) - sandbox:none - shard 1/3',
+      log: TRUSTED_VITEST_LOG,
+    },
+  ]);
+  // publicIssueAnalysis redacts log-sourced names to case keys before the
+  // eligible body is rendered; publicMachineMarkers then strips a recurrence
+  // down to the signature, markers and occurrence lines.
+  const redacted = {
+    ...analysis,
+    tests: analysis.tests.map((testEntry) => ({
+      ...testEntry,
+      id: `case ${testEntry.key}`,
+    })),
+  };
+  const stripped = [
+    `<!-- qwen-main-ci-failure-sig:${analysis.signature} -->`,
+    ...analysis.markers.map((marker) => `<!-- ${marker} -->`),
+    '',
+    OCCURRENCE_MARKER,
+    `- \`${OCCURRENCE.sha.slice(0, 12)}\` · ${OCCURRENCE.at} · [run ${OCCURRENCE.runId}](${OCCURRENCE.runUrl})`,
+    '',
+  ].join('\n');
+  const merged = renderIssueBody({
+    analysis: redacted,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: stripped,
+    autofixEligible: true,
+  });
+  assert.ok(merged.includes('## Failing tests'));
+  assert.ok(
+    merged.includes(`- \`case ${analysis.tests[0].key}\``),
+  );
+  assert.ok(!merged.includes('## Also failing'));
 });

@@ -21,6 +21,7 @@ import {
 import {
   MAX_CASES,
   TRUSTED_EXTERNAL_PROCESS_TESTS,
+  VERIFICATION_REPORT_ROOT,
   escapeRegex,
   expectedFullName,
   isProtectedVerificationPath,
@@ -433,6 +434,7 @@ test('rejects protected paths containing Git quoting characters', () => {
 
 function withRunMocks(workspace, sourceSha, run) {
   const home = mkdtempSync(join(tmpdir(), 'targeted-e2e-run-test-'));
+  const reportRoot = mkdtempSync(join(tmpdir(), 'targeted-e2e-reports-'));
   const log = join(home, 'calls.log');
   const wrappers = join(home, 'wrappers');
   mkdirSync(wrappers);
@@ -447,7 +449,7 @@ function withRunMocks(workspace, sourceSha, run) {
   const outputValidator = join(wrappers, 'output-validator.mjs');
   writeFileSync(
     commandWrapper,
-    `#!/usr/bin/env bash\nprintf 'command %s\\n' "$*" >> ${JSON.stringify(log)}\n`,
+    `#!/usr/bin/env bash\nprintf 'command %s\\n' "$*" >> ${JSON.stringify(log)}\nif [[ -n "\${AUTOFIX_SENTINEL_SECRET:-}" ]]; then printf 'leaked-secret\\n' >> ${JSON.stringify(log)}; fi\n`,
   );
   writeFileSync(
     worktreeHelper,
@@ -456,8 +458,8 @@ function withRunMocks(workspace, sourceSha, run) {
       'set -euo pipefail',
       `printf 'worktree %s\\n' "$*" >> ${JSON.stringify(log)}`,
       'case "${2:-}" in',
-      '  report) mkdir -p "/tmp/qwen-autofix-verify-home/reports/${3}";;',
-      '  remove-report) rm -rf "/tmp/qwen-autofix-verify-home/reports/${3}";;',
+      `  report) mkdir -p "${reportRoot}/\${3}";;`,
+      `  remove-report) rm -rf "${reportRoot}/\${3}";;`,
       'esac',
       '',
     ].join('\n'),
@@ -471,7 +473,7 @@ function withRunMocks(workspace, sourceSha, run) {
       'if [[ "${VITEST_WRAPPER_FAIL:-}" == "true" ]]; then',
       '  exit 2',
       'fi',
-      'report_dir="/tmp/qwen-autofix-verify-home/reports/${2}"',
+      `report_dir="${reportRoot}/\${2}"`,
       'mkdir -p "${report_dir}"',
       'cat > "${report_dir}/report.json" <<EOF',
       '{',
@@ -499,6 +501,7 @@ function withRunMocks(workspace, sourceSha, run) {
   try {
     return run({
       home,
+      reportRoot,
       log,
       metadataPath,
       reportPath: join(home, 'report.md'),
@@ -509,6 +512,7 @@ function withRunMocks(workspace, sourceSha, run) {
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
+    rmSync(reportRoot, { recursive: true, force: true });
   }
 }
 
@@ -529,22 +533,36 @@ test('runs targeted E2E cases through the trusted wrappers end to end', () => {
     commit(workspace, 'production fix');
 
     withRunMocks(workspace, sourceSha, (mocks) => {
-      runTargetedE2e({
-        metadataPath: mocks.metadataPath,
-        reportPath: mocks.reportPath,
-        base: sourceSha,
-        workspace,
-        commandWrapper: mocks.commandWrapper,
-        vitestWrapper: mocks.vitestWrapper,
-        worktreeHelper: mocks.worktreeHelper,
-        outputValidator: mocks.outputValidator,
-      });
+      assert.equal(
+        VERIFICATION_REPORT_ROOT,
+        '/tmp/qwen-autofix-verify-home/reports',
+      );
+      process.env['AUTOFIX_SENTINEL_SECRET'] = 'sentinel-secret';
+      try {
+        runTargetedE2e({
+          metadataPath: mocks.metadataPath,
+          reportPath: mocks.reportPath,
+          base: sourceSha,
+          workspace,
+          reportRoot: mocks.reportRoot,
+          commandWrapper: mocks.commandWrapper,
+          vitestWrapper: mocks.vitestWrapper,
+          worktreeHelper: mocks.worktreeHelper,
+          outputValidator: mocks.outputValidator,
+        });
+      } finally {
+        delete process.env['AUTOFIX_SENTINEL_SECRET'];
+      }
       assert.equal(
         readFileSync(mocks.reportPath, 'utf8'),
         `# Targeted E2E verification\n\n- ${testCase.id} — passed (${testCase.sandbox})\n`,
       );
+      const calls = readFileSync(mocks.log, 'utf8');
+      // The candidate build commands run with verificationEnv()'s scrubbed
+      // environment; the wrapper logs a marker if the sentinel survives.
+      assert.ok(!calls.includes('leaked-secret'));
       assert.deepEqual(
-        readFileSync(mocks.log, 'utf8').split('\n').filter(Boolean),
+        calls.split('\n').filter(Boolean),
         [
           `command ${workspace} npm ci --ignore-scripts --prefer-offline --no-audit --progress=false`,
           `command ${workspace} npx --no-install patch-package`,
@@ -555,16 +573,56 @@ test('runs targeted E2E cases through the trusted wrappers end to end', () => {
           'validator',
           `worktree ${workspace} finalize`,
           `worktree ${workspace} report case-0`,
-          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$ /tmp/qwen-autofix-verify-home/reports/case-0/report.json`,
+          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$ ${join(mocks.reportRoot, 'case-0', 'report.json')}`,
           `worktree ${workspace} remove-report case-0`,
           `worktree ${workspace} cleanup`,
           'validator',
         ],
       );
-      assert.equal(
-        existsSync('/tmp/qwen-autofix-verify-home/reports/case-0'),
-        false,
+      assert.equal(existsSync(join(mocks.reportRoot, 'case-0')), false);
+    });
+  });
+});
+
+test('aborts targeted E2E before any build when the candidate touches protected inputs', () => {
+  withWorkspace((workspace) => {
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v1',
+    );
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+    writeFileSync(
+      join(
+        workspace,
+        'integration-tests',
+        'cli',
+        'qwen-serve-client-mcp.test.ts',
+      ),
+      'weakened',
+    );
+    commit(workspace, 'weaken test');
+
+    withRunMocks(workspace, sourceSha, (mocks) => {
+      assert.throws(
+        () =>
+          runTargetedE2e({
+            metadataPath: mocks.metadataPath,
+            reportPath: mocks.reportPath,
+            base: sourceSha,
+            workspace,
+            reportRoot: mocks.reportRoot,
+            commandWrapper: mocks.commandWrapper,
+            vitestWrapper: mocks.vitestWrapper,
+            worktreeHelper: mocks.worktreeHelper,
+            outputValidator: mocks.outputValidator,
+          }),
+        /Candidate changes trusted targeted E2E inputs/,
       );
+      // The scope gate aborts before any wrapper runs.
+      assert.equal(existsSync(mocks.log), false);
     });
   });
 });
@@ -590,6 +648,7 @@ test('removes the sealed report directory when a targeted case fails', () => {
               reportPath: mocks.reportPath,
               base: sourceSha,
               workspace,
+              reportRoot: mocks.reportRoot,
               commandWrapper: mocks.commandWrapper,
               vitestWrapper: mocks.vitestWrapper,
               worktreeHelper: mocks.worktreeHelper,
@@ -610,10 +669,7 @@ test('removes the sealed report directory when a targeted case fails', () => {
         calls,
         new RegExp(`worktree ${workspace} remove-report case-0`),
       );
-      assert.equal(
-        existsSync('/tmp/qwen-autofix-verify-home/reports/case-0'),
-        false,
-      );
+      assert.equal(existsSync(join(mocks.reportRoot, 'case-0')), false);
     });
   });
 });
@@ -704,6 +760,41 @@ test('rejects incomplete and unsupported targeted metadata', () => {
         ),
       /case set is incomplete/,
     );
+    assert.throws(
+      () =>
+        validateMetadata(
+          {
+            ...metadata(testCase),
+            verification: {
+              ...metadata(testCase).verification,
+              totalCases: 0,
+              cases: [],
+            },
+          },
+          workspace,
+        ),
+      /No targeted E2E cases were provided/,
+    );
+    const sixCases = Array.from({ length: 6 }, (_, index) => ({
+      ...testCase,
+      name: `suite > case ${index}`,
+      id: `cli/qwen-serve-client-mcp.test.ts > suite > case ${index}`,
+    }));
+    assert.throws(
+      () =>
+        validateMetadata(
+          {
+            ...metadata(testCase),
+            verification: {
+              ...metadata(testCase).verification,
+              totalCases: 6,
+              cases: sixCases,
+            },
+          },
+          workspace,
+        ),
+      /exceeds the limit/,
+    );
   });
 });
 
@@ -721,6 +812,15 @@ test('requires exactly one selected passing assertion in the requested file', ()
       { success: true, testResults: [result] },
       validatedCase,
       workspace,
+    );
+    assert.throws(
+      () =>
+        validateVitestReport(
+          { success: false, testResults: [result] },
+          validatedCase,
+          workspace,
+        ),
+      /Vitest did not report success/,
     );
     assert.throws(
       () =>

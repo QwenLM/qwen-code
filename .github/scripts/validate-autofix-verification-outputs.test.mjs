@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -154,6 +155,43 @@ test('handles ignored output listings larger than the default child process buff
     }
 
     assert.deepEqual(listUnexpectedVerificationOutputs(workspace), []);
+  });
+});
+
+test('fails closed on unsafe --base values before they reach git diff', () => {
+  withRepository((workspace) => {
+    const script = fileURLToPath(
+      new URL('./validate-autofix-verification-outputs.mjs', import.meta.url),
+    );
+    const run = (...args) =>
+      spawnSync(process.execPath, [script, ...args], {
+        cwd: workspace,
+        encoding: 'utf8',
+      });
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: workspace,
+      encoding: 'utf8',
+    }).trim();
+
+    assert.equal(run('--base', base).status, 0);
+    // A single-dash value used to be absorbed by git diff (e.g. -Sfoo as a
+    // sticky pickaxe value), silently disabling the protected-path gate.
+    const dashValue = run('--base', '-Sfoo');
+    assert.notEqual(dashValue.status, 0);
+    assert.match(dashValue.stderr, /--base requires a Git revision/);
+    const garbage = run('--base', 'not-a-sha');
+    assert.notEqual(garbage.status, 0);
+    assert.match(
+      garbage.stderr,
+      /--base must be a 40-hexadecimal commit SHA/,
+    );
+    // The inline form used to miss the guard and run the wrong check.
+    const inline = run(`--base=${base}`);
+    assert.notEqual(inline.status, 0);
+    assert.match(
+      inline.stderr,
+      /--base must be passed as a separate argument/,
+    );
   });
 });
 

@@ -156,7 +156,10 @@ test('chooses the latest trusted source recurrence, not the newest artifact', ()
         '#!/usr/bin/env bash',
         `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":30,"name":"autofix-e2e-failure-123-malformed","expired":false,"workflow_run":{"id":730}},{"id":20,"name":"autofix-e2e-failure-123-456-2-720-1","expired":false,"workflow_run":{"id":720}},{"id":10,"name":"autofix-e2e-failure-123-457-1-710-1","expired":false,"workflow_run":{"id":710}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":730},{"id":720},{"id":710}]}\';;',
+        '  *"actions/runs/730/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":30,"name":"autofix-e2e-failure-123-malformed","expired":false,"workflow_run":{"id":730}}]}\';;',
+        '  *"actions/runs/720/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":20,"name":"autofix-e2e-failure-123-456-2-720-1","expired":false,"workflow_run":{"id":720}}]}\';;',
+        '  *"actions/runs/710/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-457-1-710-1","expired":false,"workflow_run":{"id":710}}]}\';;',
         '  *"actions/runs/730"*) printf \'%s\' \'{"path":".github/workflows/attacker.yml","event":"workflow_run"}\';;',
         '  *"actions/runs/720"*|*"actions/runs/710"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/20/zip"*) printf \'older-zip\';;',
@@ -226,7 +229,9 @@ test('uses immutable producer identity to break equal-source ties', () => {
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-701-1","expired":false,"workflow_run":{"id":701}},{"id":20,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":701},{"id":700}]}\';;',
+        '  *"actions/runs/701/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-701-1","expired":false,"workflow_run":{"id":701}}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":20,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*|*"actions/runs/701"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/10/zip"*) printf \'older-zip\';;',
         '  *"actions/artifacts/20/zip"*) printf \'newer-zip\';;',
@@ -280,7 +285,8 @@ test('rejects malformed artifact and producer run identifiers', () => {
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":"../../escape","name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":"../../escape","name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *) exit 1;;',
         'esac',
@@ -321,7 +327,8 @@ test('loads only metadata whose artifact producer and source run validate', () =
         '#!/usr/bin/env bash',
         `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"created_at":"2026-07-31T00:00:00Z","workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"created_at":"2026-07-31T00:00:00Z","workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
         '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"failure","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\';;',
@@ -377,7 +384,8 @@ test('rejects a source run whose live SHA no longer matches the metadata', () =>
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
         '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"failure","head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\';;',
@@ -431,7 +439,8 @@ test('rejects a source run whose live conclusion is no longer failure', () => {
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
         '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"success","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\';;',
@@ -489,7 +498,8 @@ test('rejects zip metadata naming a different source run than the artifact name'
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
         '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
         '  *) exit 1;;',
@@ -539,7 +549,8 @@ test('rejects an artifact whose real producer run differs from its name', () => 
       [
         '#!/usr/bin/env bash',
         'case "$*" in',
-        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":701}}]}]\';;',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":701}]}\';;',
+        '  *"actions/runs/701/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":701}}]}\';;',
         '  *"actions/runs/701"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
         '  *) exit 1;;',
         'esac',
@@ -556,6 +567,80 @@ test('rejects an artifact whose real producer run differs from its name', () => 
           output,
         }),
       /Artifact producer run ID mismatch/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects expired artifacts so only live ones are loadable', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-expired-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":true,"workflow_run":{"id":700}}]}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /No live artifact with prefix/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects an artifact whose producer attempt is not the trusted workflow', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-attempt-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf \'%s\' \'{"workflow_runs":[{"id":700}]}\';;',
+        '  *"actions/runs/700/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}\';;',
+        '  *"actions/runs/700/attempts/1"*) printf \'%s\' \'{"path":".github/workflows/attacker.yml","event":"workflow_run"}\';;',
+        '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /unexpected workflow/,
     );
   } finally {
     process.env['PATH'] = originalPath;

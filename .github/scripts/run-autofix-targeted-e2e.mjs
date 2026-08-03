@@ -19,6 +19,7 @@ import {
 export { isProtectedVerificationPath };
 
 export const MAX_CASES = 5;
+export const VERIFICATION_REPORT_ROOT = '/tmp/qwen-autofix-verify-home/reports';
 const CASE_TIMEOUT_MS = 20 * 60 * 1000;
 export const TRUSTED_EXTERNAL_PROCESS_TESTS = new Set([
   'cli/qwen-serve-client-mcp.test.ts',
@@ -252,6 +253,7 @@ export function runTargetedE2e({
   reportPath,
   base,
   workspace = process.cwd(),
+  reportRoot = VERIFICATION_REPORT_ROOT,
   commandWrapper,
   vitestWrapper,
   worktreeHelper,
@@ -307,7 +309,7 @@ export function runTargetedE2e({
           cwd: workspace,
         });
       }
-      const jsonPath = `/tmp/qwen-autofix-verify-home/reports/${reportName}/report.json`;
+      const jsonPath = join(reportRoot, reportName, 'report.json');
       const pattern = `^${escapeRegex(testCase.fullName)}$`;
       run(
         vitestWrapper,

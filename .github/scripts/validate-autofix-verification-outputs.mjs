@@ -182,11 +182,17 @@ export function listUnexpectedVerificationOutputs(workspace = process.cwd()) {
 }
 
 function main() {
+  if (process.argv.some((arg) => arg.startsWith('--base='))) {
+    throw new Error('--base must be passed as a separate argument');
+  }
   const baseArgIndex = process.argv.indexOf('--base');
   if (baseArgIndex !== -1) {
     const base = process.argv[baseArgIndex + 1];
-    if (!base || base.startsWith('--')) {
+    if (!base || base.startsWith('-')) {
       throw new Error('--base requires a Git revision');
+    }
+    if (!/^[0-9a-f]{40}$/.test(base)) {
+      throw new Error('--base must be a 40-hexadecimal commit SHA');
     }
     const protectedChanges = listProtectedCandidateChanges(base);
     if (protectedChanges.length) {

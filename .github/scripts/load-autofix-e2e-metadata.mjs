@@ -30,14 +30,11 @@ function ghJson(endpoint) {
   );
 }
 
-function ghJsonPages(endpoint) {
-  return JSON.parse(
-    execFileSync('gh', ['api', endpoint, '--paginate', '--slurp'], {
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    }),
-  );
-}
+// The producer workflow is the only trusted uploader of targeted E2E
+// metadata; scoping enumeration to its runs keeps the working set bounded
+// instead of slurping the repository's entire artifact listing (a
+// repo-wide --paginate --slurp grows unbounded and exhausts maxBuffer).
+const PRODUCER_WORKFLOW_FILE = 'main-ci-failure-issue.yml';
 
 export function validateMetadata(metadata, { issue, repository }) {
   if (metadata?.schemaVersion !== 1) fail('Unsupported E2E metadata schema');
@@ -125,17 +122,31 @@ function readArtifactMetadata({ artifact, issue, repository, directory }) {
   return validateMetadata(JSON.parse(metadataText), { issue, repository });
 }
 
+function listProducerArtifacts({ repository, artifactPrefix }) {
+  const artifacts = [];
+  for (let page = 1; ; page += 1) {
+    const runs = ghJson(
+      `repos/${repository}/actions/workflows/${PRODUCER_WORKFLOW_FILE}/runs?per_page=100&page=${page}`,
+    );
+    const workflowRuns = runs?.workflow_runs ?? [];
+    for (const run of workflowRuns) {
+      const runId = positiveInteger(run?.id, 'producer run ID');
+      const listing = ghJson(
+        `repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`,
+      );
+      for (const artifact of listing?.artifacts ?? []) {
+        if (artifact.name?.startsWith(artifactPrefix) && !artifact.expired)
+          artifacts.push(artifact);
+      }
+    }
+    if (workflowRuns.length < 100) break;
+  }
+  return artifacts;
+}
+
 export function loadMetadata({ issue, repository, output }) {
   const artifactPrefix = `autofix-e2e-failure-${issue}-`;
-  const pages = ghJsonPages(
-    `repos/${repository}/actions/artifacts?per_page=100`,
-  );
-  const artifacts = pages
-    .flatMap((page) => page.artifacts ?? [])
-    .filter(
-      (artifact) =>
-        artifact.name?.startsWith(artifactPrefix) && !artifact.expired,
-    );
+  const artifacts = listProducerArtifacts({ repository, artifactPrefix });
   if (!artifacts.length) fail(`No live artifact with prefix ${artifactPrefix}`);
 
   const directory = mkdtempSync(join(tmpdir(), 'autofix-e2e-metadata-'));

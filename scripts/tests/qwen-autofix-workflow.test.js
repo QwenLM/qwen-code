@@ -265,8 +265,12 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '((.assignees // []) | length == 0 or any(.login != $bot)) or',
     );
-    expect(workflow).toContain(
-      'select(((.assignees // []) | length > 0 and all(.login == $bot)) and',
+    // Pin the conjoined select on whitespace-normalized step text: a bare
+    // substring check stopped at the first `and` left the second conjunct's
+    // binding and polarity unpinned (an inverted select matches nothing,
+    // silently returning zero candidates on every cron tick).
+    expect(findCandidateIssuesStep.replace(/\s+/g, ' ')).toContain(
+      'select(((.assignees // []) | length > 0 and all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0))',
     );
     // Collision-free negative pin: reintroducing no:assignee anywhere in the
     // excludes silently drops unassigned approved issues from every scan.
@@ -1813,13 +1817,20 @@ describe('qwen-autofix workflow', () => {
     expect(protect).toContain('"${workspace}/.integration-tests"');
     expect(protect).toContain('dependencies)');
     expect(protect).toContain('finalize)');
-    expect(protect).toContain('report)');
+    // Anchored uniquely: toContain('report)') is also satisfied by the
+    // remove-report) branch, so deleting the report phase would pass silently.
+    expect(protect).toMatch(/\n {2}report\)/);
     expect(protect).toContain('remove-report)');
     expect(protect).toContain('cleanup)');
     expect(protect).toContain('"${home}/reports/${report_name}"');
     expect(protect).toContain(
       'sudo rm -rf -- "${workspace}/.integration-tests"',
     );
+    // An empty command after the workspace shift must fail closed: `env -i`
+    // with no command exits 0, so without the guard the wrapper could report
+    // success without executing any verification.
+    expect(run).toContain('if [[ $# -eq 0 ]]; then');
+    expect(run).toContain('no command provided');
     expect(run).toContain('--clear-groups');
     expect(run).toContain('--no-new-privs');
     expect(run).toContain('env -i');
@@ -1933,6 +1944,10 @@ describe('qwen-autofix workflow', () => {
       'index("status/need-information") == null',
     );
     expect(claimIssueStep).toContain('index("status/need-retesting") == null');
+    // Scoped to the claim step: the workflow-wide occurrence is also
+    // satisfied by the proof and publish gates, leaving the last pre-claim
+    // re-check unpinned.
+    expect(claimIssueStep).toContain('index("autofix/routing") == null');
     expect(claimIssueStep).toContain("EVENT_NAME: '${{ github.event_name }}'");
     expect(claimIssueStep).toContain(
       'Issue #${ISSUE} lost its ready or approval label before claim.',
@@ -1961,7 +1976,43 @@ describe('qwen-autofix workflow', () => {
       expect(freshJob).toContain(
         "TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'",
       );
+      // The downstream checkouts are unpinned, so each job re-pins the frozen
+      // base before staging or proof: a merge to main mid-run must not turn
+      // into a failed verification (or stage gates from the new tip).
+      const checkoutIndex = freshJob.indexOf("- name: 'Checkout trusted base'");
+      const repinIndex = freshJob.indexOf("- name: 'Re-pin trusted base'");
+      expect(checkoutIndex).toBeGreaterThan(-1);
+      expect(repinIndex).toBeGreaterThan(checkoutIndex);
+      expect(freshJob).toContain('git checkout --detach "${TRUSTED_BASE_OID}"');
     }
+    // Staging precedes the candidate restore in every fresh job: a
+    // post-restore copy would stage the candidate's own gate scripts into
+    // the very job whose purpose is not to trust the agent.
+    const verifyStagingIndex = issueAutofixVerifyJob.indexOf(
+      "- name: 'Stage trusted deterministic gates'",
+    );
+    expect(verifyStagingIndex).toBeGreaterThan(-1);
+    expect(verifyStagingIndex).toBeLessThan(
+      issueAutofixVerifyJob.indexOf("- name: 'Restore exact candidate commit'"),
+    );
+    const targetedStagingIndex = issueAutofixTargetedE2eJob.indexOf(
+      "- name: 'Stage trusted targeted verifier'",
+    );
+    expect(targetedStagingIndex).toBeGreaterThan(-1);
+    expect(targetedStagingIndex).toBeLessThan(
+      issueAutofixTargetedE2eJob.indexOf(
+        "- name: 'Restore exact candidate commit'",
+      ),
+    );
+    const publishStagingIndex = issueAutofixPublishJob.indexOf(
+      "- name: 'Stage trusted metadata loader'",
+    );
+    expect(publishStagingIndex).toBeGreaterThan(-1);
+    expect(publishStagingIndex).toBeLessThan(
+      issueAutofixPublishJob.indexOf(
+        "- name: 'Revalidate proof and restore candidate'",
+      ),
+    );
     // Pin each job's exact gate polarity: the restore gates abort on `!=`,
     // the publish proof asserts `==` under set -e. A polarity-blind
     // regex would let an inverted gate through.
@@ -2159,6 +2210,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(publishPrStep).toContain('if $allowed_pr == "" then');
     expect(publishPrStep).toContain('($linked | length) == 0');
+    expect(publishPrStep).toContain('($linked | length) == 1 and');
     expect(publishPrStep).toContain(
       '($linked[0].number | tostring) == $allowed_pr',
     );
@@ -2279,9 +2331,20 @@ describe('qwen-autofix workflow', () => {
     expect(publishPrStep.match(/^\s+preserve_claim$/gm)).toHaveLength(9);
     expect(
       publishPrStep.indexOf(
-        '\n          preserve_claim\n          git push --no-verify',
+        '\n          preserve_claim\n          if existing_oid="$(remote_oid)"; then',
       ),
     ).toBeGreaterThan(-1);
+    // The publication push is idempotent for the verified OID: a post-push
+    // failure that preserved the branch must not wedge every re-run on the
+    // create-only lease, so an existing branch at the expected OID is reused
+    // and only a foreign commit fails loud.
+    expect(publishPrStep).toContain('if existing_oid="$(remote_oid)"; then');
+    expect(publishPrStep).toContain(
+      'Verified branch already published by an earlier attempt; reusing it.',
+    );
+    expect(publishPrStep).toContain(
+      'Autofix branch already exists at an unexpected commit; preserving it for recovery.',
+    );
     expect(publishPrStep).toContain(
       'publication_body="${workdir}/publication-pr-body.md"',
     );
@@ -2362,6 +2425,9 @@ describe('qwen-autofix workflow', () => {
     expect(functionBody).toBeTruthy();
     const script = `${functionBody.replace(/^ {10}/gm, '')}
 function gh() {
+  if [[ -n "\${GH_FAIL:-}" ]]; then
+    return 1
+  fi
   printf '%s\\n' "\${PR_JSON}"
 }
 set +e
@@ -2382,7 +2448,7 @@ printf '%s\\n' "\${status}"
         },
       ],
     };
-    const run = (pr) =>
+    const run = (pr, extraEnv = {}) =>
       spawnSync('bash', ['-c', script], {
         encoding: 'utf8',
         env: {
@@ -2392,6 +2458,7 @@ printf '%s\\n' "\${status}"
           REPO: 'QwenLM/qwen-code',
           AUTOFIX_BOT: 'qwen-code-dev-bot',
           EXPECTED_OID: 'a'.repeat(40),
+          ...extraEnv,
         },
       });
 
@@ -2425,6 +2492,10 @@ printf '%s\\n' "\${status}"
         closingIssuesReferences: [{ number: 123 }],
       }).stdout.trim(),
     ).toBe('2');
+    // A failed `gh pr view` is uncertainty, not a definitive mismatch: the
+    // publish step consumes 1 as "close the PR" and 2 as "preserve it", so a
+    // transient API error must never close a freshly published PR.
+    expect(run(base, { GH_FAIL: 'true' }).stdout.trim()).toBe('2');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -2640,11 +2711,17 @@ printf '%s\\n' "\${status}"
     expect(findCandidateIssuesStep).toContain(
       'approval predates the marker rollout; recorded the marker',
     );
-    // The grandfather window expires once the issue sees post-cutover
-    // activity: the current prose of a touched issue was never approved, so
-    // the backfill fails closed instead of blessing edited text indefinitely.
+    // The backfill fails closed once the issue saw activity after the
+    // approval label event (or after the cutover): that prose was never
+    // approved, so it must not be blessed indefinitely.
     expect(findCandidateIssuesStep).toContain(
-      '(.updatedAt // "") | . != "" and . < $cutover',
+      '(.updatedAt // "") as $updated |',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      '($updated != "") and ($updated < $cutover) and',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      '((($updated | fromdateiso8601) - ($labeled | fromdateiso8601)) <= 60)',
     );
     expect(findCandidateIssuesStep).toContain('url,updatedAt');
     expect(findCandidateIssuesStep).toContain('state,updatedAt');
@@ -2683,6 +2760,22 @@ printf '%s\\n' "\${status}"
     );
     expect(revalidateProofStep).toContain(
       'echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"',
+    );
+    // A missing claim ref is an actionable dead end (an earlier attempt
+    // withdrew it), not an unknown state to preserve; transport failures
+    // still preserve.
+    expect(revalidateProofStep).toContain('HTTP 404');
+    expect(revalidateProofStep).toContain(
+      'The claim ref no longer exists: an earlier attempt already withdrew it',
+    );
+    expect(revalidateProofStep).toContain(
+      're-apply the autofix/approved label to start a fresh cycle.',
+    );
+    // The metadata reload is wrapped like its sibling claim reads: a
+    // transient loader failure preserves the healthy claim instead of
+    // letting withdraw destroy it.
+    expect(revalidateProofStep).toContain(
+      'Could not confirm targeted E2E metadata; preserving the claim for recovery.',
     );
     expect(claimCommentStep).toContain(
       'assign someone else or add the \\`autofix/skip\\` label',
@@ -5583,6 +5676,16 @@ printf '%s\\n' "\${status}"
     expect(withdrawClaimStep).toContain(
       'Could not confirm Autofix claim ownership; preserving the claim ref for recovery.',
     );
+    // An ABSENT ref (this run's trap released it before any ownership write,
+    // or an earlier attempt withdrew it) is not a transport failure: fall
+    // back to the visible issue state instead of a false "preserving" red.
+    expect(withdrawClaimStep).toContain('HTTP 404');
+    expect(withdrawClaimStep).toContain(
+      'Claim ref is absent and no visible ownership remains; nothing to withdraw.',
+    );
+    expect(withdrawClaimStep).toContain(
+      'Claim ref is absent but visible ownership remains; preserving the claim for recovery.',
+    );
     expect(withdrawClaimStep).not.toContain(
       'claim ownership changed or could not be confirmed',
     );
@@ -5885,6 +5988,21 @@ printf '%s\\n' "\${status}"
     expect(withdrawClaimStep).toContain(
       'The publication stage failed after verification. Check the issue-autofix-publish job logs.',
     );
+    // The elif ladder ORDER decides which message posts: on a deterministic
+    // verification failure AGENT=success, VERIFY=failure, TARGETED=skipped,
+    // so a swapped VERIFY/TARGETED check blames a job that never ran.
+    const agentResultIndex = withdrawClaimStep.indexOf(
+      '"${AGENT_RESULT}" != \'success\'',
+    );
+    const verifyResultIndex = withdrawClaimStep.indexOf(
+      '"${VERIFY_RESULT}" != \'success\'',
+    );
+    const targetedResultIndex = withdrawClaimStep.indexOf(
+      '"${TARGETED_RESULT}" != \'success\'',
+    );
+    expect(agentResultIndex).toBeGreaterThan(-1);
+    expect(verifyResultIndex).toBeGreaterThan(agentResultIndex);
+    expect(targetedResultIndex).toBeGreaterThan(verifyResultIndex);
     expect(withdrawClaimStep).toContain(
       'Visible issue ownership was withdrawn, but the claim ref could not be released.',
     );
@@ -6461,39 +6579,33 @@ printf '%s\\n' "\${status}"
     expect(issueVerifyGate.replace(/\s+/g, ' ')).toContain(
       '| AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \\ bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
     );
-    // Both jobs must stage the trusted copy before any branch switch.
+    // The deterministic gate scripts are staged only by the two jobs that
+    // execute them (issue-autofix-verify and review-address); the producer
+    // job stages only the metadata loader it runs.
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
       ) ?? [],
-    ).toHaveLength(3);
+    ).toHaveLength(2);
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-autofix-contracts\.sh "\$\{RUNNER_TEMP\}\/check-autofix-contracts\.sh"/g,
       ) ?? [],
-    ).toHaveLength(3);
+    ).toHaveLength(2);
     // The owning-package resolver is staged the same way, in the same steps.
     expect(
       workflow.match(
         /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
-    ).toHaveLength(3);
+    ).toHaveLength(2);
     expect(
       workflow.match(
         /cp \.github\/scripts\/run-autofix-review-verification\.sh "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
       ) ?? [],
     ).toHaveLength(1);
-    // In the issue-autofix job the staging must happen BEFORE the verify gate's
-    // `git checkout "${BRANCH}"` (first occurrence in the file is the issue
-    // job's): the agent's commits can touch .github/scripts, so a post-checkout
-    // copy would stage the agent's version of the gate instead of the trusted
-    // base's. indexOf resolves to the issue job's staging (first occurrence).
     expect(
-      workflow.indexOf("- name: 'Stage trusted verification scripts'"),
-    ).toBeGreaterThanOrEqual(0);
-    expect(
-      workflow.indexOf("- name: 'Stage trusted verification scripts'"),
-    ).toBeLessThan(workflow.indexOf('git checkout "${BRANCH}"'));
+      workflow.match(/- name: 'Stage trusted metadata loader'/g) ?? [],
+    ).toHaveLength(2);
     expect(workflow).toContain(
       'cp .github/scripts/load-autofix-e2e-metadata.mjs "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"',
     );
@@ -6701,6 +6813,54 @@ printf '%s\\n' "\${status}"
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('skips the sealed settings-schema gate without invoking the generator', () => {
+    // The sealed verify job sets AUTOFIX_VERIFY_COMMAND after finalize made
+    // tracked files root-owned and read-only; the gate must skip instead of
+    // running the generator (which would crash with EACCES on the schema
+    // file). The structural pins stay green if the generator is hoisted out
+    // of the else branch, so execute the script for real.
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-schema-skip-'));
+    const npmLog = join(dir, 'npm.log');
+    try {
+      writeFileSync(
+        join(dir, 'npm'),
+        `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${npmLog}"\n`,
+      );
+      chmodSync(join(dir, 'npm'), 0o755);
+      const result = spawnSync(
+        'bash',
+        [resolve('.github/scripts/check-settings-schema.sh')],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            AUTOFIX_VERIFY_COMMAND: '/bin/true',
+          },
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'Skipping settings-schema freshness check',
+      );
+      expect(existsSync(npmLog)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the build-time settings-schema skip consumed by the sealed jobs', () => {
+    // The isolated wrappers run the candidate's npm run build with
+    // QWEN_SKIP_SETTINGS_SCHEMA_GENERATION=1 (producer side pinned in
+    // run-autofix-targeted-e2e.test.mjs); the generator execSync must stay
+    // the guarded if-body, or every sealed build dies with EACCES on the
+    // read-only tracked schema file and each claim withdraws.
+    const buildScript = readFileSync('scripts/build.js', 'utf8');
+    expect(buildScript).toContain(
+      "process.env.QWEN_SKIP_SETTINGS_SCHEMA_GENERATION !== '1'\n  ) {\n    execSync('node --import tsx/esm scripts/generate-settings-schema.ts',",
+    );
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {

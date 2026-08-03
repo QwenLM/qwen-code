@@ -688,7 +688,8 @@ jobs:
       # Approvals labeled before this date predate the approval-marker
       # rollout; the scan backfills their marker from the label event time
       # instead of rejecting them forever — but only while the issue itself
-      # has seen no post-cutover activity (its current prose was approved).
+      # saw no activity after the approval label event (its current prose
+      # was approved).
       APPROVAL_MARKER_CUTOVER: '2026-08-02T00:00:00Z'
     steps:
       - name: 'Checkout'
@@ -709,15 +710,11 @@ jobs:
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
 
-      # Same staging as the review-address job: verification always runs the
-      # trusted checkout's scripts, never copies from the agent's branch.
-      - name: 'Stage trusted verification scripts'
+      # This job only executes the metadata loader (targeted E2E routing);
+      # the deterministic gate scripts are staged by the jobs that run them.
+      - name: 'Stage trusted metadata loader'
         run: |-
-          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
-          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
-          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/load-autofix-e2e-metadata.mjs "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"
-          cp .github/scripts/run-autofix-targeted-e2e.mjs "${RUNNER_TEMP}/run-autofix-targeted-e2e.mjs"
 
       - name: 'Check bot credentials'
         env:
@@ -937,18 +934,21 @@ jobs:
               # existed have no bot comment to match. Backfill the marker
               # from the approval label event time; post-cutover approvals
               # must keep the marker the labeled-event step records. An issue
-              # updated after the cutover is not backfilled — its current
-              # prose was never approved, so it fails closed until a
-              # maintainer re-applies the approval label.
+              # updated after the approval label event (or after the cutover)
+              # is not backfilled — that prose was never approved, so it
+              # fails closed until a maintainer re-applies the approval
+              # label.
               approval_labeled_at="$(gh api --paginate \
                 "repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100" --slurp \
                 | jq -r --arg approved "${AUTOFIX_APPROVED_LABEL}" \
                   '[ .[][] | select(.event == "labeled" and (.label.name // "") == $approved) | .created_at ] | max // empty')" \
                 || approval_labeled_at=''
               if [[ -n "${approval_labeled_at}" && "${approval_labeled_at}" < "${APPROVAL_MARKER_CUTOVER}" ]] &&
-                jq -e --arg cutover "${APPROVAL_MARKER_CUTOVER}" \
-                  '(.updatedAt // "") | . != "" and . < $cutover' \
-                  <<< "${candidate}" > /dev/null &&
+                jq -e --arg cutover "${APPROVAL_MARKER_CUTOVER}" --arg labeled "${approval_labeled_at}" '
+                  (.updatedAt // "") as $updated |
+                  ($updated != "") and ($updated < $cutover) and
+                  ((($updated | fromdateiso8601) - ($labeled | fromdateiso8601)) <= 60)
+                ' <<< "${candidate}" > /dev/null &&
                 gh issue comment "${candidate_issue}" --repo "${REPO}" \
                   --body "${approval_marker}"; then
                 echo "🕰️ Issue #${candidate_issue} approval predates the marker rollout; recorded the marker and continuing."
@@ -1560,6 +1560,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: 'Re-pin trusted base'
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # staging, gates, and proof operate on the trusted tree rather
+          # than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
+
       - name: 'Stage trusted deterministic gates'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
@@ -1717,6 +1725,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: 'Re-pin trusted base'
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # staging, gates, and proof operate on the trusted tree rather
+          # than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
 
       - name: 'Stage trusted targeted verifier'
         run: |-
@@ -1896,6 +1912,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: 'Re-pin trusted base'
+        if: |-
+          ${{ needs.issue-autofix.outputs.claim_owned == 'true' }}
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # the proof operates on the trusted tree rather than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
+
       - name: 'Stage trusted metadata loader'
         if: |-
           ${{ needs.issue-autofix-targeted-e2e.result == 'success' }}
@@ -1918,12 +1943,20 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         run: |-
           [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]]
+          claim_ref_error_file="$(mktemp)"
           if ! claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
-            --jq '.object.sha')"; then
+            --jq '.object.sha' 2>"${claim_ref_error_file}")"; then
+            if grep -q 'HTTP 404' "${claim_ref_error_file}"; then
+              rm -f "${claim_ref_error_file}"
+              echo '::error::The claim ref no longer exists: an earlier attempt already withdrew it (or this run released it before taking ownership). Re-running this job cannot publish; re-apply the autofix/approved label to start a fresh cycle.'
+              exit 1
+            fi
+            rm -f "${claim_ref_error_file}"
             echo '::warning::Could not confirm claim ref; preserving the claim for recovery.'
             echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
+          rm -f "${claim_ref_error_file}"
           [[ "${claim_oid}" == "${CLAIM_OID}" ]]
           if ! issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
             --json state,title,body,labels,assignees,closedByPullRequestsReferences)"; then
@@ -1952,8 +1985,12 @@ jobs:
           [[ "${live_required}" == "${E2E_REQUIRED}" ]]
           if [[ "${live_required}" == 'true' ]]; then
             current_metadata="${RUNNER_TEMP}/ci-failure-current.json"
-            node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
-              --issue "${ISSUE}" --repository "${REPO}" --output "${current_metadata}"
+            if ! node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+              --issue "${ISSUE}" --repository "${REPO}" --output "${current_metadata}"; then
+              echo '::warning::Could not confirm targeted E2E metadata; preserving the claim for recovery.'
+              echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
             current_sha="$(shasum -a 256 "${current_metadata}" | cut -d ' ' -f 1)"
             [[ "${current_sha}" == "${VERIFIED_METADATA_SHA256}" ]]
           else
@@ -2177,9 +2214,17 @@ jobs:
             exit 1
           fi
           preserve_claim
-          git push --no-verify \
-            --force-with-lease="refs/heads/${BRANCH}:" \
-            origin "HEAD:refs/heads/${BRANCH}"
+          if existing_oid="$(remote_oid)"; then
+            if [[ "${existing_oid}" != "${EXPECTED_OID}" ]]; then
+              echo '::error::Autofix branch already exists at an unexpected commit; preserving it for recovery.'
+              exit 1
+            fi
+            echo 'Verified branch already published by an earlier attempt; reusing it.'
+          else
+            git push --no-verify \
+              --force-with-lease="refs/heads/${BRANCH}:" \
+              origin "HEAD:refs/heads/${BRANCH}"
+          fi
           if ! published_oid="$(remote_oid)" || [[ ! "${published_oid}" =~ ^[0-9a-f]{40}$ ]]; then
             preserve_claim
             echo '::error::Could not confirm the published branch OID; preserving the branch for recovery.'
@@ -2272,8 +2317,30 @@ jobs:
           [[ -z "$(git status --porcelain)" ]]
           claim_ref="refs/heads/autofix/claim-issue-${ISSUE}"
           [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 0
-          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/${claim_ref#refs/}" --jq '.object.sha')"; then
-            echo '::warning::Could not confirm Autofix claim ownership; preserving the claim ref for recovery.'
+          claim_ref_error_file="$(mktemp)"
+          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/${claim_ref#refs/}" --jq '.object.sha' 2>"${claim_ref_error_file}")"; then
+            if ! grep -q 'HTTP 404' "${claim_ref_error_file}"; then
+              rm -f "${claim_ref_error_file}"
+              echo '::warning::Could not confirm Autofix claim ownership; preserving the claim ref for recovery.'
+              exit 1
+            fi
+            rm -f "${claim_ref_error_file}"
+            # Absent ref: this run's claim trap released it before any
+            # ownership write, or an earlier attempt withdrew it. Only the
+            # visible issue state can still need cleanup.
+            if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+              --json labels,assignees)"; then
+              echo '::warning::Failed to read visible issue ownership; preserving the claim for recovery.'
+              exit 1
+            fi
+            if jq -e --arg bot "${AUTOFIX_BOT}" '
+              ((.labels // []) | map(.name) | index("autofix/in-progress") == null) and
+              ((.assignees // []) | map(.login) | index($bot) == null)
+            ' <<< "${live_issue_json}" > /dev/null; then
+              echo 'Claim ref is absent and no visible ownership remains; nothing to withdraw.'
+              exit 0
+            fi
+            echo '::warning::Claim ref is absent but visible ownership remains; preserving the claim for recovery.'
             exit 1
           fi
           if [[ "${claim_oid}" != "${CLAIM_OID}" ]]; then
