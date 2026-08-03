@@ -14,13 +14,14 @@ untracked; key results below) audited
 `packages/core/src/permissions/` (12 files, 7,638 production lines) two ways:
 
 - **Naive baseline** — one agent, module context only, no methodology.
-  Result: 2 confirmed Criticals, 0 false positives, ~2.3M tokens. Better
-  than expected (it probed spontaneously) but opportunistic: whatever caught
-  its attention first got depth; whole dimensions went unexplored.
+  Result: 2 confirmed Criticals, 0 self-adjudicated false positives, ~2.3M
+  tokens. Better than expected (it probed spontaneously) but opportunistic:
+  whatever caught its attention first got depth; whole dimensions went
+  unexplored.
 - **Dimension fan-out** — 8 agents with the `/review` briefs re-anchored
   from "walk the diff" to "walk these files" (1a, 1c, 2, 3a/3b/3c, 4, 5).
   Result: **17 confirmed Criticals** (independently re-verified by probe),
-  0 false positives, ~32.5M tokens.
+  zero self-adjudicated false positives, ~32.5M tokens.
 
 The findings the fan-out added were not marginal. The single most severe —
 `cat $(rm -rf /tmp/x)` evaluating to `allow` under `deny: ["Bash(rm *)"]`,
@@ -41,7 +42,8 @@ Two more measurements shape this design:
   expensive agents (1c 6.8M, 5 6.4M, 3a 6.2M tokens) are the ones whose
   briefs demand repo-wide greps or mutation reasoning — and they are also
   the ones that produced findings no other agent could. Effort tiers must
-  cut by expected marginal yield, not by price.
+  cut by expected marginal yield, not by price — the budget ceiling below
+  bounds the total; it does not pick which agents get cut.
 
 **Replication (2026-08-03, `packages/core/src/hooks/` — 23 files, 8,516
 lines, a lifecycle/event-dispatch module, deliberately different in
@@ -49,18 +51,18 @@ character from the parser-heavy permissions module):** the margin
 reproduced and widened. The naive arm was much stronger this time (3
 confirmed Criticals, including a redirect-based SSRF bypass) — and the
 fan-out still covered all three while adding 19 more (22 total, zero
-false positives on both arms, ~7× recall margin, pre-declared success
-criterion was 3×; cost ratio ~24×, dominated by the cross-file tracer —
-see the budget rule below). Two replication findings changed this
-document: the
-cross-file tracer's event-coverage walk ("does every firing path fire?")
-produced two Criticals unique in the field — both adjacent-class siblings
-of a historical fix; and the security agent, briefed threat-model-first,
-produced four single-source Criticals at the trust boundary (including
-frontmatter hooks bypassing folder trust, a workspace-writable HTTP-hook
-whitelist, env-resolution paths defeating a prior secrets-stripping fix).
-Full record: `.qwen/investigations/legacy-review-ab-2/REPORT.md` (untracked
-working file; key results summarized above).
+self-adjudicated false positives on both arms, ~7× recall margin,
+pre-declared success criterion was 3×; cost ratio ~24×, dominated by the
+cross-file tracer — see the budget rule below). Two replication findings
+changed this document: the cross-file tracer's event-coverage walk ("does
+every firing path fire?") produced two Criticals unique in the field — both
+adjacent-class siblings of a historical fix; and the security agent,
+briefed threat-model-first, produced four single-source Criticals at the
+trust boundary (including frontmatter hooks bypassing folder trust, a
+workspace-writable HTTP-hook whitelist, env-resolution paths defeating a
+prior secrets-stripping fix). Full record:
+`.qwen/investigations/legacy-review-ab-2/REPORT.md` (untracked working
+file; key results summarized above).
 
 ## Scope and non-goals
 
@@ -82,20 +84,33 @@ findings report.
 
 ### A new skill, not a mode of `/review`
 
-`/review`'s SKILL.md is ~1,200 lines in which nearly every step is anchored
-to diff/base/PR assumptions: the worktree flow, merge-base resolution, the
-removed-behavior agent whose entire evidence source is `-` lines, anchor
-validation, the incremental cache, PR posting. Bolting a second semantic
-onto it branches every step. The cost of a new skill is re-stating the
-shared philosophy (silence over noise, failure scenarios, verification
-discipline); the benefit is that neither document lies about its flow.
+`/review`'s SKILL.md is over 1,000 lines in which nearly every step is
+anchored to diff/base/PR assumptions: the worktree flow, merge-base
+resolution, the removed-behavior agent whose entire evidence source is `-`
+lines, anchor validation, the incremental cache, PR posting. Bolting a
+second semantic onto it branches every step. The cost of a new skill is
+re-stating the shared philosophy (silence over noise, failure scenarios,
+verification discipline) — and that philosophy is carried across SKILL.md
+and a companion DESIGN.md of over 500 lines, so the bill is bigger than one
+section; the benefit is that neither document lies about its flow.
 
-What is reused is the **TypeScript layer**, which is mostly
-target-agnostic: `agent-prompt` roster/brief printing, the findings schema,
-`check-coverage` transcript verification, budget machinery (a plan-derived
-size→work mapping; `plan-files` supplies the line counts), and the
-chunk-tiling logic from `plan-diff`. The cross-round findings ledger does
-not lift into v1 — see Open questions.
+What is reused is the **TypeScript layer**, in two grades. **Lifts
+as-is:** `agent-prompt` roster/brief printing, the findings schema, the
+budget machinery's shape (a plan-derived size→work mapping; `plan-files`
+supplies the line counts), and the chunk-tiling logic from `plan-diff`.
+**Needs a target-kind parameter, not a lift:** the roster machinery
+(`lib/roster.ts`) keys on diff metrics — the `srcDiffLines`/`diffLines`
+topology gate, `hasDeletions()` (true on an empty file list by design), a
+resolved PR number — so a diff-free plan misfires through it (it would
+require 1b and 7, which this design drops, and report no territory fan-out
+at any module size); `check-coverage`'s core predicate is "the agent was
+pointed at diff lines AND opened the diff file", and an audit has no diff
+file, so it must be re-expressed as "opened file F / range R"; and the
+chunk constant counts diff lines (`DEFAULT_MAX_CHUNK_LINES = 400`), so its
+source-line analog lives in `plan-files`. The trade still holds —
+parameterizing target kind is cheaper than forking the document — but the
+shared layer is the printing, schema, and budget shape, not the gates. The
+cross-round findings ledger does not lift into v1 — see Open questions.
 
 ### Target resolution and planning
 
@@ -105,19 +120,26 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
 
 - enumerates production files under the path (respecting the review
   exclusions: no `*.test.*` as _subjects_ — tests are evidence and the
-  test-coverage agent's subject), classifies them (source / docs /
-  generated) with the same rules `plan-diff` uses;
-- counts source lines and applies the topology gate, pinned at 9,000
-  source lines — above the largest module the experiments validated
-  whole-file (8,516): below it, dimension agents each read the whole file
-  set — the only topology either experiment exercised, validated at 7,638
-  and 8,516 lines; above it, tiles files into ~400-line chunks and fans
-  out per-chunk agents with folded-in dimension briefs, mirroring Step 3B
-  — with whole-module agents retained for the walks that are meaningless
-  per-chunk (1c cross-file, 3a reuse, 5 test-coverage, and any personas
-  the tier includes — these are whole-module by construction). The
-  above-gate branch is untested extrapolation — neither experiment routed
-  a module through it — and a run that does says so in the report header;
+  test-coverage agent's subject), classifies them with the same rules
+  `plan-diff` uses — all four kinds, `source` / `test` / `generated` /
+  `docs`, where `test` is the kind this design most depends on: it is what
+  routes files out of the subject set and into Agent 5's;
+- counts source lines and applies the topology gate — a `plan-files`
+  constant pinned at 9,000 source lines, above the largest module the
+  experiments validated whole-file (8,516): below it, dimension agents
+  each read the whole file set — the only topology either experiment
+  exercised, validated at 7,638 and 8,516 lines; above it, tiles files
+  into chunks of 400 source lines (`plan-files`' source-line analog of
+  `/review`'s diff-line chunk constant — the unit changes; source lines
+  are what a diff-free target has) and fans out per-chunk agents with
+  folded-in dimension briefs, mirroring Step 3B — with whole-module
+  agents retained for the walks that are meaningless per-chunk (1c
+  cross-file, 3a reuse, 5 test-coverage, and any personas the tier
+  includes — these are whole-module by construction). The fan-out is
+  bounded by the per-run agent ceiling below — a tiling that exceeds it
+  refuses the run and asks for a narrower path. The above-gate branch is
+  untested extrapolation — neither experiment routed a module through it —
+  and a run that does says so in the report header;
 - marks heavy files for the invariant-checklist triple — untested in the
   experiments; expected to transfer by analogy from the diff-based
   checklist, flagged as extrapolation. The predicate is legacy-specific,
@@ -138,6 +160,28 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
 No worktree, no base resolution, no merge base — the tree under audit is
 the user's own checkout, read-only.
 
+### Budget ceiling
+
+The default tier is the expensive one by construction — fan-out recall is
+the product — so it ships with a stated bound, not an open tab:
+
+- **Pre-launch estimate, confirmed.** `plan-files` prints what the run
+  will launch (roster by role, chunk count) and an expected token range —
+  the two measured arms came in at ~4–6M tokens per 1,000 module lines at
+  medium (32.5M at 7,638 lines; ~46M at 8,516, derived from the
+  cross-file tracer's 16M at ~35% of its arm) — and the run starts only
+  on user confirmation.
+- **Ceiling.** Medium is capped at 60M tokens and 40 agents, whichever
+  binds first; a plan that estimates over either refuses and asks for a
+  narrower path or a lower tier. Both constants are unmeasured first cuts
+  — 60M is ~1.3× the larger measured arm — and they ride into the report
+  header with the other unexercised-machinery flags. High is
+  extrapolation: it prints and confirms the same estimate, but its
+  ceiling waits for its first measurement.
+
+The ceiling bounds the total; it does not pick which agents get cut — that
+stays the marginal-yield decision above.
+
 ### Roster
 
 Roles are the `/review` briefs with their anchor re-pointed, which the
@@ -145,17 +189,17 @@ experiment showed is a mechanical change: "walk every hunk line by line"
 becomes "walk every production file line by line"; "for every block the
 diff adds" becomes "for every non-trivial block in the module".
 
-| Role                 | Legacy re-anchor                        | Notes                                                              |
-| -------------------- | --------------------------------------- | ------------------------------------------------------------------ |
-| 1a line-by-line      | every file, every line                  | unchanged checklist                                                |
-| 1c cross-file tracer | module's exports × repo callers         | produced the unique Criticals in both rounds; mandatory            |
-| 2 security           | threat model first, then the checklist  | "name the adversary inputs" produced R2's trust-boundary Criticals |
-| 3a/3b/3c quality     | module vs codebase                      | 3a's "does this exist already" found the two-splitter root cause   |
-| 4 performance        | trace the hot path first                | require a named hot path + cost shape                              |
-| 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                      |
-| 6a attacker persona  | undirected                              | untested; one undirected seat at every tier ≥ medium — see below   |
-| 6b/6c personas       | high effort only                        | untested in the experiments                                        |
-| invariant a/b/c      | heavy files only                        | unchanged                                                          |
+| Role                 | Legacy re-anchor                        | Notes                                                                                                                                                                |
+| -------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1a line-by-line      | every file, every line                  | unchanged checklist                                                                                                                                                  |
+| 1c cross-file tracer | module's exports × repo callers         | produced the unique Criticals in both rounds; mandatory                                                                                                              |
+| 2 security           | threat model first, then the checklist  | "name the adversary inputs" produced R2's trust-boundary Criticals                                                                                                   |
+| 3a/3b/3c quality     | module vs codebase                      | the roster's three existing quality slices (3a reuse, 3b altitude/abstraction fit, 3c consistency); 3a's "does this exist already" found the two-splitter root cause |
+| 4 performance        | trace the hot path first                | require a named hot path + cost shape                                                                                                                                |
+| 5 test coverage      | tests as subject; mutation-test mindset | historical-bug parity walk transfers directly                                                                                                                        |
+| 6a attacker persona  | undirected                              | untested; one undirected seat at every tier ≥ medium — see below                                                                                                     |
+| 6b/6c personas       | high effort only                        | untested in the experiments                                                                                                                                          |
+| invariant a/b/c      | heavy files only                        | unchanged                                                                                                                                                            |
 
 **Why one undirected seat survives at medium.** Round 1 dropped all three
 personas on cost. Round 2 nearly produced the counterexample: the naive
@@ -174,21 +218,24 @@ ACP sessions) came from exactly this walk; both were adjacent-class
 siblings of a historical fix that had covered only one UI path. **It
 also made 1c the single most expensive agent of either round (16M
 tokens, ~35% of the arm)** — repo-wide path enumeration scales with the
-module's fan-out, so the brief needs a budget rule: deep-read at most N
-call sites per event and register the rest by name, instead of reading
-every caller in full — and spend the N deep-read slots on callers'
-early-return, error, and abort paths first, because a fire-miss is only
-visible there and happy-path callers are the cheap ones to register by
-name (Round 2's two unique-in-the-field Criticals were both fire-misses
-on exactly those paths — the class a flat per-event quota is most likely
-to starve). When the budget binds, the run discloses it — which events hit
-the cap and which callers were name-registered only — so the residual
-coverage trade-off is stated in the report, not implicit in it.
+module's fan-out, so the brief needs a budget rule: deep-read at most
+**N = 10** call sites per event (an unmeasured first cut) and register
+the rest by name, instead of reading every caller in full — and spend
+those ten deep-read slots on callers' early-return, error, and abort
+paths first, because a fire-miss is only visible there and happy-path
+callers are the cheap ones to register by name (Round 2's two
+unique-in-the-field Criticals were both fire-misses on exactly those
+paths — the class a flat per-event quota is most likely to starve). When
+the budget binds, the run discloses it — which events hit the cap and
+which callers were name-registered only — so the residual coverage
+trade-off is stated in the report, not implicit in it.
 
 **Dropped:** Agent 0 (no issue), 1b (no deletions — its entire evidence
-source is `-` lines), 7 (nothing was merged; build/test state is the
-user's own), 8 (diff-specialized; a module-specialized variant is an open
-question, not v1).
+source is `-` lines), Agent 7's build-gate half (nothing was merged;
+build state is the user's own — its surviving half, a baseline run of
+the module's existing tests, is an open question below), 8
+(diff-specialized; a module-specialized variant is an open question, not
+v1).
 
 ### The pre-existing inversion and legacy severity heuristics
 
@@ -198,8 +245,10 @@ disciplines keep precision without an author to consult:
 
 1. **The failure scenario is the bar.** Intent is unknowable for merged
    code ("maybe it's deliberate") — so no finding without a constructible
-   trigger and a named wrong outcome survives. The experiment's zero false
-   positives across 9 agents came from this, not from luck.
+   trigger and a named wrong outcome survives. The experiments' zero false
+   positives are self-adjudicated — 4 Criticals are maintainer-confirmed
+   to date, via #8396 — and that record came from this discipline, not
+   from luck; the Dogfood item in Verification is the external check.
 2. **Severity is decided by who the authority is on the failure path.**
    The security agent converged on a heuristic worth generalizing into the
    briefs: a miss that falls through to a conservative backstop is a
@@ -234,6 +283,13 @@ below would have no input to fire on. The experiments recorded the failure
 mode twice: Round 1's most severe finding filed as a Suggestion by one
 arm, and Round 2's explicit severity split.
 
+**One scope line: dedup is intra-run.** v1 reads no tracker, so the
+dominant legacy duplicate class — a root cause already filed as an issue
+or already being fixed in flight — is not cross-checked; a pre-report grep
+of open issues by each cluster's file/symbol is the cheap future version,
+and until then an already-filed duplicate is caught, if at all, when the
+user files the cluster.
+
 **Independent discovery is evidence, not noise:** a root cause hit by
 several agents from different dimensions is a high-confidence signal, and
 the cluster's report entry should say "found independently by N agents" —
@@ -255,8 +311,11 @@ brief must name both cases.
 
 ### Output
 
-- **The artifact:** a markdown report at `.qwen/audit/<path-slug>-<ts>.md`,
-  findings clustered by theme/root cause, each with severity, locations,
+- **The artifact:** a markdown report at
+  `.qwen/audits/<YYYY-MM-DD>-<HHMMSS>-<path-slug>.md` — the `/review`
+  report convention adapted: plural directory, date-first, HHMMSS so a
+  same-day re-audit does not overwrite the earlier report — findings
+  clustered by theme/root cause, each with severity, locations,
   failure scenario, evidence tier (end-to-end probe / unit probe /
   code read), independent-discovery count ("found independently by N
   agents"), and the verification's confidence mark (confirmed-high /
@@ -277,6 +336,9 @@ brief must name both cases.
   attaches to unexercised machinery — above-gate topology, the high-tier
   loop, twice-whiffed reverse-audit scopes, budget-bound walks, unmeasured
   tiers — since `/audit` has no verdict for them to cap.
+- **Local-only by construction:** `.qwen/*` is gitignored, so the report
+  never lands in version control — a real security property, since an
+  audit of a security module will quote exploitable code.
 - **The terminal:** a short summary — counts by severity and theme, plus
   the top clusters — not the full list. The report is for acting on; the
   terminal is for deciding whether to.
@@ -331,8 +393,8 @@ capped, sold as triage — as above.)
 
 ## Rejected alternatives
 
-- **A mode inside `/review`.** Branches every step of a 1,200-line
-  document whose flow correctness is enforced by subcommands keyed to the
+- **A mode inside `/review`.** Branches every step of that 1,000-plus-line
+  document, whose flow correctness is enforced by subcommands keyed to the
   diff assumptions. See above.
 - **Whole-repo scans.** Cost scales linearly with size while actionability
   collapses; no measured demand. Module scope is the demonstrated use
@@ -357,6 +419,12 @@ capped, sold as triage — as above.)
   back by the next round, and v1 removes every anchor it needs — no PR,
   no posted body, no verdict for the rounds to rule against. If re-audit
   lands, the ledger is the carry-forward model to reach for.
+- **Baseline test run — the surviving half of Agent 7.** Build state is
+  the user's own and no audit-side build gate is proposed, but running
+  the module's existing tests once is cheap: a pre-existing failure in
+  the audited module is itself a finding, and the run establishes the
+  baseline every verification probe needs to flip against. Whether it
+  joins every tier, or only tiers that run probes, is open.
 
 ## Verification
 
@@ -368,6 +436,7 @@ capped, sold as triage — as above.)
   intact).
 - ~~Integration: second-module replication~~ — **done** (hooks module,
   2026-08-03; margin reproduced at ~7× against a pre-declared 3×
-  criterion, zero false positives both arms).
+  criterion, zero self-adjudicated false positives both arms).
 - Dogfood: audit a module whose maintainers can confirm or reject the
-  Criticals, as PR #6457's confirmed-defect set calibrated `/review`.
+  Criticals — the external check the self-adjudicated precision record
+  rests on — as PR #6457's confirmed-defect set calibrated `/review`.
