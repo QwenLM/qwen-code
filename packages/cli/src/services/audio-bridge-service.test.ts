@@ -253,14 +253,14 @@ describe('audio bridge service', () => {
       status: 'failed',
       audioCount: MAX_AUDIO_PARTS_PER_TURN + 2,
       convertedCount: MAX_AUDIO_PARTS_PER_TURN,
-      error: 'too many audio attachments',
+      error: `too many audio attachments (maximum ${MAX_AUDIO_PARTS_PER_TURN} per turn)`,
     });
     const surplus = result.parts.filter((part) =>
       part.text?.includes('too many audio attachments'),
     );
     expect(surplus).toHaveLength(2);
     expect(formatAudioBridgeNotice(result)).toBe(
-      'Converted 4 of 6 audio file(s) to text via qwen3-asr-flash. 4 audio file(s) were sent to that model. 2 audio file(s) could not be transcribed: too many audio attachments.',
+      'Converted 4 of 6 audio file(s) to text via qwen3-asr-flash. 4 audio file(s) were sent to that model. 2 audio file(s) could not be transcribed: too many audio attachments (maximum 4 per turn).',
     );
   });
 

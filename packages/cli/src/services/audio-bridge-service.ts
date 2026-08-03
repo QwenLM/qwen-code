@@ -185,10 +185,9 @@ export async function runAudioBridge(params: {
     processedAudio += 1;
     if (processedAudio > MAX_AUDIO_PARTS_PER_TURN) {
       failedCount += 1;
-      firstFailureReason ??= 'too many audio attachments';
-      converted.push({
-        text: unavailableBlock('too many audio attachments'),
-      });
+      const reason = `too many audio attachments (maximum ${MAX_AUDIO_PARTS_PER_TURN} per turn)`;
+      firstFailureReason ??= reason;
+      converted.push({ text: unavailableBlock(reason) });
       continue;
     }
 
