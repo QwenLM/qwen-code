@@ -288,6 +288,21 @@ describe('useCompletion', () => {
       expect(result.current.suggestions).toEqual([mixed[1]]);
     });
 
+    it('preserves indices when re-selecting the active category', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
+      });
+
+      act(() => result.current.selectCategory('all'));
+
+      expect(result.current.activeCategory).toBe('all');
+      expect(result.current.activeSuggestionIndex).toBe(1);
+      expect(result.current.visibleStartIndex).toBe(1);
+    });
+
     it('cycles backwards with direction -1 and wraps from all to last', () => {
       const { result } = renderHook(() => useCompletion());
       act(() => {

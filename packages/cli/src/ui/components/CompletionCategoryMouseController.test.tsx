@@ -88,6 +88,7 @@ describe('CompletionCategoryMouseController', () => {
   it('ignores clicks outside category bounds', () => {
     const handler = mountAndGetHandler();
 
+    handler(makeEvent({ name: 'left-press', col: 18, row: 5 }));
     handler(makeEvent({ name: 'left-press', col: 9, row: 5 }));
     handler(makeEvent({ name: 'left-press', col: 19, row: 6 }));
 
