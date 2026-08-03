@@ -29,7 +29,12 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
 }));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { DEADLINE_ENV, RESERVE_ENV } from './lib/deadline.js';
+import {
+  DEADLINE_ENV,
+  RESERVE_ENV,
+  readBudgetStop,
+  readRoundStamps,
+} from './lib/deadline.js';
 import {
   buildChunkAgentPrompt,
   buildChunkLaunchPrompt,
@@ -2476,13 +2481,22 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
       '`reverse audit — stopped before round 2 by the review time budget`',
     );
     expect(msg).toContain('proceed to Step 6');
+    // The deterministic half: the marker compose-review synthesizes the
+    // verdict-capping disclosure from, written even though nothing was built.
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    // A refused round is not an admission; it must not be stamped as one.
+    expect(readRoundStamps(plan)).toHaveLength(0);
   });
 
   it('builds normally when the deadline is far, and when there is none', () => {
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
-    call('reverse-audit', { round: 1 });
+    const plan = call('reverse-audit', { round: 1 });
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    // The admission is stamped, so the next round's gate can measure this one.
+    expect(readRoundStamps(plan)).toHaveLength(1);
 
     (writeStdoutLine as unknown as Mock).mockClear();
     delete process.env[DEADLINE_ENV];
@@ -2510,7 +2524,8 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   });
 
   it('honours a shorter reserve override', () => {
-    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 900);
+    // 600s reserve + the 1800s round-1 estimate = 2400s required.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 2500);
     process.env[RESERVE_ENV] = '600';
     call('reverse-audit', { round: 4 });
     expect(process.exitCode).toBeUndefined();

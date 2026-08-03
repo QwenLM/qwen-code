@@ -43,8 +43,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  expectedRoundSeconds,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  stampRound,
+  writeBudgetStop,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -1584,13 +1587,23 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // must leave no prompt on disk for a later check to expect an agent for.
     // Reverse-audit only: the loop is the one open-ended stage, and the
     // reserve this gate protects exists precisely to let verify/compose run.
+    // What must fit is the round being admitted PLUS the tail — a gate that
+    // admits on the reserve alone hands the terminal round a start right at
+    // the boundary, which is the killed-mid-verification failure one round
+    // wide. The round's cost is the previous round's, measured admission to
+    // admission; a passing admission is stamped so the next one can measure.
     if (role === 'reverse-audit') {
-      const spent = reverseAuditBudgetExhausted(process.env);
+      const spent = reverseAuditBudgetExhausted(
+        process.env,
+        expectedRoundSeconds(args.plan, args.round),
+      );
       if (spent !== null) {
+        writeBudgetStop(args.plan, spent, args.round);
         writeStderrLine(reverseAuditBudgetMessage(spent, args.round));
         process.exitCode = 4;
         return;
       }
+      stampRound(args.plan, args.round);
     }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
@@ -1793,7 +1806,9 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember)',
+    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
+    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
+    'on stderr); anything else is a bad call or a broken plan.',
   builder: (yargs) =>
     yargs
       .option('plan', {

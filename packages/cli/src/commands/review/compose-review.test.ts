@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { writeBudgetStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
@@ -478,6 +479,39 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.body).not.toContain('LGTM');
     expect(r.body).not.toContain('no blockers');
+  });
+
+  it('a budget-stop marker caps APPROVE at COMMENT with nothing relayed by the caller', () => {
+    // The round builder refused a round and recorded the refusal; the
+    // disclosure that caps the verdict is synthesized from that marker, not
+    // from a sentence the orchestrator remembered to carry.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const r = composeReview(base({ planPath: plan }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+    expect(r.body).not.toContain('LGTM');
+
+    // And said once when the orchestrator DID relay it.
+    const r2 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r2.body.split('review time budget').length - 1).toBe(1);
   });
 
   it('an uncoverable chunk caps APPROVE at COMMENT and names the chunk', () => {
