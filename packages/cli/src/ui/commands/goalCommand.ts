@@ -258,7 +258,7 @@ export const goalCommand: SlashCommand = {
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
-    if (context.executionMode !== 'interactive') {
+    if (context.executionMode === 'acp') {
       const operation = parseGoalCommand(args);
       if (operation.kind === 'error') return errorMessage(operation.message);
       if (
@@ -267,7 +267,7 @@ export const goalCommand: SlashCommand = {
         operation.kind !== 'set'
       ) {
         return errorMessage(
-          `'/goal ${operation.kind}' is only available in interactive mode.`,
+          `'/goal ${operation.kind}' is not available in ACP mode.`,
         );
       }
       const explicitSet = operation.kind === 'set';

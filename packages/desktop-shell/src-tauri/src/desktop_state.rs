@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,6 +10,7 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 820;
 const MIN_WIDTH: u32 = 900;
 const MIN_HEIGHT: u32 = 600;
+const DISABLE_SETTINGS_PERSISTENCE_ENV: &str = "QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE";
 static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -81,6 +83,9 @@ impl SettingsStore {
     }
 
     fn update(&self, update: impl FnOnce(&mut DesktopSettings)) -> Result<(), String> {
+        if settings_persistence_disabled() {
+            return Ok(());
+        }
         let mut settings = match self.settings.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -98,6 +103,16 @@ impl SettingsStore {
         };
         read(&settings)
     }
+}
+
+fn settings_persistence_disabled() -> bool {
+    settings_persistence_disabled_value(
+        std::env::var_os(DISABLE_SETTINGS_PERSISTENCE_ENV).as_deref(),
+    )
+}
+
+fn settings_persistence_disabled_value(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
 }
 
 pub fn restore_window(window: &WebviewWindow, state: Option<&WindowState>) {
@@ -204,7 +219,11 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_settings, saved_window_state, write_atomic, DesktopSettings, WindowState};
+    use super::{
+        parse_settings, saved_window_state, settings_persistence_disabled_value, write_atomic,
+        DesktopSettings, WindowState,
+    };
+    use std::ffi::OsStr;
     use std::fs;
     use tauri::{PhysicalPosition, PhysicalSize};
 
@@ -282,5 +301,12 @@ mod tests {
         write_atomic(&path, b"second").expect("second write");
         assert_eq!(fs::read_to_string(&path).expect("read"), "second");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn smoke_can_disable_settings_persistence() {
+        assert!(settings_persistence_disabled_value(Some(OsStr::new("1"))));
+        assert!(!settings_persistence_disabled_value(Some(OsStr::new("0"))));
+        assert!(!settings_persistence_disabled_value(None));
     }
 }
