@@ -493,6 +493,12 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
 }
 
 export const npmToolchainAdapter: ReviewToolchainAdapter = {
-  applies: (root) => existsSync(join(root, 'package.json')),
+  // A root package.json alone is not an npm build project — docs sites, husky,
+  // and lint configs put one in Java repos. Apply only when runNpmToolchain can
+  // actually scope something: workspaces, or a root build/test script. Without
+  // this, such repos collide with the Maven adapter and drop to `unsupported`
+  // where Maven verification would have run.
+  applies: (root) =>
+    readWorkspaceGlobs(root).length > 0 || readRootPackage(root) !== null,
   run: runNpmToolchain,
 };

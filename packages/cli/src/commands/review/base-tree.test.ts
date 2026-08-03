@@ -251,6 +251,10 @@ describe('runBaseTree', () => {
     expect(builds).toEqual([]);
     expect(r.note).toContain('Maven');
     expect(r.note).toContain('not run');
+    // The gate answers from the object store (git cat-file) BEFORE the
+    // checkout: a large Java reactor never materialises a tree just to
+    // learn it will not be built.
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {

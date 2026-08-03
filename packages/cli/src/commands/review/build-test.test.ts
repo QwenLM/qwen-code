@@ -123,7 +123,11 @@ describe('runBuildTest', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('reports `unsupported` for a repo with no workspaces, rather than guessing', () => {
+  it('treats a package.json with no build role as no npm project at all', () => {
+    // Docs sites, husky, and lint configs put a script-less package.json in
+    // repos with nothing npm can scope. It must not make npm apply — that is
+    // what used to collide with a root pom.xml and drop the whole repo to
+    // `unsupported` where the Maven adapter could have verified the diff.
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
     writePlan(['src/a.ts']);
     const rep = runBuildTest({
@@ -143,9 +147,9 @@ describe('runBuildTest', () => {
       ok: true,
       timedOut: [],
       note:
-        'No npm package here to scope (no workspaces, and the root has no build/test ' +
-        'script). Fall back to the build/test precedence in your brief — installing ' +
-        'dependencies first — and give each command a deadline it can actually meet.',
+        'No supported npm or Maven project here to scope. Fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — ' +
+        'and give each command a deadline it can actually meet.',
     });
   });
 
@@ -196,6 +200,32 @@ describe('runBuildTest', () => {
     expect(rep.test).toEqual([]);
     expect(rep.note).toContain('Both npm and Maven apply');
     expect(rep.note).toContain('will not guess');
+  });
+
+  it('leaves a Maven repo with a build-less package.json to the Maven adapter', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'husky-only', scripts: { prepare: 'husky' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
   });
 
   it('delegates Maven-only repositories through the facade', () => {
@@ -568,6 +598,19 @@ describe('runBuildTest', () => {
         'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
       ),
     ).toContain(colored);
+  });
+
+  it('rescues Maven dependency-failure lines from a trimmed middle', () => {
+    // Maven infra classification runs on trimmed output; when the error
+    // summary lands in the omitted middle, the rescue is what keeps a
+    // network outage classified as infrastructure instead of a Critical.
+    const line =
+      '[ERROR] Could not resolve dependencies for project example:core:jar:1';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('dependency failures');
   });
 
   it('caps the rescue so hostile prose cannot void the trim', () => {

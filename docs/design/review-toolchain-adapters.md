@@ -91,10 +91,11 @@ Add an internal `ReviewToolchainAdapter` interface with:
 - A `run` method that receives normalized build/test arguments and changed file
   paths and returns the existing report shape.
 
-P0 registers one built-in adapter, npm. It applies when the repository has a
-root `package.json`; the adapter's existing execution logic then decides whether
-the npm layout and dependency state are supported or require the structured
-handoff used today. The registry is a fixed array in code. There is no extension
+P0 registers one built-in adapter, npm. It applies when the root
+`package.json` describes something npm can build — workspaces, or a root
+`build`/`test` script; the adapter's existing execution logic then decides
+whether the npm layout and dependency state are supported or require the
+structured handoff used today. The registry is a fixed array in code. There is no extension
 discovery or configuration surface.
 
 P0 deliberately does not claim to solve mixed-toolchain selection. Static
@@ -370,10 +371,12 @@ specifying this before two real adapters demonstrate the common boundary.
   interface around unchanged branching.
 - **Premature generalization:** the contract intentionally excludes coverage,
   mutation, CI discovery, and multi-toolchain aggregation.
-- **False applicability:** P0's npm adapter applies only from the presence of a
-  root `package.json`; all finer-grained support decisions remain in the one
-  execution path whose existing tests already fail closed to a structured
-  handoff.
+- **False applicability:** P0's npm adapter applies only when the root
+  `package.json` can scope something — workspaces or a root build/test script.
+  A package.json that exists only for a docs site, husky, or a lint config must
+  not claim a Java repository and hide its Maven verification behind a mixed
+  root; all finer-grained support decisions remain in the one execution path
+  whose existing tests already fail closed to a structured handoff.
 
 ## Open questions
 

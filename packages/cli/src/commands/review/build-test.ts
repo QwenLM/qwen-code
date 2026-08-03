@@ -42,14 +42,17 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
+import {
+  isDependencyFailureLine,
+  mavenToolchainAdapter,
+} from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
 } from './lib/toolchain.js';
 
-/** The root toolchains build-test can select, in precedence order. */
+/** The root toolchains build-test can select. */
 export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
   npmToolchainAdapter,
   mavenToolchainAdapter,
@@ -154,12 +157,16 @@ export function trimOutput(s: string): string {
     .filter(
       (l) =>
         MODULE_ERROR_RE.test(l) ||
-        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
+        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
+        // Maven infra classification runs on this trimmed output; a
+        // dependency-failure line lost to the trim would file a network
+        // outage against the PR — the exact error this command prevents.
+        isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }

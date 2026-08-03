@@ -20,6 +20,7 @@ import {
   mavenExecutable,
   mavenToolchainAdapter,
   readMavenReactor,
+  shellSelector,
 } from './maven-toolchain.js';
 
 const pom = (modules: string[] = []): string => `
@@ -108,7 +109,6 @@ describe('maven toolchain adapter', () => {
     ).toEqual({
       reactorWide: false,
       modules: ['nested-parent', 'nested-parent/nested-leaf'],
-      unowned: [],
       inactiveProjects: [],
     });
   });
@@ -134,6 +134,40 @@ describe('maven toolchain adapter', () => {
     expect(readMavenReactor(root)).toEqual({
       reactor: { modules: ['core'], projectDirs: ['.', 'core'] },
     });
+  });
+
+  it('parses modules past CDATA sections and `>` inside attribute values', () => {
+    // Both constructs occur in real POMs (antrun/checkstyle/xml-generation
+    // config) and used to fail the whole reactor closed.
+    writeFileSync(
+      join(root, 'pom.xml'),
+      `
+<project>
+  <build><plugins><plugin><configuration>
+    <script><![CDATA[ if (a --> b) { fail(); } ]]></script>
+    <arg value="a > b"/>
+  </configuration></plugin></plugins></build>
+  <modules>
+    <module>core</module>
+  </modules>
+</project>
+`,
+    );
+    writeProject('core');
+
+    expect(readMavenReactor(root)).toEqual({
+      reactor: { modules: ['core'], projectDirs: ['.', 'core'] },
+    });
+  });
+
+  it('still fails closed on an unbalanced comment marker', () => {
+    writeFileSync(
+      join(root, 'pom.xml'),
+      pom(['core']).replace('</modules>', '-->\n  </modules>'),
+    );
+    writeProject('core');
+
+    expect(readMavenReactor(root).error).toContain('Cannot safely parse');
   });
 
   it.each([
@@ -181,7 +215,6 @@ describe('maven toolchain adapter', () => {
     ).toEqual({
       reactorWide: true,
       modules: [],
-      unowned: [],
       inactiveProjects: [],
     });
 
@@ -222,6 +255,56 @@ describe('maven toolchain adapter', () => {
     expect(report.toolchain).toBe('unsupported');
     expect(report.note).toContain('outside the root reactor: standalone');
     expect(calls).toEqual([]);
+  });
+
+  it('keeps verifying the owning module when a test-fixture POM sits under its src/', () => {
+    // maven-invoker ITs, archetype fixtures, and src/test/resources/projects/*
+    // trees are test DATA: Maven never builds them as reactor modules and no
+    // profile activates them. Reading one as a standalone project used to fail
+    // the WHOLE diff closed — including the real source change beside it.
+    writeReactor();
+    writeProject('core/src/test/resources/projects/sample');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: [
+        'core/src/main/java/Core.java',
+        'core/src/test/resources/projects/sample/App.java',
+      ],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl core -am test',
+    ]);
+  });
+
+  it('treats a fixture POM under the root project src/ as test data too', () => {
+    writeProject('.');
+    writeProject('src/test/resources/projects/sample');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['src/test/resources/projects/sample/App.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    // Not `unsupported`: the fixture belongs to the root project's test data.
+    expect(report.toolchain).toBe('maven');
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
   });
 
   it('fails closed for an inactive Maven project nested under a reactor module', () => {
@@ -303,6 +386,10 @@ describe('maven toolchain adapter', () => {
       ok: true,
     });
     expect(report.test[0]?.command).toContain('-pl core,extension -am test');
+    // Agent 7 reads the note as evidence: it must say the run did NOT build
+    // downstream dependents, or a dependent module gets reported as verified.
+    expect(report.note).toContain('upstream dependencies only');
+    expect(report.note).toContain('downstream dependents were NOT built');
   });
 
   it('uses mvn and test-compile for build-only mode', () => {
@@ -377,6 +464,28 @@ describe('maven toolchain adapter', () => {
     const report = mavenToolchainAdapter.run({
       root,
       changedFiles: ['mvnw'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 126,
+          output: '/bin/sh: ./mvnw: Permission denied',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('does not hide a permission failure behind `./mvnw` spelled differently', () => {
+    // The guard compares normalized paths: `./mvnw` and absolute paths name
+    // the same wrapper the raw comparison missed.
+    writeReactor();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['./mvnw'],
       timeout: 5,
       install: false,
       exec: (command) =>
@@ -565,6 +674,14 @@ describe('maven toolchain adapter', () => {
     expect(report.note).toContain('module-qualified');
   });
 
+  it('quotes exotic module selectors for the platform shell', () => {
+    // Plain selectors stay bare; anything else is quoted for the shell the
+    // command actually runs under — POSIX quoting is literal in cmd.exe.
+    expect(shellSelector(['core', 'extension'])).toBe('core,extension');
+    expect(shellSelector(['my module'], 'linux')).toBe("'my module'");
+    expect(shellSelector(['my module'], 'win32')).toBe('"my module"');
+  });
+
   it('selects the wrapper a platform can execute', () => {
     writeProject('.');
     writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
@@ -596,7 +713,6 @@ describe('maven toolchain adapter', () => {
     expect(detectMavenOwnership(root, metadata, parsed.reactor)).toEqual({
       reactorWide: false,
       modules: [],
-      unowned: metadata,
       inactiveProjects: [],
     });
 

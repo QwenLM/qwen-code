@@ -59,13 +59,7 @@ import {
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
-import {
-  runBuildTest,
-  toolchainAdapters,
-  type BuildTestReport,
-} from './build-test.js';
-import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
-import { selectToolchainAdapter } from './lib/toolchain.js';
+import { runBuildTest, type BuildTestReport } from './build-test.js';
 
 export interface BaseTreeReport {
   /**
@@ -112,6 +106,14 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
+function gitHasPath(cwd: string, sha: string, path: string): boolean {
+  const r = spawnSync('git', ['cat-file', '-e', `${sha}:${path}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  return !r.error && r.status === 0;
+}
+
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const unavailable = (note: string): BaseTreeReport => ({
     available: false,
@@ -152,6 +154,19 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const worktree = resolve(args.worktree);
   if (!existsSync(worktree)) {
     return unavailable(`the review worktree ${worktree} does not exist`);
+  }
+
+  // A/B attribution reruns the recorded npm test commands (test-delta); no
+  // other toolchain has a delta consumer in this release — Agent 7's brief
+  // says the same for Maven. `cat-file` answers before a full checkout of
+  // what can be a very large Java reactor, so a Maven base never pays for a
+  // tree that would not be built.
+  if (gitHasPath(worktree, baseSha, 'pom.xml')) {
+    return unavailable(
+      `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
+        'commands — a base-side Maven build could not be consumed, so it was not run ' +
+        '(never a finding against the PR)',
+    );
   }
 
   const tree = baseWorktreePath(worktree);
@@ -263,25 +278,6 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
       );
-    }
-
-    // A/B attribution reruns the recorded npm test commands (test-delta); no
-    // other toolchain has a delta consumer in this release — Agent 7's brief
-    // says the same for Maven. A base build nothing can consume is pure cost
-    // on the most expensive tree in the review, so it does not run.
-    if (
-      selectToolchainAdapter(tree, toolchainAdapters) === mavenToolchainAdapter
-    ) {
-      return {
-        available: false,
-        path: tree,
-        baseSha,
-        build: null,
-        note:
-          `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
-          'commands — a base-side Maven build could not be consumed, so it was not run ' +
-          '(never a finding against the PR)',
-      };
     }
 
     const build = args.build

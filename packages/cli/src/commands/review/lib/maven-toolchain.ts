@@ -19,7 +19,6 @@ export interface MavenReactor {
 export interface MavenOwnership {
   reactorWide: boolean;
   modules: string[];
-  unowned: string[];
   inactiveProjects: string[];
 }
 
@@ -52,7 +51,11 @@ function isInside(root: string, path: string): boolean {
 }
 
 function moduleEntries(pom: string): string[] | null {
-  const withoutComments = pom.replace(/<!--[\s\S]*?-->/g, '');
+  // CDATA goes first: a `-->` inside one (antrun/checkstyle/xml-generation
+  // config) would otherwise trip the leftover-comment guard below, and a
+  // `<module>` inside one would be mistaken for markup.
+  const withoutCdata = pom.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  const withoutComments = withoutCdata.replace(/<!--[\s\S]*?-->/g, '');
   if (withoutComments.includes('<!--') || withoutComments.includes('-->')) {
     return null;
   }
@@ -60,7 +63,10 @@ function moduleEntries(pom: string): string[] | null {
   const entries: string[] = [];
   const stack: string[] = [];
   let moduleText: string | null = null;
-  const tokens = withoutComments.match(/<[^>]+>|[^<]+/g) ?? [];
+  // Quote-aware: a `>` inside an attribute value is legal XML and occurs in
+  // real plugin config; splitting the tag there fails the whole POM closed.
+  const tokens =
+    withoutComments.match(/<(?:"[^"]*"|'[^']*'|[^>"'])*>|[^<]+/g) ?? [];
   for (const token of tokens) {
     if (!token.startsWith('<')) {
       if (moduleText !== null) moduleText += token;
@@ -81,7 +87,8 @@ function moduleEntries(pom: string): string[] | null {
       continue;
     }
 
-    const opening = /^<\s*([\w:.-]+)(?:\s[^>]*)?\s*\/?>$/.exec(token);
+    const opening =
+      /^<\s*([\w:.-]+)(?:\s(?:"[^"]*"|'[^']*'|[^>"'])*)?\s*\/?>$/.exec(token);
     if (!opening) return null;
     const name = opening[1].split(':').at(-1) ?? '';
     const selfClosing = /\/\s*>$/.test(token);
@@ -191,11 +198,33 @@ function isRepoMetadataPath(path: string): boolean {
   );
 }
 
-function nearestMavenProject(root: string, path: string): string | null {
+/**
+ * A POM under a known project's `src/` tree is test data — maven-invoker ITs,
+ * archetype fixtures, `src/test/resources/projects/*` — never a reactor member,
+ * and no profile activates one. Reading it as a project boundary would fail the
+ * whole diff closed over a fixture, so keep walking: the file stays owned by the
+ * enclosing project.
+ */
+function isUnderTestSourceTree(
+  rel: string,
+  projectDirs: readonly string[],
+): boolean {
+  return projectDirs.some((projectDir) => {
+    const src = projectDir === '.' ? 'src' : `${projectDir}/src`;
+    return rel === src || rel.startsWith(`${src}/`);
+  });
+}
+
+function nearestMavenProject(
+  root: string,
+  path: string,
+  projectDirs: readonly string[],
+): string | null {
   let dir = dirname(join(root, path));
   while (isInside(root, dir)) {
     if (existsSync(join(dir, 'pom.xml'))) {
-      return toPosix(relative(root, dir)) || '.';
+      const rel = toPosix(relative(root, dir)) || '.';
+      if (!isUnderTestSourceTree(rel, projectDirs)) return rel;
     }
     if (dir === root) break;
     dir = dirname(dir);
@@ -209,7 +238,6 @@ export function detectMavenOwnership(
   reactor: MavenReactor,
 ): MavenOwnership {
   const modules = new Set<string>();
-  const unowned: string[] = [];
   const inactiveProjects = new Set<string>();
   let reactorWide = false;
   const deepestFirst = [...reactor.modules].sort(
@@ -218,10 +246,7 @@ export function detectMavenOwnership(
 
   for (const changedFile of changedFiles) {
     const path = normalizedChangedPath(root, changedFile);
-    if (path === null) {
-      unowned.push(changedFile);
-      continue;
-    }
+    if (path === null) continue;
     if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
       reactorWide = true;
       continue;
@@ -230,7 +255,11 @@ export function detectMavenOwnership(
       (module) => path === module || path.startsWith(`${module}/`),
     );
     if (owner) {
-      const nearestProject = nearestMavenProject(root, path);
+      const nearestProject = nearestMavenProject(
+        root,
+        path,
+        reactor.projectDirs,
+      );
       if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
         inactiveProjects.add(nearestProject);
       } else {
@@ -238,11 +267,8 @@ export function detectMavenOwnership(
       }
       continue;
     }
-    if (isDocumentationPath(path) || isRepoMetadataPath(path)) {
-      unowned.push(changedFile);
-      continue;
-    }
-    const nearestProject = nearestMavenProject(root, path);
+    if (isDocumentationPath(path) || isRepoMetadataPath(path)) continue;
+    const nearestProject = nearestMavenProject(root, path, reactor.projectDirs);
     if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
       inactiveProjects.add(nearestProject);
     } else {
@@ -253,7 +279,6 @@ export function detectMavenOwnership(
   return {
     reactorWide,
     modules: [...modules].sort(),
-    unowned,
     inactiveProjects: [...inactiveProjects].sort(),
   };
 }
@@ -487,12 +512,20 @@ function isLaunchFailure(output: string): boolean {
  * Dependency/network/plugin failures count only when Maven itself frames them:
  * a test that fails printing `Connection refused` in its stdout is a source
  * finding, not a network outage, and free-text matching cannot tell the two
- * apart. Maven's own error lines carry the `[ERROR]`/`[FATAL]` prefix.
+ * apart. Maven's own error lines carry the `[ERROR]`/`[FATAL]` prefix. The
+ * line-level form is exported so `build-test`'s output trim rescues these from
+ * the omitted middle — the classification below runs on that trimmed output,
+ * and a marker lost to the trim would file a network outage against the PR.
  */
+const DEPENDENCY_FAILURE_LINE_RE =
+  /^\[(?:ERROR|FATAL)\].*(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d))/i;
+
+export function isDependencyFailureLine(line: string): boolean {
+  return DEPENDENCY_FAILURE_LINE_RE.test(line);
+}
+
 function isDependencyFailure(output: string): boolean {
-  return /^\[(?:ERROR|FATAL)\][^\n]*(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d))/im.test(
-    output,
-  );
+  return output.split('\n').some(isDependencyFailureLine);
 }
 
 function isInfrastructureFailure(output: string): boolean {
@@ -505,11 +538,14 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
   );
 }
 
-function shellSelector(modules: string[]): string {
+export function shellSelector(
+  modules: string[],
+  platform: string = process.platform,
+): string {
   const selector = modules.join(',');
-  return /^[A-Za-z0-9_./,-]+$/.test(selector)
-    ? selector
-    : shellQuotePath(selector);
+  if (/^[A-Za-z0-9_./,-]+$/.test(selector)) return selector;
+  // The command runs through cmd.exe on Windows, where POSIX quoting is literal.
+  return platform === 'win32' ? `"${selector}"` : shellQuotePath(selector);
 }
 
 /**
@@ -565,6 +601,9 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const affected = ownership.reactorWide ? ['.'] : ownership.modules;
   const buildSet = ownership.reactorWide ? ['.'] : ownership.modules;
   const executable = mavenExecutable(args.root);
+  const wrapperChanged = args.changedFiles.some(
+    (file) => normalizedChangedPath(args.root, file) === 'mvnw',
+  );
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
   // `-am` builds the changed modules plus their upstream closure. `-amd`
   // (downstream) selects the whole reactor on exactly the repos this adapter
@@ -610,7 +649,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !hasFreshTestFailure(summaries) &&
     (isInfrastructureFailure(result.output) ||
       (executable === './mvnw' &&
-        !args.changedFiles.includes('mvnw') &&
+        !wrapperChanged &&
         result.exitCode === 126 &&
         /(?:^|\n).*\.\/mvnw:\s*Permission denied(?:\n|$)/i.test(result.output)))
   ) {
@@ -643,6 +682,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;
+  }
+  if (!ownership.reactorWide) {
+    report.note +=
+      ' Scope: this run covered the changed modules and their upstream dependencies only ' +
+      '(`-pl … -am`); downstream dependents were NOT built — a POM or API change can break ' +
+      "modules this run never compiled, and that coverage stays with the project's CI.";
   }
   return report;
 }
