@@ -196,12 +196,12 @@ describe('runBuildTest', () => {
     expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
   });
 
-  it('fail-opens a docs-only diff to the full test suite — nothing built, disclosure recorded', () => {
-    // No workspace source changed, so there is nothing to build — but a file
-    // outside every workspace (a root script, a config, even docs the tests
-    // read) can affect any package, and no scoped subset covers that. The safe
-    // direction is the repo's own full suite, with the fallback disclosed in
-    // `testScope` rather than silently skipping the run.
+  it('builds and tests nothing for a docs-only diff — prose cannot fail a suite', () => {
+    // Inert files outside every workspace (markdown, docs/, LICENSE) cannot
+    // influence any package's tests, and a full-suite fallback for a README
+    // edit would spend the whole command budget measuring nothing. Only
+    // INFLUENTIAL outside files (scripts/, .github/, root config) fail open to
+    // the full suite — the tests further down pin that direction.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -214,7 +214,7 @@ describe('runBuildTest', () => {
       name: '@x/a',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    writePlan(['README.md', 'docs/x.md']);
+    writePlan(['README.md', 'docs/x.md', 'LICENSE']);
 
     const calls: string[] = [];
     const rep = runBuildTest({
@@ -235,17 +235,49 @@ describe('runBuildTest', () => {
     });
     expect(rep.affected).toEqual([]);
     expect(rep.build).toEqual([]);
-    // The root's own full-suite command, not a per-workspace subset.
-    expect(rep.test.map((t) => t.command)).toEqual(['npm test']);
-    expect(calls.some((c) => c.startsWith('npm run build'))).toBe(false);
+    expect(rep.test).toEqual([]);
+    expect(calls).toEqual([]);
     expect(rep.ok).toBe(true);
-    expect(rep.testScope).toEqual({
-      mode: 'full',
-      reason: expect.stringContaining('outside every workspace'),
+    // The disclosure says a scoped decision selected zero suites — the note
+    // explains why that is a complete answer, not a skipped step.
+    expect(rep.testScope).toEqual({ mode: 'workspaces', workspaces: [] });
+    expect(rep.note).toContain('no package to build');
+  });
+
+  it('keeps a diff scoped when its only out-of-workspace files are inert docs', () => {
+    // README riding along with a one-workspace change must not drag the run to
+    // the full suite — the prose changes nothing the tests execute.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    // The note carries the disclosure the agent renders into its report.
-    expect(rep.note).toContain('FULL suite');
-    expect(rep.note).toContain('nothing was built');
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'README.md', 'docs/guide.md']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope).toEqual({
+      mode: 'workspaces',
+      workspaces: ['packages/a'],
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+    expect(rep.ok).toBe(true);
   });
 
   it('still runs nothing for an EMPTY diff — a full suite would measure nothing', () => {

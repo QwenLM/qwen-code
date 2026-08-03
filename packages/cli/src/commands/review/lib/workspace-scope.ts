@@ -23,6 +23,10 @@
 //   - A changed file OUTSIDE every workspace can affect any package: the test
 //     scripts themselves live in the root `package.json`, and `scripts/` is
 //     imported by whatever chooses to. No per-workspace subset covers that.
+//     Inert prose is the one carve-out — a README or LICENSE edit cannot fail
+//     a suite, and treating it as influential would spend a full-suite run
+//     (minutes, on a large monorepo) measuring nothing. What counts as prose
+//     is the plan pipeline's own docs classifier, not a second definition.
 //   - A workspace whose `package.json` does not parse is invisible to the
 //     dependency graph, so its reverse edges are missing and the closure may be
 //     silently too small — the confident false green this pipeline exists to
@@ -34,6 +38,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { classifyPath } from './diff-plan.js';
 import {
   affectedWorkspaces,
   reverseDependencyClosure,
@@ -53,6 +58,31 @@ export interface TestScope {
   workspaces?: string[];
   /** Why the mode was forced, when it was — rendered into the agent's report. */
   reason?: string;
+}
+
+/**
+ * License-family files, which carry no extension the docs classifier could key
+ * on (`LICENSE`, `COPYING`, `NOTICE`, and suffixed variants like `LICENSE-MIT`
+ * or a generated `NOTICES.txt`). The optional text extension is deliberate:
+ * `LICENSE.js` must NOT match — a name is only inert when nothing executes it.
+ */
+const LICENSE_LIKE_RE =
+  /(^|\/)(LICENSE|LICENCE|COPYING|NOTICES?)(-[^/.]+)?(\.(md|txt|rst))?$/;
+
+/**
+ * Is this changed file inert prose — unable to fail any test suite?
+ *
+ * Consulted only for files OUTSIDE every workspace, where the alternative is a
+ * full-suite fallback: a README edit that triggers the whole suite spends the
+ * command budget measuring nothing, which is the very waste scoping exists to
+ * remove. "Prose" is the plan pipeline's own docs classifier (`classifyPath`),
+ * not a second definition that could drift from it — so markdown outside the
+ * documentation directories and the repo root stays influential (the
+ * classifier's judgment: markdown in a source tree can be executable
+ * behaviour), which errs toward running MORE tests, the safe direction.
+ */
+export function isInertProse(path: string): boolean {
+  return classifyPath(path) === 'docs' || LICENSE_LIKE_RE.test(path);
 }
 
 /**
@@ -109,14 +139,20 @@ export function resolveTestScope(input: {
     };
   }
 
+  // Only INFLUENTIAL outside files force the full suite. Inert prose (docs,
+  // license files) neither forces it nor widens a scoped set — a diff of
+  // README plus one workspace stays scoped to that workspace, and a diff of
+  // prose alone obliges no test at all.
   const outside = changed.filter((f) => workspaceDirFor(f, globs) === null);
-  if (outside.length > 0) {
+  const influential = outside.filter((f) => !isInertProse(f));
+  if (influential.length > 0) {
     return {
       mode: 'full',
       reason:
-        `${outside.length} changed file(s) sit outside every workspace ` +
-        `(e.g. ${outside.slice(0, 3).join(', ')}); a root script or config ` +
-        "can affect any package's tests, so no per-workspace subset covers them",
+        `${influential.length} changed file(s) sit outside every workspace ` +
+        `and are not inert docs (e.g. ${influential.slice(0, 3).join(', ')}); ` +
+        "a root script or config can affect any package's tests, so no " +
+        'per-workspace subset covers them',
     };
   }
 

@@ -9,6 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  isInertProse,
   resolveTestScope,
   unparseableWorkspaceManifests,
 } from './workspace-scope.js';
@@ -72,7 +73,7 @@ describe('resolveTestScope', () => {
     expect(scope).toEqual({ mode: 'workspaces', workspaces: ['packages/top'] });
   });
 
-  it('falls back to full for a file outside every workspace, naming the file', () => {
+  it('falls back to full for an influential file outside every workspace, naming the file', () => {
     const scope = resolveTestScope({
       changed: ['packages/i1/src/a.ts', 'scripts/prepare.js'],
       globs: GLOBS,
@@ -83,6 +84,50 @@ describe('resolveTestScope', () => {
     expect(scope.workspaces).toBeUndefined();
     expect(scope.reason).toContain('scripts/prepare.js');
     expect(scope.reason).toContain('outside every workspace');
+  });
+
+  it('treats the root package.json as influential — it defines the test scripts themselves', () => {
+    const scope = resolveTestScope({
+      changed: ['package.json'],
+      globs: GLOBS,
+      packages: PKGS,
+      unparseable: [],
+    });
+    expect(scope.mode).toBe('full');
+    expect(scope.reason).toContain('package.json');
+  });
+
+  it('obliges no test for a diff of inert prose alone', () => {
+    // A README/docs/LICENSE edit cannot fail any suite; a full-suite fallback
+    // for it would spend minutes measuring nothing. The empty scoped set is
+    // the honest answer, and the caller reports "nothing to run" as complete.
+    const scope = resolveTestScope({
+      changed: ['README.md', 'docs/guide.md'],
+      globs: GLOBS,
+      packages: PKGS,
+      unparseable: [],
+    });
+    expect(scope).toEqual({ mode: 'workspaces', workspaces: [] });
+  });
+
+  it('treats a lone LICENSE change as inert — no extension, still prose', () => {
+    const scope = resolveTestScope({
+      changed: ['LICENSE'],
+      globs: GLOBS,
+      packages: PKGS,
+      unparseable: [],
+    });
+    expect(scope).toEqual({ mode: 'workspaces', workspaces: [] });
+  });
+
+  it('lets inert docs ride along without dragging a workspace diff to full', () => {
+    const scope = resolveTestScope({
+      changed: ['README.md', 'packages/i1/src/a.ts'],
+      globs: GLOBS,
+      packages: PKGS,
+      unparseable: [],
+    });
+    expect(scope).toEqual({ mode: 'workspaces', workspaces: ['packages/i1'] });
   });
 
   it('falls back to full when the closure covers more than half the workspaces', () => {
@@ -142,6 +187,41 @@ describe('resolveTestScope', () => {
       unparseable: [],
     });
     expect(scope).toEqual({ mode: 'workspaces', workspaces: [] });
+  });
+});
+
+describe('isInertProse', () => {
+  it('is the plan pipeline docs classifier plus the license family', () => {
+    // Inert: what `classifyPath` calls docs, and extensionless license files.
+    // Filtered so a failure names the misclassified path.
+    const inert = [
+      'README.md',
+      'docs/guide.md',
+      'documentation/api.rst',
+      'LICENSE',
+      'LICENCE',
+      'COPYING',
+      'LICENSE-MIT',
+      'NOTICES.txt',
+      'legal/LICENSE.txt',
+    ];
+    expect(inert.filter((f) => isInertProse(f))).toEqual(inert);
+  });
+
+  it('keeps everything executable or config-shaped influential', () => {
+    // `LICENSE.js` is code wearing a license name; markdown outside the docs
+    // dirs and the repo root stays influential on the classifier's own
+    // judgment (in-tree markdown can be executable behaviour, e.g. skill
+    // prompts) — erring toward MORE tests, the safe direction.
+    const influential = [
+      'scripts/build.js',
+      '.github/workflows/ci.yml',
+      'package.json',
+      'LICENSE.js',
+      'scripts/README.md',
+      '.eslintrc.json',
+    ];
+    expect(influential.filter((f) => isInertProse(f))).toEqual([]);
   });
 });
 

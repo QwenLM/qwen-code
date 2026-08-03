@@ -439,11 +439,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const fullTests = testScope?.mode === 'full' && !args.buildOnly;
 
   // With no affected workspace and no full-suite obligation there is nothing to
-  // run at all. A diff that touches nothing inside a workspace no longer lands
-  // here on its own — a root script or config can affect any package's tests, so
-  // that case fail-opens to the full suite below — but an empty diff does, and
-  // so does a build-only call (the merge-base probe), whose full run would
-  // measure nothing about this PR.
+  // run at all. Three diffs land here: an empty one; a build-only call (the
+  // merge-base probe), whose full run would measure nothing about this PR; and
+  // a diff of inert prose alone (docs, LICENSE) — prose cannot fail a suite,
+  // so "nothing to run" is the honest answer, not a skipped step. An
+  // INFLUENTIAL outside file (a root script or config, which can affect any
+  // package's tests) does not land here: it fail-opens to the full suite below.
   if (affected.length === 0 && !fullTests) {
     return {
       toolchain: 'npm',
@@ -458,7 +459,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       timedOut: [],
       note:
         `The diff changes ${changed.length} file(s), none of them inside a workspace ` +
-        '(docs, root config, CI). There is no package to build and no test to run — ' +
+        '(docs and other inert prose). There is no package to build and no test to run — ' +
         'this is a complete answer, not a skipped step.',
     };
   }
