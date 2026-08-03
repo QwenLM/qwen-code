@@ -43,23 +43,6 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ),
 };
 
-const DINGTALK_WITH_GROUP_POLICY: DaemonChannelTypeDescriptor = {
-  ...DINGTALK,
-  fields: [
-    ...DINGTALK.fields,
-    {
-      key: 'groupPolicy',
-      label: 'Group Policy',
-      kind: 'enum',
-      required: true,
-      options: [
-        { value: 'pairing', label: 'Pairing' },
-        { value: 'open', label: 'Open' },
-      ],
-    },
-  ],
-};
-
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -296,7 +279,6 @@ describe('ChannelEditorDialog', () => {
     const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
 
     await renderDialog({
-      descriptor: DINGTALK_WITH_GROUP_POLICY,
       instance: groupPairingInstance,
       listPairingRequests,
     });

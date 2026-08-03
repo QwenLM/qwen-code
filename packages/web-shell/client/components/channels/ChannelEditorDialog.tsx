@@ -610,9 +610,12 @@ export function ChannelEditorDialog({
                 ? String(draft.values['senderPolicy'] ?? '')
                 : draft.senderPolicy;
               const showRadioGroup = !descriptorPolicy;
-              const effectiveGroupPolicy = String(
-                draft.values['groupPolicy'] ?? '',
+              const descriptorGroupPolicy = descriptor.fields.some(
+                (field) => field.key === 'groupPolicy',
               );
+              const effectiveGroupPolicy = descriptorGroupPolicy
+                ? String(draft.values['groupPolicy'] ?? '')
+                : String(instance?.config.groupPolicy ?? '');
               const showPairing =
                 effectivePolicy === 'pairing' ||
                 effectiveGroupPolicy === 'pairing';
