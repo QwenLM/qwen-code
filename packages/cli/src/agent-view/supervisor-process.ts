@@ -23,8 +23,6 @@ const UNIX_SOCKET_PATH_LIMIT = 100;
 const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
 
 export interface AgentViewSupervisorHibernationPolicy {
-  enabled?: boolean;
-  idleMs?: number;
   autoExit?: boolean;
   autoExitGraceMs?: number;
 }
@@ -79,9 +77,18 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
+  // Fall back to a per-uid directory under the runtime dir. prepareSocketPath
+  // creates it 0700 when missing and the socket file is 0600, but the directory
+  // name is predictable: on a shared multi-user tmpdir a pre-existing directory
+  // is reused with its current owner and mode. Callers that need a hardened
+  // path should pass a private 0700 runtimeDir (e.g. XDG_RUNTIME_DIR).
+  const uid = process.getuid?.();
+  const fallbackDir =
+    uid === undefined ? `qwen-agent-view-${digest}` : `qwen-agent-view-${uid}`;
   return path.join(
     options.runtimeDir ?? os.tmpdir(),
-    `qwen-agent-view-${digest}.sock`,
+    fallbackDir,
+    `supervisor-${digest}.sock`,
   );
 }
 
@@ -135,7 +142,7 @@ class AgentViewSupervisorProcessHandler
   }
 
   shutdown(): { shuttingDown: true; workersStopped: 0 } {
-    void this.options.onShutdown?.();
+    void Promise.resolve(this.options.onShutdown?.()).catch(() => {});
     return { shuttingDown: true, workersStopped: 0 };
   }
 
@@ -144,13 +151,9 @@ class AgentViewSupervisorProcessHandler
   }
 
   async tickIdleHibernation(): Promise<AgentViewSupervisorMaintenanceResult> {
-    if (this.options.hibernationPolicy?.enabled === false) {
-      return { hibernated: [], shutdownRequested: false };
-    }
-
     const states = await listAgentViewSessionStates(this.store);
     if (this.shouldAutoExit(states)) {
-      void this.options.onShutdown?.();
+      void Promise.resolve(this.options.onShutdown?.()).catch(() => {});
       return { hibernated: [], shutdownRequested: true };
     }
 

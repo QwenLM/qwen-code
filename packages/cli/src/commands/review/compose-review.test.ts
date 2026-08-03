@@ -15,10 +15,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import {
   composeReview,
+  scriptLintGate,
   composeReviewCommand,
   describeChunkGap,
   verdictLine,
@@ -49,19 +51,26 @@ const MODEL = 'test-model';
 let dir: string;
 /** Passed explicitly, so these tests never race another suite over process.env. */
 let ENV: NodeJS.ProcessEnv;
+// The captured diff, and its content hash. A REAL file (not just a token): coverage
+// only string-matches this path in the agents' prompts, but the script-lint gate
+// re-hashes it for its freshness check — so a plan that arms the gate needs a diff
+// that actually exists, and a report that binds to its hash to read as fresh.
+let DIFF: string;
+let DIFF_HASH: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
   ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
   mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+  DIFF = join(dir, 'the.diff');
+  writeFileSync(DIFF, 'diff --git a/a.ts b/a.ts\n@@ -0,0 +1 @@\n+x\n');
+  DIFF_HASH = createHash('sha256').update(readFileSync(DIFF)).digest('hex');
   ghMock.mockClear();
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
-
-const DIFF = '/abs/diff.txt';
 
 /**
  * Write a plan with two chunks, and return its path.
@@ -76,6 +85,8 @@ function plan(
     step45?: boolean;
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
+    /** Override the fixture's 5000 — the low-signal floor reads this. */
+    srcDiffLines?: number;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -89,7 +100,7 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
-      srcDiffLines: 5000,
+      srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       // Real plans carry each chunk's files (`DiffChunk.files`) — the body
@@ -303,7 +314,11 @@ function blindPrompt(chunk: number): string {
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
-  planOpts: { han?: boolean; effort?: 'low' | 'medium' | 'high' } = {},
+  planOpts: {
+    han?: boolean;
+    effort?: 'low' | 'medium' | 'high';
+    srcDiffLines?: number;
+  } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -374,6 +389,53 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({ bodyCriticals: ['whole-PR blocker X'] }));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+});
+
+describe('composeReview — the low-signal Approve disclosure', () => {
+  // The coverage gate proves the agents READ the diff, not that the review had
+  // discriminating power: a dogfooded weak-model run drafted nothing from all
+  // of its agents on a non-trivial source diff where stronger same-condition
+  // runs found a verified blocker, and composed a bare confident Approve.
+  it('a zero-finding APPROVE over a non-trivial source diff carries the marker — event and body unchanged', () => {
+    const r = composeReview(base({}));
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+    // The fixture's roster: two chunk agents plus the test matrix.
+    expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
+    expect(verdictLine(r)).toBe(
+      'Verdict: Approve — low signal: none of the 3 review agents reported ' +
+        'a finding on a non-trivial diff (5000 source diff lines)',
+    );
+  });
+
+  it('a docs-only diff keeps the bare Approve — finding nothing there is the expected outcome', () => {
+    const r = composeReview({
+      planPath: coveredPlan(undefined, { srcDiffLines: 0 }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).toBe('Verdict: Approve');
+  });
+
+  it('a tiny source change at the floor keeps the bare Approve — the marker needs strictly more', () => {
+    const r = composeReview({
+      planPath: coveredPlan(undefined, { srcDiffLines: 100 }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).toBe('Verdict: Approve');
+  });
+
+  it('a review with findings never carries the marker — low signal is about empty reviews', () => {
+    const r = composeReview(base({ suggestionsInline: 1 }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).not.toContain('low signal');
   });
 });
 
@@ -1865,6 +1927,24 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.cappedBy).not.toContain('criticals-unverified');
   });
 
+  it('a MODEL-written `[lint]` string is NOT deterministic — provenance, not the marker, decides', () => {
+    // The gate's own findings are deterministic because `scriptLintGate` read a
+    // tool's report; a body Critical a model merely tagged `[lint]` (or that quoted
+    // `[lint]` out of the diff) must still be verified — otherwise an unverified or
+    // injected claim launders itself into a blocker. With no verifier, it softens.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: [
+        '[lint] deploy.sh:3 SC2086 — unquoted $x (model-written)',
+      ],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
   it('a [probe] finding is deterministic too — a run confirmed it, so it needs no separate verifier', () => {
     // The verifier confirmed this by RUNNING a probe against the code; its
     // evidence is an observed behaviour, so it is pre-confirmed like [build]/[test]
@@ -1986,6 +2066,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgraded: false,
       downgradedFrom: null,
       remediation: [],
+      lowSignal: null,
       ...over,
     });
 
@@ -2077,6 +2158,19 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
   it('is bare for a clean Approve', () => {
     expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
       'Verdict: Approve',
+    );
+  });
+
+  it("marks a low-signal Approve, with the run's own numbers", () => {
+    expect(
+      line({
+        event: 'APPROVE',
+        baseEvent: 'APPROVE',
+        lowSignal: { agents: 11, srcDiffLines: 642 },
+      }),
+    ).toBe(
+      'Verdict: Approve — low signal: none of the 11 review agents reported ' +
+        'a finding on a non-trivial diff (642 source diff lines)',
     );
   });
 });
@@ -2409,5 +2503,490 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
     } finally {
       rmSync(handlerDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('scriptLintGate — the deterministic gate reads the report', () => {
+  // Unit-level: the gate turns the orchestrator's report into verdict inputs
+  // (compose-review's coverage machinery is exercised elsewhere). A same-repo plan
+  // carries a worktreePath; without one (diff-only) the orchestrator could not run
+  // the command, so the gate must stay silent.
+  //
+  // Fixtures are FRESH by default: a captured diff exists and both the plan and the
+  // report bind to its hash, so the happy-path tests exercise the gate on a verified
+  // report — not through the fail-open branch. A freshness test overrides one side
+  // (a mismatching hash, or `diffHash: undefined`) to model staleness.
+  let freshDiff: { path: string; hash: string };
+  beforeEach(() => {
+    freshDiff = writeDiff();
+  });
+  function writePlan(over: Record<string, unknown>): string {
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        worktreePath: '.qwen/tmp/review-pr-1',
+        diffPathAbsolute: freshDiff.path,
+        files: [{ path: 'deploy.sh', kind: 'source', addedLines: 3 }],
+        ...over,
+      }),
+    );
+    return p;
+  }
+  function writeReport(
+    report: Record<string, unknown>,
+    name = 'qwen-review-script-lint.json',
+  ): void {
+    writeFileSync(
+      join(dir, name),
+      JSON.stringify({
+        checked: [],
+        skipped: [],
+        errored: [],
+        ok: true,
+        note: '',
+        diffHash: freshDiff.hash,
+        ...report,
+      }),
+    );
+  }
+  const finding = (over: Record<string, unknown> = {}) => ({
+    line: 3,
+    code: 'SC2086',
+    level: 'info',
+    message: 'Double quote to prevent globbing',
+    inDiff: true,
+    ...over,
+  });
+  const withFinding = (f: Record<string, unknown>) => ({
+    checked: [{ path: 'deploy.sh', tool: 'shellcheck', findings: [f] }],
+    ok: false,
+  });
+  /** Write a captured diff and return its path + the hash the gate will compute. */
+  function writeDiff(content = 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+added\n'): {
+    path: string;
+    hash: string;
+  } {
+    const dp = join(dir, 'pr.diff');
+    writeFileSync(dp, content);
+    const hash = createHash('sha256').update(readFileSync(dp)).digest('hex');
+    return { path: dp, hash };
+  }
+
+  it('turns an inDiff finding (above style) into a [lint] critical', () => {
+    const p = writePlan({});
+    writeReport(withFinding(finding()));
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.criticals[0]).toContain('SC2086');
+    expect(g.criticals[0]).toContain('[lint]');
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('fails closed on a STALE report — its diffHash disagrees with the plan diff', () => {
+    const p = writePlan({}); // plan binds to the fresh diff
+    writeReport({ ...withFinding(finding()), diffHash: 'a-different-hash' });
+    const g = scriptLintGate(p);
+    // The finding is NOT trusted (it was produced against a different diff); the
+    // review is unreviewed until script-lint re-runs against this one.
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('accepts a report whose diffHash matches the plan diff (fresh)', () => {
+    const p = writePlan({}); // both bind to the fresh diff by default
+    writeReport(withFinding(finding()));
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('fails closed when the plan diff is readable but the report has no diffHash', () => {
+    // The command could not hash the diff → no `diffHash`. When the plan's diff IS
+    // readable, an unverifiable report must not be trusted (the guard is not a no-op).
+    const p = writePlan({}); // readable diff
+    writeReport({ ...withFinding(finding()), diffHash: undefined }); // no diffHash
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('fails closed when NEITHER side has a hash — undefined must not equal undefined', () => {
+    // The unverifiable case its own comment claims to fail closed on: the plan names
+    // no readable diff AND the report carries no hash. `undefined !== undefined` is
+    // false, so a bare `!==` guard would ACCEPT an arbitrary report and promote its
+    // findings to blockers. The `!planDiffHash` arm is what closes it.
+    const p = writePlan({ diffPathAbsolute: '/no/such/diff.txt' });
+    writeReport({ ...withFinding(finding()), diffHash: undefined });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('the staleness guard catches an uncommitted LOCAL edit (content, not HEAD)', () => {
+    // A local plan (untrackedFiles present, no worktreePath) is `local` mode, not
+    // diff-only, so the gate is armed. The identity is the DIFF's content, so an
+    // uncommitted edit that changes the diff — HEAD unchanged — still invalidates a
+    // stale report. This is exactly the local case a HEAD-based guard would miss.
+    const d = writeDiff('diff --git a/x b/x\n@@ -0,0 +1 @@\n+edited\n');
+    const p = writePlan({
+      worktreePath: undefined,
+      untrackedFiles: [],
+      diffPathAbsolute: d.path,
+    });
+    writeReport({
+      ...withFinding(finding()),
+      diffHash: 'hash-of-the-old-diff',
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('a DEFERRED report is disclosed but does NOT cap the verdict (actionlint deferral)', () => {
+    // actionlint is deferred, not skipped/errored — a workflow-only PR whose only
+    // "problem" is the deferral must NOT be made un-Approvable. It contributes
+    // nothing to criticals/unreviewed (so it cannot cap), but it IS surfaced in
+    // `disclosed` so the body can say the workflow's shell went un-linted.
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toEqual([]);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0]).toContain('source mapping not yet supported');
+  });
+
+  it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
+    const p = writePlan({});
+    writeReport({
+      checked: [
+        {
+          path: 'deploy.sh',
+          tool: 'shellcheck',
+          findings: [finding({ level: 'style' }), finding({ inDiff: false })],
+        },
+      ],
+    });
+    expect(scriptLintGate(p).criticals).toEqual([]);
+  });
+
+  it('reports a skipped checker as unreviewed, surfacing its own reason', () => {
+    const p = writePlan({});
+    writeReport({
+      skipped: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'actionlint source mapping not yet supported',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    // the FILE and the entry's own reason are disclosed (not a hardcoded string)
+    expect(g.unreviewed[0]).toContain('.github/workflows/ci.yml');
+    expect(g.unreviewed[0]).toContain('not yet supported');
+  });
+
+  it('neutralises a PR-controlled path before it reaches the review body', () => {
+    // A filename is workspace-controlled and git allows almost any byte in one, so a
+    // path carrying a newline / `@team` / Markdown must not inject structure or a
+    // mention into the body we post. It is rendered in an inline code span with
+    // backticks and newlines stripped.
+    const p = writePlan({});
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/x.yml\n@acme-team `pwn`',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    const d = g.disclosed[0];
+    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+    // it is inert as a GitHub mention — the whole path rendered as one code span.
+    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+  });
+
+  it('reports an errored checker as unreviewed (fail closed)', () => {
+    const p = writePlan({});
+    writeReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'exited 2' }],
+    });
+    expect(scriptLintGate(p).unreviewed[0]).toContain('errored');
+  });
+
+  it('fails closed when owed but no report was produced', () => {
+    const p = writePlan({}); // no report file written
+    const g = scriptLintGate(p);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('produced no report');
+  });
+
+  it('surfaces its OWN reason when the plan itself cannot be read', () => {
+    // The coverage machinery also caps an unreadable plan, so the verdict is capped
+    // either way — but the gate must still contribute its specific reason rather than
+    // go silent (delete the plan-parse `unreviewed.push` and this disclosure vanishes
+    // while the cap stays, which is exactly the sentence a reader loses).
+    const g = scriptLintGate(join(dir, 'does-not-exist.json'));
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('could not read the plan');
+  });
+
+  it('reads a fresh report for a shebang script the path-predicate misses', () => {
+    // hasExecutableScript('.husky/pre-commit') is false (path-only), but the
+    // command shebang-detected it and reported a finding. The gate reads the
+    // report regardless of the predicate, so the finding is NOT dropped.
+    const p = writePlan({
+      files: [{ path: '.husky/pre-commit', kind: 'source' }],
+    });
+    writeReport({
+      checked: [
+        {
+          path: '.husky/pre-commit',
+          tool: 'shellcheck',
+          findings: [finding()],
+        },
+      ],
+      ok: false,
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.criticals[0]).toContain('.husky/pre-commit');
+  });
+
+  it('is a no-op when nothing was owed and no report exists', () => {
+    const p = writePlan({ files: [{ path: 'a.ts', kind: 'source' }] });
+    // no report written — not owed by path, and none produced → contribute nothing
+    expect(scriptLintGate(p)).toEqual({
+      criticals: [],
+      unreviewed: [],
+      disclosed: [],
+    });
+  });
+
+  it('is a no-op on a diff-only review — no worktree to have run it', () => {
+    const p = writePlan({ worktreePath: undefined });
+    writeReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'x' }],
+    });
+    expect(scriptLintGate(p)).toEqual({
+      criticals: [],
+      unreviewed: [],
+      disclosed: [],
+    });
+  });
+
+  it('derives the pr-numbered report name from the plan', () => {
+    const p = writePlan({ prNumber: '42' });
+    writeReport(withFinding(finding()), 'qwen-review-pr-42-script-lint.json');
+    expect(scriptLintGate(p).criticals).toHaveLength(1);
+  });
+});
+
+describe('composeReview — the script-lint gate wired to the verdict', () => {
+  // A worktree arms the gate (pr-worktree, not diff-only). That mode also owes the
+  // cross-file (1c) and build-and-test (7) roles, so a test that wants the gate's
+  // own outcome to decide the verdict — not an unrelated dimension gap — must record
+  // them too. `step45Keys` threads through to `coveredPlan` so a caller can drop the
+  // verifier (['reverse-audit']) to prove a finding stands with none.
+  function gateReadyPlan(
+    step45Keys: string[] = ['verify', 'reverse-audit'],
+  ): string {
+    const p = coveredPlan(step45Keys);
+    const planObj = JSON.parse(readFileSync(p, 'utf8'));
+    planObj.worktreePath = '.qwen/tmp/review-pr-1';
+    writeFileSync(p, JSON.stringify(planObj));
+    for (const role of ['1c', '7']) {
+      const d = promptRecordDir(p);
+      mkdirSync(d, { recursive: true });
+      const brief = briefPath(p, role);
+      writeFileSync(brief, `The ${role} brief.`);
+      const launch = `You are review agent \`${role}\`.\nread_file(file_path="${brief}")\nread_file(file_path="${DIFF}")`;
+      writeFileSync(join(d, `${role}.txt`), launch);
+      transcript(`r-${role}`, launch, { toolCalls: 2, opens: [brief] });
+    }
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+  function writeGateReport(report: Record<string, unknown>): void {
+    writeFileSync(
+      join(dir, 'qwen-review-script-lint.json'),
+      JSON.stringify({
+        checked: [],
+        skipped: [],
+        errored: [],
+        ok: true,
+        note: '',
+        // Bind to the plan's diff (coveredPlan sets diffPathAbsolute: DIFF) so the
+        // gate reads a FRESH report, not one that slips through the fail-open branch.
+        diffHash: DIFF_HASH,
+        ...report,
+      }),
+    );
+  }
+  const lintFinding = {
+    path: 'deploy.sh',
+    tool: 'shellcheck',
+    findings: [
+      { line: 3, code: 'SC2086', level: 'info', message: 'x', inDiff: true },
+    ],
+  };
+
+  it('a [lint] critical yields REQUEST_CHANGES, deterministically (no verifier)', () => {
+    // Same-repo (worktreePath) so the gate fires; a [lint] finding is pre-confirmed,
+    // so its Request changes stands with or without full coverage or a verifier.
+    const p = gateReadyPlan();
+    writeGateReport({ checked: [lintFinding], ok: false });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('SC2086');
+  });
+
+  it('the gate critical is deterministic by PROVENANCE — it stands with NO verifier', () => {
+    // The gate ran the linter, so its finding is pre-confirmed and skips Step 4 —
+    // exactly like [build]/[test]/[probe]. A verifier is absent here (only the
+    // reverse audit ran), yet the Request changes must stand and must NOT be flagged
+    // criticals-unverified. Provenance (the gate produced it), not a tag, earns this:
+    // the gate's criticals are tracked apart from the model's, never counted as
+    // claims needing verification.
+    const p = gateReadyPlan(['reverse-audit']); // verifier absent, none owed
+    writeGateReport({ checked: [lintFinding], ok: false });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(r.body).toContain('SC2086');
+  });
+
+  it('a [probe] in a GATE finding text does not erase a model claim’s verification (identity, not count)', () => {
+    // Provenance is by IDENTITY, not by count-subtraction. The gate produces a [lint]
+    // finding whose MESSAGE happens to contain "[probe]", AND the model reports a
+    // plain unverified blocker. A count-based `(filtered) − gateCount` would drop the
+    // gate finding from the filtered set (it matches [probe]) and then subtract the
+    // gate count anyway — erasing the MODEL claim's verification requirement, so the
+    // unverified blocker would post unflagged. Identity-based tracking must keep the
+    // model claim flagged as needing verification even with no verifier on record.
+    const p = gateReadyPlan(['reverse-audit']); // verifier absent
+    writeGateReport({
+      checked: [
+        {
+          path: 'deploy.sh',
+          tool: 'shellcheck',
+          findings: [
+            {
+              line: 3,
+              code: 'SC2086',
+              level: 'info',
+              message: 'quote the [probe] variable',
+              inDiff: true,
+            },
+          ],
+        },
+      ],
+      ok: false,
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['an unanchored blocker the review could not verify'],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // The gate [lint] blocker still earns Request changes...
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // ...and the model's plain critical is STILL flagged as needing verification —
+    // the "[probe]" in the gate finding did not absorb its verification requirement.
+    expect(r.body).toMatch(/verification — the review posts findings/);
+    expect(r.body).toContain(
+      'an unanchored blocker the review could not verify',
+    );
+  });
+
+  it('an ERRORED checker caps a would-be APPROVE to COMMENT and says the lint is unreviewed', () => {
+    // A clean, fully-covered plan Approves — except the gate reports a checker that
+    // errored (fail closed). That unreviewed scope must reach the cap: the verdict
+    // drops to Comment and the body names the lint. Delete the `unreviewed.push` that
+    // wires the gate to the cap and this silently Approves over an unrun linter.
+    const p = gateReadyPlan();
+    writeGateReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'exited 2' }],
+      ok: false,
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('the executable-script lint');
+    // the PR-controlled path is rendered in a Markdown code span (injection-safe)
+    expect(r.body).toContain('errored on `deploy.sh`');
+  });
+
+  it('a DEFERRED-only report keeps APPROVE but discloses the deferral in the body', () => {
+    // A fully-covered plan Approves. Its only script-lint outcome is a deferred
+    // actionlint (a workflow's embedded shell) — which must NOT cap the Approve,
+    // but MUST be surfaced in the body so the reader knows that shell went unlinted.
+    // The gate reads the report as the sole authority, so the deferral is disclosed
+    // from the report itself; the plan stays fully covered so the Approve stands.
+    const p = gateReadyPlan();
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('.github/workflows/ci.yml');
+    expect(r.body).toContain('source mapping not yet supported');
+    // the LGTM copy is still there — the disclosure augments, it doesn't replace
+    expect(r.body).toContain('LGTM');
   });
 });

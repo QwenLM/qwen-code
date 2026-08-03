@@ -49,6 +49,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // must not be polled in a tight loop.
   session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
+  session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
@@ -98,6 +99,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
@@ -134,6 +136,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // advertise the text/list/stat/glob surface without byte-window
   // support.
   workspace_file_bytes: { since: 'v1' },
+  // Daemon supports byte-cursor paging on `GET /file`: responses carry
+  // `nextCursor`/`hasMore` and requests accept `cursor`. A separate tag from
+  // `workspace_file_read` because the convention here is that new behavior
+  // gets a new tag — a client that preflighted the old one must not silently
+  // receive a surface it cannot recognise. Same split as
+  // `workspace_file_bytes` from `workspace_file_read`, and
+  // `session_transcript_pagination` from `session_transcript`.
+  workspace_file_read_cursor: { since: 'v1' },
   // Daemon supports hash-aware text mutation routes
   // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
   // gate. Clients should still pre-flight `require_auth` separately for

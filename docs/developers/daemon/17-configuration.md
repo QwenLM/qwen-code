@@ -85,7 +85,7 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `context.fileName`          | string                                                             | Overrides `getCurrentGeminiMdFilename()` through `BridgeOptions.contextFilename`.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `tools.disabled`            | string[]                                                           | Tools disabled for the next ACP child spawn. Normalized through `normalizeDisabledToolList()` (`packages/cli/src/config/normalizeDisabledTools.ts`): non-array becomes `[]`, non-string entries are skipped, whitespace is trimmed, empty entries are dropped, and duplicates are removed while preserving first occurrence. Boot and `restartMcpServer` settings refresh both run through this function. `ToolRegistry.has(name)` is exact and case-sensitive. `POST /workspace/tools/:name/enable` and `tool_toggled` update this key. |
 | `tools.approvalMode`        | `'default' \| 'auto' \| ...`                                       | Default session approval mode; `POST /session/:id/approval-mode` writes here when `persist: true`.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `telemetry`                 | object                                                             | OTel config. Keys include `enabled`, `otlpEndpoint`, `otlpProtocol`, `otlpTracesEndpoint`, `otlpLogsEndpoint`, `otlpMetricsEndpoint`, `target`, `outfile`, `includeSensitiveSpanAttributes`, `sensitiveSpanAttributeMaxLength`, `resourceAttributes`, and `metrics.includeSessionId`. `resolveTelemetrySettings()` reads it at boot and initializes `initializeTelemetry()`.                                                                                                                                                             |
+| `telemetry`                 | object                                                             | OTel config. Keys include `enabled`, `otlpEndpoint`, `otlpProtocol`, `otlpTracesEndpoint`, `otlpLogsEndpoint`, `otlpMetricsEndpoint`, `target`, `outfile`, `userId`, `includeSensitiveSpanAttributes`, `sensitiveSpanAttributeMaxLength`, `resourceAttributes`, and `metrics.includeSessionId`. `resolveTelemetrySettings()` reads it at boot and initializes `initializeTelemetry()`. `userId` is process-wide and must not be configured as end-user identity when the daemon serves multiple users.                                   |
 
 ## `ServeOptions` (programmatic embedding)
 
@@ -126,25 +126,25 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 ## Important defaults
 
-| Constant                          | File                    | Value             | Meaning                                                           |
-| --------------------------------- | ----------------------- | ----------------- | ----------------------------------------------------------------- |
-| `DEFAULT_MAX_SESSIONS`            | `bridge.ts`             | `20`              | Session cap before `SessionLimitExceededError`.                   |
-| `MAX_EVENT_RING_SIZE`             | `bridge.ts`             | `1_000_000`       | Soft cap for `BridgeOptions.eventRingSize`; guards against typos. |
-| `DEFAULT_RING_SIZE`               | `eventBus.ts`           | `8000`            | Per-session SSE replay ring depth.                                |
-| `DEFAULT_MAX_QUEUED`              | `eventBus.ts`           | `256`             | Per-subscriber queue cap.                                         |
-| `DEFAULT_MAX_SUBSCRIBERS`         | `eventBus.ts`           | `64`              | Per-bus subscriber cap.                                           |
-| `WARN_THRESHOLD_RATIO`            | `eventBus.ts`           | `0.75`            | `slow_client_warning` trigger.                                    |
-| `WARN_RESET_RATIO`                | `eventBus.ts`           | `0.375`           | Hysteresis re-arm threshold.                                      |
-| `DEFAULT_INIT_TIMEOUT_MS`         | `bridge.ts`             | `10_000`          | ACP `initialize` handshake timeout.                               |
-| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge timeout for `/workspace/mcp/:server/restart`.              |
-| `DEFAULT_PERMISSION_TIMEOUT_MS`   | `bridge.ts`             | `5 * 60_000`      | Per-permission request wallclock.                                 |
-| `DEFAULT_MAX_PENDING_PER_SESSION` | `bridge.ts`             | `64`              | Aligned with `DEFAULT_MAX_SUBSCRIBERS`.                           |
-| `MAX_RESOLVED_PERMISSION_RECORDS` | `permissionMediator.ts` | `512`             | FIFO for recently resolved permissions.                           |
-| `KILL_HARD_DEADLINE_MS`           | `spawnChannel.ts`       | `10_000`          | Per-channel graceful shutdown window.                             |
-| `SHUTDOWN_FORCE_CLOSE_MS`         | `run-qwen-serve.ts`     | `5_000`           | HTTP server force-close timer.                                    |
-| `MAX_READ_BYTES`                  | `fs/policy.ts`          | `256 * 1024`      | Read cap.                                                         |
-| `MAX_WRITE_BYTES`                 | `fs/policy.ts`          | `5 * 1024 * 1024` | Write cap.                                                        |
-| `MAX_DISPLAY_NAME_LENGTH`         | `bridge.ts`             | `256`             | Session `displayName` cap.                                        |
+| Constant                          | File                    | Value             | Meaning                                                                              |
+| --------------------------------- | ----------------------- | ----------------- | ------------------------------------------------------------------------------------ |
+| `DEFAULT_MAX_SESSIONS`            | `bridge.ts`             | `20`              | Session cap before `SessionLimitExceededError`.                                      |
+| `MAX_EVENT_RING_SIZE`             | `bridge.ts`             | `1_000_000`       | Soft cap for `BridgeOptions.eventRingSize`; guards against typos.                    |
+| `DEFAULT_RING_SIZE`               | `eventBus.ts`           | `8000`            | Per-session SSE replay ring depth.                                                   |
+| `DEFAULT_MAX_QUEUED`              | `eventBus.ts`           | `256`             | Per-subscriber queue cap.                                                            |
+| `DEFAULT_MAX_SUBSCRIBERS`         | `eventBus.ts`           | `64`              | Per-bus subscriber cap.                                                              |
+| `WARN_THRESHOLD_RATIO`            | `eventBus.ts`           | `0.75`            | `slow_client_warning` trigger.                                                       |
+| `WARN_RESET_RATIO`                | `eventBus.ts`           | `0.375`           | Hysteresis re-arm threshold.                                                         |
+| `DEFAULT_INIT_TIMEOUT_MS`         | `bridge.ts`             | `10_000`          | ACP `initialize` handshake timeout.                                                  |
+| `MCP_RESTART_TIMEOUT_MS`          | `bridge.ts`             | `300_000`         | Bridge timeout for `/workspace/mcp/:server/restart`.                                 |
+| `DEFAULT_PERMISSION_TIMEOUT_MS`   | `bridge.ts`             | `5 * 60_000`      | Per-permission request wallclock.                                                    |
+| `DEFAULT_MAX_PENDING_PER_SESSION` | `bridge.ts`             | `64`              | Aligned with `DEFAULT_MAX_SUBSCRIBERS`.                                              |
+| `MAX_RESOLVED_PERMISSION_RECORDS` | `permissionMediator.ts` | `512`             | FIFO for recently resolved permissions.                                              |
+| `KILL_HARD_DEADLINE_MS`           | `spawnChannel.ts`       | `10_000`          | Per-channel graceful shutdown window.                                                |
+| `SHUTDOWN_FORCE_CLOSE_MS`         | `run-qwen-serve.ts`     | `5_000`           | HTTP server force-close timer.                                                       |
+| `MAX_READ_BYTES`                  | `fs/policy.ts`          | `256 * 1024`      | Full-snapshot and returned-text cap; larger UTF-8 text requires a finite line limit. |
+| `MAX_WRITE_BYTES`                 | `fs/policy.ts`          | `5 * 1024 * 1024` | Write cap.                                                                           |
+| `MAX_DISPLAY_NAME_LENGTH`         | `bridge.ts`             | `256`             | Session `displayName` cap.                                                           |
 
 ## Cross-references
 

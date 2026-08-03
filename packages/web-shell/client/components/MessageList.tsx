@@ -109,6 +109,8 @@ interface MessageListProps {
   includeSubagentToolUsageInMetrics?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  failedPromptMessageId?: string;
+  onRetryFailedPrompt?: () => void;
   onBranchSession?: () => void;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
@@ -486,10 +488,16 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
-function isAssistantAnswer(item: DisplayItem): boolean {
+function isFinalContentCandidate(
+  item: DisplayItem,
+  includeBackgroundNotifications: boolean,
+): boolean {
   return (
     item.type === 'message' &&
-    item.message.role === 'assistant' &&
+    (item.message.role === 'assistant' ||
+      (includeBackgroundNotifications &&
+        item.message.role === 'system' &&
+        item.message.source === 'background_notification')) &&
     // `content` is typed `string`, but daemon SSE text can be undefined at
     // runtime (transcriptToMessages copies `textBlock.text` through). Guard it:
     // `applyTurnCollapse` runs in render, so a bare `.trim()` would blank the
@@ -503,6 +511,7 @@ function findFinalAnswerIndex(
   items: readonly DisplayItem[],
   start: number,
   end: number,
+  includeBackgroundNotifications = true,
 ): number {
   let lastWorkStepIndex = start;
   for (let i = end; i > start; i--) {
@@ -512,7 +521,9 @@ function findFinalAnswerIndex(
     }
   }
   for (let i = end; i > lastWorkStepIndex; i--) {
-    if (isAssistantAnswer(items[i]!)) return i;
+    if (isFinalContentCandidate(items[i]!, includeBackgroundNotifications)) {
+      return i;
+    }
   }
   return -1;
 }
@@ -535,7 +546,7 @@ function collectFinalAssistantTurnIds(
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
     const turnHead = items[start];
-    const answerIdx = findFinalAnswerIndex(items, start, end);
+    const answerIdx = findFinalAnswerIndex(items, start, end, false);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
     if (
@@ -550,9 +561,10 @@ function collectFinalAssistantTurnIds(
 }
 
 /**
- * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
- * The final answer and any system/shell/insight rows (errors, cancellations,
- * command output) are kept visible even when the turn is collapsed.
+ * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
+ * and non-final background notifications. The final content and any other
+ * system/shell/insight rows (errors, cancellations, command output) are kept
+ * visible even when the turn is collapsed.
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
@@ -567,6 +579,9 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'thinking':
       return true;
     case 'system':
+      if (item.message.source === 'background_notification') {
+        return !isFinalAnswer;
+      }
       return isMidTurnInjectedDebugMessage(item.message);
     case 'user':
     case 'user_shell':
@@ -888,6 +903,7 @@ export function getSessionTimelineEntries(
       timelineItems,
       -1,
       timelineItems.length - 1,
+      false,
     );
     const finalAssistantItem =
       finalAssistantIndex >= 0 ? timelineItems[finalAssistantIndex] : null;
@@ -2206,6 +2222,8 @@ export const MessageList = memo(
       includeSubagentToolUsageInMetrics = true,
       showRetryHint = false,
       onRetryClick,
+      failedPromptMessageId,
+      onRetryFailedPrompt,
       onBranchSession,
       onCanScrollToBottomChange,
       turnFileChanges,
@@ -3680,6 +3698,11 @@ export const MessageList = memo(
               isLatest={isLatest}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
+              sendFailed={
+                displayItem.message.role === 'user' &&
+                displayItem.message.id === failedPromptMessageId
+              }
+              onRetrySend={onRetryFailedPrompt}
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
@@ -3730,6 +3753,8 @@ export const MessageList = memo(
         workspaceCwd,
         showRetryHint,
         onRetryClick,
+        failedPromptMessageId,
+        onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
         onOpenArtifact,

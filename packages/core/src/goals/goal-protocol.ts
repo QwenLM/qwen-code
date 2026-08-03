@@ -5,6 +5,8 @@
  */
 
 export const GOAL_STATE_VERSION = 2 as const;
+export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
+export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
 
 export const PAUSED_GOAL_SYSTEM_REMINDER =
   '<system-reminder>\nThe Goal is paused. Do not continue its objective unless the user resumes it. Treat this message as ordinary conversation.\n</system-reminder>';
@@ -97,6 +99,19 @@ export interface GoalTerminalProposal {
   reason: string;
   evidenceRefs: string[];
   blockerKind?: 'authority' | 'external' | 'repeated';
+}
+
+export function validateGoalProposalReason(reason: string): string | null {
+  if (!reason.trim()) return 'Goal proposal reason must not be empty';
+  if ([...reason].length > GOAL_PROPOSAL_REASON_MAX_CHARACTERS) {
+    return `Goal proposal reason exceeds ${GOAL_PROPOSAL_REASON_MAX_CHARACTERS} characters`;
+  }
+  if (
+    new TextEncoder().encode(reason).byteLength > GOAL_PROPOSAL_REASON_MAX_BYTES
+  ) {
+    return `Goal proposal reason exceeds ${GOAL_PROPOSAL_REASON_MAX_BYTES} UTF-8 bytes`;
+  }
+  return null;
 }
 
 export type GoalStateCause =

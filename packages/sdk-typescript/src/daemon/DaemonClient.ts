@@ -33,6 +33,7 @@ import type {
   DaemonSessionContextUsageStatus,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonSideTaskSession,
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
@@ -41,6 +42,7 @@ import type {
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  SideTaskSessionRequest,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
@@ -76,7 +78,13 @@ import type {
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
   DaemonGitCommitDetail,
+  DaemonGitBranchesResult,
+  DaemonGitCheckoutResult,
+  DaemonGitPushResult,
+  DaemonGitPullResult,
+  DaemonGitCommitResult,
   DaemonGitHubPullRequestList,
+  DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpReloadOptions,
@@ -122,7 +130,10 @@ import type {
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -1134,10 +1145,15 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+  async workspaceGitLog(
+    limit?: number,
+    skip?: number,
+    range?: string,
+  ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
+    if (range) params.set('range', range);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -1151,6 +1167,66 @@ export class DaemonClient {
       `/workspace/git/log/commit?sha=${urlEncode(sha)}`,
       'GET /workspace/git/log/commit',
       { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitBranches(): Promise<DaemonGitBranchesResult> {
+    return await this.jsonRequest<DaemonGitBranchesResult>(
+      '/workspace/git/branches',
+      'GET /workspace/git/branches',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCheckout(ref: string): Promise<DaemonGitCheckoutResult> {
+    return await this.jsonRequest<DaemonGitCheckoutResult>(
+      '/workspace/git/checkout',
+      'POST /workspace/git/checkout',
+      { method: 'POST', body: { ref }, mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCreateBranch(
+    name: string,
+    startPoint?: string,
+  ): Promise<DaemonGitCheckoutResult> {
+    return await this.jsonRequest<DaemonGitCheckoutResult>(
+      '/workspace/git/branch',
+      'POST /workspace/git/branch',
+      { method: 'POST', body: { name, startPoint }, mode: 'rest' },
+    );
+  }
+
+  async workspaceGitPush(opts?: {
+    setUpstream?: boolean;
+    force?: boolean;
+  }): Promise<DaemonGitPushResult> {
+    return await this.jsonRequest<DaemonGitPushResult>(
+      '/workspace/git/push',
+      'POST /workspace/git/push',
+      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+    );
+  }
+
+  async workspaceGitPull(opts?: {
+    rebase?: boolean;
+    fetchOnly?: boolean;
+  }): Promise<DaemonGitPullResult> {
+    return await this.jsonRequest<DaemonGitPullResult>(
+      '/workspace/git/pull',
+      'POST /workspace/git/pull',
+      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCommit(
+    message: string,
+    opts?: { all?: boolean },
+  ): Promise<DaemonGitCommitResult> {
+    return await this.jsonRequest<DaemonGitCommitResult>(
+      '/workspace/git/commit',
+      'POST /workspace/git/commit',
+      { method: 'POST', body: { message, ...opts }, mode: 'rest' },
     );
   }
 
@@ -1569,7 +1645,12 @@ export class DaemonClient {
 
   async readWorkspaceFile(
     filePath: string,
-    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    opts: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
     const url = new URL(`${this.baseUrl}/file`);
@@ -1582,6 +1663,9 @@ export class DaemonClient {
     }
     if (opts.limit !== undefined) {
       url.searchParams.set('limit', String(opts.limit));
+    }
+    if (opts.cursor !== undefined) {
+      url.searchParams.set('cursor', opts.cursor);
     }
     return await this.fetchWithTimeout(
       url.toString(),
@@ -1657,6 +1741,19 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace-path-suggestions');
         }
         return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  async workspaceDirectoryPicker(): Promise<unknown> {
+    return await this.jsonRequest<unknown>(
+      '/workspace-directory-picker',
+      'POST /workspace-directory-picker',
+      {
+        method: 'POST',
+        body: {},
+        timeoutMs: 310_000,
+        mode: 'rest',
       },
     );
   }
@@ -2368,13 +2465,38 @@ export class DaemonClient {
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ name: req.name }),
+        body: JSON.stringify({
+          ...(req.name !== undefined ? { name: req.name } : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
         return (await res.json()) as DaemonBranchedSession;
+      },
+    );
+  }
+
+  async createSideTaskSession(
+    sessionId: string,
+    req: SideTaskSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSideTaskSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/side-task`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.name !== undefined ? { name: req.name } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/side-task');
+        }
+        return (await res.json()) as DaemonSideTaskSession;
       },
     );
   }
@@ -3565,6 +3687,35 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.jsonRequest<DaemonChannelPairingApprovalsSnapshot>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspace/channels/:name/pairing-approvals',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.jsonRequest<DaemonChannelPairingRevocationResult>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspace/channels/:name/pairing-approvals',
+      {
+        method: 'DELETE',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   private workspaceChannelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -4657,6 +4808,31 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspaces/:workspace/channels/:name/pairing-approvals',
+      undefined,
+      opts,
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspaces/:workspace/channels/:name/pairing-approvals',
+      { method: 'DELETE', body: request },
+      opts,
+    );
+  }
+
   private channelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -4790,11 +4966,13 @@ export class WorkspaceDaemonClient {
     limit?: number,
     skip?: number,
     cwd?: string,
+    range?: string,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
+    if (range) params.set('range', range);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -4819,11 +4997,130 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceGitBranches(cwd?: string): Promise<DaemonGitBranchesResult> {
+    const suffix =
+      cwd != null ? `/git/branches?cwd=${urlEncode(cwd)}` : '/git/branches';
+    return this.client.workspaceJsonRequest<DaemonGitBranchesResult>(
+      this.workspaceSelector,
+      suffix,
+      'GET /workspaces/:workspace/git/branches',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitCheckout(
+    ref: string,
+    cwd?: string,
+  ): Promise<DaemonGitCheckoutResult> {
+    const suffix =
+      cwd != null ? `/git/checkout?cwd=${urlEncode(cwd)}` : '/git/checkout';
+    return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/checkout',
+      { method: 'POST', body: { ref }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitCreateBranch(
+    name: string,
+    startPoint?: string,
+    cwd?: string,
+  ): Promise<DaemonGitCheckoutResult> {
+    const suffix =
+      cwd != null ? `/git/branch?cwd=${urlEncode(cwd)}` : '/git/branch';
+    return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/branch',
+      { method: 'POST', body: { name, startPoint }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitPush(
+    opts?: {
+      setUpstream?: boolean;
+      force?: boolean;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitPushResult> {
+    const suffix =
+      cwd != null ? `/git/push?cwd=${urlEncode(cwd)}` : '/git/push';
+    return this.client.workspaceJsonRequest<DaemonGitPushResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/push',
+      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+    );
+  }
+
+  workspaceGitPull(
+    opts?: {
+      rebase?: boolean;
+      fetchOnly?: boolean;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitPullResult> {
+    const suffix =
+      cwd != null ? `/git/pull?cwd=${urlEncode(cwd)}` : '/git/pull';
+    return this.client.workspaceJsonRequest<DaemonGitPullResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/pull',
+      { method: 'POST', body: opts ?? {}, mode: 'rest' },
+    );
+  }
+
+  workspaceGitCommit(
+    message: string,
+    opts?: { all?: boolean },
+    cwd?: string,
+  ): Promise<DaemonGitCommitResult> {
+    const suffix =
+      cwd != null ? `/git/commit?cwd=${urlEncode(cwd)}` : '/git/commit';
+    return this.client.workspaceJsonRequest<DaemonGitCommitResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/commit',
+      { method: 'POST', body: { message, ...opts }, mode: 'rest' },
+    );
+  }
+
   workspaceGitHubPullRequests(): Promise<DaemonGitHubPullRequestList> {
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestList>(
       this.workspaceSelector,
       '/github/prs',
       'GET /workspaces/:workspace/github/prs',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitHubCreatePullRequest(
+    opts: {
+      title: string;
+      body?: string;
+      base?: string;
+      head?: string;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitHubPullRequestCreateResult> {
+    const suffix =
+      cwd != null
+        ? `/github/prs/create?cwd=${urlEncode(cwd)}`
+        : '/github/prs/create';
+    return this.client.workspaceJsonRequest<DaemonGitHubPullRequestCreateResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/github/prs/create',
+      { method: 'POST', body: opts, mode: 'rest' },
+    );
+  }
+
+  workspaceGitHubDefaultBranch(): Promise<{ branch: string }> {
+    return this.client.workspaceJsonRequest<{ branch: string }>(
+      this.workspaceSelector,
+      '/github/default-branch',
+      'GET /workspaces/:workspace/github/default-branch',
       { mode: 'rest' },
     );
   }
@@ -5146,7 +5443,12 @@ export class WorkspaceDaemonClient {
 
   readWorkspaceFile(
     filePath: string,
-    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    opts: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
     const query = new URLSearchParams({ path: filePath });
@@ -5154,6 +5456,7 @@ export class WorkspaceDaemonClient {
       query.set('maxBytes', String(opts.maxBytes));
     if (opts.line !== undefined) query.set('line', String(opts.line));
     if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
     return this.get(
       `/file?${query.toString()}`,
       'GET /workspaces/:workspace/file',

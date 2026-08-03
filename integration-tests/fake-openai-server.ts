@@ -7,6 +7,7 @@
 import {
   createServer,
   type IncomingMessage,
+  type IncomingHttpHeaders,
   type Server,
   type ServerResponse,
 } from 'node:http';
@@ -52,6 +53,7 @@ export type FakeOpenAIChoice = {
 
 export type FakeOpenAIRequest = {
   body: JsonObject;
+  headers: IncomingHttpHeaders;
 };
 
 export type FakeOpenAIServer = {
@@ -117,7 +119,7 @@ export async function startFakeOpenAIServer(
       }
 
       const requestIndex = requests.length;
-      requests.push({ body });
+      requests.push({ body, headers: req.headers });
 
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {

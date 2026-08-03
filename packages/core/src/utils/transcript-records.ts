@@ -35,6 +35,10 @@ export interface TranscriptRecordInput {
   readonly usageMetadata?: unknown;
   readonly toolCallResult?: unknown;
   readonly systemPayload?: unknown;
+  readonly forkedFrom?: {
+    readonly sessionId: string;
+    readonly messageUuid: string;
+  };
 }
 
 export interface TranscriptReplayGapInput {
@@ -102,6 +106,8 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_launch_prompt',
   'file_history_snapshot',
   'session_source',
+  'goal_state',
+  'goal_runtime',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);
 

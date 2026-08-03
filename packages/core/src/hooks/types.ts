@@ -257,6 +257,8 @@ export type HookDecision = 'ask' | 'block' | 'deny' | 'approve' | 'allow';
  */
 export interface HookInput {
   session_id: string;
+  source_type?: string;
+  source_id?: string;
   transcript_path: string;
   cwd: string;
   hook_event_name: string;
@@ -824,7 +826,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, and content_length.
+   * response_parts, result_display, error, error_type, content_length, and
+   * vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }
@@ -854,6 +857,7 @@ export interface PostToolBatchOutput extends HookOutput {
  */
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
+  submitted_prompt?: string;
 }
 
 /**

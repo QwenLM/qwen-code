@@ -118,6 +118,147 @@ describe('resumeHistoryUtils', () => {
     expect(userItem.text).toBe('post-gap message');
   });
 
+  describe('UserPromptSubmit hook context provenance', () => {
+    const tagged =
+      '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    const buildUserItems = (record: Record<string, unknown>) => {
+      const conversation = {
+        messages: [record],
+      } as unknown as ConversationRecord;
+      const session: ResumedSessionData = {
+        conversation,
+      } as ResumedSessionData;
+      return buildResumedHistoryItems(session, makeConfig({}), 1_000);
+    };
+
+    it('prefers recorded displayText over the augmented parts', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+        systemPayload: {
+          displayText: 'my prompt',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('prefers displayText over the tag-strip fallback', () => {
+      // Fixture where the two branches disagree: without displayText the
+      // tag-strip path would expose the middle "expanded extra" part.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            { text: 'my prompt' },
+            { text: 'expanded extra' },
+            { text: tagged },
+          ],
+        },
+        systemPayload: {
+          displayText: 'my prompt',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('strips a trailing whole-part tagged block when no displayText is recorded', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('keeps user-authored text that merely contains the tag', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: `quote: ${tagged} end` }] },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: `quote: ${tagged} end` },
+      ]);
+    });
+
+    it('keeps a sole part that matches the tag shape (user-authored)', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: tagged }]);
+    });
+
+    it('falls back to raw concatenation for legacy bare-injected records', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [{ text: 'my prompt' }, { text: 'bare injected context' }],
+        },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+      ]);
+    });
+
+    it('prefers at_command userText even when the paired user record has a trailing tagged part', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText: '@file.ts summarize this',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [{ text: 'expanded model prompt' }, { text: tagged }],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('@file.ts summarize this');
+      expect(userItem.text).not.toContain('qwen:user-prompt-submit-context');
+    });
+
+    it('strips a trailing tagged part when at_command userText is absent', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [{ text: 'my prompt' }, { text: tagged }],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('my prompt');
+    });
+  });
+
   it('converts conversation into history items with incremental ids', () => {
     const conversation = {
       messages: [
@@ -615,6 +756,7 @@ describe('resumeHistoryUtils', () => {
         toolCallResult: {
           callId: 'call-1',
           resultDisplay: 'Read 1 file',
+          visionBridgeNotice: 'Converted image via qwen3-vl-plus.',
           status: 'success',
           responseParts: [
             {
@@ -629,6 +771,9 @@ describe('resumeHistoryUtils', () => {
       });
       const tool = firstTool(items);
       expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.visionBridgeNotice).toBe(
+        'Converted image via qwen3-vl-plus.',
+      );
       expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
     });
 

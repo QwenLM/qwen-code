@@ -860,7 +860,9 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims:',
+          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          'probe it runs up to 8 single-statement deletion mutants, each a suite run, and ' +
+          'it budgets itself to finish inside that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
@@ -872,11 +874,18 @@ export function buildRoleBrief(
         'Read its `findings[]`. `kind: "unreachable"` is a test the project\'s test command ' +
           'never collects — it did not run here and it does not run in CI. `kind: "inert"` is ' +
           'a test that **still passed with the change reverted**: it is green whether or not ' +
-          'the feature exists, so it cannot catch a regression in it. Report each as a ' +
-          '**Suggestion** with `Source: [test]`, saying plainly which behaviour ships ' +
-          'unprotected. **`inconclusive` is not a finding** — reverting the source often ' +
-          "breaks the test's own compile, and that is not the test catching anything. Note it " +
-          'and move on.',
+          'the feature exists, so it cannot catch a regression in it. `kind: "mutant-survived"` ' +
+          'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
+          'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
+          'test in the diff fails when it is removed, which the whole-file ' +
+          "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
+          '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
+          'test in this diff that would catch its removal. **`inconclusive` is not a ' +
+          'finding** — for probes and mutants alike, ' +
+          "reverting or mutating the source often breaks the test's own compile, and that is " +
+          'not the test catching anything. Mutants counted in `mutants.skippedForBudget`, ' +
+          '`mutants.skippedForCap`, or `mutants.skippedForBaseline` never ran — not findings ' +
+          'either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }
@@ -910,8 +919,8 @@ export function buildRoleBrief(
 
   // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
   // Test) — it runs deterministic commands, not code review." The roster path
-  // hands the same --rules to every role, so the exclusion lives here, where
-  // both the single-role and roster builds pass through.
+  // hands the same --rules to every role, so the exclusion lives here, where both
+  // the single-role and roster builds pass through.
   parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }

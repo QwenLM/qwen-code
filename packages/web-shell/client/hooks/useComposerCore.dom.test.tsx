@@ -4,7 +4,13 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
-import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
+import {
+  type ComposerSubmitCommit,
+  useComposerCore,
+  type UseComposerCoreOptions,
+  type UseComposerCoreReturn,
+} from './useComposerCore';
+import { getPromptHistoryStorageKey } from './useInputHistory';
 import type {
   UserMessageContentParser,
   WebShellComposerInput,
@@ -23,6 +29,9 @@ function Harness({
   renderComposerTagTooltip,
   parseUserMessageContent,
   followupState,
+  sessionId,
+  atWorkspaceCwd,
+  commands,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -34,15 +43,20 @@ function Harness({
     shownAt: number;
     suggestion: string | null;
   };
+  sessionId?: string;
+  atWorkspaceCwd?: string;
+  commands?: UseComposerCoreOptions['commands'];
 }) {
   const composer = useComposerCore({
     onSubmit,
-    commands: [],
+    commands: commands ?? [],
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
     parseUserMessageContent,
     followupState,
+    sessionId,
+    atWorkspaceCwd,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
   });
@@ -58,6 +72,9 @@ async function mount({
   renderComposerTagTooltip,
   parseUserMessageContent,
   followupState,
+  sessionId,
+  atWorkspaceCwd,
+  commands,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -69,14 +86,20 @@ async function mount({
     shownAt: number;
     suggestion: string | null;
   };
+  sessionId?: string;
+  atWorkspaceCwd?: string;
+  commands?: UseComposerCoreOptions['commands'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
 
-  const render = (portalRoot: HTMLElement | null) => {
+  let currentPortalRoot: HTMLElement | null = null;
+  let currentSessionId = sessionId;
+  let currentWorkspaceCwd = atWorkspaceCwd;
+  const render = () => {
     root!.render(
-      <WebShellPortalRootContext.Provider value={portalRoot}>
+      <WebShellPortalRootContext.Provider value={currentPortalRoot}>
         <I18nProvider language="en">
           <Harness
             composerInput={composerInput}
@@ -85,6 +108,9 @@ async function mount({
             renderComposerTagTooltip={renderComposerTagTooltip}
             parseUserMessageContent={parseUserMessageContent}
             followupState={followupState}
+            sessionId={currentSessionId}
+            atWorkspaceCwd={currentWorkspaceCwd}
+            commands={commands}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -92,26 +118,71 @@ async function mount({
   };
 
   await act(async () => {
-    render(null);
+    render();
   });
   return {
     onSubmit,
     setPortalRoot(portalRoot: HTMLElement | null) {
-      act(() => render(portalRoot));
+      currentPortalRoot = portalRoot;
+      act(() => render());
+    },
+    switchSession(
+      nextSessionId: string | undefined,
+      nextWorkspaceCwd: string | undefined,
+    ) {
+      currentSessionId = nextSessionId;
+      currentWorkspaceCwd = nextWorkspaceCwd;
+      act(() => render());
+    },
+    rerender() {
+      act(() => render());
     },
   };
 }
 
 afterEach(() => {
   act(() => root?.unmount());
+  vi.useRealTimers();
   container?.remove();
-  localStorage.removeItem('qwen-web-shell-history');
-  localStorage.removeItem('qwen-web-shell-command-history');
+  for (let index = localStorage.length - 1; index >= 0; index--) {
+    const key = localStorage.key(index);
+    if (
+      key === 'qwen-web-shell-command-history' ||
+      key?.startsWith('qwen-web-shell-history') ||
+      key?.startsWith('qwen-web-shell-session-draft:') ||
+      key?.startsWith('qwen-web-shell-pending-task-draft:')
+    ) {
+      localStorage.removeItem(key);
+    }
+  }
   document.getElementById('web-shell-tooltip-styles')?.remove();
   root = null;
   container = null;
   latest = null;
 });
+
+function pressHistoryKey(key: 'ArrowUp' | 'ArrowDown') {
+  const editor = container!.querySelector('.cm-content')!;
+  editor.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key,
+      code: key,
+      bubbles: true,
+    }),
+  );
+}
+
+function blurEditor() {
+  container!.querySelector('.cm-editor')!.dispatchEvent(new FocusEvent('blur'));
+}
+
+function getSessionDraftKey(sessionId: string): string {
+  return `qwen-web-shell-session-draft:${encodeURIComponent(sessionId)}`;
+}
+
+function getPendingTaskDraftKey(workspaceCwd: string): string {
+  return `qwen-web-shell-pending-task-draft:${encodeURIComponent(workspaceCwd)}`;
+}
 
 describe('useComposerCore tooltip portal', () => {
   it('moves the CodeMirror tooltip portal and styles into the shared shadow root', async () => {
@@ -134,6 +205,541 @@ describe('useComposerCore tooltip portal', () => {
       shadowRoot.getElementById('web-shell-tooltip-styles'),
     ).not.toBeNull();
     host.remove();
+  });
+});
+
+describe('useComposerCore history and drafts', () => {
+  it('does not serialize the whole document again for a slash menu refresh', async () => {
+    await mount();
+    const doc = latest!.viewRef.current!.state.doc;
+    const textPrototype = Object.getPrototypeOf(
+      Object.getPrototypeOf(doc),
+    ) as typeof doc;
+    const toString = vi.spyOn(textPrototype, 'toString');
+
+    act(() =>
+      latest!.setText(
+        `${Array.from({ length: 10_000 }, () => 'draft').join('\n')}\n/`,
+      ),
+    );
+
+    expect(toString).toHaveBeenCalledOnce();
+  });
+
+  it('keeps slash completion replacement coordinates absolute', async () => {
+    await mount({
+      commands: [
+        {
+          name: 'help',
+          description: 'Show help',
+          source: 'builtin-command',
+        },
+      ],
+    });
+
+    act(() => latest!.setText('context\n/he'));
+
+    expect(latest!.slashMenu).toMatchObject({ from: 8, to: 11 });
+    act(() => latest!.acceptSlashCompletion());
+    expect(latest!.getText()).toBe('context\n/help ');
+  });
+
+  it('does not reread history storage on unrelated rerenders', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    const readsAfterMount = getItem.mock.calls.length;
+
+    mounted.rerender();
+
+    expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('falls back to legacy prompt history until the workspace has its own history', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy prompt');
+
+    act(() => latest!.submitText());
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['legacy prompt']);
+
+    act(() => {
+      latest!.setText('workspace prompt');
+      latest!.submitText();
+    });
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['legacy prompt', 'workspace prompt']);
+  });
+
+  it('isolates prompt history by workspace and reloads it when the workspace changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => {
+      latest!.setText('prompt from a');
+      latest!.submitText();
+    });
+
+    mounted.switchSession('session-b', '/workspace/b');
+    act(() => {
+      latest!.setText('prompt from b');
+      latest!.submitText();
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('prompt from b');
+
+    mounted.switchSession('session-a', '/workspace/a');
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('prompt from a');
+
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['prompt from a']);
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/b')) ??
+          '[]',
+      ),
+    ).toEqual(['prompt from b']);
+  });
+
+  it('resets history navigation when the session changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => {
+      latest!.setText('oldest');
+      latest!.submitText();
+      latest!.setText('newest');
+      latest!.submitText();
+      latest!.setText('draft a');
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('newest');
+
+    mounted.switchSession('session-b', '/workspace/shared');
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('newest');
+
+    mounted.switchSession('session-a', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft a');
+  });
+
+  it('restores unsent text for each session and clears accepted drafts', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => latest!.setText('draft a'));
+    mounted.switchSession('session-b', '/workspace/shared');
+    expect(latest!.getText()).toBe('');
+
+    act(() => latest!.setText('draft b'));
+    mounted.switchSession('session-a', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft a');
+
+    mounted.switchSession('session-b', '/workspace/shared');
+    expect(latest!.getText()).toBe('draft b');
+
+    act(() => latest!.submitText());
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
+  });
+
+  it('restores an unsent new-task draft after leaving and returning', async () => {
+    vi.useFakeTimers();
+    const workspaceCwd = '/workspace/shared';
+    const mounted = await mount({ atWorkspaceCwd: workspaceCwd });
+
+    act(() => latest!.setText('new task draft still typing'));
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+    act(() => vi.advanceTimersByTime(1999));
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'new task draft still typing',
+    );
+
+    act(() => latest!.setText('draft flushed on switch'));
+    mounted.switchSession('session-a', workspaceCwd);
+    expect(latest!.getText()).toBe('');
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'draft flushed on switch',
+    );
+
+    mounted.switchSession(undefined, '/workspace/other');
+    expect(latest!.getText()).toBe('');
+
+    mounted.switchSession(undefined, workspaceCwd);
+    expect(latest!.getText()).toBe('draft flushed on switch');
+
+    act(() => latest!.setText('draft flushed on unmount'));
+    act(() => root?.unmount());
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'draft flushed on unmount',
+    );
+    container?.remove();
+    root = null;
+    container = null;
+    latest = null;
+
+    await mount({ atWorkspaceCwd: workspaceCwd });
+    expect(latest!.getText()).toBe('draft flushed on unmount');
+  });
+
+  it('keeps an unscoped new-task draft in memory until its workspace resolves', async () => {
+    localStorage.setItem(
+      'qwen-web-shell-pending-task-draft:',
+      'draft from another workspace',
+    );
+    const mounted = await mount();
+
+    expect(latest!.getText()).toBe('');
+    act(() => latest!.setText('current pending draft'));
+
+    mounted.switchSession(undefined, '/workspace/current');
+
+    expect(latest!.getText()).toBe('current pending draft');
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey('/workspace/current')),
+    ).toBe('current pending draft');
+    expect(localStorage.getItem('qwen-web-shell-pending-task-draft:')).toBe(
+      'draft from another workspace',
+    );
+  });
+
+  it('keeps newer unscoped input when the resolved workspace has an older draft', async () => {
+    const workspaceCwd = '/workspace/current';
+    localStorage.setItem(
+      getPendingTaskDraftKey(workspaceCwd),
+      'older persisted draft',
+    );
+    const mounted = await mount();
+
+    act(() => latest!.setText('newer in-memory draft'));
+    mounted.switchSession(undefined, workspaceCwd);
+
+    expect(latest!.getText()).toBe('newer in-memory draft');
+    expect(localStorage.getItem(getPendingTaskDraftKey(workspaceCwd))).toBe(
+      'newer in-memory draft',
+    );
+  });
+
+  it('restores an older workspace draft after a programmatic unscoped reset', async () => {
+    const workspaceCwd = '/workspace/current';
+    localStorage.setItem(
+      getPendingTaskDraftKey(workspaceCwd),
+      'persisted workspace draft',
+    );
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    mounted.switchSession(undefined, undefined);
+    mounted.switchSession(undefined, workspaceCwd);
+
+    expect(latest!.getText()).toBe('persisted workspace draft');
+  });
+
+  it('commits a new-task prompt after its session is allocated', async () => {
+    let commitPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const workspaceCwd = '/workspace/new-task';
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: workspaceCwd });
+
+    act(() => {
+      latest!.setText('first prompt');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-created', workspaceCwd);
+    expect(latest!.getText()).toBe('');
+
+    act(() => commitPrompt?.());
+
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey(workspaceCwd)) ?? '[]',
+      ),
+    ).toEqual(['first prompt']);
+    expect(
+      localStorage.getItem(getPendingTaskDraftKey(workspaceCwd)),
+    ).toBeNull();
+  });
+
+  it('commits a delayed queued prompt to history exactly once', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => latest!.setText('stale saved draft'));
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('queued-session'))).toBe(
+      'stale saved draft',
+    );
+
+    act(() => {
+      latest!.setText('queued prompt');
+      latest!.submitText();
+    });
+    expect(latest!.getText()).toBe('queued prompt');
+    expect(
+      localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')),
+    ).toBeNull();
+
+    act(() => {
+      commitQueuedPrompt?.();
+      commitQueuedPrompt?.();
+    });
+    expect(latest!.getText()).toBe('');
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')) ??
+          '[]',
+      ),
+    ).toEqual(['queued prompt']);
+    expect(
+      localStorage.getItem(getSessionDraftKey('queued-session')),
+    ).toBeNull();
+  });
+
+  it('does not clear newer input when a prompt is accepted in the same session', async () => {
+    vi.useFakeTimers();
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => {
+      latest!.setText('queued prompt');
+      latest!.submitText();
+      latest!.setText('newer draft');
+      latest!.addTags([
+        {
+          id: 'newer-tag',
+          value: 'newer tag',
+          serialized: '@newer-tag',
+        },
+      ]);
+    });
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('newer draft');
+    expect(latest!.composerTags).toEqual([
+      expect.objectContaining({ id: 'newer-tag' }),
+    ]);
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/queue')) ??
+          '[]',
+      ),
+    ).toEqual(['queued prompt']);
+
+    act(() => vi.advanceTimersByTime(2000));
+    expect(localStorage.getItem(getSessionDraftKey('queued-session'))).toBe(
+      'newer draft',
+    );
+  });
+
+  it('does not clear retyped identical input after delayed acceptance', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    await mount({
+      onSubmit,
+      sessionId: 'queued-session',
+      atWorkspaceCwd: '/workspace/queue',
+    });
+
+    act(() => {
+      latest!.setText('same text');
+      latest!.submitText();
+      latest!.setText('');
+      latest!.setText('same text');
+    });
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('same text');
+  });
+
+  it('does not clear the next session when a delayed prompt is accepted', async () => {
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const mounted = await mount({
+      onSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+
+    act(() => {
+      latest!.setText('queued in a');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-b', '/workspace/b');
+    act(() => latest!.setText('draft b'));
+    act(() => commitQueuedPrompt?.());
+
+    expect(latest!.getText()).toBe('draft b');
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBe(
+      'draft b',
+    );
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey('/workspace/a')) ??
+          '[]',
+      ),
+    ).toEqual(['queued in a']);
+    expect(
+      localStorage.getItem(getPromptHistoryStorageKey('/workspace/b')),
+    ).toBeNull();
+  });
+
+  it('updates in-memory history for a delayed prompt in the same workspace', async () => {
+    vi.useFakeTimers();
+    let commitQueuedPrompt: ComposerSubmitCommit | undefined;
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+      (_text, _images, commitAccepted) => {
+        commitQueuedPrompt = commitAccepted;
+        return false;
+      },
+    );
+    const mounted = await mount({
+      onSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    act(() => {
+      latest!.setText('queued in a');
+      latest!.submitText();
+    });
+    mounted.switchSession('session-b', '/workspace/shared');
+    act(() => latest!.setText('draft b'));
+    act(() => commitQueuedPrompt?.());
+    act(() => pressHistoryKey('ArrowUp'));
+
+    expect(latest!.getText()).toBe('queued in a');
+    act(() => vi.advanceTimersByTime(2000));
+    expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBe(
+      'draft b',
+    );
+  });
+
+  it('closes history search when the session or workspace changes', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => {
+      latest!.setText('prompt from a');
+      latest!.submitText();
+      latest!.searchState.openHistorySearch();
+    });
+    expect(latest!.searchState.searchMode).toBe(true);
+    expect(latest!.searchState.searchMatches).toEqual(['prompt from a']);
+
+    mounted.switchSession('session-b', '/workspace/b');
+    expect(latest!.searchState.searchMode).toBe(false);
+    expect(latest!.searchState.searchMatches).toEqual([]);
+  });
+
+  it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
+    vi.useFakeTimers();
+    await mount({
+      sessionId: 'vis-session',
+      atWorkspaceCwd: '/workspace/vis',
+    });
+
+    act(() => latest!.setText('draft before hide'));
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBeNull();
+
+    const originalVisibility = document.visibilityState;
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before hide',
+    );
+
+    act(() => latest!.setText('draft before pagehide'));
+    act(() => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before pagehide',
+    );
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: originalVisibility,
+      configurable: true,
+    });
   });
 });
 
@@ -312,6 +918,49 @@ describe('useComposerCore tags', () => {
     expect(
       document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
     ).toHaveLength(kinds.length);
+  });
+
+  it('reports inline composer tags as attachments', async () => {
+    await mount();
+
+    expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.handle.hasAttachments()).toBe(true);
+    expect(latest!.hasAttachments).toBe(true);
+
+    act(() => {
+      latest!.removeInlineTags();
+    });
+    expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('updates inline tag state when a document change removes the last tag', async () => {
+    await mount();
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: '' },
+      });
+    });
+
+    expect(latest!.hasAttachments).toBe(false);
   });
 
   it('keeps inline tags after trimming leading whitespace on submit', async () => {

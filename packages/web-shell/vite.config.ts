@@ -35,8 +35,15 @@ const daemonProxy: ProxyOptions = {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
     });
+    proxy.on('proxyReqWs', (proxyReq) => {
+      proxyReq.removeHeader('origin');
+      proxyReq.removeHeader('referer');
+    });
   },
 };
+
+export const QUALIFIED_VOICE_STREAM_PROXY =
+  '^/workspaces/[^/]+/voice/stream/?$';
 
 export default defineConfig(({ command }) => ({
   root: 'client',
@@ -84,6 +91,7 @@ export default defineConfig(({ command }) => ({
       '/daemon/status': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,

@@ -17,7 +17,12 @@
 // than the thing doing the launching. These tests pin that derivation.
 
 import { describe, it, expect } from 'vitest';
-import { requiredAgents, reviewMode, isTerritoryFanOut } from './roster.js';
+import {
+  requiredAgents,
+  reviewMode,
+  isTerritoryFanOut,
+  hasExecutableScript,
+} from './roster.js';
 
 /** A same-repo PR: a worktree to build in, a PR number to check an issue against. */
 const PR = {
@@ -157,6 +162,78 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys(local)).not.toContain('0');
     // But there IS a tree, so the tracer and the build still run.
     expect(keys(local)).toEqual(expect.arrayContaining(['1c', '7']));
+  });
+});
+
+describe('hasExecutableScript — the script-lint gate predicate', () => {
+  // No longer an agent requirement: the orchestrator runs `qwen review
+  // script-lint` and compose-review reads its report. This predicate is what
+  // both share to decide whether the lint was OWED — detected by path, the same
+  // `pathTool` the command dispatches on, so the two cannot disagree.
+  it('is never in the agent roster', () => {
+    const plan = { ...PR, files: [{ path: 'deploy.sh', kind: 'source' }] };
+    expect(keys(plan)).not.toContain('script-lint');
+  });
+
+  it.each([
+    ['deploy.sh', true],
+    ['scripts/build.bash', true],
+    ['.github/workflows/ci.yml', true],
+    ['Dockerfile', true],
+    ['docker/api.Dockerfile', true],
+    ['src/pay.ts', false], // production TS: nothing a shell linter owns
+    ['README.md', false],
+    ['config.yml', false], // yaml, but not a workflow
+  ])('a diff touching %s is an executable script: %s', (path, owed) => {
+    expect(hasExecutableScript({ files: [{ path }] })).toBe(owed);
+  });
+
+  it('is true when any one file among many is an executable script', () => {
+    expect(
+      hasExecutableScript({
+        files: [
+          { path: 'src/a.ts' },
+          { path: 'src/b.ts' },
+          { path: '.husky/pre-commit.sh' },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it('trusts fileLines only in pr-worktree — a true deletion is exempt there, but never in local/diff-only', () => {
+    const wt = { worktreePath: '.qwen/tmp/review-pr-1' }; // pr-worktree mode
+    // pr-worktree: fileLines is a real post-image count, so 0 is a TRUE deletion
+    // (no file to lint) and is exempt...
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'gone.sh', fileLines: 0 }],
+      }),
+    ).toBe(false);
+    // ...while a surviving file (fileLines > 0) with addedLines 0 — a removed `fi`
+    // that breaks a `.sh` — is still owed.
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'broke.sh', addedLines: 0, fileLines: 12 }],
+      }),
+    ).toBe(true);
+    // local/diff-only: the report builder writes fileLines 0 for EVERY file (no
+    // post-image), so 0 is "unknown", NOT "deleted" — a surviving script must still
+    // be owed, or a missing report would pass uncapped. This is the fail-open fix.
+    expect(
+      hasExecutableScript({
+        untrackedFiles: [], // local mode
+        files: [{ path: 'deploy.sh', fileLines: 0 }],
+      }),
+    ).toBe(true);
+    // Absent fileLines fails safe to owed.
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'kept.sh', addedLines: 3 }],
+      }),
+    ).toBe(true);
   });
 });
 

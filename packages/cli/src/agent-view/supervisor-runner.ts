@@ -32,6 +32,7 @@ import {
   readAgentViewSupervisor,
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
+import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -48,6 +49,7 @@ export interface AgentViewSupervisorClientHandle {
   list(cwd?: string): Promise<unknown>;
   subscribe(
     onEvent: (event: AgentViewSupervisorEvent) => void,
+    onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
   dispatch(prompt: string, cwd: string): Promise<unknown>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
@@ -101,9 +103,8 @@ export async function ensureAgentViewSupervisor(
     const startedProcess = (options.spawnProcess ?? defaultSpawnSupervisor)([
       INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
     ]);
-    startedProcess.on?.('error', () => {});
     startedProcess.unref?.();
-    await waitForSupervisor(socketPath, options);
+    await waitForSpawnedSupervisorReady(startedProcess, socketPath, options);
     return createSupervisorHandle(
       socketPath,
       startedProcess,
@@ -145,7 +146,7 @@ export async function runAgentViewSupervisor(
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
-        void server.close();
+        void Promise.resolve(server.close()).catch(() => {});
       });
     },
   });
@@ -171,23 +172,33 @@ export async function runAgentViewSupervisor(
     const maintenanceInterval = setInterval(() => {
       void handler.tickIdleHibernation().catch(() => {});
     }, options.maintenanceIntervalMs ?? SUPERVISOR_MAINTENANCE_INTERVAL_MS);
+    const onSigterm = () => {
+      clearInterval(maintenanceInterval);
+      clearInterval(closeInterval);
+      void server
+        .close()
+        .catch(() => {})
+        .finally(resolve);
+    };
+    const onSigint = () => {
+      clearInterval(maintenanceInterval);
+      clearInterval(closeInterval);
+      void server
+        .close()
+        .catch(() => {})
+        .finally(resolve);
+    };
     const closeInterval = setInterval(() => {
       if (closeRequested) {
         clearInterval(maintenanceInterval);
         clearInterval(closeInterval);
+        process.off('SIGTERM', onSigterm);
+        process.off('SIGINT', onSigint);
         resolve();
       }
     }, 25);
-    process.once('SIGTERM', () => {
-      clearInterval(maintenanceInterval);
-      clearInterval(closeInterval);
-      void server.close().finally(resolve);
-    });
-    process.once('SIGINT', () => {
-      clearInterval(maintenanceInterval);
-      clearInterval(closeInterval);
-      void server.close().finally(resolve);
-    });
+    process.once('SIGTERM', onSigterm);
+    process.once('SIGINT', onSigint);
   });
   await fs
     .unlink(
@@ -216,8 +227,11 @@ function createSupervisorHandle(
         cwd ? { cwd } : undefined,
         authOptions,
       ),
-    subscribe: (onEvent) =>
-      subscribeAgentViewSupervisor(socketPath, onEvent, authOptions),
+    subscribe: (onEvent, onError) =>
+      subscribeAgentViewSupervisor(socketPath, onEvent, {
+        ...authOptions,
+        ...(onError ? { onError } : {}),
+      }),
     dispatch: (prompt: string, cwd: string) =>
       callAgentViewSupervisor(
         socketPath,
@@ -290,10 +304,54 @@ function createSupervisorHandle(
       callAgentViewSupervisor(
         socketPath,
         'shutdown',
-        keepWorkers ? { keepWorkers } : undefined,
+        keepWorkers === undefined ? undefined : { keepWorkers },
         authOptions,
       ),
   };
+}
+
+async function waitForSpawnedSupervisorReady(
+  startedProcess: ChildProcess,
+  socketPath: string,
+  options: EnsureAgentViewSupervisorOptions,
+): Promise<void> {
+  const waitAbort = new AbortController();
+  let cleanup = () => {};
+  const startupFailure = new Promise<never>((_, reject) => {
+    const fail = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      fail(new Error(formatSupervisorStartupExit(code, signal)));
+    };
+    cleanup = () => {
+      startedProcess.off?.('error', fail);
+      startedProcess.off?.('exit', onExit);
+    };
+    startedProcess.once?.('error', fail);
+    startedProcess.once?.('exit', onExit);
+  });
+
+  try {
+    await Promise.race([
+      waitForSupervisor(socketPath, options, waitAbort.signal),
+      startupFailure,
+    ]);
+  } finally {
+    waitAbort.abort();
+    cleanup();
+  }
+}
+
+function formatSupervisorStartupExit(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): string {
+  if (signal) {
+    return `Agent View supervisor exited before becoming ready with signal ${signal}.`;
+  }
+  return `Agent View supervisor exited before becoming ready with code ${code ?? 'unknown'}.`;
 }
 
 async function withSupervisorStartLock(
@@ -368,11 +426,18 @@ async function canReachSupervisor(
 async function waitForSupervisor(
   socketPath: string,
   options: EnsureAgentViewSupervisorOptions,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadlineMs =
     Date.now() + SUPERVISOR_READY_RETRIES * SUPERVISOR_READY_DELAY_MS;
   while (Date.now() < deadlineMs) {
+    if (signal?.aborted) {
+      throw new Error('Agent View supervisor startup was cancelled.');
+    }
     if (await canReachSupervisor(socketPath, options)) return;
+    if (signal?.aborted) {
+      throw new Error('Agent View supervisor startup was cancelled.');
+    }
     await delay(SUPERVISOR_READY_DELAY_MS);
   }
   throw new Error('Agent View supervisor did not become ready.');
@@ -404,11 +469,8 @@ async function readSupervisorAuthToken(
 }
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
-  const entry = process.argv[1];
-  if (!entry) {
-    throw new Error('Cannot locate qwen CLI entrypoint for Agent View.');
-  }
-  return spawn(process.execPath, [entry, ...args], {
+  const argv = buildCurrentQwenCliArgv(args);
+  return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
     env: {

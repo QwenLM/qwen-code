@@ -80,6 +80,15 @@ export async function readAgentViewRoster(
   return normalizeRoster(raw);
 }
 
+async function readAgentViewRosterForWrite(
+  options: StoreOptions = {},
+): Promise<AgentViewRosterFile> {
+  const raw = await readJsonRecordForWrite(
+    getAgentViewStorePaths(options).rosterPath,
+  );
+  return normalizeRoster(raw);
+}
+
 export async function writeAgentViewRoster(
   roster: AgentViewRosterFile,
   options: StoreOptions = {},
@@ -91,12 +100,13 @@ export async function upsertAgentViewRosterEntry(
   entry: AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(entry.sessionId);
   const sessions = roster.sessions.filter(
-    (item) => item.sessionId !== entry.sessionId,
+    (item) => sanitizeSessionId(item.sessionId) !== key,
   );
   const existing = roster.sessions.find(
-    (item) => item.sessionId === entry.sessionId,
+    (item) => sanitizeSessionId(item.sessionId) === key,
   );
   const updated: AgentViewRosterEntry = {
     ...existing,
@@ -116,13 +126,16 @@ export async function removeAgentViewRosterEntry(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(sessionId);
   const now = new Date().toISOString();
   const next: AgentViewRosterFile = {
     ...roster,
     schemaVersion: 1,
     updatedAt: now,
-    sessions: roster.sessions.filter((item) => item.sessionId !== sessionId),
+    sessions: roster.sessions.filter(
+      (item) => sanitizeSessionId(item.sessionId) !== key,
+    ),
   };
   await writeAgentViewRoster(next, options);
   return next;
@@ -133,10 +146,11 @@ export async function updateAgentViewRosterEntry(
   update: (entry: AgentViewRosterEntry) => AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterEntry | undefined> {
-  const roster = await readAgentViewRoster(options);
+  const roster = await readAgentViewRosterForWrite(options);
+  const key = sanitizeSessionId(sessionId);
   let updated: AgentViewRosterEntry | undefined;
   const sessions = roster.sessions.map((entry) => {
-    if (entry.sessionId !== sessionId) return entry;
+    if (sanitizeSessionId(entry.sessionId) !== key) return entry;
     updated = update(entry);
     return updated;
   });
@@ -156,10 +170,9 @@ export async function readAgentViewSessionState(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile | undefined> {
-  const raw = await readJsonRecord(
-    getAgentViewSessionPaths(sessionId, options).statePath,
-  );
-  return normalizeSessionState(raw, sessionId);
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecord(paths.statePath);
+  return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
 export async function writeAgentViewSessionState(
@@ -167,7 +180,7 @@ export async function writeAgentViewSessionState(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(state.sessionId, options);
-  const existing = await readJsonRecord(paths.statePath);
+  const existing = await readJsonRecordForWrite(paths.statePath);
   await writeJsonFile(paths.statePath, {
     ...existing,
     ...state,
@@ -204,7 +217,7 @@ export async function listAgentViewSessionSnapshots(
   const states = await listAgentViewSessionStates(options);
   const roster = await readAgentViewRoster(options);
   const rosterEntries = new Map(
-    roster.sessions.map((entry) => [entry.sessionId, entry]),
+    roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
   );
   const snapshots = await Promise.all(
     states.map(async (state) => ({
@@ -224,10 +237,9 @@ export async function readAgentViewLaunch(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewLaunchFile | undefined> {
-  const raw = await readJsonRecord(
-    getAgentViewSessionPaths(sessionId, options).launchPath,
-  );
-  return normalizeLaunch(raw, sessionId);
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecord(paths.launchPath);
+  return normalizeLaunch(raw, path.basename(paths.sessionDir));
 }
 
 export async function writeAgentViewLaunch(
@@ -235,7 +247,7 @@ export async function writeAgentViewLaunch(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(launch.sessionId, options);
-  const existing = await readJsonRecord(paths.launchPath);
+  const existing = await readJsonRecordForWrite(paths.launchPath);
   await writeJsonFile(paths.launchPath, {
     ...existing,
     ...launch,
@@ -259,7 +271,7 @@ export async function writeAgentViewActivity(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecord(paths.activityPath);
+  const existing = await readJsonRecordForWrite(paths.activityPath);
   await writeJsonFile(paths.activityPath, {
     ...existing,
     ...activity,
@@ -283,7 +295,7 @@ export async function writeAgentViewWorker(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecord(paths.workerPath);
+  const existing = await readJsonRecordForWrite(paths.workerPath);
   await writeJsonFile(paths.workerPath, {
     ...existing,
     ...worker,
@@ -305,7 +317,7 @@ export async function writeAgentViewSupervisor(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewStorePaths(options);
-  const existing = await readJsonRecord(paths.supervisorPath);
+  const existing = await readJsonRecordForWrite(paths.supervisorPath);
   await writeJsonFile(paths.supervisorPath, {
     ...existing,
     ...supervisor,
@@ -340,14 +352,35 @@ async function readJsonRecord(
     const text = await fs.readFile(filePath, 'utf8');
     const parsed = JSON.parse(text);
     return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    // Fail soft on any read or parse error: one corrupt or odd entry under
+    // jobs/ must not poison a full listing, which the supervisor would
+    // misread as "unreachable" and then answer with a duplicate spawn.
+    return undefined;
+  }
+}
+
+async function readJsonRecordForWrite(
+  filePath: string,
+): Promise<JsonRecord | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
   } catch (error) {
-    if (
-      error instanceof SyntaxError ||
-      (isNodeError(error) && error.code === 'ENOENT')
-    ) {
+    // A missing file means there is nothing to merge. Any other read failure
+    // (EMFILE, EIO) must surface: treating it as empty would silently drop
+    // fields a previous or newer writer populated.
+    if (isNodeError(error) && error.code === 'ENOENT') {
       return undefined;
     }
     throw error;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    // Corrupt contents have no fields worth preserving; overwriting recovers.
+    return undefined;
   }
 }
 
@@ -356,8 +389,13 @@ async function writeJsonFile(
   value: JsonRecord,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
+  // noFollow: these files carry the supervisor and worker auth tokens;
+  // refuse to write through a pre-placed symlink at the store path, matching
+  // the other credential write sites (trustedHooks, file-token-storage).
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
+    forceMode: true,
+    noFollow: true,
   });
 }
 
@@ -393,12 +431,8 @@ function normalizeRosterEntry(
     sessionId,
     projectCwd: path.resolve(projectCwd),
     activeCwd: path.resolve(activeCwd),
-    ...(stringValue(value['displayName'])
-      ? { displayName: stringValue(value['displayName']) }
-      : {}),
-    ...(typeof value['pinned'] === 'boolean'
-      ? { pinned: value['pinned'] }
-      : {}),
+    displayName: stringValue(value['displayName']),
+    pinned: typeof value['pinned'] === 'boolean' ? value['pinned'] : undefined,
     createdAt,
     updatedAt,
   };
@@ -409,7 +443,10 @@ function normalizeSessionState(
   expectedSessionId: string,
 ): AgentViewSessionStateFile | undefined {
   if (!raw) return undefined;
-  const sessionId = stringValue(raw['sessionId']) ?? expectedSessionId;
+  // The directory name (already sanitized) is the source of truth; trusting
+  // the file's sessionId would let one directory impersonate another and mix
+  // per-session files across directories.
+  const sessionId = expectedSessionId || stringValue(raw['sessionId']);
   const projectCwd = stringValue(raw['projectCwd']);
   const originalCwd = stringValue(raw['originalCwd']);
   const activeCwd = stringValue(raw['activeCwd']);
@@ -452,7 +489,9 @@ function normalizeLaunch(
   expectedSessionId: string,
 ): AgentViewLaunchFile | undefined {
   if (!raw) return undefined;
-  const sessionId = stringValue(raw['sessionId']) ?? expectedSessionId;
+  // Mirror normalizeSessionState: the sanitized directory name is the source
+  // of truth, so a tampered launch.json cannot impersonate another session.
+  const sessionId = expectedSessionId || stringValue(raw['sessionId']);
   const entrypoint = stringValue(raw['entrypoint']);
   const projectCwd = stringValue(raw['projectCwd']);
   const activeCwd = stringValue(raw['activeCwd']);
@@ -480,15 +519,9 @@ function normalizeActivity(
   return {
     ...raw,
     schemaVersion: 1,
-    ...(stringValue(raw['summary'])
-      ? { summary: stringValue(raw['summary']) }
-      : {}),
-    ...(stringValue(raw['waitingFor'])
-      ? { waitingFor: stringValue(raw['waitingFor']) }
-      : {}),
-    ...(stringValue(raw['lastResult'])
-      ? { lastResult: stringValue(raw['lastResult']) }
-      : {}),
+    summary: stringValue(raw['summary']),
+    waitingFor: stringValue(raw['waitingFor']),
+    lastResult: stringValue(raw['lastResult']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
   };
@@ -501,27 +534,13 @@ function normalizeWorker(
   return {
     ...raw,
     schemaVersion: 1,
-    ...(numberValue(raw['hostPid'])
-      ? { hostPid: numberValue(raw['hostPid']) }
-      : {}),
-    ...(numberValue(raw['workerPid'])
-      ? { workerPid: numberValue(raw['workerPid']) }
-      : {}),
-    ...(stringValue(raw['endpoint'])
-      ? { endpoint: stringValue(raw['endpoint']) }
-      : {}),
-    ...(stringValue(raw['hostEndpoint'])
-      ? { hostEndpoint: stringValue(raw['hostEndpoint']) }
-      : {}),
-    ...(stringValue(raw['hostAuthToken'])
-      ? { hostAuthToken: stringValue(raw['hostAuthToken']) }
-      : {}),
-    ...(stringValue(raw['tokenDigest'])
-      ? { tokenDigest: stringValue(raw['tokenDigest']) }
-      : {}),
-    ...(stringValue(raw['lastHeartbeatAt'])
-      ? { lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']) }
-      : {}),
+    hostPid: numberValue(raw['hostPid']),
+    workerPid: numberValue(raw['workerPid']),
+    endpoint: stringValue(raw['endpoint']),
+    hostEndpoint: stringValue(raw['hostEndpoint']),
+    hostAuthToken: stringValue(raw['hostAuthToken']),
+    tokenDigest: stringValue(raw['tokenDigest']),
+    lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']),
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,
     platform: platformValue(raw['platform']),
     recentOutputBytes: numberValue(raw['recentOutputBytes']) ?? 0,
@@ -543,7 +562,7 @@ function normalizeSupervisor(
     schemaVersion: 1,
     pid,
     socketPath,
-    ...(authToken ? { authToken } : {}),
+    authToken,
     startedAt,
     updatedAt,
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,
@@ -608,8 +627,18 @@ function terminalValue(value: unknown): AgentViewLaunchFile['terminal'] {
   };
 }
 
+const KNOWN_PLATFORMS: ReadonlySet<string> = new Set([
+  'aix',
+  'darwin',
+  'freebsd',
+  'linux',
+  'openbsd',
+  'sunos',
+  'win32',
+]);
+
 function platformValue(value: unknown): NodeJS.Platform {
-  return typeof value === 'string'
+  return typeof value === 'string' && KNOWN_PLATFORMS.has(value)
     ? (value as NodeJS.Platform)
     : process.platform;
 }
