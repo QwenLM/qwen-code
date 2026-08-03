@@ -252,6 +252,17 @@ const countHeadContentLines = (
 };
 
 /**
+ * Ensures code fences (``` or ~~~) start on their own line so that
+ * MarkdownDisplay's line-based parser can detect them. Models sometimes emit
+ * the opening fence right after prose without a preceding newline. Shared by
+ * the boxed single-turn renderers (/btw, /advisor) so fence edge cases only
+ * need one fix.
+ */
+export function normalizeCodeFences(text: string): string {
+  return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
+}
+
+/**
  * Splits `content` at `splitPoint` into a head (committed to <Static>) and a
  * tail (kept pending) for streaming render.
  *

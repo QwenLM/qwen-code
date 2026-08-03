@@ -8,6 +8,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../../colors.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { normalizeCodeFences } from '../../utils/markdownUtilities.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 export interface AdvisorDisplayProps {
@@ -21,15 +22,6 @@ export interface AdvisorDisplayProps {
 
 // border(1)*2 + paddingX(1)*2 = 4
 const ADVISOR_SELF_CHROME = 4;
-
-/**
- * Ensure code fences (``` or ~~~) start on their own line so that
- * MarkdownDisplay's line-based parser can detect them. Models sometimes emit
- * the opening fence right after prose without a preceding newline.
- */
-function normalizeCodeFences(text: string): string {
-  return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
-}
 
 const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
   text,

@@ -10,6 +10,7 @@ import {
   splitFencedMarkdown,
   parseCodeFenceInfo,
   getEnclosingFenceInfo,
+  normalizeCodeFences,
 } from './markdownUtilities.js';
 
 describe('markdownUtilities', () => {
@@ -281,6 +282,29 @@ describe('markdownUtilities', () => {
         lang: 'ts',
         startLine: 7,
       });
+    });
+  });
+
+  describe('normalizeCodeFences', () => {
+    it('inserts a newline before a fence that follows prose', () => {
+      expect(normalizeCodeFences('Intro```ts\ncode\n```')).toBe(
+        'Intro\n```ts\ncode\n```',
+      );
+    });
+
+    it('handles tilde fences the same way', () => {
+      expect(normalizeCodeFences('Intro~~~\ncode\n~~~')).toBe(
+        'Intro\n~~~\ncode\n~~~',
+      );
+    });
+
+    it('leaves fences that already start a line untouched', () => {
+      const text = 'Prose\n```\ncode\n```\nMore.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('returns text without fences unchanged', () => {
+      expect(normalizeCodeFences('plain text')).toBe('plain text');
     });
   });
 });

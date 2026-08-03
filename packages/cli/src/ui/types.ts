@@ -524,8 +524,9 @@ export type HistoryItemBtw = HistoryItemBase & {
 /**
  * Independent second-opinion review rendered by `/advisor`. `text` is the
  * reviewer's markdown; `model` is the resolved model id that produced it,
- * shown in the header so a misconfigured `advisorModel` (which silently falls
- * back to the main model) is visible to the user.
+ * shown in the header. An unknown `advisorModel` is passed to the provider
+ * as-is and surfaces as an error if rejected; only unresolvable alias
+ * selectors fall back to the main model.
  */
 export type HistoryItemAdvisor = HistoryItemBase & {
   type: 'advisor';

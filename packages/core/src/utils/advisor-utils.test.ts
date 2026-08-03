@@ -38,6 +38,16 @@ describe('buildAdvisorPrompt', () => {
     expect(prompt).toContain('You have NO tools');
   });
 
+  it('should wrap the constraints in a system-reminder envelope', () => {
+    const prompt = buildAdvisorPrompt('focus');
+    expect(prompt).toMatch(
+      /^<system-reminder>\n[\s\S]*\n<\/system-reminder>\n\n/,
+    );
+    expect(prompt.indexOf('focus')).toBeGreaterThan(
+      prompt.indexOf('</system-reminder>'),
+    );
+  });
+
   it('should expose a positive max input length', () => {
     expect(ADVISOR_MAX_INPUT_LENGTH).toBeGreaterThan(0);
   });

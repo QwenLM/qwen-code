@@ -234,23 +234,28 @@ The `/advisor` command runs an independent, read-only review of the conversation
 
   Consulting advisor...
 
-  /advisor · qwen3-max
-  ────────────────────
-
-  ## Verdict
-  The approach is sound, but the edge case at line 42 is unverified.
-
-  ## Risks
-  - The fix assumes the config is always loaded; a startup race could leave it null.
-
-  ## Missing evidence
-  - No test exercises the null-config path in the visible transcript.
-
-  ## Recommendation
-  Add a focused unit test for the null-config branch before merging.
+  ╭──────────────────────────────────────────────────────╮
+  │ /advisor · qwen3-max                                 │
+  │                                                      │
+  │ Verdict                                              │
+  │ The approach is sound, but the edge case at line 42  │
+  │ is unverified.                                       │
+  │                                                      │
+  │ Risks                                                │
+  │  - The fix assumes the config is always loaded; a    │
+  │    startup race could leave it null.                 │
+  │                                                      │
+  │ Missing evidence                                     │
+  │  - No test exercises the null-config path in the     │
+  │    visible transcript.                               │
+  │                                                      │
+  │ Recommendation                                       │
+  │ Add a focused unit test for the null-config branch   │
+  │ before merging.                                      │
+  ╰──────────────────────────────────────────────────────╯
 ```
 
-The review renders in a bordered box; the header shows the resolved reviewer model, so a mistyped `advisorModel` — which silently falls back to the main model — is visible at a glance.
+The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model.
 
 **Supported Execution Modes:**
 

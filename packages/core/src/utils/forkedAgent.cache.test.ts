@@ -447,6 +447,7 @@ describe('runForkedAgent (cache path)', () => {
     });
 
     expect(result.text).toBe('commit this');
+    expect(result.model).toBe(fastModel);
     expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
       mockConfig,
       mockConfig,
@@ -538,6 +539,7 @@ describe('runForkedAgent (cache path)', () => {
     });
 
     expect(result.text).toBe('commit this');
+    expect(result.model).toBe(fastModel);
     expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
       mockConfig,
       mockConfig,
@@ -604,7 +606,7 @@ describe('runForkedAgent (cache path)', () => {
       getAllConfiguredModels: vi.fn(() => []),
     } as unknown as Config;
 
-    await runForkedAgent({
+    const result = await runForkedAgent({
       config: mockConfig,
       userMessage: 'suggest something',
       cacheSafeParams: getCacheSafeParams()!,
@@ -612,6 +614,7 @@ describe('runForkedAgent (cache path)', () => {
     });
 
     expect(capturedModel).toBe('parent-model');
+    expect(result.model).toBe('parent-model');
     expect(createRuntimeContentGeneratorView).not.toHaveBeenCalled();
   });
 

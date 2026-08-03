@@ -24,6 +24,9 @@ vi.mock('../../i18n/index.js', () => ({
 }));
 
 const mockRunForkedAgent = vi.hoisted(() => vi.fn());
+const mockBuildAdvisorPrompt = vi.hoisted(() =>
+  vi.fn((focus: string) => `<advisor-framing>\n${focus}`),
+);
 const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   vi.fn().mockReturnValue({
     generationConfig: {},
@@ -35,7 +38,7 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   ADVISOR_MAX_INPUT_LENGTH: 4096,
-  buildAdvisorPrompt: (focus: string) => focus,
+  buildAdvisorPrompt: mockBuildAdvisorPrompt,
   runForkedAgent: mockRunForkedAgent,
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
 }));
@@ -70,6 +73,7 @@ describe('advisorCommand', () => {
     expect(advisorCommand.name).toBe('advisor');
     expect(advisorCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(advisorCommand.description).toBeTruthy();
+    expect(advisorCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 
   it('should return error when focus exceeds max length', async () => {
@@ -80,6 +84,19 @@ describe('advisorCommand', () => {
       messageType: 'error',
       content: expect.stringContaining('too long'),
     });
+  });
+
+  it('should accept a focus at exactly the max length', async () => {
+    mockRunForkedAgent.mockResolvedValue({
+      text: 'review',
+      model: 'test-model',
+      usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+    });
+
+    const result = await advisorCommand.action!(mockContext, 'x'.repeat(4096));
+
+    expect(result).toBeUndefined();
+    expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
   });
 
   it('should return error when config is not loaded', async () => {
@@ -121,7 +138,7 @@ describe('advisorCommand', () => {
         usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
       });
 
-      await advisorCommand.action!(mockContext, '');
+      const result = await advisorCommand.action!(mockContext, '');
 
       expect(mockContext.ui.setPendingItem).toHaveBeenNthCalledWith(1, {
         type: MessageType.INFO,
@@ -135,7 +152,10 @@ describe('advisorCommand', () => {
         },
         expect.any(Number),
       );
+      expect(mockContext.ui.addItem).toHaveBeenCalledTimes(1);
+      expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
       expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+      expect(result).toBeUndefined();
     });
 
     it('should pass focus into the advisor prompt', async () => {
@@ -147,10 +167,13 @@ describe('advisorCommand', () => {
 
       await advisorCommand.action!(mockContext, 'check the error handling');
 
+      expect(mockBuildAdvisorPrompt).toHaveBeenCalledWith(
+        'check the error handling',
+      );
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
         expect.objectContaining({
           cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
-          userMessage: expect.stringContaining('check the error handling'),
+          userMessage: '<advisor-framing>\ncheck the error handling',
         }),
       );
     });
@@ -328,7 +351,7 @@ describe('advisorCommand', () => {
     it('should add error item on failure and clear pending', async () => {
       mockRunForkedAgent.mockRejectedValue(new Error('API error'));
 
-      await advisorCommand.action!(mockContext, '');
+      const result = await advisorCommand.action!(mockContext, '');
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -338,6 +361,7 @@ describe('advisorCommand', () => {
         expect.any(Number),
       );
       expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+      expect(result).toBeUndefined();
     });
 
     it('should format non-Error rejections with a fallback', async () => {
@@ -469,6 +493,7 @@ describe('advisorCommand', () => {
         messageType: 'info',
         content: 'review text',
       });
+      expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
       expect(acpContext.ui.setPendingItem).not.toHaveBeenCalled();
     });
 
