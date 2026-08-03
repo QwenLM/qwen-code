@@ -131,6 +131,20 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `unedited — copy it, do not retype it.`,
     );
   }
+  // Near-verbatim delivery with the payload proven to arrive: the transcript
+  // shows the brief opened and, where the role reads the diff, the diff read.
+  // A NOTE, not a failure, and no relaunch — the last run to treat this as a
+  // failure relaunched twelve agents to redeliver text they had already acted
+  // on, the most expensive repair in the pipeline spent repairing nothing.
+  if (report.driftedLaunches.length > 0) {
+    writeStderrLine(
+      `NOTE: ${report.driftedLaunches.length} agent(s) launched with a ` +
+        `near-verbatim prompt — ${report.driftedLaunches.join('; ')}. Their ` +
+        `briefs were opened and the work is on record, so the delivery ` +
+        `stands and NO relaunch is owed. Copy future blocks exactly — one ` +
+        `edited word is what turns a clean pass into this note.`,
+    );
+  }
   // The one failure no other check in this file can see. Every other question is
   // asked of an agent whose transcript exists; a brief that never arrived leaves
   // nothing to ask it of.

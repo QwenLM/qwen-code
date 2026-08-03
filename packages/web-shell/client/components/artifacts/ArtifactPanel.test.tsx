@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
+  DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
 } from '@qwen-code/sdk/daemon';
@@ -16,6 +17,7 @@ const { mockActions, mockWorkspaceActions } = vi.hoisted(() => ({
   },
   mockWorkspaceActions: {
     readFileBytes: vi.fn(),
+    readWorkspaceFile: vi.fn(),
     stat: vi.fn(),
   },
 }));
@@ -91,6 +93,51 @@ function shellPanel(task: DaemonSessionShellTaskStatus) {
   );
 }
 
+function codeReviewArtifact(
+  patch: Partial<DaemonSessionArtifact> = {},
+): DaemonSessionArtifact {
+  return {
+    id: 'review-artifact',
+    kind: 'other',
+    storage: 'workspace',
+    source: 'tool',
+    status: 'available',
+    title: 'Code review result',
+    workspacePath: '.qwen/reviews/review.json',
+    metadata: { artifactType: 'code_review', schemaVersion: 1 },
+    retention: 'ephemeral',
+    clientRetained: false,
+    createdAt: '2026-08-03T00:00:00.000Z',
+    updatedAt: '2026-08-03T00:00:00.000Z',
+    ...patch,
+  };
+}
+
+function artifactPanel(artifact: DaemonSessionArtifact) {
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[artifact]}
+        tabs={[
+          {
+            id: 'artifact:review-artifact',
+            kind: 'artifact',
+            title: artifact.title,
+            artifactId: artifact.id,
+          },
+        ]}
+        activeTabId="artifact:review-artifact"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
 afterEach(() => {
   for (const { root, container } of mounted) {
     act(() => root.unmount());
@@ -100,6 +147,7 @@ afterEach(() => {
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
   mockWorkspaceActions.readFileBytes.mockReset();
+  mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
 });
 
@@ -114,6 +162,127 @@ function openAddMenu(container: HTMLElement) {
   });
   return add;
 }
+
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe('ArtifactPanel code review artifacts', () => {
+  it('dispatches an available workspace artifact to the dedicated renderer', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: JSON.stringify({
+        schemaVersion: 1,
+        target: 'local',
+        effort: 'high',
+        verdict: {
+          event: 'APPROVE',
+          verdictLine: 'Verdict: Approve',
+          baseEvent: 'APPROVE',
+          cappedBy: [],
+          downgraded: false,
+          downgradedFrom: null,
+        },
+        findings: [],
+        counts: {
+          total: 0,
+          bySeverity: {
+            Critical: 0,
+            Suggestion: 0,
+            'Nice to have': 0,
+          },
+          byConfidence: { high: 0, low: 0 },
+          held: 0,
+        },
+        outcomesRecorded: false,
+        markdownReportPath: '.qwen/reviews/review.md',
+      }),
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(codeReviewArtifact())));
+    await flush();
+
+    expect(container.textContent).toContain('Authoritative verdict');
+    expect(container.textContent).toContain('Verdict: Approve');
+    expect(container.querySelector('.cm-editor')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/review.json',
+    );
+  });
+
+  it.each(['changed', 'missing'] as const)(
+    'does not render a %s artifact as authoritative',
+    async (status) => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+
+      act(() => root.render(artifactPanel(codeReviewArtifact({ status }))));
+      await flush();
+
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        status,
+      );
+      expect(container.textContent).not.toContain('Authoritative verdict');
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires code review artifacts to use workspace storage', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          codeReviewArtifact({
+            storage: 'external_url',
+            workspacePath: undefined,
+          }),
+        ),
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'workspace files',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('still sends an ordinary JSON artifact to the generic editor', async () => {
+    // The regression the early `return` in the dispatch can cause: an
+    // artifact WITHOUT the code_review metadata must keep reaching the
+    // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: '{}',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(codeReviewArtifact({ metadata: {} }))));
+    await flush();
+
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(container.textContent).not.toContain('Authoritative verdict');
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/review.json',
+    );
+  });
+});
 
 describe('ArtifactPanel add menu', () => {
   it('keeps the disabled review action on the empty page and hides the add button', () => {
@@ -145,7 +314,7 @@ describe('ArtifactPanel add menu', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.includes('Review'));
+    ).find((button) => button.textContent?.includes('Changes'));
     expect(review?.disabled).toBe(true);
     expect(review?.textContent).toContain('View recent file changes');
     expect(container.textContent).not.toContain('⌘');
@@ -378,7 +547,7 @@ describe('ArtifactPanel add menu', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.includes('Review'));
+    ).find((button) => button.textContent?.includes('Changes'));
     expect(review?.disabled).toBe(false);
     act(() => review?.click());
     expect(onOpenLatestReview).toHaveBeenCalledOnce();
@@ -462,7 +631,7 @@ describe('ArtifactPanel add menu', () => {
 
     openAddMenu(container);
     const menuText = document.body.querySelector('[role="menu"]')?.textContent;
-    expect(menuText).toContain('Review');
+    expect(menuText).toContain('Changes');
     expect(menuText).toContain('New side task');
     expect(menuText).not.toContain('Existing side task');
   });
