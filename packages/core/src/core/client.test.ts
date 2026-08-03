@@ -2157,6 +2157,58 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('re-reveals MCP tools from resumed history after progressive discovery', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+
+      // The resumed chat is constructed before progressive MCP discovery, so
+      // startChat() cannot match this historical call until the server's tools
+      // are registered. setTools() is the common refresh path once they are.
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                args: { a: 1, b: 2 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([
+        {
+          name: 'mcp__calculator__add',
+          description: 'Add two numbers',
+          serverName: 'calculator',
+        },
+      ]);
+      reg.revealDeferredTool.mockClear();
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(
+        'mcp__calculator__add',
+      );
+    });
+
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without ToolSearch
       // a deferred MCP tool can't be reached, so the only safe option is
