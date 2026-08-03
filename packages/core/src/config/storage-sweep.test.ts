@@ -10,6 +10,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage, sweepStaleWorktreeProjects } from './storage.js';
+import { sanitizeCwd } from '../utils/paths.js';
 
 // The sweep must treat a failed removal as skippable. Simulate the failure by
 // mocking rm for the stuck entry only: chmod-based DAC failure is silently
@@ -66,21 +67,38 @@ describe('sweepStaleWorktreeProjects', () => {
   });
 
   it('removes project dirs whose worktree no longer exists', async () => {
-    const gone = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-aaa', {
-      worktreePath: path.join(base, 'definitely-not-here'),
+    const goneWorktree = path.join(base, 'definitely-not-here');
+    const entry = sanitizeCwd(goneWorktree);
+    const gone = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
       originalCwd: '/repo',
     });
 
     const removed = await sweepStaleWorktreeProjects(base);
 
-    expect(removed).toEqual(['-tmp-qwen-exit-sess-aaa']);
+    expect(removed).toEqual([entry]);
     expect(fs.existsSync(gone)).toBe(false);
+  });
+
+  it('keeps a normal project bucket whose worktree sidecar points at a gone path', async () => {
+    // enter/exit run from the original repo never relocates session storage,
+    // so the sidecar lands in the normal bucket; deleting it would wipe the
+    // repo's chat history.
+    const normal = makeProjectSnapshot(base, sanitizeCwd('/repo'), {
+      worktreePath: path.join(base, 'removed-worktree'),
+      originalCwd: '/repo',
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(normal)).toBe(true);
   });
 
   it('keeps project dirs whose worktree still exists', async () => {
     const alive = path.join(base, 'wt-alive');
     fs.mkdirSync(alive, { recursive: true });
-    const kept = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-bbb', {
+    const kept = makeProjectSnapshot(base, sanitizeCwd(alive), {
       worktreePath: alive,
       originalCwd: '/repo',
     });
@@ -113,30 +131,31 @@ describe('sweepStaleWorktreeProjects', () => {
   });
 
   it('judges by archived sidecars too', async () => {
-    const projectDir = path.join(base, 'projects', '-tmp-qwen-exit-sess-arch');
+    const goneWorktree = path.join(base, 'definitely-not-here');
+    const projectDir = path.join(base, 'projects', sanitizeCwd(goneWorktree));
     const archiveDir = path.join(projectDir, 'chats', 'archive');
     fs.mkdirSync(archiveDir, { recursive: true });
     fs.writeFileSync(
       path.join(archiveDir, 'session-1.worktree.json'),
       JSON.stringify({
-        worktreePath: path.join(base, 'definitely-not-here'),
+        worktreePath: goneWorktree,
         originalCwd: '/repo',
       }),
     );
 
     const removed = await sweepStaleWorktreeProjects(base);
 
-    expect(removed).toEqual(['-tmp-qwen-exit-sess-arch']);
+    expect(removed).toEqual([sanitizeCwd(goneWorktree)]);
     expect(fs.existsSync(projectDir)).toBe(false);
   });
 
   it('falls through a corrupted sidecar to the next valid one', async () => {
-    const projectDir = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-mix', {
+    const alive = path.join(base, 'wt-still-here');
+    fs.mkdirSync(alive, { recursive: true });
+    const projectDir = makeProjectSnapshot(base, sanitizeCwd(alive), {
       worktreePath: path.join(base, 'gone'),
       originalCwd: '/repo',
     });
-    const alive = path.join(base, 'wt-still-here');
-    fs.mkdirSync(alive, { recursive: true });
     fs.writeFileSync(
       path.join(projectDir, 'chats', 'session-0.worktree.json'),
       '{not json',
@@ -153,12 +172,12 @@ describe('sweepStaleWorktreeProjects', () => {
   });
 
   it('keeps the bucket when any sidecar points at a live worktree', async () => {
-    const projectDir = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-two', {
+    const alive = path.join(base, 'wt-second-session');
+    fs.mkdirSync(alive, { recursive: true });
+    const projectDir = makeProjectSnapshot(base, sanitizeCwd(alive), {
       worktreePath: path.join(base, 'gone'),
       originalCwd: '/repo',
     });
-    const alive = path.join(base, 'wt-second-session');
-    fs.mkdirSync(alive, { recursive: true });
     fs.writeFileSync(
       path.join(projectDir, 'chats', 'session-2.worktree.json'),
       JSON.stringify({ worktreePath: alive, originalCwd: '/repo' }),
@@ -171,25 +190,31 @@ describe('sweepStaleWorktreeProjects', () => {
   });
 
   it('continues the sweep when one entry cannot be removed', async () => {
-    const stuck = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-aaa-stuck', {
-      worktreePath: path.join(base, 'gone-1'),
-      originalCwd: '/repo',
-    });
-    const gone = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-bbb-gone', {
-      worktreePath: path.join(base, 'gone-2'),
+    const stuck = makeProjectSnapshot(
+      base,
+      sanitizeCwd(path.join(base, 'aaa-stuck-wt')),
+      {
+        worktreePath: path.join(base, 'aaa-stuck-wt'),
+        originalCwd: '/repo',
+      },
+    );
+    const goneWorktree = path.join(base, 'gone-2');
+    const gone = makeProjectSnapshot(base, sanitizeCwd(goneWorktree), {
+      worktreePath: goneWorktree,
       originalCwd: '/repo',
     });
 
     const removed = await sweepStaleWorktreeProjects(base);
 
-    expect(removed).toEqual(['-tmp-qwen-exit-sess-bbb-gone']);
+    expect(removed).toEqual([sanitizeCwd(goneWorktree)]);
     expect(fs.existsSync(stuck)).toBe(true);
     expect(fs.existsSync(gone)).toBe(false);
   });
 
   it('the Storage constructor schedules the sweep once per base dir', async () => {
-    makeProjectSnapshot(base, '-tmp-qwen-exit-sess-ccc', {
-      worktreePath: path.join(base, 'missing'),
+    const missingWorktree = path.join(base, 'missing');
+    makeProjectSnapshot(base, sanitizeCwd(missingWorktree), {
+      worktreePath: missingWorktree,
       originalCwd: '/repo',
     });
 
@@ -198,20 +223,21 @@ describe('sweepStaleWorktreeProjects', () => {
     const firstSnapshot = path.join(
       base,
       'projects',
-      '-tmp-qwen-exit-sess-ccc',
+      sanitizeCwd(missingWorktree),
     );
     await waitFor(() => !fs.existsSync(firstSnapshot));
     expect(fs.existsSync(firstSnapshot)).toBe(false);
 
     // A later construction on the same base must not sweep again.
-    makeProjectSnapshot(base, '-tmp-qwen-exit-sess-ddd', {
-      worktreePath: path.join(base, 'also-missing'),
+    const alsoMissing = path.join(base, 'also-missing');
+    makeProjectSnapshot(base, sanitizeCwd(alsoMissing), {
+      worktreePath: alsoMissing,
       originalCwd: '/repo',
     });
     new Storage('/tmp/z', base);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(
-      fs.existsSync(path.join(base, 'projects', '-tmp-qwen-exit-sess-ddd')),
+      fs.existsSync(path.join(base, 'projects', sanitizeCwd(alsoMissing))),
     ).toBe(true);
   });
 });

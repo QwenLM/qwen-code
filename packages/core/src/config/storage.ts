@@ -43,10 +43,13 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
  * point at the temp worktree. The worktree is deleted on exit (or lost on
  * crash), but the snapshot dir is never removed, so
  * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
- * project dirs whose worktree sidecars all point at paths that no longer
- * exist. Anything that cannot prove itself stale (no sidecar, corrupted
- * sidecars, at least one live worktree) is kept; this never touches normal
- * project dirs.
+ * project dirs that are keyed by a worktree path and whose worktree
+ * sidecars all point at paths that no longer exist. Anything that cannot
+ * prove itself stale (no sidecar, corrupted sidecars, at least one live
+ * worktree) is kept. Normal project buckets are never touched: they can
+ * hold worktree sidecars of their own (enter/exit run from the original
+ * repo does not relocate session storage), so a bucket whose name is not a
+ * sanitized worktree path is skipped regardless of what its sidecars say.
  */
 export async function sweepStaleWorktreeProjects(
   runtimeBaseDir: string,
@@ -64,6 +67,16 @@ export async function sweepStaleWorktreeProjects(
     const chatsDir = path.join(projectsDir, entry, 'chats');
     const worktreePaths = await readWorktreeSidecarPaths(chatsDir);
     if (worktreePaths.length === 0) continue;
+
+    // Only a bucket actually keyed by a worktree path may be swept. A normal
+    // project bucket can hold worktree sidecars too (enter/exit run from the
+    // original repo never relocates the session storage), and deleting it
+    // would wipe the repo's chat history.
+    if (
+      !worktreePaths.some((worktreePath) => entry === sanitizeCwd(worktreePath))
+    ) {
+      continue;
+    }
 
     // One live worktree anywhere in the bucket is enough to keep it; the
     // snapshot is stale only when every parseable sidecar points at a gone
