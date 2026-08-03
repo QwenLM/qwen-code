@@ -2191,6 +2191,8 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
+    omniEnabled: settings.omni?.enabled ?? false,
+    omniUploadMaxFileBytes: settings.omni?.upload?.maxFileBytes,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.

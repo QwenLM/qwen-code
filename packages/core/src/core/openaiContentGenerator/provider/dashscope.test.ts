@@ -486,6 +486,36 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         `QwenCode/unknown (${process.platform}; ${process.arch})`,
       );
     });
+
+    it('should add the OssResourceResolve header when omni is enabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers['X-DashScope-OssResourceResolve']).toBe('enable');
+    });
+
+    it('should omit the OssResourceResolve header when omni is disabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(false),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers).not.toHaveProperty('X-DashScope-OssResourceResolve');
+    });
   });
 
   describe('buildClient', () => {

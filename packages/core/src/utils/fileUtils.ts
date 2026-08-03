@@ -1253,11 +1253,25 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
+    // Omni experiment: when active, local video files are delivered via the
+    // DashScope upload channel instead of inline base64, with a 1 GiB
+    // per-file ceiling replacing the 10MB inline cap below. Dynamic import
+    // keeps the omni module (which reaches into the provider layer) out of
+    // fileUtils' static dependency graph.
+    let omniModule: typeof import('../omni/index.js') | undefined;
+    if (fileType === 'video') {
+      const omni = await import('../omni/index.js');
+      if (omni.isOmniVideoDeliveryActive(config)) {
+        omniModule = omni;
+      }
+    }
+
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
-      !shouldRenderImageOverview
+      !shouldRenderImageOverview &&
+      omniModule === undefined
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1520,6 +1534,18 @@ export async function processSingleFileContent(
       }
       case 'audio':
       case 'video': {
+        if (fileType === 'video' && omniModule) {
+          // Delegated to the omni module: fail-closed delivery via the
+          // DashScope upload channel; user aborts are rethrown and land in
+          // this function's outer abort handling.
+          return await omniModule.readVideoViaOmniDelivery({
+            filePath,
+            config,
+            displayName,
+            relativePathForDisplay,
+            signal,
+          });
+        }
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);

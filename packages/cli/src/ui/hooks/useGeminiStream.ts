@@ -495,6 +495,12 @@ export const useGeminiStream = (
 
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
+  // True while prepareQueryForGemini runs (@-command file resolution, which
+  // can include slow work like omni media uploads). Feeding this into
+  // streamingState keeps Esc-to-cancel and the loading indicator active
+  // during preprocessing — otherwise a minutes-long upload would look idle
+  // and swallow Esc (cancelOngoingRequest early-returns outside Responding).
+  const [isPreparingQuery, setIsPreparingQuery] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
@@ -754,6 +760,7 @@ export const useGeminiStream = (
     }
     if (
       isResponding ||
+      isPreparingQuery ||
       toolCalls.some(
         (tc) =>
           tc.status === 'executing' ||
@@ -769,7 +776,7 @@ export const useGeminiStream = (
       return StreamingState.Responding;
     }
     return StreamingState.Idle;
-  }, [isResponding, toolCalls]);
+  }, [isResponding, isPreparingQuery, toolCalls]);
 
   useEffect(() => {
     if (
@@ -2809,18 +2816,42 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } =
-          submitType === SendMessageType.Retry
-            ? { queryToSend: query, shouldProceed: true }
-            : await prepareQueryForGemini(
-                query,
-                userMessageTimestamp,
-                abortSignal,
-                prompt_id!,
-                submitType,
-                submittedPrompt,
-                allowConcurrentBtwDuringResponse,
-              );
+        let prepared: {
+          queryToSend: PartListUnion | null;
+          shouldProceed: boolean;
+        };
+        if (submitType === SendMessageType.Retry) {
+          prepared = { queryToSend: query, shouldProceed: true };
+        } else {
+          // Surface the preprocessing phase (@ file resolution, media
+          // uploads) as Responding so the loading indicator shows and Esc
+          // cancels via abortControllerRef. Scoped to interactive user
+          // queries only: notification/cron/teammate drains key off
+          // streamingState transitions and must not see extra flips, and
+          // /btw side-questions must leave the main stream's state alone.
+          const surfacePreparing =
+            submitType === SendMessageType.UserQuery &&
+            !allowConcurrentBtwDuringResponse;
+          if (surfacePreparing) {
+            setIsPreparingQuery(true);
+          }
+          try {
+            prepared = await prepareQueryForGemini(
+              query,
+              userMessageTimestamp,
+              abortSignal,
+              prompt_id!,
+              submitType,
+              submittedPrompt,
+              allowConcurrentBtwDuringResponse,
+            );
+          } finally {
+            if (surfacePreparing) {
+              setIsPreparingQuery(false);
+            }
+          }
+        }
+        const { queryToSend, shouldProceed } = prepared;
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
