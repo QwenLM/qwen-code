@@ -614,12 +614,13 @@ describe('readManyFiles', () => {
       await fs.mkdir(absolutePath);
       await fs.writeFile(path.join(absolutePath, 'visible.txt'), 'visible');
       const approvedStats = await fs.stat(absolutePath);
+      const canonicalPath = await fs.realpath(absolutePath);
       const fsp = nodeFs.promises;
       const originalStat = fsp.stat.bind(fsp);
       let validatedStats = 0;
       const statSpy = vi.spyOn(fsp, 'stat').mockImplementation(async (file) => {
         const stats = await originalStat(file);
-        if (file === absolutePath && ++validatedStats === 2) {
+        if (file === canonicalPath && ++validatedStats === 2) {
           return { ...stats, ino: stats.ino + 1 } as nodeFs.Stats;
         }
         return stats;
