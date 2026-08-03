@@ -83,6 +83,23 @@ describe('resolveEnvVarsInString', () => {
     expect(result).not.toContain('custom-supplied-secret');
   });
 
+  it('should never resolve braced ${VAR} internal secrets from process.env', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+
+    const result = resolveEnvVarsInString('t=${QWEN_SERVER_TOKEN}');
+
+    expect(result).toBe('t=${QWEN_SERVER_TOKEN}');
+    expect(result).not.toContain('daemon-secret');
+  });
+
+  it('should block braced internal secrets even when customEnv supplies them', () => {
+    const result = resolveEnvVarsInString('t=${QWEN_SERVER_TOKEN}', {
+      QWEN_SERVER_TOKEN: 'custom-supplied-secret',
+    });
+    expect(result).toBe('t=${QWEN_SERVER_TOKEN}');
+    expect(result).not.toContain('custom-supplied-secret');
+  });
+
   it('should leave undefined variables with braces unchanged', () => {
     const result = resolveEnvVarsInString('Value is ${UNDEFINED_VAR}');
 

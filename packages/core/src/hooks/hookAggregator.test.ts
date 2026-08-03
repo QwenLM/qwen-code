@@ -110,6 +110,26 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.reason).toBe('first reason\nsecond reason');
     });
 
+    it('should concatenate systemMessages so a one-shot message survives later hooks', () => {
+      const outputs: HookOutput[] = [
+        { continue: true, systemMessage: 'Warning: redirect to final URL' },
+        { continue: true, systemMessage: 'audit ok' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.Stop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(results, HookEventName.Stop);
+      expect(result.finalOutput?.systemMessage).toBe(
+        'Warning: redirect to final URL\naudit ok',
+      );
+    });
+
     it('should block when any hook blocks', () => {
       const outputs: HookOutput[] = [
         { reason: 'allowed', decision: 'allow' },

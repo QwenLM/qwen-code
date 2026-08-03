@@ -686,6 +686,21 @@ describe('SkillTool', () => {
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
     });
+
+    it('grants allowedTools for a bundled skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...projectSkill,
+        level: 'bundled',
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('refreshSkills', () => {

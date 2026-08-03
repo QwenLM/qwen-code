@@ -278,9 +278,9 @@ describe('HttpHookRunner', () => {
       // Exactly one request: the redirect target is never fetched
       expect(mockFetch).toHaveBeenCalledTimes(1);
       // The remedy rides a systemMessage. How it surfaces is
-      // event-dependent: Stop hooks emit it as an agent message, other
-      // events log it via hookEventHandler — either way it is carried in
-      // the hook output, not limited to this runner's debug log.
+      // event-dependent: Stop/SubagentStop show it to the user; other
+      // events only write it to the debug-file channel — either way it
+      // is carried in the hook output.
       expect(result.output?.systemMessage).toContain(
         'returned a redirect (302)',
       );
@@ -364,12 +364,15 @@ describe('HttpHookRunner', () => {
       expect(message.length).toBeLessThan(11000);
     });
 
-    it('should emit the redirect warning once per hook, then stay debug-only', async () => {
-      mockFetch.mockResolvedValue({
+    it('should emit the redirect warning once per hook URL and event, then stay debug-only', async () => {
+      const redirectResponse = {
         ok: false,
         status: 302,
         headers: new Headers({ location: 'https://api.example.com/moved' }),
-      });
+      };
+      mockFetch
+        .mockResolvedValueOnce(redirectResponse)
+        .mockResolvedValueOnce(redirectResponse);
 
       const config = createMockConfig();
       const input = createMockInput();
@@ -397,6 +400,69 @@ describe('HttpHookRunner', () => {
           String(msg).includes('returned a redirect (302)'),
         ),
       ).toHaveLength(2);
+    });
+
+    it('should keep a warn slot per event so a PreToolUse 3xx does not burn the Stop warning', async () => {
+      const redirectResponse = {
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: 'https://api.example.com/moved' }),
+      };
+      mockFetch
+        .mockResolvedValueOnce(redirectResponse)
+        .mockResolvedValueOnce(redirectResponse);
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      const preToolUse = await httpRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+      const stop = await httpRunner.execute(config, HookEventName.Stop, input);
+
+      expect(preToolUse.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
+      // Stop/SubagentStop is where the systemMessage actually reaches
+      // the user; it keeps its own slot instead of inheriting the spent
+      // PreToolUse one.
+      expect(stop.output?.systemMessage).toContain('returned a redirect (302)');
+    });
+
+    it('should warn again when the hook URL changes, even for a shared name', async () => {
+      const redirectResponse = {
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: 'https://api.example.com/moved' }),
+      };
+      mockFetch
+        .mockResolvedValueOnce(redirectResponse)
+        .mockResolvedValueOnce(redirectResponse);
+
+      const input = createMockInput();
+
+      const before = await httpRunner.execute(
+        createMockConfig({ name: 'api-hook' }),
+        HookEventName.PreToolUse,
+        input,
+      );
+      const after = await httpRunner.execute(
+        createMockConfig({
+          name: 'api-hook',
+          url: 'https://api.example.com/hook-v2',
+        }),
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(before.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
+      expect(after.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
     });
 
     it('should parse JSON response with hook output', async () => {

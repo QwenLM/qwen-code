@@ -135,6 +135,7 @@ export class HookAggregator {
    * Rules:
    * - Any "block" or "deny" decision results in blocking (most restrictive wins)
    * - Reasons are concatenated with newlines
+   * - System messages are concatenated with newlines
    * - continue=false takes precedence over continue=true
    * - Additional context is concatenated
    * - For PostToolUse, decision and reason are required fields
@@ -195,12 +196,18 @@ export class HookAggregator {
         }
       }
 
-      // Copy other fields (later values win for simple fields)
+      // Copy other fields (later values win for simple fields;
+      // systemMessage is concatenated like reason so a one-shot message
+      // from an earlier hook survives later hooks).
       if (output.suppressOutput !== undefined) {
         merged.suppressOutput = output.suppressOutput;
       }
       if (output.systemMessage !== undefined) {
-        merged.systemMessage = output.systemMessage;
+        merged.systemMessage = merged.systemMessage
+          ? [merged.systemMessage, output.systemMessage]
+              .filter(Boolean)
+              .join('\n')
+          : output.systemMessage;
       }
     }
 

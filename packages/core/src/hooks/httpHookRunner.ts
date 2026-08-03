@@ -284,10 +284,13 @@ export class HttpHookRunner {
               `are never followed (SSRF protection). Point the hook at the ` +
               `final URL (non-blocking).`;
             debugLogger.warn(message);
-            // The remedy only needs saying once per hook; a PreToolUse hook
-            // behind a redirecting LB would otherwise emit the warning on
-            // every tool call for the whole session.
-            if (this.redirectWarnedHooks.has(hookId)) {
+            // The remedy only needs saying once per hook URL and event
+            // (keyed like executedOnceHooks): a PreToolUse hook behind a
+            // redirecting LB would otherwise emit it on every tool call,
+            // and event-scoping keeps a debug-only PreToolUse 3xx from
+            // burning the slot a user-visible Stop emission needs.
+            const warnKey = `${hookConfig.url}:${eventName}`;
+            if (this.redirectWarnedHooks.has(warnKey)) {
               return {
                 hookConfig,
                 eventName,
@@ -296,7 +299,7 @@ export class HttpHookRunner {
                 duration,
               };
             }
-            this.redirectWarnedHooks.add(hookId);
+            this.redirectWarnedHooks.add(warnKey);
             return {
               hookConfig,
               eventName,
