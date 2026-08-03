@@ -106,6 +106,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { createRequestedSessionIdAdmission } from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -549,6 +550,11 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  /**
+   * Returns every bridge generation that is still alive, including draining
+   * generations no longer exposed by the workspace registry.
+   */
+  getSessionBridges?: () => readonly AcpSessionBridge[];
   workspaceTrustHotReloadAvailable?: boolean;
   getWorkspaceTrustPolicySnapshot?: () =>
     | DaemonTrustPolicySnapshot
@@ -672,6 +678,15 @@ export function createServeApp(
   if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
     throw new Error(
       'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
+  if (
+    (deps.workspaceTrustHotReloadAvailable === true ||
+      deps.workspaceRuntimeRemoval !== undefined) &&
+    deps.getSessionBridges === undefined
+  ) {
+    throw new Error(
+      'createServeApp: runtime replacement/removal requires deps.getSessionBridges so session-id admission can inspect draining generations.',
     );
   }
   const app = express();
@@ -1136,6 +1151,17 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
+    archiveCoordinator,
+    getBridges:
+      deps.getSessionBridges ??
+      (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge)),
+    getPersistenceTargets: () =>
+      workspaceRegistry.listManaged().map((runtime) => ({
+        workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      })),
+  });
   primaryTrustRegistry = workspaceRegistry;
   const primaryRuntime = createLiveWorkspaceDelegate(
     () => workspaceRegistry.primary,
@@ -2248,6 +2274,7 @@ export function createServeApp(
     bridge: primaryBridge,
     workspaceRegistry,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -2603,6 +2630,7 @@ export function createServeApp(
     workspaceRegistry,
     isPrimaryWorkspaceTrusted,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
