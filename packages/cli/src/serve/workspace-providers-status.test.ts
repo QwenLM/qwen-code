@@ -562,6 +562,48 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.initialized).toBe(false);
   });
 
+  it('does not truncate message when URL has a port and later @ (#8136)', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443/v1 - contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    const msg = JSON.stringify(result);
+    // Port and path must survive
+    expect(msg).toContain('https://api.example:8443/v1');
+    // Text after the URL must survive (not truncated by the @ in the email)
+    expect(msg).toContain('contact admin@example.com');
+  });
+
+  it('fully strips password containing @ (#8136)', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:p@ssw0rd-tail@broken.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    const msg = JSON.stringify(result);
+    expect(msg).toContain('https://broken.example/v1');
+    // The password fragment must not leak
+    expect(msg).not.toContain('ssw0rd-tail');
+    expect(msg).not.toContain('p@ssw0rd');
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
