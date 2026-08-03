@@ -533,18 +533,11 @@ export class ChatCompressionService {
         )
       : 0;
 
-    // Slim the side-query input: replace inlineData with placeholders.
-    // The original history (with images) is preserved separately for
-    // the post-compact image restoration block.
-    const slim = slimCompactionInput(sideQueryHistory);
-    if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
-      config
-        .getDebugLogger()
-        .debug(
-          `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
-            `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
-        );
-    }
+    let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
+    const getColdInput = () => {
+      coldInput ??= slimCompactionInput(sideQueryHistory);
+      return coldInput;
+    };
 
     // Hoist the system prompt so the guard can include it in the estimate.
     const systemInstruction = buildCompressionSystemPrompt(
@@ -574,7 +567,7 @@ export class ChatCompressionService {
         // prompt + max_tokens <= window, so all three terms count.
         const slimmedTokenEstimate =
           estimateContentTokens(
-            slim.slimmedHistory,
+            getColdInput().slimmedHistory,
             slimmingConfig.imageTokenEstimate,
           ) +
           Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
@@ -595,8 +588,17 @@ export class ChatCompressionService {
 
     const abortSignal = signal ?? new AbortController().signal;
     abortSignal.throwIfAborted();
-    const runColdCompression = () =>
-      runSideQuery(config, {
+    const runColdCompression = () => {
+      const slim = getColdInput();
+      if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+        config
+          .getDebugLogger()
+          .debug(
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
+              `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+          );
+      }
+      return runSideQuery(config, {
         purpose: 'chat-compression',
         skipOutputLanguagePreference: true,
         model: effectiveCompactionModel,
@@ -636,13 +638,12 @@ export class ChatCompressionService {
         abortSignal,
         promptId,
       });
+    };
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
     const canShareCache =
       effectiveCompactionModel === config.getModel() &&
-      slim.stats.imagesStripped === 0 &&
-      slim.stats.documentsStripped === 0 &&
       supportsCompressionCacheSharing(config);
     if (canShareCache) {
       try {

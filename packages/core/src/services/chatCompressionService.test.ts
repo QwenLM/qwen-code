@@ -20,7 +20,7 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, type InputModalities } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
@@ -2173,12 +2173,31 @@ describe('ChatCompressionService.compress cache sharing', () => {
     }));
   }
 
+  function makeMediaHistory(): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: 'pdf-bytes',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'media received' }] },
+    ];
+  }
+
   function makeFixture(options?: {
     history?: Content[];
     authType?: AuthType;
     baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
+    modalities?: InputModalities;
   }): {
     chat: GeminiChat;
     config: Config;
@@ -2216,6 +2235,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
         baseUrl: options?.baseUrl,
         contextWindowSize: 200_000,
         enableCacheControl: options?.enableCacheControl ?? true,
+        modalities: options?.modalities,
       }),
       getHookSystem: vi.fn().mockReturnValue({
         firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -2304,6 +2324,32 @@ describe('ChatCompressionService.compress cache sharing', () => {
       config?: { tools?: unknown };
     };
     expect(request.config?.tools).toBe(requestTools);
+  });
+
+  it('attempts cache sharing with supported media still in the history', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({
+      history,
+      modalities: { image: true, pdf: true },
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).toContain('image-bytes');
+    expect(JSON.stringify(request.contents)).toContain('pdf-bytes');
+    expect(coldSpy).not.toHaveBeenCalled();
   });
 
   it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
@@ -2556,6 +2602,40 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(coldSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('slims media only after the cache-sharing request fails', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({
+      history,
+      modalities: { image: true, pdf: true },
+    });
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+      { text: '[image: image/png]' },
+      { text: '[document: application/pdf]' },
+    ]);
+  });
+
   it.each([
     {
       name: 'a distinct compaction model',
@@ -2575,37 +2655,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
     {
       name: 'disabled cache control',
       options: { enableCacheControl: false },
-    },
-    {
-      name: 'media-bearing history',
-      options: {
-        history: [
-          {
-            role: 'user',
-            parts: [{ inlineData: { mimeType: 'image/png', data: 'base64' } }],
-          },
-          { role: 'model', parts: [{ text: 'image received' }] },
-        ],
-      },
-    },
-    {
-      name: 'document-bearing history',
-      options: {
-        history: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'application/pdf',
-                  data: 'base64',
-                },
-              },
-            ],
-          },
-          { role: 'model', parts: [{ text: 'document received' }] },
-        ],
-      },
     },
   ])('keeps $name on the cold path', async ({ options }) => {
     const { chat, config, generateText } = makeFixture(options);
