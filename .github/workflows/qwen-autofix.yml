@@ -2103,16 +2103,12 @@ jobs:
             # mutable head commit date: a base-sync HEAD would recreate the burial.
             CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
 
-            # PAGINATION INVARIANT: gh api --paginate emits one JSON array PER
-            # PAGE (a >100-item PR produces "[…][…]"), so every fetch that
-            # lands in a WORKDIR json file is normalized to ONE flat array
-            # here at the fetch site — plain jq consumers then stay correct
-            # past 100 items, and slurp-style readers (jq -s add, --slurpfile
-            # + add) are unaffected because add is idempotent over a single
-            # array. Do NOT redirect --paginate output straight into a file:
-            # a takeover PR at the round cap has 100+ bot comments alone, and
-            # a multi-doc ic.json turns ROUND/EVAL_WM/REARM_KEY into
-            # multi-line strings that break the cap arithmetic silently.
+            # PAGINATION NOTE: gh >= v2.31.0 merges all pages of a REST array
+            # endpoint into ONE flat JSON array (cli/cli#7190), so the WORKDIR
+            # files below are single arrays on every hosted runner. The jq
+            # normalizer pipes are retained as cheap defense-in-depth:
+            # idempotent over a flat array, and they would also normalize the
+            # per-page "[…][…]" shape that older gh versions emitted.
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
               | jq -s 'add // []' > "${WORKDIR}/ic.json"
             # First-pickup engage ack: fork label events carry no secrets and
@@ -2902,11 +2898,9 @@ jobs:
           echo "conflict=${CONFLICT}" >> "${GITHUB_OUTPUT}"
           echo "🔀 Conflict with base: ${CONFLICT}"
 
-          # Normalized to ONE flat array per file at the fetch site — gh api
-          # --paginate emits one array per page past 100 items, and NEWEST /
-          # LIVE_NEW below bind these files POSITIONALLY (.[0]..[3]): a
-          # multi-doc rv.json would shift rc/ic/checks into the wrong slots.
-          # See the scan step's PAGINATION INVARIANT comment.
+          # Same flat-array normalization as the scan step (see its PAGINATION
+          # NOTE). NEWEST / LIVE_NEW below bind these files POSITIONALLY
+          # (.[0]..[3]), so each must remain a single well-formed array.
           gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
             | jq -s 'add // []' > "${WORKDIR}/rv.json"
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \

@@ -2412,22 +2412,25 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('normalizes every paginated WORKDIR fetch to one flat array (>100-item PRs)', () => {
-    // gh api --paginate emits one JSON array PER PAGE, so a PR past 100
-    // comments/reviews produces "[…][…]". Every fetch that lands in a
-    // WORKDIR json file must pipe through the flat-array normalizer: the
-    // plain-jq consumers (MARKERS/REARM_KEY/ROUND, CAP_NOTICED,
-    // BASE_UPDATE_RECENT, LAST_REJECTION, PRIOR_TIMEOUTS, the milestone
-    // census) mis-aggregate on a multi-doc file — ROUND becomes a
-    // multi-line string and the cap arithmetic dies silently — while
-    // NEWEST/LIVE_NEW additionally bind rv/rc/ic/checks POSITIONALLY, so
-    // one multi-page file shifts every later slot. Slurp-style readers
-    // (jq -rs add, --slurpfile + add) are unaffected: add is idempotent
-    // over a single flat array.
+    // gh >= v2.31.0 merges all pages of a REST array endpoint into ONE flat
+    // JSON array (cli/cli#7190), so on every hosted runner the WORKDIR files
+    // are already single arrays; the jq -s 'add // []' pipes are retained as
+    // cheap defense-in-depth. Every fetch that lands in a WORKDIR json file
+    // must still pipe through the normalizer: plain-jq consumers
+    // (MARKERS/REARM_KEY/ROUND, CAP_NOTICED, BASE_UPDATE_RECENT,
+    // LAST_REJECTION, PRIOR_TIMEOUTS, the milestone census) would
+    // mis-aggregate on a multi-doc file — ROUND becomes a multi-line string
+    // and the cap arithmetic dies silently — while NEWEST/LIVE_NEW
+    // additionally bind rv/rc/ic/checks POSITIONALLY, so one multi-page file
+    // shifts every later slot. Slurp-style readers (jq -rs add, --slurpfile
+    // + add) are unaffected: add is idempotent over a single flat array.
+    // The two-page fixtures below are synthetic (the per-page shape gh <
+    // v2.31.0 emitted): they exercise the jq mechanics of the normalizer and
+    // its consumers, not the wire format current gh produces.
     expect(workflow).not.toContain('--paginate > "');
-    // Pin the total --paginate occurrence count (13 code sites + 3 comment
-    // lines today) so ANY new paginated site forces a deliberate test
-    // update, however it is spaced or line-wrapped.
-    expect(workflow.split('--paginate').length - 1).toBe(16);
+    // Pin the total --paginate code-site count so ANY new paginated site
+    // forces a deliberate test update, however it is spaced or line-wrapped.
+    expect(workflow.split('--paginate').length - 1).toBe(13);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
