@@ -16,6 +16,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   readZipEntries,
@@ -140,4 +141,51 @@ describe('scanArtifactRoots', () => {
       }
     },
   );
+});
+
+describe('artifact-scan.js command line', () => {
+  const scanScript = fileURLToPath(
+    new URL('./artifact-scan.js', import.meta.url),
+  );
+  const runScan = (args) =>
+    spawnSync(process.execPath, [scanScript, ...args], { encoding: 'utf8' });
+
+  it('scans explicit positional roots instead of the default artifacts', () => {
+    const root = mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-artifact-cli-dirty-'),
+    );
+    try {
+      const file = path.join(root, 'adapter.js');
+      writeFileSync(file, 'class McpContext {}');
+
+      const result = runScan([root]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${file}: forbidden signature class McpContext`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('exits clean for explicit positional roots without forbidden signatures', () => {
+    const root = mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-artifact-cli-clean-'),
+    );
+    try {
+      mkdirSync(path.join(root, 'background'));
+      writeFileSync(
+        path.join(root, 'background/service-worker.js'),
+        'console.log("qwen bridge");',
+      );
+
+      const result = runScan([root]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('ARTIFACT-SCAN: PASS');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

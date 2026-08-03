@@ -70,10 +70,14 @@ export function resolveNightlyBuildNumber(packageVersion) {
   const configured = process.env.QWEN_CHROME_EXTENSION_BUILD_NUMBER?.trim();
   if (configured) {
     const parsed = Number(configured);
-    if (!Number.isInteger(parsed) || parsed <= 0) {
+    if (
+      !Number.isInteger(parsed) ||
+      parsed <= 0 ||
+      parsed >= PREVIEW_BUILD_START
+    ) {
       throw new Error(
         `Invalid QWEN_CHROME_EXTENSION_BUILD_NUMBER "${configured}": ` +
-          'expected a positive integer.',
+          `expected a positive integer less than ${PREVIEW_BUILD_START}.`,
       );
     }
     return parsed;

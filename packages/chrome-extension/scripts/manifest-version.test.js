@@ -228,6 +228,15 @@ describe('resolveNightlyBuildNumber', () => {
     ).toThrow(`Invalid ${ENV_KEY} "abc"`);
   });
 
+  it('rejects an environment variable override in the preview range', () => {
+    process.env[ENV_KEY] = '60000';
+    expect(() =>
+      resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
+    ).toThrow(
+      `Invalid ${ENV_KEY} "60000": expected a positive integer less than 60000.`,
+    );
+  });
+
   it('falls back to the nightly date on a shallow clone', () => {
     mockExecFileSync.mockReturnValue('true\n');
     expect(resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc')).toBe(

@@ -100,6 +100,10 @@ describe.skipIf(process.platform === 'win32')(
         'scripts/package-extension.js',
         [],
       );
+      // Packaging needs a built dist/extension plus the zip binary, which
+      // unit-test runs may lack, so success is not guaranteed; require an
+      // observable run instead of a silent exit 0.
+      expect(direct.status === 0 || direct.stderr.length > 0).toBe(true);
       expectSameRun(direct, symlinked);
     }, 30_000);
   },
