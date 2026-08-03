@@ -250,6 +250,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
 
+  /**
+   * The server's status when this invocation's call was issued. DISCONNECTED
+   * here means the call was never delivered, which is what lets the replay
+   * gate tell a re-execution (unsafe without idempotency evidence) from a
+   * first delivery (always safe).
+   */
+  private statusAtCallStart: MCPServerStatus | undefined;
+
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
@@ -377,7 +385,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       throw error;
     }
 
-    if (!this.canSafelyReplay()) {
+    // The annotation gate protects against re-executing a call a live
+    // connection might have carried to completion. A call issued while the
+    // server was already known-disconnected never reached it — there is
+    // nothing that "may have completed" — so retrying it is a first
+    // delivery, and refusing that turns every dead transport into a
+    // permanent error for every unannotated tool.
+    const neverDelivered =
+      this.statusAtCallStart === MCPServerStatus.DISCONNECTED;
+
+    if (!neverDelivered && !this.canSafelyReplay()) {
       throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE);
     }
 
@@ -404,7 +421,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
-        if (!newInvocation.canSafelyReplay()) {
+        // Same carve-out as above: a never-delivered call is not a replay.
+        // The fresh invocation snapshots its own pre-call status, so if ITS
+        // call dies mid-flight on the recovered connection, the gate applies
+        // to the next hop with no carve-out.
+        if (!neverDelivered && !newInvocation.canSafelyReplay()) {
           throw new Error(
             DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE,
           );
@@ -464,6 +485,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // The replay-safety gate needs to know whether this call could have
+    // reached the server AT ALL: a call issued while the transport was
+    // already known-disconnected was never delivered, so a later "replay"
+    // of it is a first delivery, not a re-execution. Snapshot the status
+    // before the attempt — by the time the error surfaces, the status has
+    // been overwritten by the failure itself.
+    this.statusAtCallStart = getMCPServerStatus(this.serverName);
     // Use direct MCP client if available (supports progress notifications),
     // otherwise fall back to the @google/genai mcpToTool wrapper.
     if (this.mcpClient) {
