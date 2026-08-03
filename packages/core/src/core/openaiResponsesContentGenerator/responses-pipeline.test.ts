@@ -564,6 +564,45 @@ describe('ResponsesPipeline', () => {
     ]);
   });
 
+  it('recovers the final frame when the stream ends mid-line with no trailing newline', async () => {
+    // Distinct from a stream missing only its trailing blank-line
+    // terminator: here the connection drops before any newline at all
+    // follows the last `data: ` line, so it is never split out of
+    // `buffer` by `buffer.split('\n')` and never reaches the main
+    // per-line loop. Without handling this, `currentEventType` is set
+    // but `dataAccumulator` stays empty, and the post-loop flush (gated
+    // on `currentEventType && dataAccumulator`) silently drops the frame.
+    const body = [
+      'event: response.completed',
+      `data: ${JSON.stringify({ response: { id: 'r1', status: 'completed' } })}`,
+    ].join('\n'); // no trailing newline
+    const encoder = new TextEncoder();
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'text/event-stream' },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(body));
+          controller.close();
+        },
+      }),
+      text: async () => '',
+    });
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const chunks = [];
+    for await (const chunk of pipeline.executeStream(
+      textRequest('hello'),
+      'prompt-1',
+    )) {
+      chunks.push(chunk);
+    }
+    expect(chunks.map((c) => c.candidates?.[0]?.content?.parts)).toEqual([[]]);
+  });
+
   it('parses correctly when frames are split across multiple reader.read() chunks', async () => {
     const lines = [
       ...sseEvent('response.output_text.delta', { delta: 'foo' }),
