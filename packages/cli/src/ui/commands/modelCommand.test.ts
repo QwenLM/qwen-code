@@ -110,6 +110,33 @@ describe('modelCommand', () => {
     expect(result).toEqual(['qwen-max']);
   });
 
+  it('should not complete model ids for --default combined with an auxiliary flag', async () => {
+    mockContext.services.config = {
+      getAvailableModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-max',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      ]),
+    } as unknown as Config;
+
+    for (const partial of [
+      '--default --fast q',
+      '--fast --default q',
+      '--default --image q',
+      '--vision --default q',
+    ]) {
+      const result = await modelCommand.completion!(mockContext, partial);
+      expect(result).toBeNull();
+    }
+
+    const defaultOnly = await modelCommand.completion!(
+      mockContext,
+      '--default q',
+    );
+    expect(defaultOnly).toEqual(['qwen-max']);
+  });
+
   it('should return error when config is not available', async () => {
     mockContext.services.config = null;
 
@@ -432,7 +459,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('rejects --project with an inline prompt using the inline-specific message', async () => {
+  it('rejects a scope flag without --default plus an inline prompt with the scope-guard message', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
@@ -470,7 +497,7 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'error',
       content:
-        "Cannot combine --default --project with an inline prompt. Run '/model --default --project qwen-max' first, then send your prompt.",
+        'Use --default with --project or --global when persisting the main model.',
     });
   });
 
@@ -658,6 +685,46 @@ describe('modelCommand', () => {
 
     expect(switchModel).not.toHaveBeenCalled();
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+  });
+
+  it('rejects --default with an inline prompt in ACP mode using the flag-aware message', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/model --default qwen-max explain this',
+        name: 'model',
+        args: '--default qwen-max explain this',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--default qwen-max explain this',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Cannot combine --default with an inline prompt. Run '/model --default qwen-max' first, then send your prompt.",
+    });
   });
 
   it('should not persist the model when direct model validation fails', async () => {

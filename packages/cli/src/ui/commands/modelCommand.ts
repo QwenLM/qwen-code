@@ -455,6 +455,16 @@ export const modelCommand: SlashCommand = {
       }
       const trimmed = partialArg.trim();
       if (trimmed) {
+        // The action path always rejects --default combined with an
+        // auxiliary model flag, so never offer model completions for it.
+        if (
+          /(?:^|\s)--default(?:\s|$)/.test(trimmed) &&
+          AUX_MODEL_FLAGS.some((flag) =>
+            new RegExp(`(?:^|\\s)${flag}(?:\\s|$)`).test(trimmed),
+          )
+        ) {
+          return null;
+        }
         let mode:
           | 'main'
           | 'fast'
@@ -1106,6 +1116,34 @@ export const modelCommand: SlashCommand = {
       }
 
       if (inlinePrompt) {
+        // Persistence flags are consumed before the inline prompt path, which
+        // does not persist the model. Reject them instead of silently dropping
+        // the requested behavior. This runs before the ACP rejection below
+        // because the two-step command suggested here also works in ACP.
+        if (persistDefault || scopeOverride) {
+          if (!persistDefault) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t(
+                'Use --default with --project or --global when persisting the main model.',
+              ),
+            };
+          }
+          const flag = hasProject
+            ? '--default --project'
+            : hasGlobal
+              ? '--default --global'
+              : '--default';
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Cannot combine {{flag}} with an inline prompt. Run '/model {{flag}} {{model}}' first, then send your prompt.",
+              { flag, model: modelName },
+            ),
+          };
+        }
         // ACP hosts send the prompt on the session model via a separate
         // pipeline that doesn't thread a per-turn override, so the inline form
         // would silently run on the default model. Reject it there rather than
@@ -1117,26 +1155,6 @@ export const modelCommand: SlashCommand = {
             content: t(
               "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
               { model: modelName },
-            ),
-          };
-        }
-        // Persistence flags are consumed before the inline prompt path, which
-        // does not persist the model. Reject them instead of silently dropping
-        // the requested behavior.
-        if (persistDefault || scopeOverride) {
-          const flag = persistDefault
-            ? '--default'
-            : hasProject
-              ? '--default --project'
-              : hasGlobal
-                ? '--default --global'
-                : '';
-          return {
-            type: 'message',
-            messageType: 'error',
-            content: t(
-              "Cannot combine {{flag}} with an inline prompt. Run '/model {{flag}} {{model}}' first, then send your prompt.",
-              { flag, model: modelName },
             ),
           };
         }
