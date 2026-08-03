@@ -1218,3 +1218,466 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('Correlate');
   });
 });
+
+describe('runBuildTest (Maven)', () => {
+  let root: string;
+  let planPath: string;
+
+  const writePlan = (paths: string[]): void => {
+    planPath = join(root, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        diffPathAbsolute: '/dev/null',
+        files: paths.map((p) => ({ path: p, kind: 'source' })),
+      }),
+    );
+  };
+
+  const pom = (dir: string, body: string): void => {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(join(root, dir, 'pom.xml'), body);
+  };
+
+  // A nested reactor like the repos this path was built for:
+  //   common, libs/dqc-all (aggregator), libs/dqc-all/dqc-core
+  const mavenRepo = (): void => {
+    pom(
+      '',
+      '<project><modules><module>common</module>' +
+        '<module>libs/dqc-all</module></modules></project>',
+    );
+    pom('common', '<project/>');
+    pom('libs/dqc-all', '<modules><module>dqc-core</module></modules>');
+    pom('libs/dqc-all/dqc-core', '<project/>');
+  };
+
+  const okExec = (calls: string[]) => (command: string) => {
+    calls.push(command);
+    return {
+      command,
+      exitCode: 0,
+      seconds: 1,
+      timedOut: false,
+      output: '',
+    };
+  };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'bt-mvn-'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('scopes build and test to the deepest module the diff touches', () => {
+    mavenRepo();
+    writePlan(['libs/dqc-all/dqc-core/src/Main.java', 'README.md']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.affected).toEqual(['libs/dqc-all/dqc-core']);
+    expect(calls).toEqual([
+      'mvn -B -pl libs/dqc-all/dqc-core -am compile',
+      'mvn -B -pl libs/dqc-all/dqc-core -am test',
+    ]);
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('libs/dqc-all/dqc-core');
+  });
+
+  it('scopes across two changed modules, sorted and comma-joined', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java', 'libs/dqc-all/dqc-core/src/B.java']);
+
+    const calls: string[] = [];
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls[0]).toBe(
+      'mvn -B -pl common,libs/dqc-all/dqc-core -am compile',
+    );
+  });
+
+  it('builds nothing for a diff outside every module — and says so', () => {
+    mavenRepo();
+    writePlan(['README.md', 'docs/x.md']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.affected).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('nothing to build');
+  });
+
+  it('runs the whole reactor unscoped when the root pom itself changed', () => {
+    mavenRepo();
+    writePlan(['pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['.']);
+    expect(calls).toEqual(['mvn -B compile', 'mvn -B test']);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('widens a changed NESTED aggregator pom to every module under it', () => {
+    // `-pl libs/dqc-all` alone would compile nothing (packaging pom, no
+    // sources) and `-am` pulls only upstream — the children inheriting the
+    // changed config would never build, a confident false green.
+    mavenRepo();
+    writePlan(['libs/dqc-all/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    // The aggregator itself stays in the set (the pom file lives in it); a
+    // packaging-pom module compiles nothing, so including it is harmless.
+    expect(rep.affected).toEqual(['libs/dqc-all', 'libs/dqc-all/dqc-core']);
+    expect(calls).toEqual([
+      'mvn -B -pl libs/dqc-all,libs/dqc-all/dqc-core -am compile',
+      'mvn -B -pl libs/dqc-all,libs/dqc-all/dqc-core -am test',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('unions widened descendants with the modules the diff also touches', () => {
+    mavenRepo();
+    writePlan(['libs/dqc-all/pom.xml', 'common/src/A.java']);
+
+    const calls: string[] = [];
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls[0]).toBe(
+      'mvn -B -pl common,libs/dqc-all,libs/dqc-all/dqc-core -am compile',
+    );
+  });
+
+  it('treats a zero-module pom as one project: any change builds the root', () => {
+    pom('', '<project/>');
+    writePlan(['src/main/java/A.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(calls).toEqual(['mvn -B compile', 'mvn -B test']);
+  });
+
+  it('prefers ./mvnw when the repo pins a Maven wrapper', () => {
+    mavenRepo();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o755 });
+    writePlan(['common/src/A.java']);
+
+    const calls: string[] = [];
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls[0]).toBe('./mvnw -B -pl common -am compile');
+  });
+
+  it('falls back to mvn when the wrapper lacks the exec bit', () => {
+    // A wrapper committed from a Windows checkout has mode 644; `./mvnw`
+    // would exit 126 on every command and misroute into the correlate-with-
+    // diff framing. Degrade to `mvn` instead.
+    mavenRepo();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o644 });
+    writePlan(['common/src/A.java']);
+
+    const calls: string[] = [];
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls[0]).toBe('mvn -B -pl common -am compile');
+  });
+
+  it('skips the test command on --buildOnly', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      buildOnly: true,
+      exec: okExec(calls),
+    });
+
+    expect(calls).toEqual(['mvn -B -pl common -am compile']);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain('build-only');
+  });
+
+  it('falls back to `unsupported` when a declared module dir has no pom.xml', () => {
+    // Files under `ghost/` would map to no module and report a false green,
+    // so the scoping hands off instead of guessing.
+    pom('', '<modules><module>common</module><module>ghost</module></modules>');
+    pom('common', '<project/>');
+    writePlan(['common/src/A.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('cannot model');
+  });
+
+  it('stops after a failed build and frames it for correlation with the diff', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: command.endsWith('compile') ? 1 : 0,
+          seconds: 1,
+          timedOut: false,
+          output: '[ERROR] compile failed',
+        };
+      },
+    });
+
+    expect(calls).toHaveLength(1); // no test after a failed compile
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Critical');
+  });
+
+  it('frames a build timeout as infrastructure, not a defect', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: null,
+        seconds: 60,
+        timedOut: true,
+        output: '',
+      }),
+    });
+
+    expect(rep.ok).toBe(false);
+    expect(rep.timedOut).toEqual(['mvn -B -pl common -am compile']);
+    expect(rep.note).toContain('infrastructure');
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('frames a TEST timeout as infrastructure, not a defect to correlate', () => {
+    // The Maven analogue of the npm suite's test-timeout case: a `mvn test`
+    // killed at the deadline must hit the infra branch, not the "correlate
+    // with the diff — a failure is a Critical" framing.
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) =>
+        command.endsWith('test')
+          ? { command, exitCode: null, seconds: 60, timedOut: true, output: '' }
+          : { command, exitCode: 0, seconds: 1, timedOut: false, output: '' },
+    });
+
+    expect(rep.ok).toBe(false);
+    expect(rep.timedOut).toEqual(['mvn -B -pl common -am test']);
+    expect(rep.note).toContain('ran out of time');
+    expect(rep.note).toContain('infrastructure');
+    expect(rep.note).not.toContain('Critical');
+    expect(rep.note).not.toContain('Correlate');
+  });
+
+  it('frames a failing test for correlation with the diff', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) =>
+        command.endsWith('test')
+          ? {
+              command,
+              exitCode: 1,
+              seconds: 2,
+              timedOut: false,
+              output: '[ERROR] Tests run: 3, Failures: 1',
+            }
+          : { command, exitCode: 0, seconds: 1, timedOut: false, output: '' },
+    });
+
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('1 command(s) failed');
+    expect(rep.note).toContain('pre-existing');
+  });
+
+  it('skips the build on a low-disk machine and frames it as environment', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+    statfsSyncMock.mockReturnValue({ bavail: 100, bsize: 1 });
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls).toEqual([]);
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Insufficient disk space');
+  });
+
+  it('keeps the npm path for a repo that has BOTH npm and Maven layouts', () => {
+    // npm owns a repo that declares it; the Maven branch only takes repos
+    // npm is entirely absent from.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'both',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    pom('', '<project><modules><module>common</module></modules></project>');
+    pom('common', '<project/>');
+    // npm completeness markers, as the main suite's beforeEach would set them
+    writeFileSync(join(root, 'package-lock.json'), '{}');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec([]),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+  });
+
+  it('keeps the npm-UNMODELED handoff even when a pom.xml exists', () => {
+    // Deleting the `!unmodeled` guard would hand a `packages/**` repo to the
+    // Maven branch: the changed workspace file maps to no Maven module, and
+    // the report would say "nothing to build" — a false green replacing the
+    // safe handoff to the brief's fallback.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/**'] }),
+    );
+    pom('', '<project/>');
+    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('does not model');
+  });
+
+  it('keeps the npm no-packages handoff even when a pom.xml exists', () => {
+    // Declared workspaces matching nothing: same false-green shape, other half
+    // of the guard (`globs.length === 0` false here, `packages` empty).
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pom('', '<project/>');
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('No npm package here to scope');
+  });
+});

@@ -14,8 +14,9 @@
 //   1. `.qwen/review-rules.md`
 //   2. `.github/copilot-instructions.md` (preferred)
 //      OR `copilot-instructions.md` (fallback — only one is loaded)
-//   3. `AGENTS.md` — only the `## Code Review` section
-//   4. `QWEN.md`   — only the `## Code Review` section
+//   3. `AGENTS.md`  — only the `## Code Review` section
+//   4. `QWEN.md`    — only the `## Code Review` section
+//   5. `CLAUDE.md`  — only the `## Code Review` section
 //
 // Missing files are skipped silently. If no rules are found, the script
 // writes an empty file (or omits the file when `--out` is not given) and
@@ -56,7 +57,7 @@ export function extractCodeReviewSection(content: string): string | null {
   return lines.slice(start, end).join('\n').trim();
 }
 
-function loadCombined(baseRef: string): {
+export function loadCombined(baseRef: string): {
   combined: string;
   loaded: string[];
 } {
@@ -109,6 +110,17 @@ function loadCombined(baseRef: string): {
     }
   }
 
+  // 5. CLAUDE.md — extract Code Review section only. Many teams keep their
+  //    agent conventions there; without the section they contribute nothing.
+  const claudeMd = showFile(baseRef, 'CLAUDE.md');
+  if (claudeMd) {
+    const section = extractCodeReviewSection(claudeMd);
+    if (section) {
+      sections.push(`### From CLAUDE.md\n\n${section}`);
+      loaded.push('CLAUDE.md');
+    }
+  }
+
   return {
     combined: sections.join('\n\n---\n\n'),
     loaded,
@@ -136,7 +148,7 @@ async function runLoadRules(args: LoadRulesArgs): Promise<void> {
 export const loadRulesCommand: CommandModule = {
   command: 'load-rules <base_ref>',
   describe:
-    'Read project review rules from the base branch (.qwen/review-rules.md, .github/copilot-instructions.md, AGENTS.md, QWEN.md) and write a combined Markdown file',
+    'Read project review rules from the base branch (.qwen/review-rules.md, .github/copilot-instructions.md, AGENTS.md, QWEN.md, CLAUDE.md) and write a combined Markdown file',
   builder: (yargs) =>
     yargs
       .positional('base_ref', {

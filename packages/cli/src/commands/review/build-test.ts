@@ -44,6 +44,7 @@ import {
   readFileSync,
   rmSync,
   statfsSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -57,6 +58,7 @@ import {
   readWorkspacePackages,
   type WorkspacePackage,
 } from './lib/workspaces.js';
+import { affectedMavenModules, readMavenLayout } from './lib/maven.js';
 
 /** The build command for a dir: the root package takes no `--workspace`. */
 function buildCommand(dir: string): string {
@@ -79,9 +81,12 @@ export interface CommandResult {
 }
 
 export interface BuildTestReport {
-  /** `npm` when the workspace scoping applied; `unsupported` otherwise. */
-  toolchain: 'npm' | 'unsupported';
-  /** Workspace dirs the diff changed. */
+  /**
+   * `npm` when the workspace scoping applied, `maven` when the module
+   * scoping did; `unsupported` when neither could scope the repo.
+   */
+  toolchain: 'npm' | 'maven' | 'unsupported';
+  /** The workspace or module dirs the diff changed (`['.']` = unscoped root). */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
@@ -390,6 +395,18 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     unmodeled ||
     (!singleRoot && (globs.length === 0 || packages.length === 0))
   ) {
+    // A Maven multi-module repo gets its own scoping when npm is entirely
+    // absent — no workspaces and no single root package. A repo that declares
+    // npm workspaces keeps the npm path (and its failure modes) even if a
+    // `pom.xml` also lives in it.
+    if (
+      !unmodeled &&
+      !singleRoot &&
+      globs.length === 0 &&
+      existsSync(join(root, 'pom.xml'))
+    ) {
+      return runMavenBuildTest(args, changed, root, perCommandMs, exec);
+    }
     return unsupportedReport(
       unmodeled
         ? 'This repo uses a workspace glob shape this command does not model ' +
@@ -744,11 +761,193 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   return results;
 }
 
+/**
+ * The Maven path: scope `mvn` to the modules the diff touches, the same
+ * deal the npm path gives workspaces. `-am` puts the modules and everything
+ * they compile against into the reactor, so resolution never depends on what
+ * happens to be installed in the local repository — a scoped build must not
+ * fail on an artifact the PR cannot have broken. Dependents are NOT built
+ * (see the design doc): `-amd` would pull projects whose own dependencies may
+ * sit outside the reactor, manufacturing resolution failures that read as
+ * defects in the diff.
+ */
+function runMavenBuildTest(
+  args: BuildTestArgs,
+  changed: string[],
+  root: string,
+  perCommandMs: number,
+  exec: (command: string, cwd: string, timeoutMs: number) => CommandResult,
+): BuildTestReport {
+  const unsupportedMaven = (note: string): BuildTestReport => ({
+    toolchain: 'unsupported',
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    ok: true,
+    timedOut: [],
+    note,
+  });
+
+  const layout = readMavenLayout(root);
+  if (layout.unmodeled) {
+    return unsupportedMaven(
+      'This Maven repo declares a module this command cannot model (an ' +
+        'outside-the-basedir entry, or a module directory with no pom.xml), so it ' +
+        'cannot safely decide which modules the diff touches. Fall back to the ' +
+        'build/test precedence in your brief, and give each command a deadline it ' +
+        'can actually meet.',
+    );
+  }
+
+  // The wrapper pins the Maven version the repo expects. Prefer it only when
+  // it is ALSO executable: one committed without the exec bit (common in
+  // repos authored on Windows) exits every command 126 Permission denied,
+  // which would misroute into the "correlate with the diff" framing instead
+  // of falling back to a `mvn` that works.
+  let mvn = 'mvn';
+  if (existsSync(join(root, 'mvnw'))) {
+    try {
+      if (statSync(join(root, 'mvnw')).mode & 0o111) mvn = './mvnw';
+    } catch {
+      // An unreadable wrapper falls back to `mvn`, same as an absent one.
+    }
+  }
+
+  // The root pom (dependencyManagement, plugin config) can change what EVERY
+  // module compiles, so a change to it disables scoping — the npm root-package
+  // analogue. A NESTED aggregator pom is the same case for its subtree: `-pl`
+  // on the aggregator alone would compile nothing (packaging pom, no sources)
+  // while `-am` pulls only UPSTREAM — the children that inherit the change
+  // would never build, a confident false green. Widen to every module under
+  // it instead. A zero-module pom is a single-module project: any change is
+  // the whole project. A file under no module is the Maven docs/root-config
+  // case and builds nothing.
+  let rootPomChanged = false;
+  const pomWidened = new Set<string>();
+  for (const f of changed) {
+    const norm = f.replace(/^\.\//, '');
+    if (norm === 'pom.xml') {
+      rootPomChanged = true;
+      break;
+    }
+    if (norm.endsWith('/pom.xml')) {
+      const dir = norm.slice(0, -'/pom.xml'.length);
+      for (const m of layout.modules) {
+        if (m.startsWith(`${dir}/`)) pomWidened.add(m);
+      }
+    }
+  }
+  let affected: string[];
+  if (layout.modules.length === 0) {
+    affected = changed.length > 0 ? ['.'] : [];
+  } else if (rootPomChanged) {
+    affected = ['.'];
+  } else {
+    affected = affectedMavenModules(changed, layout.modules);
+    if (pomWidened.size > 0) {
+      affected = [...new Set([...affected, ...pomWidened])].sort();
+    }
+  }
+
+  const results: BuildTestReport = {
+    toolchain: 'maven',
+    affected,
+    buildSet: affected,
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    ok: true,
+    timedOut: [],
+    note: '',
+  };
+
+  if (affected.length === 0) {
+    results.note =
+      `The diff changes ${changed.length} file(s), none of them inside a Maven ` +
+      'module (docs, root config, CI). There is nothing to build and no test to ' +
+      'run — this is a complete answer, not a skipped step.';
+    return results;
+  }
+
+  // The same disk preflight as the npm build phase: a compile that hits ENOSPC
+  // mid-write fails with errors that read as defects in the diff.
+  const free = freeDiskBytes(root);
+  if (free !== null && free < BUILD_MIN_FREE_BYTES) {
+    results.ok = false;
+    results.note =
+      `Insufficient disk space (${gib(free)}G free, need ~${gib(BUILD_MIN_FREE_BYTES)}G): ` +
+      'skipped the build and tests rather than fill the disk mid-compile. This ' +
+      'is an environment issue, not a code finding — report it as informational.';
+    return results;
+  }
+
+  const scoped = affected[0] !== '.';
+  const scope = scoped ? ` -pl ${affected.join(',')} -am` : '';
+  const buildCmd = `${mvn} -B${scope} compile`;
+
+  const b = exec(buildCmd, root, perCommandMs);
+  results.build.push(b);
+  if (b.timedOut) results.timedOut.push(b.command);
+  if (b.exitCode !== 0) {
+    results.ok = false;
+    results.note = b.timedOut
+      ? `\`${b.command}\` ran out of time (${args.timeout}s). That is an ` +
+        'infrastructure result, not a defect in the diff — report it as informational.'
+      : `\`${b.command}\` failed. Correlate the errors below with the diff: a ` +
+        'compile error in a file the PR changed is a Critical; one in a file it did not ' +
+        'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
+    return results;
+  }
+
+  if (!args.buildOnly) {
+    const testCmd = `${mvn} -B${scope} test`;
+    const t = exec(testCmd, root, perCommandMs);
+    results.test.push(t);
+    if (t.timedOut) results.timedOut.push(t.command);
+    if (t.exitCode !== 0) results.ok = false;
+  }
+
+  if (!results.note) {
+    const failed = [...results.build, ...results.test].filter(
+      (r) => r.exitCode !== 0,
+    );
+    const realFailures = failed.filter((r) => !r.timedOut);
+    const testClause = args.buildOnly
+      ? ' Tests were not run (build-only).'
+      : ' Tests ran over that set. Everything passed.';
+    if (results.ok) {
+      results.note = scoped
+        ? `Scoped the build to ${affected.length} of ${layout.modules.length} Maven ` +
+          `module(s) — ${affected.join(', ')} — with \`-am\` adding what they compile ` +
+          `against.${testClause}`
+        : `The diff changes the root pom (or the repo is one Maven module), so the ` +
+          `whole reactor built.${testClause}`;
+    } else if (realFailures.length === 0) {
+      results.note =
+        `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
+        'infrastructure result, not a defect in the diff — report it as informational.';
+    } else {
+      results.note =
+        `${realFailures.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
+        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.' +
+        (failed.length > realFailures.length
+          ? ' (Commands that timed out are infrastructure, not findings.)'
+          : '');
+    }
+  }
+  return results;
+}
+
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build and test the workspaces the diff changes (and what they compile ' +
-    'against), with a deadline the commands can actually meet',
+    'Build and test the packages the diff changes (npm workspaces or Maven ' +
+    'modules, and what they compile against), with a deadline the commands ' +
+    'can actually meet',
   builder: (yargs) =>
     yargs
       .option('plan', {

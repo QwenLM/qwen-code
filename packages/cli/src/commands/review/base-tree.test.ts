@@ -236,6 +236,24 @@ describe('runBaseTree', () => {
     expect(run({}, () => empty).available).toBe(false);
   });
 
+  it('is NOT available for a maven base that BUILT — and does not say it failed', () => {
+    // `test-delta` attributes failures by parsing runner output; surefire's
+    // shape is not a parse it can do, so the A/B is unavailable for maven.
+    // The tree built fine — the note must not claim otherwise.
+    const mavenBuild = {
+      ok: true,
+      toolchain: 'maven',
+      build: [{ command: 'mvn -B -pl common -am compile', exitCode: 0 }],
+      note: 'built',
+    } as unknown as BuildTestReport;
+    const r = run({}, () => mavenBuild);
+    expect(r.available).toBe(false);
+    expect(r.note).toMatch(/built, but an A\/B is not available/);
+    expect(r.note).toMatch(/maven/);
+    expect(r.note).not.toMatch(/did not build/);
+    expect(r.note).toMatch(/never a finding against the PR/);
+  });
+
   it('refuses when the plan carries no mergeBaseSha', () => {
     const r = run({ plan: { mergeBaseSha: undefined } });
     expect(r.available).toBe(false);

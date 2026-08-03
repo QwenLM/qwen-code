@@ -277,7 +277,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     // base maps to no package, e.g. a package this PR adds), or an npm scope with
     // nothing to compile. Such a tree was never built, so it cannot be run against;
     // stamping it `available` would let an A/B read the absence of a build as a
-    // behavioural difference.
+    // behavioural difference. A `maven` tree CAN build, but the A/B stays
+    // unavailable: `test-delta` attributes failures by parsing runner output,
+    // and surefire's shape is not a parse it can do.
     if (!build.ok || build.toolchain !== 'npm' || build.build.length === 0) {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
@@ -288,15 +290,24 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       } catch {
         // The tree may be too broken to hold a marker; the next shard repays.
       }
+      // A tree that built but whose toolchain the A/B cannot attribute is NOT
+      // "did not build" — saying that sends a caller hunting a build failure
+      // that never happened. The verdict is the same either way.
+      const builtButUnattributable =
+        build.ok && build.build.length > 0 && build.toolchain !== 'npm';
       return {
         available: false,
         path: tree,
         baseSha,
         build,
-        note:
-          `the base tree at ${baseSha.slice(0, 9)} did not build, so nothing can be run ` +
-          'against it; an A/B is not available for this review (this is an ' +
-          'infrastructure result, never a finding against the PR)',
+        note: builtButUnattributable
+          ? `the base tree at ${baseSha.slice(0, 9)} built, but an A/B is not ` +
+            `available for the ${build.toolchain} toolchain — its test failures ` +
+            'cannot be attributed to files, so the path rule stands (this is an ' +
+            'infrastructure result, never a finding against the PR)'
+          : `the base tree at ${baseSha.slice(0, 9)} did not build, so nothing can be run ` +
+            'against it; an A/B is not available for this review (this is an ' +
+            'infrastructure result, never a finding against the PR)',
       };
     }
 

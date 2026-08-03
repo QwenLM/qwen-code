@@ -251,7 +251,7 @@ Run `qwen review load-rules` to read project-specific rules. **For PR reviews, r
 
 `<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>` (run `git fetch <remote> <base>` first if not yet fetched). For local-uncommitted or file-path reviews use `HEAD`.
 
-The subcommand reads (in order, all sources combined): `.qwen/review-rules.md`, then either `.github/copilot-instructions.md` or root-level `copilot-instructions.md` (only one — preferred wins), then the `## Code Review` section of `AGENTS.md`, then the `## Code Review` section of `QWEN.md`. Missing files are silently skipped. The output file is empty when no rules are found — the subcommand reports `No review rules found on <ref>` to stdout in that case; skip rule injection in Step 3.
+The subcommand reads (in order, all sources combined): `.qwen/review-rules.md`, then either `.github/copilot-instructions.md` or root-level `copilot-instructions.md` (only one — preferred wins), then the `## Code Review` section of `AGENTS.md`, then the `## Code Review` section of `QWEN.md`, then the `## Code Review` section of `CLAUDE.md`. Missing files are silently skipped. The output file is empty when no rules are found — the subcommand reports `No review rules found on <ref>` to stdout in that case; skip rule injection in Step 3.
 
 If the output file is non-empty, prepend its content to each **LLM-based review agent's** (Agents 0–6 and any Agent 8 specialized finders) instructions:
 "In addition to the standard review criteria, you MUST also enforce these project-specific rules:
