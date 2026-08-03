@@ -240,7 +240,10 @@ describe('isAbortError', () => {
     // and has no ABORT_ERR code, so the checks above miss it.
     const error = new APIUserAbortError({ message: 'Request was aborted.' });
 
-    expect(error.name).toBe('Error');
+    // Assert the requirement (the name-based branch can't match it) rather than
+    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
+    // ever set a name without changing the correct behavior here.
+    expect(error.name).not.toBe('AbortError');
     expect(isAbortError(error)).toBe(true);
   });
 
@@ -252,7 +255,10 @@ describe('isAbortError', () => {
       message: 'Request was aborted.',
     });
 
-    expect(error.name).toBe('Error');
+    // Assert the requirement (the name-based branch can't match it) rather than
+    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
+    // ever set a name without changing the correct behavior here.
+    expect(error.name).not.toBe('AbortError');
     expect(isAbortError(error)).toBe(true);
   });
 
