@@ -1352,7 +1352,8 @@ const EN: Messages = {
   'local.lsp': 'Show LSP server status',
   'local.remember': 'Save a durable memory to the memory system',
   'local.summary': 'Generate a project summary file',
-  'local.workflows': 'List active and completed workflow runs',
+  'local.workflows':
+    'List workflow runs or cooperatively pause/resume a live run',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -3891,7 +3892,7 @@ const ZH: Messages = {
   'local.lsp': '显示 LSP 服务器状态',
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
-  'local.workflows': '列出进行中和已完成的工作流运行',
+  'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',

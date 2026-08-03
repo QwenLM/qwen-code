@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   stripExportMeta,
   extractAndStripMeta,
   createWorkflowSandbox,
 } from './workflow-sandbox.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -970,6 +971,76 @@ describe('createWorkflowSandbox security', () => {
     } finally {
       delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
     }
+  });
+
+  // Pause-aware watchdog: a paused run executes nothing and spends no
+  // tokens, so paused time must neither burn the wall-clock budget nor
+  // let the timer kill the run mid-pause (resume would then be
+  // impossible while the UI promises "press p to resume").
+  it('suspends the wall-clock watchdog while the scheduler is paused', async () => {
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100,
+      scheduler,
+    });
+    const run = sandbox.run(`return new Promise(() => {});`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(scheduler.pause()).toBe(true);
+    // Wait out the entire budget while paused — pre-fix the watchdog
+    // fired mid-pause and rejected the run.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    expect(scheduler.resume()).toBe(true);
+    await expect(run).rejects.toThrow(/timed out after 100 ms wall clock/);
+  });
+
+  it('re-arms with the banked remainder on resume, not a fresh budget', async () => {
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let finish: ((value: string) => void) | undefined;
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+      maxWallClockMs: 200,
+      scheduler,
+    });
+    // Consume most of the budget BEFORE pausing; only the banked
+    // remainder may fire after resume.
+    const run = sandbox.run(`await agent('a'); return new Promise(() => {});`);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(scheduler.pause()).toBe(true);
+    finish?.('done');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    let settled = false;
+    void run.catch(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    const resumedAt = Date.now();
+    await expect(run).rejects.toThrow(/timed out after 200 ms wall clock/);
+    // The banked remainder (~80 ms) fires promptly; a fresh full budget
+    // (200 ms) would overshoot this bound.
+    expect(Date.now() - resumedAt).toBeLessThan(150);
   });
 
   // FIX-E (Round 4 Critical): Array args used to leak host process because

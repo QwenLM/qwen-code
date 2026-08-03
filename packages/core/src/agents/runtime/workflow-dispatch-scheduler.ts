@@ -32,24 +32,41 @@ export class WorkflowDispatchScheduler {
   private inFlight = 0;
   private readonly queue: Job[] = [];
   private readonly gateWaiters: GateWaiter[] = [];
+  private readonly stateListeners = new Set<
+    (snapshot: WorkflowDispatchSnapshot) => void
+  >();
 
   constructor(
     private readonly limit: number,
     private readonly signal?: AbortSignal,
-    private readonly onStateChange?: (
-      snapshot: WorkflowDispatchSnapshot,
-    ) => void,
+    onStateChange?: (snapshot: WorkflowDispatchSnapshot) => void,
   ) {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(
         `Workflow dispatch limit must be a positive integer, got ${String(limit)}.`,
       );
     }
+    if (onStateChange) this.stateListeners.add(onStateChange);
     if (signal && !signal.aborted) {
       signal.addEventListener('abort', () => this.abortPending(), {
         once: true,
       });
     }
+  }
+
+  /**
+   * Subscribe to state transitions. Returns an unsubscribe function.
+   * The constructor callback (when given) is registered as the first
+   * listener; this method lets additional observers — e.g. the sandbox's
+   * pause-aware wall-clock watchdog — hook the same transitions.
+   */
+  onStateChange(
+    listener: (snapshot: WorkflowDispatchSnapshot) => void,
+  ): () => void {
+    this.stateListeners.add(listener);
+    return () => {
+      this.stateListeners.delete(listener);
+    };
   }
 
   run<T>(thunk: () => Promise<T>): Promise<T> {
@@ -128,7 +145,8 @@ export class WorkflowDispatchScheduler {
   private setState(state: WorkflowDispatchState): void {
     if (this.state === state) return;
     this.state = state;
-    this.onStateChange?.(this.snapshot());
+    const snapshot = this.snapshot();
+    for (const listener of [...this.stateListeners]) listener(snapshot);
   }
 
   private abortPending(): void {

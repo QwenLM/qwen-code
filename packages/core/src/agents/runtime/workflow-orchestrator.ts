@@ -1408,9 +1408,13 @@ export class WorkflowOrchestrator {
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
             }
-            return scheduler
-              .waitUntilRunning()
-              .then(() => cached.result as WorkflowAgentResult);
+            // Resolve even if the gate aborts: rejecting an already-cached
+            // result at teardown would surface an unobserved rejection for
+            // fire-and-forget calls on a correctly-cancelled run.
+            return scheduler.waitUntilRunning().then(
+              () => cached.result as WorkflowAgentResult,
+              () => cached.result as WorkflowAgentResult,
+            );
           }
         }
         // First miss → suffix goes live; append a `started` marker so an
@@ -1571,7 +1575,16 @@ export class WorkflowOrchestrator {
           }
         })
         .then(
-          (result) => scheduler.waitUntilRunning().then(() => result),
+          // Resolve even if the gate aborts: a successful dispatch must not
+          // turn into a teardown rejection — for a fire-and-forget call the
+          // script never attached a handler, so the rejection would surface
+          // as a spurious process-level unhandledRejection alarm on a
+          // correctly-cancelled run.
+          (result) =>
+            scheduler.waitUntilRunning().then(
+              () => result,
+              () => result,
+            ),
           (error) => {
             // A queued job can be rejected by scheduler abort without ever
             // invoking its thunk. Settle the issued counter here as well;
@@ -1616,6 +1629,7 @@ export class WorkflowOrchestrator {
             abortOnTimeout: req.abortOnTimeout,
             emitter,
             budget,
+            scheduler,
             // No `workflow` — single-level nesting limit.
           });
           // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
@@ -1634,6 +1648,7 @@ export class WorkflowOrchestrator {
       abortOnTimeout: req.abortOnTimeout,
       emitter,
       budget,
+      scheduler,
     });
     try {
       const result = await sandbox.run(req.script);

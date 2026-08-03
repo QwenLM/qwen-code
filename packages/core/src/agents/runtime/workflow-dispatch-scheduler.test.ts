@@ -152,6 +152,21 @@ describe('WorkflowDispatchScheduler', () => {
     expect(scheduler.snapshot().queued).toBe(0);
   });
 
+  it('notifies onStateChange subscribers and honors unsubscribe', () => {
+    const states: string[] = [];
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const unsubscribe = scheduler.onStateChange((snapshot) =>
+      states.push(snapshot.state),
+    );
+
+    expect(scheduler.pause()).toBe(true);
+    expect(states).toEqual(['pausing', 'paused']);
+
+    unsubscribe();
+    expect(scheduler.resume()).toBe(true);
+    expect(states).toEqual(['pausing', 'paused']);
+  });
+
   it('rejects run() immediately after pause + abort', async () => {
     const controller = new AbortController();
     const scheduler = new WorkflowDispatchScheduler(1, controller.signal);

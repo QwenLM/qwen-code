@@ -346,6 +346,37 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).not.toHaveBeenCalled();
   });
 
+  it('re-anchors detail selection when roster drift moves the viewed entry', () => {
+    // Selection is index-based and the roster re-sorts on every status
+    // change. When a DIFFERENT entry moves into the pinned index while
+    // the viewed entry is still alive, the dialog must follow the viewed
+    // entry to its new index instead of ejecting the user to the list.
+    const newerAgent = entry({ agentId: 'agent-new', startTime: 10 });
+    const workflow = workflowEntry({
+      runId: 'wf_viewed',
+      id: 'wf_viewed',
+      status: 'running',
+      endTime: undefined,
+    });
+    const h = setup([newerAgent, workflow]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.moveSelectionDown());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    // The newer agent completes and drops below the still-active
+    // workflow; the workflow stays alive but no longer sits at the
+    // pinned index.
+    h.setEntries([
+      workflow,
+      { ...newerAgent, status: 'completed', endTime: Date.now() },
+    ]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
   it('exits to list mode after cancelling the running entry being viewed in detail', () => {
     const running = entry({ agentId: 'a', status: 'running' });
     const h = setup([running]);
@@ -676,6 +707,10 @@ describe('BackgroundTasksDialog', () => {
     const h = setup([running, entry({ agentId: 'a' })]);
 
     h.call(() => h.probe.current!.actions.openDialog());
+    // Positive footer-hint coverage: the cooperative pause affordance is
+    // the only discoverability path in the list view, so its rendering
+    // must be asserted directly (not just via negation elsewhere).
+    expect(h.lastFrame()).toContain('p pause (cooperative)');
     h.pressKey({ sequence: 'p' });
     expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
     expect(h.workflowResume).not.toHaveBeenCalled();
@@ -684,6 +719,7 @@ describe('BackgroundTasksDialog', () => {
       workflowEntry({ status: 'paused' }),
       entry({ agentId: 'a' }),
     ]);
+    expect(h.lastFrame()).toContain('p resume (cooperative)');
     h.pressKey({ sequence: 'p' });
     expect(h.workflowResume).toHaveBeenCalledWith('wf_test1234');
 
@@ -727,6 +763,11 @@ describe('BackgroundTasksDialog', () => {
 
       h.call(() => h.probe.current!.actions.openDialog());
       h.call(() => h.probe.current!.actions.enterDetail());
+      // Positive footer-hint coverage for the detail branch too (the
+      // body's own "cooperative" text must not be the only signal).
+      expect(h.lastFrame()).toContain(
+        action === 'pause' ? 'p pause (cooperative)' : 'p resume (cooperative)',
+      );
       h.pressKey({ sequence: 'p' });
 
       const expected = action === 'pause' ? h.workflowPause : h.workflowResume;

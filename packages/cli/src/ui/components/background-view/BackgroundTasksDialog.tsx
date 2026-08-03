@@ -1371,6 +1371,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     cancelSelected,
     resumeSelected,
     toggleSelectedWorkflowPause,
+    setSelectedIndex,
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
@@ -1582,6 +1583,18 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     const seen = initialDetailStatusRef.current;
     if (seen && seen.entryId !== selectedEntryId) {
+      // Selection is index-based while the roster re-sorts on every
+      // status change, so a *different* entry can move into the pinned
+      // index while the viewed entry is still alive in the list.
+      // Re-anchor the selection to its new position; only exit when the
+      // entry is genuinely gone.
+      const driftedIndex = entries.findIndex(
+        (candidate) => entryId(candidate) === seen.entryId,
+      );
+      if (driftedIndex >= 0) {
+        setSelectedIndex(driftedIndex);
+        return;
+      }
       initialDetailStatusRef.current = null;
       exitDetail();
       return;
@@ -1615,6 +1628,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntryId,
     selectedStatus,
     exitDetail,
+    entries,
+    setSelectedIndex,
   ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.

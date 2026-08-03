@@ -1103,6 +1103,191 @@ describe('WorkflowOrchestrator', () => {
     await expect(run).rejects.toThrow('dispatch-boom');
   });
 
+  it('delivers a successful dispatch result when cancellation aborts its pause gate', async () => {
+    // A fire-and-forget dispatch that succeeded before the run was
+    // cancelled must resolve with its result, not reject with AbortError:
+    // the script never attached a handler, so the rejection would cross
+    // the vm bridge as an unobserved promise rejection and surface a
+    // spurious process-level alarm for a correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    scheduler.pause();
+    finishDispatch?.('A');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:A' });
+  });
+
+  it('raises no unhandledRejection for an un-awaited successful dispatch on cancel', async () => {
+    // The reviewer-reported alarm: a fire-and-forget agent() call whose
+    // dispatch succeeded before the cancel must not surface a
+    // process-level unhandledRejection ("CRITICAL: Unhandled Promise
+    // Rejection") for a correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('delivers a cached dispatch result when cancellation aborts its pause gate', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('keep'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    let completed = 0;
+    const emitter = {
+      agentCompleted: () => {
+        completed += 1;
+      },
+    };
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    const run = orch2.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      scheduler,
+      emitter,
+    });
+    // Both dispatches are cached; their results park behind the gate.
+    await vi.waitFor(() => expect(completed).toBe(2));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:r:a' });
+  });
+
+  it('keeps a paused run alive past the wall-clock budget and completes it after resume', async () => {
+    // The wall clock is a hang backstop armed at sandbox.run start; a
+    // run paused mid-flight executes nothing, so the watchdog must
+    // suspend on pause and re-arm on resume instead of killing the run
+    // mid-pause (after which resume is impossible).
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = '0.4';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      let finishDispatch: ((value: string) => void) | undefined;
+      const orchestrator = new WorkflowOrchestrator(
+        () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      );
+      const run = orchestrator.run({
+        script: `return await agent('a');`,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('done');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+      // Sleep past the 400 ms budget while paused.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = prev;
+    }
+  });
+
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.

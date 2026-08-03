@@ -363,6 +363,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
 // instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
@@ -538,6 +539,14 @@ export interface SandboxOptions {
    * dialog / detail body) can re-render without polling `getPhases()`.
    */
   emitter?: WorkflowOrchestratorEmitter;
+  /**
+   * The run's dispatch scheduler. When provided, the async wall-clock
+   * watchdog suspends while the scheduler is not `running` (pausing /
+   * paused): a paused run executes nothing and spends no tokens, so
+   * paused time must neither burn wall-clock budget nor let the timer
+   * kill the run mid-pause (resume would then be impossible).
+   */
+  scheduler?: WorkflowDispatchScheduler;
 }
 
 /**
@@ -561,6 +570,64 @@ function resolveMaxWallClockMs(opts: SandboxOptions): number {
   const envSec = Number(process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS']);
   if (Number.isFinite(envSec) && envSec > 0) return envSec * 1000;
   return DEFAULT_MAX_WALL_CLOCK_MS;
+}
+
+/**
+ * Async wall-clock watchdog whose budget only accrues while armed.
+ * `pause()` clears the timer and banks the unconsumed remainder;
+ * `resume()` re-arms with that remainder — so pause/resume cycles
+ * neither extend the total active-time budget nor lose any of it.
+ */
+class WallClockWatchdog {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private remainingMs: number;
+  private armedAt = 0;
+  private paused = false;
+  private stopped = false;
+
+  constructor(
+    budgetMs: number,
+    private readonly onFire: () => void,
+  ) {
+    this.remainingMs = budgetMs;
+    this.arm();
+  }
+
+  pause(): void {
+    if (this.stopped || this.paused || this.timer === undefined) return;
+    this.paused = true;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.remainingMs = Math.max(
+      0,
+      this.remainingMs - (Date.now() - this.armedAt),
+    );
+  }
+
+  resume(): void {
+    if (this.stopped || !this.paused) return;
+    this.paused = false;
+    this.arm();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private arm(): void {
+    this.armedAt = Date.now();
+    this.timer = setTimeout(() => {
+      this.stopped = true;
+      this.timer = undefined;
+      this.onFire();
+    }, this.remainingMs);
+    // Don't keep the event loop alive on Node — if the run resolves
+    // quickly, the timer will be stopped in finally; this guards against
+    // edge cases where the caller drops the promise.
+    this.timer.unref?.();
+  }
 }
 
 export interface WorkflowSandbox {
@@ -1145,9 +1212,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // hung network calls — none of which the vm timeout or future P5
       // budget can stop (a 0-token hang spends no budget). Permanent
       // defense-in-depth; default 30 min, env-tunable.
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let watchdog: WallClockWatchdog | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
+        watchdog = new WallClockWatchdog(maxWallClockMs, () => {
           // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
           // in-flight subagents see the cancellation and stop. Order
           // matters: rejecting first then aborting would race the
@@ -1159,16 +1226,20 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
                 'Override via SandboxOptions.maxWallClockMs or QWEN_CODE_MAX_WORKFLOW_SECONDS env var.',
             ),
           );
-        }, maxWallClockMs);
-        // Don't keep the event loop alive on Node — if the run resolves
-        // quickly, the timer will be cleared in finally; this guards against
-        // edge cases where the caller drops the promise.
-        timer.unref?.();
+        });
+      });
+      // Pause-aware watchdog: suspend while the scheduler is not running
+      // so a paused run can neither be killed mid-pause nor burn budget
+      // it will need after resume.
+      const stopWatchingState = opts.scheduler?.onStateChange(({ state }) => {
+        if (state === 'running') watchdog?.resume();
+        else watchdog?.pause();
       });
       try {
         return await Promise.race([result, timeoutPromise]);
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        stopWatchingState?.();
+        watchdog?.stop();
       }
     },
     getPhases: () => [...phases],
